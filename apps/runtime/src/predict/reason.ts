@@ -55,6 +55,12 @@
  *  - `deferred` (chat is busy): it sends itself again in 15 seconds, up to 40
  *    times, then gives up for the night and leaves a mark for Settings >
  *    Health. `capped`, `unavailable`, `invalid`: nothing is recorded.
+ *  - A write that fails for any reason but the database's refusal (`failed`)
+ *    is a missed second opinion and no more: the same mark for Health, an
+ *    audit entry, its class in the log, and the job ends without an error. A
+ *    job of this queue that does fail (it was killed, its time ran out) is
+ *    left out of Health's count of failed jobs: nothing runs it again, and a
+ *    missed second opinion is not a failing queue.
  *  - At most 2 requests and 1 claim of the cap for a number in a night,
  *    WHATEVER runs the job again: a job that failed after the model answered,
  *    a second job for the same number, a restart. Both are counted in the
@@ -70,6 +76,7 @@
  *    Never a value, a probability or a prompt. Job data is the run's id (and
  *    how many times it has yielded to chat): nothing else.
  */
+// Network: Ollama on this Mac only, a scoped POST to /api/chat, after model/here.ts says the model runs here.
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { OllamaProvider } from '@flint/core/ollama';
@@ -77,7 +84,7 @@ import { CODE_TABLE, localDay, resolveTier, runsInShadow, type Cap } from '@flin
 import type { Bus } from '../bus.js';
 import type { Config } from '../config.js';
 import type { Db, Tx } from '../db.js';
-import { failureOf } from '../dbcodes.js';
+import { failureClass, failureOf } from '../dbcodes.js';
 import { appendAudit } from '../governance/audit.js';
 import { claim } from '../governance/counters.js';
 import { activePolicies } from '../governance/proposals.js';
@@ -296,6 +303,8 @@ export const MAX_DEFERRALS = 40;
 export const DEFERRAL_MARK = 'forecasts.deferral';
 /** What Settings > Health says, for an hour, after one gave up. */
 export const DEFERRAL_SAYS = `Chat was busy for ${(MAX_DEFERRALS * DEFER_SECONDS) / 60} minutes, so a forecast went without the local model’s second opinion.`;
+/** And after one that the model answered could not be written (the same mark, for the same hour). */
+export const MISSED_SAYS = 'The local model’s second opinion couldn’t be saved, so a forecast went without it.';
 
 const Id = z.string().regex(/^[A-Za-z0-9_-]{1,40}$/);
 /** One run's estimate: its run, and how many times it has yielded to chat. An id and a count only. */
@@ -332,7 +341,9 @@ export type ReasonOutcome =
   /** Chat stayed busy: given up for the night. */
   | 'gave_up'
   /** The database refused the write (the switch was turned off meanwhile). */
-  | 'refused';
+  | 'refused'
+  /** The write failed some other way (a lost connection, a fault): nothing was recorded, and Health says so. */
+  | 'failed';
 
 export interface ReasonDeps {
   db: Db;
@@ -459,7 +470,7 @@ export async function runReason(d: ReasonDeps, job: ReasonJob): Promise<{ outcom
   const ended = async (outcome: ReasonOutcome, m: { requests?: number; modelMs?: number } = {}): Promise<{ outcome: ReasonOutcome }> => {
     await appendAudit(db, [{
       actor: REASON_ACTOR, context: 'autonomous', kind: 'action', action: REASON_ACTION, tier: s.tier,
-      outcome: outcome === 'recorded' ? 'ok' : outcome === 'refused' || outcome === 'invalid' || outcome === 'unavailable' ? 'failed' : 'skipped',
+      outcome: outcome === 'recorded' ? 'ok' : outcome === 'refused' || outcome === 'failed' || outcome === 'invalid' || outcome === 'unavailable' ? 'failed' : 'skipped',
       inputs: { series: key, run: job.runId, result: outcome, requests: m.requests ?? 0, deferrals: job.deferrals ?? 0, ...(m.modelMs !== undefined ? { modelMs: m.modelMs } : {}) },
     }], now);
     return { outcome };
@@ -498,8 +509,9 @@ export async function runReason(d: ReasonDeps, job: ReasonJob): Promise<{ outcom
   await d.hooks?.answered?.();
 
   // The estimate, beside the forecaster's answer: the same claim, the same rule, the same resolve time.
+  let wrote: 'recorded' | 'exists' | 'nothing' | 'refused' | 'failed';
   try {
-    const wrote = await db.$transaction(async (tx: Tx) => {
+    wrote = await db.$transaction(async (tx: Tx) => {
       // One estimate per run, whoever else is writing: the lock, then a second look.
       await tx.$queryRaw`SELECT 1 FROM (SELECT pg_advisory_xact_lock(hashtext(${`estimate:${job.runId}`}))) AS l`;
       // The second look is at the time of WRITING, not of asking: the model may have taken minutes. A step that
@@ -522,14 +534,23 @@ export async function runReason(d: ReasonDeps, job: ReasonJob): Promise<{ outcom
       }, REASON_WRITER, writing);
       return 'recorded' as const;
     }, READ_COMMITTED);
-    // The model was asked: however it ends, there is an entry that says so.
-    return ended(wrote, counts);
   } catch (err) {
-    if (!refusedByDb(err)) throw err;
-    // The database refused it (the switch was turned off, or the number forgotten, while the model answered): its class and the key.
-    d.log?.(`forecast: ${key}'s second opinion was not recorded: ${failureOf(err)}`);
-    return ended('refused', counts);
+    if (refusedByDb(err)) {
+      // The database refused it (the switch was turned off, or the number forgotten, while the model answered): its class and the key.
+      d.log?.(`forecast: ${key}'s second opinion was not recorded: ${failureOf(err)}`);
+      wrote = 'refused';
+    } else {
+      // Anything else (a lost connection, a timeout, a fault): tonight's second opinion is missed, and that is all.
+      // The job does not fail for it. A failed job of this queue is never run again, so failing would only leave a
+      // dead letter. What failed is said by its class, never by its message.
+      d.log?.(`forecast: ${key}'s second opinion was not saved: ${failureClass(err)}`);
+      wrote = 'failed';
+    }
   }
+  // Missed for a fault: Settings > Health says so on Forecasts for an hour, as it does when chat stayed busy.
+  if (wrote === 'failed') await db.healthCheck.create({ data: { component: DEFERRAL_MARK, status: 'degraded', detail: MISSED_SAYS, at: now } });
+  // The model was asked: however it ends, there is an entry that says so.
+  return ended(wrote, counts);
 }
 
 /**

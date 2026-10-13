@@ -412,8 +412,11 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
     return [{ component: 'postgres', status: 'down' }];
   }
 
+  // A second opinion's job (forecast.reason) is never run again, so each one that fails, is killed or runs out of
+  // time is a dead letter at once, where every other queue's takes three failures. Counted here, one missed second
+  // opinion would read as a failing queue for a day. They are left out: a missed one is said on Forecasts.
   const bus = await db.$queryRaw<Array<{ dead: bigint; stuck: bigint }>>`
-    SELECT (SELECT count(*) FROM pgboss.job WHERE name = 'dead' AND created_on > ${ago(24 * 3_600_000)}) AS dead,
+    SELECT (SELECT count(*) FROM pgboss.job WHERE name = 'dead' AND created_on > ${ago(24 * 3_600_000)} AND source_name IS DISTINCT FROM 'forecast.reason') AS dead,
            (SELECT count(*) FROM pgboss.job WHERE state = 'active' AND started_on < ${ago(STUCK_ACTIVE_MS)}) AS stuck`;
   const dead = Number(bus[0]?.dead ?? 0);
   const stuck = Number(bus[0]?.stuck ?? 0);

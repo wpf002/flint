@@ -76,10 +76,13 @@ describe('no egress from predictions', () => {
     expect(src).not.toMatch(/\/internal\/complete|frontier|anthropic|openai|perplexity|tavily|notifyServer|prophet-api|railway\.app/i);
     expect(src).not.toMatch(/process\.env|\bimport\s*\(/);
     expect(src).not.toMatch(/child_process|execFile|\bexec\(|\bspawn\(|makeRun\(/);
-    // It writes no value to a log: its one log line names a series' key and the class of a refusal.
+    // It writes no value to a log: its two log lines name a series' key and the class of a refusal or of a failure.
     expect(src).not.toMatch(/console\.(log|warn|error|info|debug)|process\.std(out|err)/);
-    expect(src.match(/d\.log\?\.\(/g)).toHaveLength(1);
+    expect(src.match(/d\.log\?\.\(/g)).toHaveLength(2);
     expect(src).toContain("d.log?.(`forecast: ${key}'s second opinion was not recorded: ${failureOf(err)}`)");
+    expect(src).toContain("d.log?.(`forecast: ${key}'s second opinion was not saved: ${failureClass(err)}`)");
+    // (Never an error's own words.)
+    expect(src).not.toMatch(/err\.message|String\(err\)|\$\{err\}/);
     // The reply's schema has no field that could hold a sentence.
     expect(src).toContain("export const Estimate = z.object({ probability: z.number().finite().min(MIN_PROBABILITY).max(MAX_PROBABILITY), reasonCode: z.enum(ESTIMATE_REASONS) }).strict();");
   });

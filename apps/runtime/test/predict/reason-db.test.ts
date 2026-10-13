@@ -31,7 +31,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { localDay } from '@flint/policy';
+import { addLocalDays, localDay, localDayBounds } from '@flint/policy';
 import { NO_DB, freshDb, type TestUrls } from '../db';
 import { CANARY, DAY, HOUR, TZ, dayStart as kitDayStart, ledgerKit, type LedgerKit } from '../ledger/kit';
 import { FakeBus, goalFixture, type GoalFixture } from '../goals/fixture';
@@ -45,7 +45,8 @@ import { weekOf } from '../../src/predict/metrics';
 import { forecastSeries, freqOf } from '../../src/predict/series';
 import { runForecasts } from '../../src/predict/run';
 import {
-  DEFERRAL_MARK, DEFERRAL_SAYS, DEFER_SECONDS, MAX_DEFERRALS, PROMPT_VERSION, REASON_ACTION, REASON_QUEUE, REASON_SEND, ReasonJob, claimedCounter, requestsCounter, runReason, sendReasons,
+  DEFERRAL_MARK, DEFERRAL_SAYS, DEFER_SECONDS, MAX_DEFERRALS, MISSED_SAYS, PROMPT_VERSION, REASON_ACTION, REASON_QUEUE, REASON_SEND, ReasonJob, claimedCounter, requestsCounter, runReason,
+  sendReasons,
   type ReasonDeps,
 } from '../../src/predict/reason';
 import { listening, modelsHere, tags } from '../ollama-kit';
@@ -460,15 +461,32 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
       expect(user).toMatch(/Week of \d{4}-\d{2}-\d{2}: \d+\nQuestion: is the value for the week of \d{4}-\d{2}-\d{2} above /);
     });
 
-    it('a job that fails after the model answered, run again and again: two requests and one slot of the cap that night, then nothing is asked', async () => {
+    it('a write that fails after the model answered is a missed second opinion, not a failed job; run again and again: two requests and one slot of the cap that night', async () => {
       const claims = await counter(REASON_ACTION);
-      const broke = async () => { throw new Error('the write failed'); };
-      // The write throws once the model has answered: the job fails. Run again (a deploy that sends it again, a
-      // queue that would retry), it asks once more, with the slot it already has.
-      await expect(reason(runId, { fetch: answers(), hooks: { beforeRecord: broke } })).rejects.toThrow('the write failed');
+      await k.owner(`DELETE FROM "HealthCheck" WHERE component = $1`, [DEFERRAL_MARK]);
+      said.length = 0;
+      // (What the failure says of itself must go nowhere: only what kind of failure it was.)
+      const broke = async () => { throw new Error('the write failed: 31.34 for Series: Perplexity Spend'); };
+      // The write throws once the model has answered. The job does not fail for it: a failed job of this queue is
+      // never run again, so it would only be a dead letter, and Health's Job Queue row would call the queue failing.
+      expect(await reason(runId, { fetch: answers(), hooks: { beforeRecord: broke } })).toEqual({ outcome: 'failed' });
       expect([sent.length, await counter(REASON_ACTION)]).toEqual([1, claims + 1]);
-      await expect(reason(runId, { fetch: answers(), hooks: { beforeRecord: broke } })).rejects.toThrow('the write failed');
+      // Said by its class and the number's key, and nothing else.
+      expect(said).toEqual([`forecast: ${KEY}'s second opinion was not saved: Error`]);
+      expect((await audits())[0]).toMatchObject({ actor: 'runtime:reason', outcome: 'failed', reasoning: null, outcomeDetail: null, inputs: { series: KEY, run: runId, result: 'failed', requests: 1 } });
+      expect(JSON.stringify((await audits())[0])).not.toMatch(/write failed|31\.34|Perplexity/);
+      // Settings > Health says a forecast went without its second opinion, on Forecasts, for an hour.
+      expect(await k.db.healthCheck.findMany({ where: { component: DEFERRAL_MARK }, select: { status: true, detail: true } })).toEqual([{ status: 'degraded', detail: MISSED_SAYS }]);
+      expect(MISSED_SAYS).toBe('The local model’s second opinion couldn’t be saved, so a forecast went without it.');
+      const home = mkdtempSync(join(tmpdir(), 'reason-missed-'));
+      const forecasts = async (now: Date) => (await checkComponents({ db: k.db, config: { home, triage: false, tz: TZ, predict: true }, now, sources: [] })).find((c) => c.component === 'forecasts');
+      expect(await forecasts(new Date(NOW.getTime() + 60_000))).toEqual({ component: 'forecasts', status: 'degraded', detail: MISSED_SAYS });
+      expect(await forecasts(new Date(NOW.getTime() + HOUR + 60_000))).toMatchObject({ status: 'ok' });
+      // Run again (a deploy that sends it again), it asks once more, with the slot it already has.
+      expect(await reason(runId, { fetch: answers(), hooks: { beforeRecord: broke } })).toEqual({ outcome: 'failed' });
       expect([sent.length, await counter(REASON_ACTION)]).toEqual([2, claims + 1]);
+      // A write the database itself refuses is still said as that (the test above), and anything thrown before the
+      // model is asked is not this: only the write is caught.
       // A third and a fourth, with a write that would work: nothing is asked and nothing is claimed.
       expect(await reason(runId, { fetch: answers() })).toEqual({ outcome: 'spent' });
       expect(await reason(runId, { fetch: answers() })).toEqual({ outcome: 'spent' });
@@ -503,6 +521,54 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
         await real.stop();
       }
     });
+
+    it('a second opinion’s job that fails, or is killed mid-run, is not a failed job on Health’s Job Queue row; another queue’s still is', async () => {
+      const real = await startBus(urls.app, () => {});
+      const home = mkdtempSync(join(tmpdir(), 'reason-queue-'));
+      const queueRow = async () => (await checkComponents({ db: k.db, config: { home, triage: false, tz: TZ, predict: true }, now: new Date(), sources: [] })).find((c) => c.component === 'bus');
+      const dead = async () => (await k.owner(`SELECT source_name, data::text AS data FROM pgboss.job WHERE name = 'dead' ORDER BY created_on`)).rows as Array<{ source_name: string | null; data: string }>;
+      const until = async (ok: () => Promise<boolean>, ms = 25_000) => {
+        const end = Date.now() + ms;
+        while (!(await ok())) {
+          if (Date.now() > end) throw new Error('timed out');
+          await new Promise((r) => setTimeout(r, 200));
+        }
+      };
+      try {
+        await k.owner(`DELETE FROM pgboss.job WHERE name IN ($1, 'dead')`, [REASON_QUEUE]);
+        expect(await queueRow()).toEqual({ component: 'bus', status: 'ok' });
+        // A job whose handler throws: sent with no retries, it is a dead letter the first time.
+        let ran = 0;
+        const worker = await real.boss.work(REASON_QUEUE, { pollingIntervalSeconds: 0.5 }, async () => {
+          ran += 1;
+          throw new Error('boom');
+        });
+        expect(await real.boss.send(REASON_QUEUE, { runId: 'frfailed0001' }, { singletonKey: 'n1.failed', ...REASON_SEND })).toBeTruthy();
+        await until(async () => (await dead()).length === 1);
+        expect(ran).toBe(1);
+        expect((await dead()).map((d) => [d.source_name, JSON.parse(d.data)])).toEqual([[REASON_QUEUE, { runId: 'frfailed0001' }]]);
+        expect((await k.owner(`SELECT state, retry_count, retry_limit FROM pgboss.job WHERE name = $1`, [REASON_QUEUE])).rows).toEqual([{ state: 'failed', retry_count: 0, retry_limit: 0 }]);
+        // One missed second opinion is not a failing queue.
+        expect(await queueRow()).toEqual({ component: 'bus', status: 'ok' });
+        await real.boss.offWork(REASON_QUEUE, { id: worker });
+        // A job a runtime took and was killed with (never settled): its time runs out, and it is a dead letter too.
+        expect(await real.boss.send(REASON_QUEUE, { runId: 'frkilled0001' }, { singletonKey: 'n1.killed', expireInSeconds: 1, ...REASON_SEND })).toBeTruthy();
+        const [taken] = await real.boss.fetch(REASON_QUEUE);
+        expect(taken).toBeTruthy();
+        await new Promise((r) => setTimeout(r, 1_500));
+        await real.boss.supervise(REASON_QUEUE);
+        await until(async () => (await dead()).length === 2);
+        expect((await dead()).map((d) => d.source_name)).toEqual([REASON_QUEUE, REASON_QUEUE]);
+        expect(await queueRow()).toEqual({ component: 'bus', status: 'ok' });
+        // Another queue's dead letter still counts, and is the only one counted.
+        await real.boss.send('dead', { eventId: 'x' });
+        await k.owner(`INSERT INTO pgboss.job (name, data, source_name) VALUES ('dead', '{"eventId":"y"}', 'triage')`);
+        expect(await queueRow()).toEqual({ component: 'bus', status: 'degraded', detail: 'The queue had 2 failed jobs in the last day.' });
+      } finally {
+        await k.owner(`DELETE FROM pgboss.job WHERE name IN ($1, 'dead')`, [REASON_QUEUE]);
+        await real.stop();
+      }
+    }, 90_000);
 
     it('a step that ends while the model answers: the second look is at the time of writing, and nothing is written', async () => {
       const over = new Date(dayStart(0).getTime() + DAY + 1);
@@ -576,6 +642,71 @@ describe.skipIf(NO_DB)('the local model’s second opinion on flint_test', () =>
       await nothingRecorded();
     });
   });
+});
+
+describe.skipIf(NO_DB)('the night’s two requests are counted by Flint’s own day, not the hour, the week or the UTC date', () => {
+  const CHICAGO = 'America/Chicago';
+  let k: LedgerKit;
+  afterAll(async () => {
+    await k?.db.$disconnect();
+  });
+
+  it('two jobs the same local day in different hours, across the UTC date change: the second asks nothing; the next local day it is asked again', async () => {
+    k = await ledgerKit(await freshDb());
+    const start = (day: string) => localDayBounds(CHICAGO, day).start;
+    const at = (day: string, hours: number, minutes: number) => new Date(start(day).getTime() + (hours * 60 + minutes) * 60_000);
+    // Two local days that are over (the audit trail takes no entry dated ahead of now), both in one week.
+    let day = addLocalDays(localDay(CHICAGO, new Date()), -3);
+    while ([0, 6].includes(new Date(`${day}T12:00:00Z`).getUTCDay())) day = addLocalDays(day, -1);
+    const next = addLocalDays(day, 1);
+    const d = forecastSeries(DEPLOYS)!;
+    await k.series({ key: d.key, unit: d.unit, freq: freqOf(d), sensitivity: d.sensitivity, description: d.description });
+    await k.turnOn([DEPLOYS], [DEPLOYS]);
+    // Sixty local days of a rising line, up to the first of the two days.
+    for (let i = 0; i <= 60; i++) await k.point(DEPLOYS, start(addLocalDays(day, -i)), 10 + 2 * (60 - i));
+    /** A night's run for `on` and the forecaster's question about that local day, as the runner leaves them: open until the day is over. */
+    const night = async (on: string): Promise<string> => {
+      const [from, end] = [start(on), start(addLocalDays(on, 1))];
+      const run = await k.run(DEPLOYS, { beatsNaive: true, points: [{ at: from.toISOString(), mean: 130, lo: 124, hi: 136 }] });
+      await k.question(DEPLOYS, from, 'above', 128, { probability: 0.6, forecastRunId: run, resolverSpec: { seriesKey: DEPLOYS, at: from.toISOString(), end: end.toISOString(), op: 'above', value: 128 } },
+        { madeAgo: Date.now() - at(on, 3, 50).getTime(), dueAgo: Date.now() - end.getTime() - HOUR });
+      return run;
+    };
+    const first = await night(day);
+
+    let sent = 0;
+    const unusable = (async () => {
+      sent += 1;
+      return new Response(JSON.stringify({ model: 'm', message: { role: 'assistant', content: JSON.stringify({ probability: 0.99, reasonCode: 'trend' }) }, done: true, done_reason: 'stop', prompt_eval_count: 10, eval_count: 5 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    const job = (runId: string, now: Date) => runReason({ db: k.db, bus: new FakeBus(), config: { tz: CHICAGO, ollama: OLLAMA }, load: async () => 'proceed', now: () => now, fetch: unusable }, { runId });
+
+    // 5:30 in the afternoon and 7:30 in the evening: one local day, two hours, and two UTC dates.
+    const [early, late] = [at(day, 17, 30), at(day, 19, 30)];
+    expect([localDay(CHICAGO, early), localDay(CHICAGO, late)]).toEqual([day, day]);
+    expect(early.toISOString().slice(0, 10)).not.toBe(late.toISOString().slice(0, 10));
+    expect(early.toISOString().slice(0, 13)).not.toBe(late.toISOString().slice(0, 13));
+    // The first job makes the night's two requests (neither answer can be used).
+    expect(await job(first, early)).toEqual({ outcome: 'invalid' });
+    expect(sent).toBe(2);
+    // The second, two hours and a UTC date later, the same local day: nothing is asked.
+    expect(await job(first, late)).toEqual({ outcome: 'spent' });
+    expect(sent).toBe(2);
+
+    // The next local day (the same week): that night's forecast, and it is asked again. Twice, and then no more.
+    const second = await night(next);
+    expect(await job(second, at(next, 4, 0))).toEqual({ outcome: 'invalid' });
+    expect(sent).toBe(4);
+    expect(await job(second, at(next, 23, 0))).toEqual({ outcome: 'spent' });
+    expect(sent).toBe(4);
+    // What the database holds: two requests and one slot for the number on each of the two local days.
+    const counted = (await k.owner(`SELECT action, day, count FROM "ActionCounter" WHERE action LIKE 'ledger.reason.%' ORDER BY action, day`)).rows;
+    expect(counted).toEqual([
+      { action: claimedCounter(DEPLOYS), day, count: 1 }, { action: claimedCounter(DEPLOYS), day: next, count: 1 },
+      { action: REASON_ACTION, day, count: 1 }, { action: REASON_ACTION, day: next, count: 1 },
+      { action: requestsCounter(DEPLOYS), day, count: 2 }, { action: requestsCounter(DEPLOYS), day: next, count: 2 },
+    ]);
+  }, 120_000);
 });
 
 describe.skipIf(NO_DB)('the second opinion is settled like any other prediction, and kept out of an area’s own scores', () => {
