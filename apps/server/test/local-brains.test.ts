@@ -503,20 +503,30 @@ describe('every look tells whoever keeps it what the model server says it is', (
       const s = await start({ [MAIN]: { loaded: true, contextLength: 16384 } }, c.kind);
       const h = heard();
       const quiet: string[] = [];
+      const since: number[] = [];
+      const failedAt: number[] = [];
       let listing: 'answers' | '500' = 'answers';
+      // (The listing fails a moment after it is asked, so "when the look began" and "when it gave up" are two times.)
       const gate = ((url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
-        listing === '500' && String(url).endsWith('/api/tags') ? Promise.resolve(new Response('{"error":"x"}', { status: 500 })) : fetch(url, init)) as typeof fetch;
-      const { brains } = await build(c.env(s), { ...h, fetch: gate, silent: (baseURL) => void quiet.push(baseURL) });
+        listing === '500' && String(url).endsWith('/api/tags')
+          ? new Promise<Response>((resolve) => setTimeout(() => (failedAt.push(Date.now()), resolve(new Response('{"error":"x"}', { status: 500 }))), 15))
+          : fetch(url, init)) as typeof fetch;
+      const { brains } = await build(c.env(s), { ...h, fetch: gate, silent: (baseURL, at) => (quiet.push(baseURL), void since.push(at)) });
       await brains.monitor.check();
       expect(h.told.length, c.label).toBeGreaterThan(0);
       expect(quiet, c.label).toEqual([]); // while it answers, never
       // Its listing fails, and everything else it answers still does.
       listing = '500';
       const told = h.told.length;
+      const began = Date.now();
       const snapshot = await brains.monitor.check();
       expect(snapshot.reachable, c.label).toBe(true);
       expect(quiet, c.label).toEqual([c.at(s)]);
       expect(h.told.length, c.label).toBe(told);
+      // Asked twice (one bad answer is not yet silence), and told with when the look BEGAN: before either answer.
+      expect(failedAt, c.label).toHaveLength(2);
+      expect(since[0], c.label).toBeGreaterThanOrEqual(began);
+      expect(since[0], c.label).toBeLessThan(failedAt[0]!);
       await brains.monitor.check();
       expect(quiet, c.label).toEqual([c.at(s), c.at(s)]); // every such look
       listing = 'answers';
