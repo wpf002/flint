@@ -136,7 +136,8 @@ describe.skipIf(NO_DB)('Health sees the whole machine (flint_test)', () => {
       await owner('SELECT lo_create(0)');
       expect((await checks(now)).postgres!.detail).toBe('The database holds 2 large objects that aren’t Flint’s. No backup includes them.');
     } finally {
-      await owner('SELECT lo_unlink(oid) FROM pg_largeobject_metadata');
+      // Its maker takes them away again (only its owner may remove one), whatever the lines above did.
+      await owner('SELECT lo_unlink(oid) FROM pg_largeobject_metadata WHERE lomowner = current_user::regrole');
     }
     expect((await checks(now)).postgres!.status).toBe('ok');
     for (const n of [1, 2, 40]) expect(noteProblems(HEALTH_NAMES.postgres!, DATABASE_HEALTH.largeObjects(n))).toEqual([]);
