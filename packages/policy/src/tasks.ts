@@ -517,6 +517,8 @@ export interface TaskStanding {
   overridden: boolean;
   /** Its accept card is waiting for him. */
   waitingForWill: boolean;
+  /** It passed its checks, and he turned its accept card down or let it lapse: it ended without his acceptance. */
+  declined: boolean;
 }
 /** The one sentence under a task's title in the Tasks panel. */
 export function taskLine(t: TaskStanding): string {
@@ -532,7 +534,7 @@ export function taskLine(t: TaskStanding): string {
     case 'rejected':
       return t.overridden ? 'You rejected it.' : t.checks ? `It failed ${n(t.checks.total - t.checks.met)}.` : TASK_STATUS_SAYS.rejected;
     case 'failed':
-      return t.failure ? TASK_FAILURE_SAYS[t.failure] : TASK_STATUS_SAYS.failed;
+      return t.declined ? 'You didn’t accept its result.' : t.failure ? TASK_FAILURE_SAYS[t.failure] : TASK_STATUS_SAYS.failed;
     default:
       return TASK_STATUS_SAYS[t.status];
   }
