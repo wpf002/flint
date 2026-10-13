@@ -20,6 +20,12 @@
 --      live row holding it back, and the intake's own audit entry for this
 --      source and goal, whose digest is the digest of what the row holds. The
 --      description is a quote by the card's own measure (12 to 300 characters).
+--      And never more than twice the day's limit in any 24 hours (the limit
+--      is the rule's own cap, or 3 if that is less; every goal from chat made
+--      in those hours counts, a card's too). The runtime counts by Will's day,
+--      so twice the limit is the most an honest one adds across a midnight;
+--      past that the database lets none in, however the runtime counts, and a
+--      rule signed for 3 a day can never fill Suggested.
 --
 -- A card's approval is used once, in one transaction, for this goal
 -- (p3_bind_approval, after the row is written: an insert that meets a goal
@@ -49,6 +55,9 @@ DECLARE
   signed jsonb;
   day_from text;
   day_to text;
+  promoters integer;
+  cap integer;
+  recent integer;
 BEGIN
   IF current_user = 'flint_owner' THEN
     RETURN NEW;
@@ -115,30 +124,41 @@ BEGIN
 
   -- 3. A rule Will signed lets goal.propose run alone (read as the helpers' store reads its own promotion: a live,
   -- unscoped row, and none that holds it back), and the intake put this goal on record first.
-  IF EXISTS (SELECT 1 FROM "ActionPolicy" ap WHERE ap."active" AND ap."expiresAt" > clock_timestamp() AND ap."tier" = 'alone'
-             AND ap."pattern" IN ('goal.propose', 'goal.*') AND (ap."scope" IS NULL OR jsonb_typeof(ap."scope") = 'null'))
+  SELECT count(*), min(ap."dailyCap") INTO promoters, cap FROM "ActionPolicy" ap
+  WHERE ap."active" AND ap."expiresAt" > clock_timestamp() AND ap."tier" = 'alone'
+    AND ap."pattern" IN ('goal.propose', 'goal.*') AND (ap."scope" IS NULL OR jsonb_typeof(ap."scope") = 'null');
+  IF promoters > 0
      AND NOT EXISTS (SELECT 1 FROM "ActionPolicy" ap WHERE ap."active" AND ap."expiresAt" > clock_timestamp() AND ap."tier" <> 'alone'
                      AND ap."pattern" IN ('goal.propose', 'goal.*'))
      AND coalesce(char_length(NEW."description") BETWEEN 12 AND 300 AND NEW."successCriteria" = '[]'::jsonb, false) THEN
-    FOR e IN
-      SELECT a."inputs" FROM "AuditEntry" a
-      WHERE a."correlationId" = NEW."sourceRef" AND a."actor" = 'runtime:goals.candidates' AND a."context" = 'chat' AND a."kind" = 'action'
-        AND a."action" = 'goal.propose' AND a."tier" = 'alone' AND a."decision" = 'act' AND a."outcome" = 'ok' AND NOT a."tainted"
-        AND a."inputs"->>'goalId' = NEW."id" AND a."inputs"->>'sourceRef' = NEW."sourceRef"
-        AND jsonb_typeof(a."inputs"->'saidAt') = 'string' AND jsonb_typeof(a."inputs"->'argsDigest') = 'string'
-        AND (NOT a."inputs" ? 'dueOn' OR jsonb_typeof(a."inputs"->'dueOn') = 'string')
-    LOOP
-      -- What the entry recorded (the digest of the suggestion's args, as digestOf computes it) is what the row holds.
-      signed := jsonb_build_object('goalId', NEW."id", 'title', NEW."title", 'quote', NEW."description", 'saidAt', e."inputs"->'saidAt', 'sourceRef', NEW."sourceRef")
-                || CASE WHEN e."inputs" ? 'dueOn' THEN jsonb_build_object('dueOn', e."inputs"->'dueOn') ELSE '{}'::jsonb END;
-      IF p3_args_digest(signed) = e."inputs"->>'argsDigest'
-         AND (NEW."horizonAt" IS NULL OR coalesce(e."inputs"->>'dueOn' BETWEEN day_from AND day_to, false)) THEN
-        IF TG_WHEN = 'AFTER' THEN
-          RETURN NULL;
+    -- One at a time, so the count below is exact: the next waits here until this one has landed or failed.
+    PERFORM pg_advisory_xact_lock(hashtext('goal_chat_floor'));
+    -- In any 24 hours, twice the day's limit: the rule's cap or 3, whichever is less (3 is the runtime's own limit
+    -- for a day: @flint/policy SUGGESTIONS_PER_DAY). The runtime counts by Will's day, so twice is the most an
+    -- honest one adds across a midnight. A goal's createdAt is the wall clock's, set by the database. After the
+    -- row is written it is one of them.
+    SELECT count(*) INTO recent FROM "Goal" g WHERE g."origin" = 'flint' AND g."createdAt" > clock_timestamp() - interval '24 hours';
+    IF recent < 2 * least(coalesce(cap, 3), 3) + (TG_WHEN = 'AFTER')::int THEN
+      FOR e IN
+        SELECT a."inputs" FROM "AuditEntry" a
+        WHERE a."correlationId" = NEW."sourceRef" AND a."actor" = 'runtime:goals.candidates' AND a."context" = 'chat' AND a."kind" = 'action'
+          AND a."action" = 'goal.propose' AND a."tier" = 'alone' AND a."decision" = 'act' AND a."outcome" = 'ok' AND NOT a."tainted"
+          AND a."inputs"->>'goalId' = NEW."id" AND a."inputs"->>'sourceRef' = NEW."sourceRef"
+          AND jsonb_typeof(a."inputs"->'saidAt') = 'string' AND jsonb_typeof(a."inputs"->'argsDigest') = 'string'
+          AND (NOT a."inputs" ? 'dueOn' OR jsonb_typeof(a."inputs"->'dueOn') = 'string')
+      LOOP
+        -- What the entry recorded (the digest of the suggestion's args, as digestOf computes it) is what the row holds.
+        signed := jsonb_build_object('goalId', NEW."id", 'title', NEW."title", 'quote', NEW."description", 'saidAt', e."inputs"->'saidAt', 'sourceRef', NEW."sourceRef")
+                  || CASE WHEN e."inputs" ? 'dueOn' THEN jsonb_build_object('dueOn', e."inputs"->'dueOn') ELSE '{}'::jsonb END;
+        IF p3_args_digest(signed) = e."inputs"->>'argsDigest'
+           AND (NEW."horizonAt" IS NULL OR coalesce(e."inputs"->>'dueOn' BETWEEN day_from AND day_to, false)) THEN
+          IF TG_WHEN = 'AFTER' THEN
+            RETURN NULL;
+          END IF;
+          RETURN NEW;
         END IF;
-        RETURN NEW;
-      END IF;
-    END LOOP;
+      END LOOP;
+    END IF;
   END IF;
 
   RAISE EXCEPTION 'goal %: a goal from chat is added only by its own signed card, or under a rule Will signed', gid USING ERRCODE = 'insufficient_privilege';

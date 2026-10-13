@@ -211,11 +211,16 @@ describe.skipIf(NO_DB)('P3 guards in the database', () => {
       expect(await code(ins(', progress', ', 0.5'))).toBe('42501');
       expect(await code(ins(', "criteriaMet"', `, '{"c1":"2026-10-01"}'`))).toBe('42501');
       expect(await code(ins(', "nextReviewAt"', ', now()'))).toBe('42501');
-      const flint = (ref: string | null) => app(`INSERT INTO "Goal" (id, title, owner, origin, "sourceRef", "updatedAt") VALUES ($1, 'Synthetic', 'will', 'flint', $2, now())`, [id('go'), ref]);
-      expect(await code(flint(null))).toBe('23514');
-      expect(await code(flint('chat:not-a-digest'))).toBe('23514');
-      await flint(`chat:${HEX('e')}`);
-      expect(await code(app(`INSERT INTO "Goal" (id, title, owner, origin, "sourceRef", "updatedAt") VALUES ($1, 'Synthetic', 'will', 'will', $2, now())`, [id('go'), `chat:${HEX('f')}`]))).toBe('23514');
+      // A goal's own rule (goal_valid), seen as the owner writes: a flint goal names its chat, and only such a goal does.
+      const flint = (q: typeof app, ref: string | null) => q(`INSERT INTO "Goal" (id, title, owner, origin, "sourceRef", "updatedAt") VALUES ($1, 'Synthetic', 'will', 'flint', $2, now())`, [id('go'), ref]);
+      expect(await code(flint(owner, null))).toBe('23514');
+      expect(await code(flint(owner, 'chat:not-a-digest'))).toBe('23514');
+      await flint(owner, `chat:${HEX('e')}`);
+      expect(await code(owner(`INSERT INTO "Goal" (id, title, owner, origin, "sourceRef", "updatedAt") VALUES ($1, 'Synthetic', 'will', 'will', $2, now())`, [id('go'), `chat:${HEX('f')}`]))).toBe('23514');
+      // The runtime's own role is held to more: a goal from chat needs its signed card, or a rule Will signed (the floor
+      // under it, test/p3-chat-floor-db.test.ts), so each of these is refused before goal_valid is asked.
+      for (const ref of [null, 'chat:not-a-digest', `chat:${HEX('d')}`]) expect(await code(flint(app, ref)), String(ref)).toBe('42501');
+      expect(await code(app(`INSERT INTO "Goal" (id, title, owner, origin, "sourceRef", "updatedAt") VALUES ($1, 'Synthetic', 'will', 'will', $2, now())`, [id('go'), `chat:${HEX('f')}`]))).toBe('42501');
       expect(await code(app(`INSERT INTO "Goal" (id, title, owner, origin, "updatedAt") VALUES ($1, $2, 'will', 'will', now())`, [id('go'), 'x'.repeat(121)]))).toBe('23514');
       // createdAt is the wall clock's, whatever was sent.
       const gid = id('go');
