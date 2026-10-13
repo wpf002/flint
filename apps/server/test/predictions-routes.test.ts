@@ -292,6 +292,15 @@ describe('writes', () => {
     }
     expect(asked).toEqual([]);
     asked = [{ method: 'POST', url: '', auth: '', body: '' }];
+    // The runtime says when the card it filed changes second opinions only (every number on it is already on):
+    // that reaches the console as it was said, so the card is worded from the runtime's word and nobody else's.
+    answer = () => ({ status: 200, body: { id: 'pr1', deduped: false, onlyOpinion: true } });
+    expect(await post('/predictions/turn-on', { series: [KEY], opinion: true })).toEqual({ status: 200, body: { id: 'pr1', deduped: false, onlyOpinion: true } });
+    // It is said only when it is so: any other value there is not this contract's answer.
+    for (const not of [false, 'true', 1, null]) {
+      answer = () => ({ status: 200, body: { id: 'pr1', deduped: false, onlyOpinion: not } });
+      expect((await post('/predictions/turn-on', { series: [KEY], opinion: true })).status, String(not)).toBe(502);
+    }
     // An answer that is not the contract's never reaches the console.
     answer = () => ({ status: 200, body: { id: 'pr1', deduped: false, args: { series: [KEY] } } });
     expect((await post('/predictions/turn-on', { series: [KEY] })).status).toBe(502);

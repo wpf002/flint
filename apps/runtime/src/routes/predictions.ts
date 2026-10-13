@@ -128,7 +128,8 @@ export function registerPredictionRoutes(app: FastifyInstance, d: PredictionRout
     // The local model's second opinion is signed only where there is a local model to give it.
     if (opinion === true && !view.model) throw new Refused(409, PREDICT_SAYS.noModel);
     const filed = await proposeForecasts(db, series, new Date(), 'console', opinion === true);
-    return out(PredictFiled, { id: filed.id, deduped: filed.deduped });
+    // Whether every number on the card is already on (read as it was filed): the console words the card from this.
+    return out(PredictFiled, { id: filed.id, deduped: filed.deduped, ...(filed.onlyOpinion ? { onlyOpinion: true as const } : {}) });
   }));
 
   app.post('/v1/predictions/series/:key/turn-off', pre, guarded(async (req) => {

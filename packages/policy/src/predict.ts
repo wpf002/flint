@@ -65,9 +65,16 @@ export const ForecastEnableArgs = z
   });
 export type ForecastEnableArgs = z.infer<typeof ForecastEnableArgs>;
 
-/** What a forecast card's reason says, for good: fixed sentences, never a number. */
+/**
+ * What a forecast card's reason says, for good: fixed sentences, never a number. A card's reason is also what KIND
+ * of card it is, and it cannot change once the card is filed:
+ *  - `enable`: it turns its numbers on (and the local model's second opinion, where it lists one).
+ *  - `opinion`: every number on it was already on when it was filed. It changes second opinions and nothing else:
+ *    signed after one of its numbers was turned off, it is refused, and never turns forecasts back on.
+ */
 export const FORECAST_REASONS = {
   enable: 'Approving turns on Flint’s forecasts of these numbers, on this Mac.',
+  opinion: 'Approving changes only the local model’s second opinion on these numbers, which Flint already forecasts.',
 } as const;
 
 /** How sensitive a set of series is, taken together: the most sensitive of them. */
@@ -241,7 +248,11 @@ export type AccuracyView = z.infer<typeof AccuracyView>;
  */
 export const TurnOnBody = z.object({ series: z.array(SeriesKey).min(1).max(40), opinion: z.boolean().optional() }).strict();
 /** A card filed: its id, and whether it was one already waiting. */
-export const PredictFiled = z.object({ id: Ref, deduped: z.boolean() }).strict();
+/**
+ * The card that was filed. `onlyOpinion`: every number on it was already on when it was filed (as the filing read
+ * them), so approving it changes second opinions and nothing else. Said only when it is so.
+ */
+export const PredictFiled = z.object({ id: Ref, deduped: z.boolean(), onlyOpinion: z.literal(true).optional() }).strict();
 export const PredictDone = z.object({ ok: z.literal(true) }).strict();
 /** A body with nothing in it (Turn Off). */
 export const PredictEmptyBody = z.object({}).strict();

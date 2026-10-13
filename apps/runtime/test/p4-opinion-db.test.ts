@@ -13,9 +13,12 @@
  *    off, or that there is no local model. Never its reason or its name.
  *  - Turning it off needs no signature, is audited by the number's key, and
  *    leaves the forecasts on and the estimates already made on the ledger.
- *  - A card replaces an older waiting card only where the two name a number
- *    in common: the one-number Second Opinion card leaves a waiting card for
- *    other numbers waiting.
+ *  - A card is one of two kinds, fixed as it is filed: one that turns numbers
+ *    on (it replaces every card still waiting, as the sheet's card always
+ *    did), or, when every number on it is already on, one that changes second
+ *    opinions only (it replaces only a waiting card that names one of its
+ *    numbers, and signed after its number was turned off it is refused: it
+ *    never turns forecasts back on). The runtime's answer says which.
  *  - Accuracy compares it with the forecaster's own answer to the very same
  *    questions, a sentence for each kind of answer once there are 30; before
  *    that it says how far along it is. An area's own lines, the night's
@@ -32,11 +35,11 @@ import { enrollTestKey } from './sign';
 import { modelsHere } from './ollama-kit';
 import { buildApp } from '../src/app';
 import type { RuntimeScope } from '../src/config';
-import { approveProposal } from '../src/governance/proposals';
+import { approveProposal, rejectProposal } from '../src/governance/proposals';
 import { runInternal } from '../src/governance/internal';
 import { snapshotCalibration } from '../src/ledger/calibration';
 import { sweep } from '../src/ledger/sweep';
-import { OPINION_OFF_ACTION } from '../src/predict/enable';
+import { OPINION_OFF_ACTION, proposeForecasts } from '../src/predict/enable';
 import { PANEL, opinionSays, opinionTooFewSays, opinionVersusSays } from '../src/predict/phrasing';
 import { SAME_SCORE } from '../src/predict/view';
 import { runReason } from '../src/predict/reason';
@@ -133,8 +136,8 @@ describe.skipIf(NO_DB)('the second opinion in the Predictions panel, on flint_te
     expect(filed.status).toBe(200);
     const args = { series: [DEPLOYS, ANTHROPIC].sort(), reason: [DEPLOYS, ANTHROPIC].sort() };
     const all = await cards();
-    // The card still waiting names another number: it waits on (a newer card replaces only a card it shares a number with).
-    expect(all.map((c) => c.status)).toEqual(['pending', 'pending']);
+    // The newer card replaced the one still waiting, as any Turn On card from the sheet does.
+    expect(all.map((c) => c.status)).toEqual(['rejected', 'pending']);
     expect(all[1]).toMatchObject({ id: filed.body.id, origin: 'console', args, argsDigest: digestOf(args), sensitivity: 'financial', consequential: true, reason: FORECAST_REASONS.enable });
     // `opinion: false` is the plain card, and anything else in its place is not a request.
     for (const bad of [{ series: [DEPLOYS], opinion: 'yes' }, { series: [DEPLOYS], reason: [DEPLOYS] }, { series: [DEPLOYS], opinion: true, model: 'gpt-oss:120b-cloud' }]) {
@@ -236,34 +239,117 @@ describe.skipIf(NO_DB)('the second opinion in the Predictions panel, on flint_te
     expect(await switches(THREADS)).toEqual({ on: true, reason: true });
   });
 
-  it('a one-number Second Opinion card leaves a waiting card for other numbers waiting; a card that names one of its numbers replaces it', async () => {
+  it('a card that only changes second opinions leaves a waiting sheet card waiting; a card from the sheet replaces every waiting card, as it always did', async () => {
     const waiting = async () => (await cards()).filter((c) => c.status === 'pending').map((c) => c.id);
+    const card = async (id: unknown) => (await cards()).find((c) => c.id === id)!;
     expect(await waiting()).toEqual([]);
-    // Will ticked two more numbers in the sheet and has not signed yet.
+    // Will ticked two more numbers in the sheet and has not signed yet. Both are off: a card that turns numbers on.
     const rest = await call('POST', '/v1/predictions/turn-on', { series: [DOWNTIME, CALENDAR] });
-    expect(rest.status).toBe(200);
-    // From one number's own view he asks for its second opinion again (Deploys is on, without it).
+    expect([rest.status, rest.body]).toEqual([200, { id: rest.body.id, deduped: false }]);
+    expect((await card(rest.body.id)).reason).toBe(FORECAST_REASONS.enable);
+    // From one number's own view he asks for its second opinion again (Deploys is on, without it). The runtime says
+    // what kind of card it filed: every number on it is already on. That is kept as the card's reason, for good.
     expect(await switches(DEPLOYS)).toEqual({ on: true, reason: false });
     const own = await call('POST', '/v1/predictions/turn-on', { series: [DEPLOYS], opinion: true });
-    expect(own.status).toBe(200);
+    expect([own.status, own.body]).toEqual([200, { id: own.body.id, deduped: false, onlyOpinion: true }]);
+    expect(await card(own.body.id)).toMatchObject({ status: 'pending', reason: FORECAST_REASONS.opinion, args: { series: [DEPLOYS], reason: [DEPLOYS] } });
+    expect(FORECAST_REASONS.opinion).toBe('Approving changes only the local model’s second opinion on these numbers, which Flint already forecasts.');
     // Both wait: the card for the other two numbers is not thrown away, and can still be signed.
     expect((await waiting()).sort()).toEqual([rest.body.id, own.body.id].sort());
     expect((await page()).waiting.map((w) => [w.id, w.numbers]).sort()).toEqual([[rest.body.id, 2], [own.body.id, 1]].sort());
     expect([(await series(DOWNTIME)).waiting, (await series(DEPLOYS)).waiting, (await series(THREADS)).waiting]).toEqual([true, true, false]);
-    // A newer card that names Deploys replaces the Deploys card, and only that one.
+    // Asked for again, it is the card already waiting, and still said to be what it is.
+    expect((await call('POST', '/v1/predictions/turn-on', { series: [DEPLOYS], opinion: true })).body).toEqual({ id: own.body.id, deduped: true, onlyOpinion: true });
+    // Another card of the same kind that names Deploys replaces the Deploys card, and only that one.
     const wider = await call('POST', '/v1/predictions/turn-on', { series: [DEPLOYS, ANTHROPIC], opinion: true });
-    expect(wider.status).toBe(200);
+    expect(wider.body).toEqual({ id: wider.body.id, deduped: false, onlyOpinion: true });
     expect((await waiting()).sort()).toEqual([rest.body.id, wider.body.id].sort());
-    expect((await cards()).find((c) => c.id === own.body.id)).toMatchObject({ status: 'rejected' });
+    expect(await card(own.body.id)).toMatchObject({ status: 'rejected' });
     expect((await k.db.proposal.findUniqueOrThrow({ where: { id: own.body.id as string } })).error).toBe('A newer version of this card replaced it.');
-    // One number in common is enough, whichever list it is on.
-    const calendar = await call('POST', '/v1/predictions/turn-on', { series: [CALENDAR] });
-    expect((await waiting()).sort()).toEqual([calendar.body.id, wider.body.id].sort());
-    // The card that waited all along is signed, and does what it says.
-    expect(await sign(wider.body.id as string)).toEqual({ on: 2, reason: 2 });
-    expect([await switches(DEPLOYS), await switches(ANTHROPIC)]).toEqual([{ on: true, reason: true }, { on: true, reason: true }]);
-    expect(await sign(calendar.body.id as string)).toEqual({ on: 1, reason: 0 });
+    // A card with even one number that is off is a card from the sheet: it turns a number on, it says nothing of
+    // "only", and it replaces EVERY card still waiting, so exactly one is left (as before there were second opinions).
+    const mixed = await call('POST', '/v1/predictions/turn-on', { series: [DEPLOYS, DOWNTIME], opinion: true });
+    expect([mixed.status, mixed.body]).toEqual([200, { id: mixed.body.id, deduped: false }]);
+    expect((await card(mixed.body.id)).reason).toBe(FORECAST_REASONS.enable);
+    expect(await waiting()).toEqual([mixed.body.id]);
+    for (const gone of [rest, wider]) expect((await k.db.proposal.findUniqueOrThrow({ where: { id: gone.body.id as string } })).error, String(gone.body.id)).toBe('A newer version of this card replaced it.');
+    // And a second-opinion card for another number leaves that one waiting too.
+    const other = await call('POST', '/v1/predictions/turn-on', { series: [ANTHROPIC], opinion: true });
+    expect(other.body).toMatchObject({ onlyOpinion: true });
+    expect((await waiting()).sort()).toEqual([mixed.body.id, other.body.id].sort());
+    // It is signed, and does what it says: the second opinion, on a number that was on and stays on.
+    expect(await sign(other.body.id as string)).toEqual({ on: 1, reason: 1 });
+    expect(await switches(ANTHROPIC)).toEqual({ on: true, reason: true });
+    await rejectProposal(k.db, mixed.body.id as string, { error: 'a test put it away' }, undefined, 'test');
     expect(await waiting()).toEqual([]);
+  });
+
+  it('a second-opinion card signed after its number was turned off is refused: it never turns forecasts back on', async () => {
+    const card = async (id: unknown) => k.db.proposal.findUniqueOrThrow({ where: { id: id as string }, select: { status: true, reason: true, error: true } });
+    expect(await switches(DEPLOYS)).toEqual({ on: true, reason: false });
+    const own = await call('POST', '/v1/predictions/turn-on', { series: [DEPLOYS], opinion: true });
+    expect(own.body).toEqual({ id: own.body.id, deduped: false, onlyOpinion: true });
+    // The card on screen says only its second opinion changes. Before he signs, the number is turned off elsewhere.
+    expect((await call('POST', `/v1/predictions/series/${DEPLOYS}/turn-off`, {})).status).toBe(200);
+    expect(await switches(DEPLOYS)).toEqual({ on: false, reason: false });
+    const said = 'This number’s forecasts were turned off, so this card no longer applies. File it again.';
+    await expect(sign(own.body.id as string)).rejects.toMatchObject({ name: 'Refused', status: 409, message: said });
+    // Nothing was turned on, and the card is over, saying why.
+    expect(await switches(DEPLOYS)).toEqual({ on: false, reason: false });
+    expect(await card(own.body.id)).toEqual({ status: 'failed', reason: FORECAST_REASONS.opinion, error: said });
+    expect(noteProblems('Predictions', said)).toEqual([]);
+    // Filed again, the number is off: this card turns it on, the runtime says nothing of "only", and signed, it does.
+    const again = await call('POST', '/v1/predictions/turn-on', { series: [DEPLOYS], opinion: true });
+    expect(again.body).toEqual({ id: again.body.id, deduped: false });
+    expect(again.body.id).not.toBe(own.body.id);
+    expect((await card(again.body.id)).reason).toBe(FORECAST_REASONS.enable);
+    expect(await sign(again.body.id as string)).toEqual({ on: 1, reason: 1 });
+    expect(await switches(DEPLOYS)).toEqual({ on: true, reason: true });
+    // Several numbers on one such card (from the command line), one of them turned off since: the same, in its own words.
+    await call('POST', `/v1/predictions/series/${DEPLOYS}/second-opinion-off`, {});
+    await call('POST', `/v1/predictions/series/${ANTHROPIC}/second-opinion-off`, {});
+    const two = await proposeForecasts(k.db, [DEPLOYS, ANTHROPIC], new Date(), 'console', true);
+    expect(two).toMatchObject({ deduped: false, onlyOpinion: true });
+    await call('POST', `/v1/predictions/series/${ANTHROPIC}/turn-off`, {});
+    await expect(sign(two.id)).rejects.toMatchObject({ status: 409, message: 'Forecasts for one of these numbers were turned off, so this card no longer applies. File it again.' });
+    // Not half of it either: Deploys' second opinion is as it was.
+    expect([await switches(DEPLOYS), await switches(ANTHROPIC)]).toEqual([{ on: true, reason: false }, { on: false, reason: false }]);
+    // (Anthropic back on for the tests below, by the card that turns it on.)
+    await sign((await call('POST', '/v1/predictions/turn-on', { series: [ANTHROPIC] })).body.id as string);
+    expect(await switches(ANTHROPIC)).toEqual({ on: true, reason: false });
+  });
+
+  it('a card still waiting with the same lists but of the other kind is replaced, never handed back as this one', async () => {
+    const card = async (id: unknown) => k.db.proposal.findUniqueOrThrow({ where: { id: id as string }, select: { status: true, reason: true, error: true } });
+    const waiting = async () => (await cards()).filter((c) => c.status === 'pending').map((c) => c.id);
+    expect([await waiting(), await switches(CALENDAR)]).toEqual([[], null]);
+    // The sheet: Calendar Hours with its second opinion. It is off, so this card turns it on. He does not sign yet.
+    const first = await call('POST', '/v1/predictions/turn-on', { series: [CALENDAR], opinion: true });
+    expect(first.body).toEqual({ id: first.body.id, deduped: false });
+    // Meanwhile the number is turned on another way (the command line's card, signed).
+    const cli = await proposeForecasts(k.db, [CALENDAR]);
+    expect(cli).toMatchObject({ deduped: false, onlyOpinion: false });
+    expect(await sign(cli.id)).toEqual({ on: 1, reason: 0 });
+    expect(await switches(CALENDAR)).toEqual({ on: true, reason: false });
+    expect((await card(first.body.id)).status).toBe('pending');
+    // Now he asks for its second opinion from its own view: the very lists of the card still waiting. That card
+    // would turn forecasts on if they were off by the time he signed; this one must not. So it is a new card.
+    const second = await call('POST', '/v1/predictions/turn-on', { series: [CALENDAR], opinion: true });
+    expect(second.body).toEqual({ id: second.body.id, deduped: false, onlyOpinion: true });
+    expect(second.body.id).not.toBe(first.body.id);
+    expect(await card(first.body.id)).toEqual({ status: 'rejected', reason: FORECAST_REASONS.enable, error: 'A newer version of this card replaced it.' });
+    expect((await card(second.body.id)).reason).toBe(FORECAST_REASONS.opinion);
+    expect(await waiting()).toEqual([second.body.id]);
+    // And the other way round: the number is turned off, and he ticks it on the sheet with its second opinion.
+    // The card still waiting says "only its second opinion changes" and would be refused; the sheet's card replaces it.
+    expect((await call('POST', `/v1/predictions/series/${CALENDAR}/turn-off`, {})).status).toBe(200);
+    const third = await call('POST', '/v1/predictions/turn-on', { series: [CALENDAR], opinion: true });
+    expect(third.body).toEqual({ id: third.body.id, deduped: false });
+    expect(await card(second.body.id)).toMatchObject({ status: 'rejected', error: 'A newer version of this card replaced it.' });
+    expect((await card(third.body.id)).reason).toBe(FORECAST_REASONS.enable);
+    expect(await waiting()).toEqual([third.body.id]);
+    expect(await sign(third.body.id as string)).toEqual({ on: 1, reason: 1 });
+    expect(await switches(CALENDAR)).toEqual({ on: true, reason: true });
   });
 
   it('no log line holds what the model said, a number’s value or a card’s numbers', async () => {

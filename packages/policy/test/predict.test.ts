@@ -221,6 +221,11 @@ describe('P4 part 4: the Predictions panel\'s wire', () => {
     expect(PredictEmptyBody.safeParse({ on: false }).success).toBe(false);
     expect(PredictFiled.safeParse({ id: 'prabc123', deduped: false }).success).toBe(true);
     expect(PredictFiled.safeParse({ id: 'prabc123', deduped: false, args: {} }).success).toBe(false);
+    // The runtime says when the card it filed changes second opinions only. Said only when it is so: an older
+    // runtime says nothing, and neither does a card that turns a number on.
+    expect(PredictFiled.safeParse({ id: 'prabc123', deduped: false, onlyOpinion: true }).success).toBe(true);
+    expect(PredictFiled.parse({ id: 'prabc123', deduped: true })).toEqual({ id: 'prabc123', deduped: true });
+    for (const not of [false, 'true', 1, null]) expect(PredictFiled.safeParse({ id: 'prabc123', deduped: false, onlyOpinion: not }).success, String(not)).toBe(false);
     expect(PredictDone.safeParse({ ok: true }).success).toBe(true);
     expect(PredictDone.safeParse({ ok: false }).success).toBe(false);
   });

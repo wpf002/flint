@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
 import { laterDay, pinLocale, shownDay } from './console-dates';
-import { ACTION_WORDS, WEEKLY_JOBS, noteProblems } from '@flint/policy';
+import { ACTION_WORDS, FORECAST_REASONS, WEEKLY_JOBS, noteProblems } from '@flint/policy';
 
 /** A rule's last day, and how the console shows it: a date with its year, whenever this runs. */
 const RULE_UNTIL = laterDay(3, 29);
@@ -876,6 +876,48 @@ describe('the console Approvals panel', () => {
     decided = [];
     ids.apprlist!.children[0]!.children[0]!.button('Approve with Password').onclick!();
     expect(decided.at(-1)).toEqual(['approve', 'tp', { reason: 'turn on predictions', fresh: true, args: { series: all, reason: ['daily.deploys.count', 'daily.spend.anthropic.usd'] } }]);
+  });
+
+  it('a predictions card filed when its numbers were already on says that only second opinions change, from the card’s own stored reason', async () => {
+    const OPINION = FORECAST_REASONS.opinion;
+    expect(run('APPR_PREDICT_OPINION')).toBe(OPINION);
+    expect(OPINION).toBe('Approving changes only the local model’s second opinion on these numbers, which Flint already forecasts.');
+    const predict = (over: Record<string, unknown> = {}) => card({
+      id: 'tp', fullName: 'forecast.series.enable', origin: 'console', sensitivity: 'ops', consequential: true,
+      args: { series: ['daily.deploys.count'], reason: ['daily.deploys.count'] }, reason: OPINION, ...over,
+    });
+    const facts = (p: Record<string, unknown>) => (JSON.parse(JSON.stringify(run(`apprFacts(${JSON.stringify(p)})`))) as string[][]).map((f) => f.map((x) => x.replace(/\u00a0/g, ' ')));
+    const one = 'Flint already forecasts this number, so only its second opinion changes.';
+    const many = 'Flint already forecasts these numbers, so only their second opinions change.';
+    // One line under the title, what the card holds, and what the prompt says he is signing.
+    expect([run(`apprTitle(${JSON.stringify(predict())})`), run(`apprSub(${JSON.stringify(predict())})`), run(`apprReason(${JSON.stringify(predict())})`)]).toEqual(['Turn On Predictions', one, 'change a second opinion']);
+    expect(facts(predict()).slice(0, 2)).toEqual([['Numbers', 'Deploys'], ['Second Opinion', 'Local Model']]);
+    expect(run(`apprSub(${JSON.stringify(predict({ args: { series: ['daily.deploys.count', 'daily.threads.open'], reason: ['daily.deploys.count'] } }))})`)).toBe(many);
+    for (const line of [one, many, OPINION]) {
+      expect(noteProblems('Predictions', line), line).toEqual([]);
+      expect(line).toMatch(/^[A-Z][^(){}[\]`]*\.$/);
+    }
+    // It turns nothing on, so it does not say that turning this on also checks what Flint already predicted.
+    const says = (p: Record<string, unknown>) => JSON.parse(JSON.stringify(run(`apprDetails(${JSON.stringify(p)}).says`))) as string[];
+    expect(says(predict())).toEqual([]);
+    expect(says(predict({ reason: FORECAST_REASONS.enable }))).toEqual([run('APPR_PREDICT_ALSO')]);
+    // Any other reason (the card that turns numbers on, none at all, a sentence that only looks like it) is the plain card.
+    for (const reason of [FORECAST_REASONS.enable, null, undefined, `${OPINION} `, 'opinion']) {
+      const p = predict({ reason });
+      expect([run(`apprSub(${JSON.stringify(p)})`), run(`apprReason(${JSON.stringify(p)})`)], String(reason)).toEqual(['Flint forecasts 1 of its own numbers each night, on this Mac.', 'turn on predictions']);
+    }
+    // And the reason is another action's business: only a predictions card is read this way.
+    expect(run(`apprPredictOnlyOpinion(${JSON.stringify(card({ id: 'x', fullName: 'world.source.enable', reason: OPINION }))})`)).toBe(false);
+    // In the list: the line under the title, and behind Show Details the card's own reason, then its number by name.
+    answer = () => ({ status: 200, body: { signed: true, proposals: [predict()] } });
+    await open();
+    const shown = ids.apprlist!.children[0]!.children[0]!;
+    expect(shown.shown()).toContain(`Turn On Predictions${one}`);
+    expect(shown.shown()).toContain('Asks on Its Own');
+    const details = shown.all().find((e) => e.className === 'details')!;
+    expect(details.all().filter((e) => e.tagName === 'p').map((e) => e.textContent)).toEqual([OPINION]);
+    expect(details.all().filter((e) => e.tagName === 'li').map((e) => e.textContent)).toEqual(['Deploys · Second Opinion']);
+    expect(shown.shown()).not.toMatch(/forecast\.series|daily\.|also checks|[{}[\]"]/);
   });
 
   it('a card approved here is told to the Goals panel, so a New Goal draft whose card it was is spent; a failed one is not', async () => {

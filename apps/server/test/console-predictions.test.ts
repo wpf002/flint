@@ -37,7 +37,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
 import { webcrypto } from 'node:crypto';
-import { AnswerBody, ForecastEnableArgs, PREDICT_SAYS, PredictEmptyBody, TurnOnBody, digestOf, noteProblems } from '@flint/policy';
+import { AnswerBody, ForecastEnableArgs, PREDICT_SAYS, PredictEmptyBody, TurnOnBody, digestOf, noteProblems, PredictFiled } from '@flint/policy';
 import { PREDICTIONS_SAY } from '../src/predictions-routes';
 
 const html = readFileSync(join(__dirname, '..', '..', 'console', 'index.html'), 'utf8');
@@ -925,22 +925,55 @@ describe('the local model\'s second opinion', () => {
     expect(rowOf('Local Model').button('Turn On Second Opinion').getAttribute('aria-label')).toBeNull();
     expect(foot().buttons()).toEqual(['Turn Off Forecasts']);
     calls = [];
+    // The runtime files it, and says what kind of card it filed: every number on it is already on.
+    routes = answers({ 'POST /predictions/turn-on': { status: 200, body: { id: 'prcard9x8y7z', deduped: false, onlyOpinion: true } } });
     rowOf('Local Model').button('Turn On Second Opinion').onclick!();
     await settle();
     expect(calls).toEqual([{ url: '/predictions/turn-on', method: 'POST', body: { series: [KEYS.deploys], opinion: true } }]);
+    expect(PredictFiled.safeParse({ id: 'prcard9x8y7z', deduped: false, onlyOpinion: true }).success).toBe(true);
     expect(title()).toBe('Turn On Predictions');
-    // The number is already on: the card says so, and that only its second opinion changes. It does not say Flint
-    // "forecasts 1 of its own numbers each night" as if that began now, nor that turning this on starts the checks.
-    expect(body().with('plead').map((e) => e.textContent)).toEqual(['Flint already forecasts this number. Only its second opinion changes.']);
+    // The card says so, and that only its second opinion changes. It does not say Flint "forecasts 1 of its own
+    // numbers each night" as if that began now, nor that turning this on starts the checks.
+    const ONLY = 'Flint already forecasts this number, so only its second opinion changes.';
+    expect(body().with('plead').map((e) => e.textContent)).toEqual([ONLY]);
     expect(screen()).not.toMatch(/forecasts 1 of its own numbers|also checks the predictions/);
-    ownWords([], ['Flint already forecasts this number. Only its second opinion changes.']);
+    ownWords([], [ONLY]);
     expect(headers()).toEqual(['Numbers', 'Second Opinion']);
     expect(rows()).toEqual([['Deploys', [], ''], ['Local Model', [SAYS], '']]);
     plainScreen();
     expect(signed).toEqual([]);
     foot().button('Approve with Touch ID').onclick!();
     await settle();
+    // The prompt says what he is signing, too.
+    expect(signed).toEqual([['prcard9x8y7z', { fresh: true, reason: 'change a second opinion', args: { series: [KEYS.deploys], reason: [KEYS.deploys] } }]]);
+
+    // The card is worded from the runtime's answer, never from what this page had loaded. The page shows the number
+    // as on; it was turned off somewhere else a moment ago, so the runtime filed a card that turns it on again, and
+    // says nothing of "only". The card then says what its signature does: it turns forecasts on.
+    run('closePredictions()');
+    signed = [];
+    await openNumber({ on: false, says: 'The local model doesn’t estimate this number.', offer: true });
+    expect(foot().buttons()).toEqual(['Turn Off Forecasts']);
+    routes = answers({ 'POST /predictions/turn-on': { status: 200, body: { id: 'prcard9x8y7z', deduped: false } } });
+    rowOf('Local Model').button('Turn On Second Opinion').onclick!();
+    await settle();
+    expect(body().with('plead').map((e) => e.textContent)).toEqual([
+      'Flint forecasts 1 of its own numbers each night, on this Mac.',
+      'Turning this on also checks the predictions Flint has already made, and those results can’t be undone.',
+    ]);
+    expect(screen()).not.toMatch(/already forecasts/);
+    foot().button('Approve with Touch ID').onclick!();
+    await settle();
     expect(signed).toEqual([['prcard9x8y7z', { fresh: true, reason: 'turn on predictions', args: { series: [KEYS.deploys], reason: [KEYS.deploys] } }]]);
+    // Anything but `true` is not a yes.
+    for (const not of [false, 'true', 1, null]) {
+      run('closePredictions()');
+      await openNumber({ on: false, says: 'The local model doesn’t estimate this number.', offer: true });
+      routes = answers({ 'POST /predictions/turn-on': { status: 200, body: { id: 'prcard9x8y7z', deduped: false, onlyOpinion: not } } });
+      rowOf('Local Model').button('Turn On Second Opinion').onclick!();
+      await settle();
+      expect(screen(), String(not)).not.toMatch(/already forecasts/);
+    }
     // No local model: the runtime's sentence says so, and nothing is offered.
     run('closePredictions()');
     await openNumber({ on: false, says: 'No local model is set on this Mac.', offer: false });
@@ -968,6 +1001,16 @@ describe('the local model\'s second opinion', () => {
     expect(leads[0]).toMatch(/^Flint forecasts \d+ of its own numbers each night, on this Mac\.$/);
     expect(leads[1]).toBe('Turning this on also checks the predictions Flint has already made, and those results can’t be undone.');
     expect(screen()).not.toMatch(/already forecasts/);
+    // Should every number he ticked have been turned on elsewhere meanwhile, the runtime says so, and so does the card.
+    run('closePredictions()');
+    await sheet(offPage({ secondOpinion: true }));
+    opinionSwitch()!.onclick!({ stopPropagation: () => {} });
+    routes = answers({ 'POST /predictions/turn-on': { status: 200, body: { id: 'prcard9x8y7z', deduped: false, onlyOpinion: true } } });
+    foot().button('Continue').onclick!();
+    await settle();
+    const MANY = 'Flint already forecasts these numbers, so only their second opinions change.';
+    expect(body().with('plead').map((e) => e.textContent)).toEqual([MANY]);
+    ownWords([], [MANY]);
   });
 
   it('a runtime from before second opinions sends a number with no word of one: the view is as it was, with one button', async () => {

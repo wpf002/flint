@@ -8,6 +8,11 @@
  *    a fixed sentence, its lists are marked as Will's own, and it is marked for
  *    his fresh touch. A card that could not apply, or that would change nothing,
  *    is never filed.
+ *  - of one of two kinds, fixed as it is filed and kept as its reason: a card
+ *    that turns numbers on, or (every number on it already on, as the filing
+ *    transaction read them) a card that changes second opinions only. The
+ *    second kind never turns a number's forecasts back on: run after one of its
+ *    numbers was turned off, it is refused.
  *  - carried out in ONE transaction at READ COMMITTED (runForecast): the claim
  *    (signature checked again, tier, intent), the writes under flint.actor
  *    `will:approval:<id>`, and the card's completion. A crash anywhere leaves
@@ -48,6 +53,9 @@ export const SAY = {
   nothing: PREDICT_SAYS.nothing,
   reshaped: 'Flint reads this card differently since you approved it. File it again.',
   replaced: 'A newer version of this card replaced it.',
+  // A card that changes second opinions only, run after a number on it was turned off: it turns nothing back on.
+  turnedOff: 'This number’s forecasts were turned off, so this card no longer applies. File it again.',
+  someTurnedOff: 'Forecasts for one of these numbers were turned off, so this card no longer applies. File it again.',
 } as const;
 
 /** A provenance ref on a card is an id: a proposal's provenance is kept for good. */
@@ -127,6 +135,8 @@ interface ApplyContext {
   approvalId: string;
   /** What Will signed: the stored args' digest. */
   argsDigest: string;
+  /** The card was filed when every number on it was already on (its reason says so): it changes second opinions only. */
+  onlyOpinion?: boolean;
 }
 type Applied = { result: { on: number; reason: number } } | { refusal: string };
 
@@ -137,6 +147,11 @@ type Applied = { result: { on: number; reason: number } } | { refusal: string };
  * number's MetricSeries row is made if it is missing (as the registry says it
  * is; on this Mac only), and its switch row is turned on under this card's
  * approval, with the local model's estimate on exactly where the card signed it.
+ *
+ * A card that changes second opinions only (`onlyOpinion`) turns no number
+ * on: every number on it must still be on, and its rows are held from the
+ * look to the write, so a number turned off meanwhile is not turned back on
+ * by a card that said only its second opinion changes.
  */
 export async function applyEnable(tx: Tx, raw: unknown, ctx: ApplyContext): Promise<Applied> {
   // The args as signed, read again with the shared contract. Normalizing them again must change nothing.
@@ -147,6 +162,12 @@ export async function applyEnable(tx: Tx, raw: unknown, ctx: ApplyContext): Prom
   if (!defs) return { refusal: SAY.unknown };
   const why = await storedProblem(tx, defs);
   if (why) return { refusal: why };
+  if (ctx.onlyOpinion) {
+    // FOR UPDATE: turning a number off (an unsigned UPDATE of its row) waits for this transaction, and this one
+    // reads the row as that one left it.
+    const rows = await tx.$queryRaw<Array<{ on: boolean }>>`SELECT "on" FROM "ForecastSeries" WHERE "seriesKey" IN (${Prisma.join(args.series)}) FOR UPDATE`;
+    if (rows.length !== args.series.length || rows.some((r) => r.on !== true)) return { refusal: args.series.length === 1 ? SAY.turnedOff : SAY.someTurnedOff };
+  }
   for (const d of defs) {
     // createMany + skipDuplicates: one INSERT ... ON CONFLICT DO NOTHING, so a row that is there is never written.
     await tx.metricSeries.createMany({ data: [{ key: d.key, unit: d.unit, freq: freqOf(d), sensitivity: d.sensitivity, description: d.description }], skipDuplicates: true });
@@ -175,10 +196,14 @@ export async function applyEnable(tx: Tx, raw: unknown, ctx: ApplyContext): Prom
  * same numbers is the one returned.
  *
  * From the console the newer card wins: his other Turn On cards still waiting
- * (from the console or the command line) that name any of the same numbers
- * are rejected, unsigned, with a fixed sentence. A card for other numbers
- * altogether is left waiting. A card left waiting after a cancelled prompt can then never be
- * approved later in place of the one that replaced it. Only cards filed
+ * (from the console or the command line) are rejected, unsigned, with a fixed
+ * sentence, so the sheet always leaves exactly one card waiting, and a card
+ * left waiting after a cancelled prompt can never be approved later in place
+ * of the one that replaced it. One exception: a card that changes second
+ * opinions only (every number on it is already on) replaces only the waiting
+ * cards that name one of its numbers. Asking for a second opinion on one
+ * number does not throw away the card still waiting for the numbers Will
+ * ticked on the sheet. Only cards filed
  * before this one are rejected, and in the transaction that files it: Turn On
  * filings run one at a time (createProposal's `serial`), so each sees every
  * card filed before it and none filed after, and filings made at the same
@@ -187,32 +212,55 @@ export async function applyEnable(tx: Tx, raw: unknown, ctx: ApplyContext): Prom
  * `opinion`: the local model also gives its second opinion on these numbers
  * (all of them: the card's `reason` list is its `series` list). Off unless
  * Will switched it on in the sheet; the command line never asks for it.
+ *
+ * The answer's `onlyOpinion`: every number on the card was already on, read in
+ * the transaction that filed it. That is the card's kind, kept as its reason
+ * (FORECAST_REASONS.opinion), and what the executor holds it to. A card still
+ * waiting with the very same lists but of the other kind (the numbers were
+ * turned on, or off, since it was filed) is replaced, never handed back: what
+ * a card is said to do and what its signature would do are then one thing.
  */
 export async function proposeForecasts(db: Db, keys: readonly string[] = FORECAST_SERIES_KEYS, now = new Date(), from: 'cli' | 'console' = 'cli', opinion = false) {
   const series = [...new Set(keys)].sort();
   const actor = `will:${from}`;
   const action = 'forecast.series.enable';
-  return createProposal(db, {
-    kind: 'tool_call', origin: from, action, args: { series, reason: opinion ? [...series] : [] },
+  const args = { series, reason: opinion ? [...series] : [] };
+  const CARD = { id: true, action: true, argsDigest: true, tainted: true, origin: true } as const;
+  /** Every number on the card is already on, as the filing transaction read them. */
+  let onlyOpinion = false;
+  const filed = await createProposal(db, {
+    kind: 'tool_call', origin: from, action, args,
     argsProvenance: { series: { source: 'will', tainted: false }, reason: { source: 'will', tainted: false } },
     tainted: false, sensitivity: 'ops', destructive: false, consequential: true, ttlMinutes: 7 * 24 * 60,
   }, actor, now, undefined, undefined, {
     serial: action,
+    before: async (tx: Tx) => {
+      onlyOpinion = (await tx.forecastSeries.count({ where: { seriesKey: { in: series }, on: true } })) === series.length;
+      const reason = onlyOpinion ? FORECAST_REASONS.opinion : FORECAST_REASONS.enable;
+      // The same lists on a card of the other kind, still waiting: not this card. It is replaced, so the filing
+      // below makes a new one instead of handing that one back.
+      const other = await tx.proposal.findMany({
+        where: { status: 'pending', action, argsDigest: digestOf(args), NOT: { origin: { startsWith: 'runtime:' } }, OR: [{ reason: null }, { reason: { not: reason } }] },
+        select: CARD,
+      });
+      for (const o of other) await rejectPendingIn(tx, o, SAY.replaced, actor);
+      return { reason };
+    },
     ...(from === 'console' ? {
       filed: async (tx: Tx, id: string) => {
-        const older = await tx.proposal.findMany({ where: { status: 'pending', action, origin: { in: ['console', 'cli'] }, id: { not: id } }, select: { id: true, action: true, argsDigest: true, tainted: true, origin: true, args: true } });
+        const older = await tx.proposal.findMany({ where: { status: 'pending', action, origin: { in: ['console', 'cli'] }, id: { not: id } }, select: { ...CARD, args: true } });
         const mine = new Set(series);
-        for (const { args, ...o } of older) {
-          // Only a card that names one of these numbers is replaced. A card for OTHER numbers still waits: the
-          // one-number Second Opinion card must not throw away the Turn On card Will has yet to sign for the rest.
-          // (A waiting card this cannot read names nothing it could turn on: it goes too.)
-          const theirs = ForecastEnableArgs.safeParse(args);
-          if (theirs.success && !theirs.data.series.some((k) => mine.has(k))) continue;
+        for (const { args: theirs, ...o } of older) {
+          // A card that changes second opinions only leaves a waiting card for OTHER numbers waiting. (One this
+          // cannot read names nothing it could turn on: it goes.) Every other new card replaces every waiting one.
+          const named = onlyOpinion ? ForecastEnableArgs.safeParse(theirs) : undefined;
+          if (named?.success && !named.data.series.some((k) => mine.has(k))) continue;
           await rejectPendingIn(tx, o, SAY.replaced, actor);
         }
       },
     } : {}),
   });
+  return { ...filed, onlyOpinion };
 }
 
 /** Who the panel's writes are by. */
@@ -304,7 +352,7 @@ export async function runForecast(db: Db, id: string, rp: WebAuthnRelyingParty |
       async (tx) => {
         const c = await claimIn(tx, id, rp, tz, actor, now);
         if ('refused' in c) return c;
-        const p = await tx.proposal.findUniqueOrThrow({ where: { id }, select: { approvalId: true, origin: true, templateId: true, kind: true, tainted: true } });
+        const p = await tx.proposal.findUniqueOrThrow({ where: { id }, select: { approvalId: true, origin: true, templateId: true, kind: true, tainted: true, reason: true } });
         // Only Will's own card, from the console or the CLI: one from chat never runs, however it was filed.
         const wills = contextOf(p.origin) === 'console' && p.templateId === null && p.kind === 'tool_call' && !p.tainted;
         // And only the on-switch itself: this executor runs no other action, whatever it is handed.
@@ -314,7 +362,8 @@ export async function runForecast(db: Db, id: string, rp: WebAuthnRelyingParty |
             ? { refusal: SAY.fromConsole }
             : await (async () => {
                 await tx.$queryRaw`SELECT set_config('flint.actor', ${`will:approval:${p.approvalId}`}, true)`;
-                return applyEnable(tx, c.claimed.args, { approvalId: p.approvalId!, argsDigest: c.claimed.argsDigest });
+                // The card's kind is its reason, fixed since it was filed.
+                return applyEnable(tx, c.claimed.args, { approvalId: p.approvalId!, argsDigest: c.claimed.argsDigest, onlyOpinion: p.reason === FORECAST_REASONS.opinion });
               })();
         if ('refusal' in r) {
           await completeIn(tx, id, { ok: false, error: r.refusal }, actor, now);
