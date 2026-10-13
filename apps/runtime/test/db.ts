@@ -4,12 +4,17 @@
  * Where the URLs come from, in order:
  *  1. FLINT_DB_TEST_OWNER_URL / FLINT_DB_TEST_URL / FLINT_DB_TEST_APPROVER_URL in
  *     the environment;
- *  2. on the Mac, those keys (and only those) read from ~/.flint/secrets.env, the
- *     approver's derived from FLINT_DB_APPROVER_URL with the database swapped;
+ *  2. in the deploy gate only (FLINT_DEPLOY_GATE=1, set by install-runtime.sh),
+ *     those keys (and only those) read from ~/.flint/secrets.env, the approver's
+ *     derived from FLINT_DB_APPROVER_URL with the database swapped;
  *  3. in CI, set by global-setup.ts after it creates the roles in the throwaway
  *     Postgres container.
- * With none of them the database tests are skipped, except in CI, where that is
- * a failure.
+ * With none of them the database tests are skipped, except in CI and the gate,
+ * where that is a failure.
+ *
+ * The gate is the only run that may read this Mac's own settings. A test run
+ * started by hand with no URLs in its environment used to fall back to them and
+ * reset the gate's database under it, which failed a deploy. It now gets none.
  */
 import { execFile } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
@@ -55,7 +60,7 @@ export interface TestUrls {
 
 export function testUrls(): TestUrls | undefined {
   const env = process.env;
-  const file = env.FLINT_DB_TEST_OWNER_URL ? {} : fromSecrets();
+  const file = env.FLINT_DB_TEST_OWNER_URL || env.FLINT_DEPLOY_GATE !== '1' ? {} : fromSecrets();
   const owner = env.FLINT_DB_TEST_OWNER_URL ?? file.FLINT_DB_TEST_OWNER_URL;
   const app = env.FLINT_DB_TEST_URL ?? file.FLINT_DB_TEST_URL;
   const approverBase = env.FLINT_DB_TEST_APPROVER_URL ?? (file.FLINT_DB_APPROVER_URL && withDatabase(file.FLINT_DB_APPROVER_URL, 'flint_test'));

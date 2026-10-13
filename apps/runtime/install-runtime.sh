@@ -78,9 +78,11 @@ pnpm --filter @flint/core build >/dev/null
 if [ "${FLINT_SKIP_TESTS:-0}" != "1" ]; then
   echo "gate: runtime typecheck + tests (scratch database flint_test)..."
   pnpm --filter @flint/runtime typecheck || die "runtime typecheck failed — NOT deploying the runtime"
-  # The tests read the scratch database's URLs themselves (secrets.env, backup.env);
-  # FLINT_REQUIRE_DB makes a missing database a failure, never a silent skip.
-  FLINT_REQUIRE_DB=1 pnpm --filter @flint/runtime test || die "runtime tests failed — NOT deploying the runtime"
+  # The tests read the scratch database's URLs themselves (secrets.env, backup.env),
+  # and only here: FLINT_DEPLOY_GATE is what lets them, so no other test run on this
+  # Mac can reach the gate's database. FLINT_REQUIRE_DB makes a missing database a
+  # failure, never a silent skip.
+  FLINT_DEPLOY_GATE=1 FLINT_REQUIRE_DB=1 pnpm --filter @flint/runtime test || die "runtime tests failed — NOT deploying the runtime"
 fi
 
 OWNER_URL="$(secret FLINT_DB_OWNER_URL)"
