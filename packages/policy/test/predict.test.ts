@@ -21,6 +21,7 @@ import {
   PredictionsWaiting,
   QUESTIONS_PER_DAY,
   QuestionsPage,
+  SecondOpinion,
   SeriesAnswer,
   SeriesKey,
   TurnOnBody,
@@ -151,8 +152,12 @@ describe('P4 part 4: the Predictions panel\'s wire', () => {
   });
 
   it('the page, one number, the questions and the scores are strict, and bounded', () => {
-    const page = { state: 'on', numbers: [row], waiting: [{ id: 'prabc123', numbers: 12 }], questions: 2, announce: false };
+    const page = { state: 'on', numbers: [row], waiting: [{ id: 'prabc123', numbers: 12 }], questions: 2, announce: false, secondOpinion: true };
     expect(PredictionsPage.parse(page)).toEqual(page);
+    // Whether the sheet may offer the local model's second opinion is always said.
+    const { secondOpinion: _s, ...unsure } = page;
+    expect(PredictionsPage.safeParse(unsure).success).toBe(false);
+    expect(PredictionsPage.safeParse({ ...page, secondOpinion: 'yes' }).success).toBe(false);
     expect(PredictionsPage.safeParse({ ...page, state: 'maybe' }).success).toBe(false);
     expect(PredictionsPage.safeParse({ ...page, extra: 1 }).success).toBe(false);
     expect(PredictionsPage.safeParse({ ...page, numbers: Array.from({ length: 61 }, () => row) }).success).toBe(false);
@@ -162,8 +167,17 @@ describe('P4 part 4: the Predictions panel\'s wire', () => {
       expect(PredictionsWaiting.safeParse(bad).success, JSON.stringify(bad).slice(0, 60)).toBe(false);
     }
     const fact = { label: 'Today', value: 'About 4', says: 'The 80% range is 2 to 6.' };
-    const series = { number: row, forecast: [fact], chance: { label: 'Above 3', value: 'Likely · 70%', says: 'It’s likely, around 70%, that today runs above 3.' }, record: 'Flint has no results for this number yet.', waiting: false, offHere: false };
+    const series = { number: row, forecast: [fact], chance: { label: 'Above 3', value: 'Likely · 70%', says: 'It’s likely, around 70%, that today runs above 3.' }, opinion: null, record: 'Flint has no results for this number yet.', waiting: false, offHere: false };
     expect(SeriesAnswer.parse({ series })).toEqual({ series });
+    // The local model's second opinion is one sentence, its switch, and whether it can be turned on here: never a number beside the words.
+    const opinion = { on: true, says: 'The local model said about 60%.', offer: false };
+    expect(SeriesAnswer.parse({ series: { ...series, opinion } })).toEqual({ series: { ...series, opinion } });
+    expect(SecondOpinion.safeParse({ on: false, says: 'The local model doesn’t estimate this number.', offer: true }).success).toBe(true);
+    for (const bad of [{ ...opinion, probability: 0.6 }, { ...opinion, reasonCode: 'trend' }, { ...opinion, model: 'muse-glimmer:30b' }, { on: true, offer: false }, { ...opinion, says: 'about 60%' }, { ...opinion, says: '{"p":0.6}.' }]) {
+      expect(SeriesAnswer.safeParse({ series: { ...series, opinion: bad } }).success, JSON.stringify(bad)).toBe(false);
+    }
+    const { opinion: _o, ...unsaidOpinion } = series;
+    expect(SeriesAnswer.safeParse({ series: unsaidOpinion }).success).toBe(false);
     expect(SeriesAnswer.safeParse({ series: { ...series, chance: null } }).success).toBe(true);
     expect(SeriesAnswer.safeParse({ series: { ...series, forecast: Array.from({ length: 9 }, () => fact) } }).success).toBe(false);
     expect(SeriesAnswer.safeParse({ series: { ...series, points: [{ mean: 4 }] } }).success).toBe(false);
@@ -192,6 +206,11 @@ describe('P4 part 4: the Predictions panel\'s wire', () => {
     for (const a of ['yes', 'no', 'skip']) expect(AnswerBody.parse({ answer: a })).toEqual({ answer: a });
     for (const bad of [{}, { answer: 'maybe' }, { answer: true }, { answer: 'yes', outcome: true }, { answer: 'yes', resolvedBy: 'will' }]) expect(AnswerBody.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
     expect(TurnOnBody.parse({ series: ['daily.deploys.count'] })).toEqual({ series: ['daily.deploys.count'] });
+    // The local model's second opinion is one switch for the numbers named: on, off, or unsaid (off).
+    for (const opinion of [true, false]) expect(TurnOnBody.parse({ series: ['daily.deploys.count'], opinion })).toEqual({ series: ['daily.deploys.count'], opinion });
+    for (const bad of [{ series: ['daily.deploys.count'], opinion: 'yes' }, { series: ['daily.deploys.count'], opinion: ['daily.deploys.count'] }, { series: ['daily.deploys.count'], opinion: true, model: 'gpt-oss:120b-cloud' }]) {
+      expect(TurnOnBody.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
     for (const bad of [{}, { series: [] }, { series: ['Deploys'] }, { series: ['daily.deploys.count'], reason: ['daily.deploys.count'] }, { series: Array.from({ length: 41 }, (_, i) => `daily.x${i}.count`) }]) {
       expect(TurnOnBody.safeParse(bad).success, JSON.stringify(bad).slice(0, 80)).toBe(false);
     }

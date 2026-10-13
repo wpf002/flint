@@ -16,11 +16,14 @@
  *    local until it has said what it is (`placeSaid`).
  *
  * Everything here is pure: it reads no environment, makes no request and keeps
- * no clock of its own. Who asks a server, and when, is each process's own (the
- * server's ollama-locality watches; the runtime's model/here asks before a
- * call). What an answer means, and for how long it is believed, is here, so
- * the two cannot disagree. Each fails closed: no word, an old one, or a
- * listing without the model is not local.
+ * no clock of its own. Who asks a server, when, and for how long its word is
+ * believed is each process's own: the server's ollama-locality keeps a watch
+ * (asked every minute, believed for five), because it reads the answer on
+ * every chat turn; the runtime's model/here asks before each local call and
+ * believes the answer for two seconds, because its calls are few and carry
+ * Will's own words. What an answer MEANS is here, so the two cannot read one
+ * listing two ways. Each fails closed: no word, an old one, or a listing
+ * without the model is not local.
  */
 
 /**
@@ -139,9 +142,9 @@ export async function placeSaid(status: number, body: () => Promise<unknown>): P
   return status === 404 || status === 405 || status === 501 ? 'other' : undefined;
 }
 
-/** What a server last said is believed for this long, and then not at all. */
+/** What a watched server last said is believed for this long, and then not at all (the server's watch; a caller that asks each time passes its own, shorter). */
 export const PLACE_MAX_AGE_MS = 5 * 60_000;
-/** A server is asked again once what it said is this old. */
+/** A watched server is asked again this often. */
 export const PLACE_ASK_EVERY_MS = 60_000;
 /** How long a server has to list its models. */
 export const PLACE_TIMEOUT_MS = 2_000;

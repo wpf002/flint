@@ -23,6 +23,11 @@
  *  - No answer is recorded on one tap: the first arms the row, the second
  *    records. A prediction Flint cannot say plainly offers only Skip.
  *  - Closing drops what the panel holds.
+ *  - The local model's second opinion (P4 part 5): one switch on the sheet,
+ *    offered only where the runtime says there is a local model; the card
+ *    shows it as the Approvals panel does, and what is signed lists the same
+ *    numbers for the local model. One number, open, shows it as the runtime's
+ *    one sentence, with Turn Off (one unsigned POST) or Turn On (the card).
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -141,7 +146,7 @@ const number = (key: string, name: string, over: Record<string, unknown> = {}) =
 const OFF = { on: false, state: 'off', value: 'Off', says: 'Forecasts for this number are off.' };
 /** The page with numbers in every state a row can be in. */
 const onPage = (over: Record<string, unknown> = {}) => ({
-  state: 'on', waiting: [], questions: 0, announce: false,
+  state: 'on', waiting: [], questions: 0, announce: false, secondOpinion: false,
   numbers: [
     number(KEYS.anthropic, 'Anthropic Spend', { state: 'no_trend', value: 'No Trend', says: 'There’s no reliable trend, and a plain guess gives an 80% range of $0.80 to $1.75.' }),
     number(KEYS.openai, 'OpenAI Spend', { state: 'waiting', value: 'Waiting', says: 'Yesterday’s number isn’t in yet, so there’s no forecast for today.' }),
@@ -159,7 +164,7 @@ const seriesOf = (n: ReturnType<typeof number>, over: Record<string, unknown> = 
   number: n,
   forecast: [{ label: 'Today', value: 'About 4', says: 'The 80% range is 2 to 6.' }, { label: 'Tue, Oct 13', value: 'About 5', says: 'The 80% range is 2 to 8.' }],
   chance: { label: 'Above 3', value: 'Likely · 70%', says: 'It’s likely, around 70%, that today runs above 3.' },
-  record: '22 of its last 27 ranges held.', waiting: false, offHere: false, ...over,
+  opinion: null, record: '22 of its last 27 ranges held.', waiting: false, offHere: false, ...over,
 });
 const QID = 'pdq1abc123def';
 const SAID = 'Flint said likely, around 70%, on Oct 3. It was due Oct 5 at 3:00 PM.';
@@ -729,6 +734,202 @@ describe('turning predictions on', () => {
   });
 });
 
+describe('the local model\'s second opinion', () => {
+  const sheet = async (page: Record<string, unknown>) => {
+    routes = answers({ 'GET /predictions': { status: 200, body: page } });
+    await open();
+    body().button('Turn On Predictions').onclick!();
+  };
+  const switches = () => body().visible().filter((e) => e.getAttribute('role') === 'switch');
+  const opinionSwitch = () => switches().find((t) => t.getAttribute('aria-label') === 'Second Opinion');
+  const SAYS = 'The local model also estimates each number, and Flint compares the two.';
+  const openNumber = async (opinion: unknown, over: Record<string, unknown> = {}) => {
+    const n = onPage().numbers[2]!;
+    routes = answers({ [`GET /predictions/series/${KEYS.deploys}`]: { status: 200, body: { series: seriesOf(n, { opinion, ...over }) } } });
+    await open();
+    rowOf('Deploys').onclick!();
+    await settle();
+  };
+
+  it('the sheet offers it only where the runtime says there is a local model: one switch, off to begin with', async () => {
+    await sheet(offPage());
+    expect(headers()).toEqual(['Numbers to Forecast']);
+    expect(opinionSwitch()).toBeUndefined();
+    expect(screen()).not.toMatch(/Second Opinion|local model/i);
+    run('closePredictions()');
+    await sheet(offPage({ secondOpinion: true }));
+    expect(headers()).toEqual(['Numbers to Forecast', 'Local Model']);
+    const t = opinionSwitch()!;
+    expect([t.tagName, t.className, t.getAttribute('aria-checked')]).toEqual(['button', 'toggle', 'false']);
+    expect(rows().at(-1)).toEqual(['Second Opinion', [SAYS], '']);
+    // It flips with a click on it or anywhere on its row, and nothing is sent by either.
+    t.onclick!({ stopPropagation: () => {} });
+    expect(t.getAttribute('aria-checked')).toBe('true');
+    body().with('ppick').at(-1)!.onclick!();
+    expect(t.getAttribute('aria-checked')).toBe('false');
+    expect(calls.filter((c) => c.method === 'POST')).toEqual([]);
+    plainScreen();
+    ownWords(['Local Model', 'Second Opinion'], [SAYS]);
+    // Anything but the runtime's plain yes leaves it out.
+    for (const secondOpinion of ['true', 1, null, undefined]) {
+      run('closePredictions()');
+      await sheet(offPage({ secondOpinion }));
+      expect(opinionSwitch(), String(secondOpinion)).toBeUndefined();
+    }
+  });
+
+  it('left off, the card is the plain one: nothing about a second opinion is sent, shown or signed', async () => {
+    await sheet(offPage({ secondOpinion: true }));
+    calls = [];
+    foot().button('Continue').onclick!();
+    await settle();
+    const all = offPage().numbers.map((n) => n.key).sort();
+    expect(calls).toEqual([{ url: '/predictions/turn-on', method: 'POST', body: { series: all } }]);
+    expect(headers()).toEqual(['Numbers']);
+    expect(screen()).not.toMatch(/Second Opinion|Local Model/);
+    foot().button('Approve with Touch ID').onclick!();
+    await settle();
+    expect(signed[0]![1]).toEqual({ fresh: true, reason: 'turn on predictions', args: { series: all, reason: [] } });
+  });
+
+  it('switched on, the card names the same numbers for the local model, says so before it is signed, and that is what is signed', async () => {
+    await sheet(offPage({ secondOpinion: true }));
+    const keep = ['Anthropic Spend', 'Deploys'];
+    for (const t of switches()) if (t.getAttribute('aria-label') !== 'Second Opinion' && !keep.includes(t.getAttribute('aria-label')!)) t.onclick!({ stopPropagation: () => {} });
+    opinionSwitch()!.onclick!({ stopPropagation: () => {} });
+    calls = [];
+    foot().button('Continue').onclick!();
+    await settle();
+    const sorted = [KEYS.deploys, KEYS.anthropic].sort();
+    // One switch rides along with the keys: the runtime writes the card's two lists from it.
+    expect(calls).toEqual([{ url: '/predictions/turn-on', method: 'POST', body: { series: sorted, opinion: true } }]);
+    expect(TurnOnBody.safeParse(calls[0]!.body).success).toBe(true);
+    expect(signed).toEqual([]);
+    // The card: its numbers, then the Second Opinion fact in the Approvals panel's own words for it.
+    expect(headers()).toEqual(['Numbers', 'Second Opinion']);
+    expect(rows()).toEqual([['Anthropic Spend', [], 'Spending'], ['Deploys', [], ''], ['Local Model', [SAYS], '']]);
+    expect(rows().at(-1)![0]).toBe(run(`apprPredictOpinion(apprPredictList({args:{series:${JSON.stringify(sorted)},reason:${JSON.stringify(sorted)}}}))`));
+    const order = body().visible().filter((e) => ['plead', 'gsh', 'group'].includes(e.className)).map((e) => e.className);
+    expect(order).toEqual(['plead', 'plead', 'gsh', 'group', 'gsh', 'group']);
+    plainScreen();
+    ownWords(['Numbers', 'Second Opinion', 'Local Model'], [SAYS]);
+    // Signed: exactly what was shown, the same list twice, as the shared contract normalizes it.
+    foot().button('Approve with Touch ID').onclick!();
+    await settle();
+    expect(signed).toHaveLength(1);
+    expect(signed[0]![1]).toEqual({ fresh: true, reason: 'turn on predictions', args: { series: sorted, reason: sorted } });
+    const args = JSON.parse(JSON.stringify(signed[0]![1].args)) as { series: string[]; reason: string[] };
+    expect(ForecastEnableArgs.parse(args)).toEqual(args);
+    expect(digestOf(args)).toBe(digestOf(ForecastEnableArgs.parse({ series: [...sorted].reverse(), reason: [...sorted].reverse() })));
+    // The sheet opened again starts with the switch off: it is never carried over from the last card.
+    run('closePredictions()');
+    await sheet(offPage({ secondOpinion: true }));
+    expect(opinionSwitch()!.getAttribute('aria-checked')).toBe('false');
+    calls = [];
+    foot().button('Continue').onclick!();
+    await settle();
+    expect((calls[0]!.body as Record<string, unknown>).opinion).toBeUndefined();
+  });
+
+  it('a card refused for want of a local model is said in the server\'s sentence, and the sheet stays', async () => {
+    await sheet(offPage({ secondOpinion: true }));
+    opinionSwitch()!.onclick!({ stopPropagation: () => {} });
+    routes = answers({ 'POST /predictions/turn-on': { status: 409, body: { error: PREDICT_SAYS.noModel, code: 'noModel' } } });
+    foot().button('Continue').onclick!();
+    await settle();
+    expect(said()).toEqual(['No local model is set on this Mac, so there is no second opinion to turn on.', 'res bad']);
+    expect(title()).toBe('Turn On Predictions');
+    expect(headers()).toEqual(['Numbers to Forecast', 'Local Model']);
+    expect(signed).toEqual([]);
+  });
+
+  it('one number, open: the runtime\'s one sentence under SECOND OPINION, between its chance and its record; none while there is nothing to say', async () => {
+    await openNumber(null);
+    expect(headers()).toEqual(['Forecast', 'Chance', 'Record']);
+    expect(screen()).not.toMatch(/Second Opinion|Local Model/);
+    run('closePredictions()');
+    await openNumber({ on: true, says: 'The local model said about 60%.', offer: false });
+    expect(headers()).toEqual(['Forecast', 'Chance', 'Second Opinion', 'Record']);
+    expect(rowOf('Local Model').children[0]!.children.map((c) => c.textContent)).toEqual(['Local Model', 'The local model said about 60%.']);
+    expect(rowOf('Local Model').buttons()).toEqual(['Turn Off']);
+    // Two buttons on the page say Turn Off: to a screen reader, this one says it is the second opinion's.
+    expect(rowOf('Local Model').button('Turn Off').getAttribute('aria-label')).toBe('Turn Off Second Opinion');
+    expect(foot().button('Turn Off').getAttribute('aria-label')).toBeNull();
+    // The forecaster's own chance is beside it, untouched, and the footer still turns the number itself off.
+    expect(rows()).toContainEqual(['Above 3', ['It’s likely, around 70%, that today runs above 3.'], 'Likely · 70%']);
+    expect(foot().buttons()).toEqual(['Turn Off']);
+    plainScreen();
+    ownWords(['Second Opinion', 'Local Model', 'Turn Off'], []);
+    // The sentence is shown as it came: text, never markup.
+    run('closePredictions()');
+    await openNumber({ on: true, says: 'The local model said about <b>60%</b>.', offer: false });
+    expect(rowOf('Local Model').children[0]!.children[1]!.textContent).toBe('The local model said about <b>60%</b>.');
+  });
+
+  it('Turn Off is one unsigned POST with nothing in it; the number is read again and the panel says what happened', async () => {
+    await openNumber({ on: true, says: 'The local model said about 60%.', offer: false });
+    const off = { on: false, says: 'The local model doesn’t estimate this number.', offer: true };
+    routes = answers({ [`GET /predictions/series/${KEYS.deploys}`]: { status: 200, body: { series: seriesOf(onPage().numbers[2]!, { opinion: off }) } } });
+    calls = [];
+    const b = rowOf('Local Model').button('Turn Off');
+    b.onclick!();
+    expect(b.disabled).toBe(true);
+    b.onclick!();
+    await settle();
+    expect(calls).toEqual([
+      { url: `/predictions/series/${KEYS.deploys}/second-opinion-off`, method: 'POST', body: {} },
+      { url: `/predictions/series/${KEYS.deploys}`, method: 'GET', body: undefined },
+    ]);
+    expect(PredictEmptyBody.safeParse(calls[0]!.body).success).toBe(true);
+    expect(signed).toEqual([]);
+    expect(said()).toEqual(['The local model stopped estimating this number.', 'res ok']);
+    expect(rowOf('Local Model').children[0]!.children[1]!.textContent).toBe('The local model doesn’t estimate this number.');
+    expect(rowOf('Local Model').buttons()).toEqual(['Turn On']);
+    // Its forecasts are still on: the footer still offers to turn the number off.
+    expect(foot().buttons()).toEqual(['Turn Off']);
+    ownWords(['Turn On'], ['The local model stopped estimating this number.']);
+    // A refusal is said in the server's sentence, and the button comes back.
+    run('closePredictions()');
+    await openNumber({ on: true, says: 'The local model said about 60%.', offer: false });
+    routes = answers({ [`POST /predictions/series/${KEYS.deploys}/second-opinion-off`]: { status: 409, body: { error: PREDICT_SAYS.opinionOff, code: 'opinionOff' } } });
+    rowOf('Local Model').button('Turn Off').onclick!();
+    await settle();
+    expect(said()).toEqual(['The second opinion for this number is already off.', 'res bad']);
+    expect(rowOf('Local Model').button('Turn Off').disabled).toBe(false);
+  });
+
+  it('Turn On files the card for this one number with the local model on it, and shows it to sign; where it cannot be turned on there is no button', async () => {
+    await openNumber({ on: false, says: 'The local model doesn’t estimate this number.', offer: true });
+    expect(rowOf('Local Model').buttons()).toEqual(['Turn On']);
+    expect(rowOf('Local Model').button('Turn On').getAttribute('aria-label')).toBe('Turn On Second Opinion');
+    calls = [];
+    rowOf('Local Model').button('Turn On').onclick!();
+    await settle();
+    expect(calls).toEqual([{ url: '/predictions/turn-on', method: 'POST', body: { series: [KEYS.deploys], opinion: true } }]);
+    expect(title()).toBe('Turn On Predictions');
+    expect(headers()).toEqual(['Numbers', 'Second Opinion']);
+    expect(rows()).toEqual([['Deploys', [], ''], ['Local Model', [SAYS], '']]);
+    expect(signed).toEqual([]);
+    foot().button('Approve with Touch ID').onclick!();
+    await settle();
+    expect(signed).toEqual([['prcard9x8y7z', { fresh: true, reason: 'turn on predictions', args: { series: [KEYS.deploys], reason: [KEYS.deploys] } }]]);
+    // No local model: the runtime's sentence says so, and nothing is offered.
+    run('closePredictions()');
+    await openNumber({ on: false, says: 'No local model is set on this Mac.', offer: false });
+    expect(rowOf('Local Model').children[0]!.children[1]!.textContent).toBe('No local model is set on this Mac.');
+    expect(rowOf('Local Model').buttons()).toEqual([]);
+    // A device with no approval key files nothing.
+    run('closePredictions()');
+    keyed = false;
+    await openNumber({ on: false, says: 'The local model doesn’t estimate this number.', offer: true });
+    calls = [];
+    rowOf('Local Model').button('Turn On').onclick!();
+    await settle();
+    expect(calls.filter((c) => c.method === 'POST')).toEqual([]);
+    expect(foot().buttons()).toEqual(['Open Settings']);
+  });
+});
+
 describe('Questions', () => {
   const SECOND_SAID = 'Flint said unlikely, around 20%, on Oct 5. It was due Oct 7 at 9:00 AM.';
   const second = question({ id: 'pdq2zzz999', title: 'Deploys ran above 4.', says: SECOND_SAID });
@@ -1105,7 +1306,9 @@ describe('the script itself', () => {
     expect(code).not.toMatch(/\bconfirm\(|\balert\(|\bprompt\(/);
     // Every request is one of the panel's eight, and none carries anything in a query.
     expect(code).not.toMatch(/\?[a-z]+=|[&?]series=|[&?]answer=/);
-    expect([...code.matchAll(/'(\/predictions[^']*)'/g)].map((m) => m[1]).sort()).toEqual(['/predictions', '/predictions/accuracy', '/predictions/questions', '/predictions/questions/', '/predictions/series/', '/predictions/series/', '/predictions/turn-on', '/predictions/waiting']);
+    expect([...code.matchAll(/'(\/predictions[^']*)'/g)].map((m) => m[1]).sort()).toEqual(['/predictions', '/predictions/accuracy', '/predictions/questions', '/predictions/questions/', '/predictions/series/', '/predictions/series/', '/predictions/series/', '/predictions/turn-on', '/predictions/waiting']);
+    // The three under a number's key: read it, turn it off, and turn its second opinion off.
+    expect([...code.matchAll(/encodeURIComponent\((?:n\.)?key\)(?:\+'(\/[a-z-]+)')?/g)].map((m) => m[1] ?? '').sort()).toEqual(['', '/second-opinion-off', '/turn-off']);
     // It reaches the server only through the Goals panel's one caller, which sends the console's token.
     expect(code).not.toMatch(/\bfetch\(|XMLHttpRequest|WebSocket|EventSource/);
   });

@@ -18,13 +18,17 @@
  *    remote model. A name proves nothing: `ollama cp` gives a cloud model a
  *    plain one, and only the listing tells them apart.
  *
- * It fails closed. The server keeps its record current by asking every
- * minute; the runtime asks before a call instead, whenever what it last heard
- * is more than a minute old. What was heard is believed for five minutes and
- * then not at all, so an Ollama that is slow to answer once does not stop the
- * work, and one that has stopped answering is soon not asked anything. Never
- * heard, not listed, listed with a remote host, or an answer that is no
- * listing: not here.
+ * It fails closed, and it asks every time. Before each local call Ollama is
+ * asked for its listing again, unless it answered within the last two
+ * seconds (calls that come together share one answer). What it said is
+ * believed for those two seconds and no longer: a model repointed at Ollama's
+ * servers stops being asked at the next call, and a listing that does not
+ * come (Ollama down, slow, not an Ollama, an answer that is no listing) is not
+ * a yes, whatever it said a moment ago. Never heard, not listed, listed with a
+ * remote host: not here. The server keeps a watch and believes a listing for
+ * minutes, because it reads it on every chat turn; the runtime's calls are
+ * few, carry Will's own words (a goal's title and why it matters), and can
+ * afford the question each time.
  *
  * This is also the runtime's ONE reader of Ollama's lists (`list`): Settings >
  * Health reads what is installed and what is loaded through it
@@ -36,9 +40,11 @@
  * them even when the transport would wait longer. Listing models loads nothing
  * and costs nothing, so it needs no slot and no cap.
  */
-import { ModelPlaces, PLACE_ASK_EVERY_MS, PLACE_TIMEOUT_MS, isCloudModel, onThisMachine, placeSaid, type PlaceSaid } from '@flint/policy';
+import { ModelPlaces, PLACE_TIMEOUT_MS, isCloudModel, onThisMachine, placeSaid, type PlaceSaid } from '@flint/policy';
 import { scopedFetch } from '../policy/egress.js';
 
+/** What Ollama said of its models is believed for this long, then asked for again: long enough for calls that come together to share one answer. */
+export const LISTING_WORD_MS = 2_000;
 /** A list longer than this is not read. */
 export const LISTING_MAX_CHARS = 4_000_000;
 
@@ -54,10 +60,8 @@ export interface AskedOllama {
 }
 
 export interface LocalModelsOptions {
-  /** What was heard is asked for again once it is this old (default: a minute). */
-  askEveryMs?: number;
-  /** What was heard is believed for this long (default: five minutes). */
-  maxAgeMs?: number;
+  /** What Ollama said is believed for this long, and then asked for again (default: two seconds). */
+  wordMs?: number;
   /** How long Ollama has to list its models (default: two seconds). */
   timeoutMs?: number;
   now?: () => number;
@@ -68,7 +72,8 @@ export class LocalModels {
   readonly #asking = new Map<string, Promise<PlaceSaid | undefined>>();
 
   constructor(private readonly opts: LocalModelsOptions = {}) {
-    this.#places = new ModelPlaces({ ...(opts.maxAgeMs !== undefined ? { maxAgeMs: opts.maxAgeMs } : {}), ...(opts.now ? { now: opts.now } : {}) });
+    // The shared record reads the answer; here it is believed only for the word's two seconds.
+    this.#places = new ModelPlaces({ maxAgeMs: opts.wordMs ?? LISTING_WORD_MS, ...(opts.now ? { now: opts.now } : {}) });
   }
 
   #now(): number {
@@ -83,8 +88,10 @@ export class LocalModels {
     if (!ollama.model.trim() || isCloudModel(ollama.model)) return false;
     if (ollama.proxied === true || !onThisMachine(ollama.url)) return false;
     const origin = new URL(ollama.url).origin;
+    // Asked again unless it answered within the word's two seconds. An answer that does not come leaves nothing
+    // to believe: what was heard before is too old by then, so the model is not here.
     const at = this.#places.heardAt(origin);
-    if (at === undefined || this.#now() - at > (this.opts.askEveryMs ?? PLACE_ASK_EVERY_MS)) await this.#listen(origin, base);
+    if (at === undefined || this.#now() - at > (this.opts.wordMs ?? LISTING_WORD_MS)) await this.#listen(origin, base);
     return this.#places.runsHere(origin, ollama.model);
   }
 
@@ -112,10 +119,9 @@ export class LocalModels {
 
   /**
    * Ask that Ollama for one of its lists. Never throws. What the listing (`/api/tags`) says is taken into the
-   * record; an answer that says nothing either way leaves what is known to age out.
+   * record; an answer that says nothing either way leaves nothing new to believe.
    */
   async #ask(origin: string, path: ListPath, base: typeof fetch): Promise<PlaceSaid | undefined> {
-    const at = this.#now();
     const timeoutMs = this.opts.timeoutMs ?? PLACE_TIMEOUT_MS;
     const get = scopedFetch([{ origin, pathPrefix: path, methods: ['GET'] }], base, timeoutMs);
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -137,10 +143,11 @@ export class LocalModels {
         // Too late, or too long to be a list: nothing is learned.
         if (gaveUp || text.length > LISTING_MAX_CHARS) return undefined;
         const said = await placeSaid(r.status, async () => JSON.parse(text) as unknown);
-        if (path === '/api/tags') this.#places.take(origin, said, at);
+        // Its word is as old as its arrival: believed from now, for the word's two seconds.
+        if (path === '/api/tags') this.#places.take(origin, said, this.#now());
         return said;
       } catch {
-        // Down, slow or refused: nothing is learned, and what was known ages out.
+        // Down, slow or refused: nothing is learned.
         return undefined;
       }
     })();
@@ -149,7 +156,7 @@ export class LocalModels {
     return said;
   }
 
-  /** Take a listing as Ollama gave it (`/api/tags`'s `models`), as of `at`: what `runsHere` then believes (tests). */
+  /** Take a listing as Ollama gave it (`/api/tags`'s `models`), as of `at`: what `runsHere` then believes for the word's two seconds (tests). */
   learn(url: string, rows: readonly unknown[], at: number = this.#now()): void {
     this.#places.learn(url, rows, at);
   }

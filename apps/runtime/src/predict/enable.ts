@@ -182,13 +182,17 @@ export async function applyEnable(tx: Tx, raw: unknown, ctx: ApplyContext): Prom
  * filings run one at a time (createProposal's `serial`), so each sees every
  * card filed before it and none filed after, and filings made at the same
  * moment can never reject each other. The last one filed is the one left.
+ *
+ * `opinion`: the local model also gives its second opinion on these numbers
+ * (all of them: the card's `reason` list is its `series` list). Off unless
+ * Will switched it on in the sheet; the command line never asks for it.
  */
-export async function proposeForecasts(db: Db, keys: readonly string[] = FORECAST_SERIES_KEYS, now = new Date(), from: 'cli' | 'console' = 'cli') {
+export async function proposeForecasts(db: Db, keys: readonly string[] = FORECAST_SERIES_KEYS, now = new Date(), from: 'cli' | 'console' = 'cli', opinion = false) {
   const series = [...new Set(keys)].sort();
   const actor = `will:${from}`;
   const action = 'forecast.series.enable';
   return createProposal(db, {
-    kind: 'tool_call', origin: from, action, args: { series, reason: [] },
+    kind: 'tool_call', origin: from, action, args: { series, reason: opinion ? [...series] : [] },
     argsProvenance: { series: { source: 'will', tainted: false }, reason: { source: 'will', tainted: false } },
     tainted: false, sensitivity: 'ops', destructive: false, consequential: true, ttlMinutes: 7 * 24 * 60,
   }, actor, now, undefined, undefined, {
@@ -222,6 +226,29 @@ export async function turnOffSeries(db: Db, key: string, now = new Date()): Prom
       const n = await tx.$executeRaw`UPDATE "ForecastSeries" SET "on" = false, "reason" = false WHERE "seriesKey" = ${key} AND "on"`;
       if (!n) throw new Refused(409, PREDICT_SAYS.alreadyOff);
       await appendAudit(tx, [{ actor: CONSOLE_ACTOR, context: 'console', kind: 'action', action: TURN_OFF_ACTION, outcome: 'ok', correlationId: `${key}.off`, tainted: false, inputs: { series: key } }], now);
+    },
+    { maxWait: 10_000, timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+  );
+}
+
+/** What turning a number's second opinion off is recorded under in the audit trail. */
+export const OPINION_OFF_ACTION = 'forecast.series.opinion_off';
+
+/**
+ * Turn the local model's second opinion off for one number, from the console,
+ * and leave its forecasts on. Unsigned, as turning the number off is: it only
+ * narrows what Flint does, and it is audited by the number's key. The
+ * estimates it already made stay on the ledger and keep being checked.
+ * Turning it on again takes the card.
+ */
+export async function turnOffOpinion(db: Db, key: string, now = new Date()): Promise<void> {
+  if (!forecastSeries(key)) throw new Refused(404, SAY.unknown);
+  await db.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT set_config('flint.actor', ${CONSOLE_ACTOR}, true)`;
+      const n = await tx.$executeRaw`UPDATE "ForecastSeries" SET "reason" = false WHERE "seriesKey" = ${key} AND "reason"`;
+      if (!n) throw new Refused(409, PREDICT_SAYS.opinionOff);
+      await appendAudit(tx, [{ actor: CONSOLE_ACTOR, context: 'console', kind: 'action', action: OPINION_OFF_ACTION, outcome: 'ok', correlationId: `${key}.opinion_off`, tainted: false, inputs: { series: key } }], now);
     },
     { maxWait: 10_000, timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
   );

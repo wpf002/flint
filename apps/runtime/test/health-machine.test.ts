@@ -256,8 +256,8 @@ describe('the local models', () => {
     for (const url of ['http://localhost:11434', 'http://[::1]:11434']) expect(await localModels(url, lists(['x'], [])), url).toBeDefined();
   });
 
-  it('Health reads through the runtime’s one reader, so what it saw is what the next local call goes by', async () => {
-    const reader = new ModelReader();
+  it('Health reads through the runtime’s one reader: what it just saw is the same word a local call goes by', async () => {
+    const reader = new ModelReader({ now: () => 0 });
     const calls: Array<{ url: string; method: string; redirect: unknown }> = [];
     const f = lists(['qwen2.5:14b'], [], calls);
     expect((await localModels('http://127.0.0.1:11434', f, reader))!.installed.has('qwen2.5:14b')).toBe(true);

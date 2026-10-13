@@ -3,6 +3,9 @@
  * the name is not a cloud model's, the address is this machine, and Ollama's
  * own listing holds the model and says nothing of a remote host or model.
  *
+ * The runtime asks before every local call, and believes the answer for two
+ * seconds: a listing that then does not come is not a yes.
+ *
  * First the record itself, then each caller against it: triage's judge, a goal
  * review's plan stage and a prediction's second opinion. For each, a cloud
  * tag, a plain name that Ollama lists with a remote host, a listing that hangs
@@ -12,8 +15,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { PLACE_ASK_EVERY_MS, PLACE_MAX_AGE_MS } from '@flint/policy';
-import { LocalModels } from '../../src/model/here';
+import { LISTING_WORD_MS, LocalModels } from '../../src/model/here';
 import { judge } from '../../src/triage/judge';
 import { planDiff, type PlanFacts } from '../../src/goals/planner';
 import { estimate } from '../../src/predict/reason';
@@ -28,21 +30,26 @@ const HERE = [{ name: MODEL, model: MODEL, size: 1 }, { name: 'llama3.1:latest' 
 const ALIAS = { name: 'mine:latest', model: 'mine:latest', remote_host: 'https://ollama.com:443', remote_model: 'gpt-oss:120b' };
 
 describe('what the runtime knows of the models on this Mac', () => {
-  it('a model Ollama lists with no remote host is here, and the listing is asked for once a minute at most', async () => {
+  it('a model Ollama lists with no remote host is here; it is asked again for every call, unless it answered within the last two seconds', async () => {
     let now = 1_000_000;
     const models = new LocalModels({ now: () => now });
     const o = listening(() => tags(HERE));
     expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
+    // Calls that come together share the one answer.
     expect(await models.runsHere({ url: URL_, model: 'Llama3.1' }, o.fetch)).toBe(true);
     expect(await models.runsHere({ url: `${URL_}/`, model: MODEL }, o.fetch)).toBe(true);
     expect(o.seen).toEqual([{ method: 'GET', url: `${URL_}/api/tags` }]);
-    now += PLACE_ASK_EVERY_MS;
+    now += LISTING_WORD_MS;
     expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
     expect(o.seen).toHaveLength(1);
-    // A minute on, it is asked again.
+    // Two seconds on, it is asked again: and again for the call after that.
     now += 1;
     expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
     expect(o.seen).toHaveLength(2);
+    now += 60_000;
+    expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
+    expect(o.seen).toHaveLength(3);
+    expect(LISTING_WORD_MS).toBe(2_000);
   });
 
   it('a cloud model’s name is refused without asking anything', async () => {
@@ -109,7 +116,7 @@ describe('what the runtime knows of the models on this Mac', () => {
       expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch), what).toBe(false);
       expect(o.seen, what).toHaveLength(2);
     }
-    // These are an answer: it is no Ollama, or an Ollama without the model. Believed, and not asked again within the minute.
+    // These are an answer: it is no Ollama, or an Ollama without the model. Believed for its two seconds like any other.
     const answered: Array<[string, () => Response | Promise<Response>]> = [
       ['a 404', () => new Response('not found', { status: 404 })],
       ['no JSON', () => new Response('<html>hello</html>', { status: 200 })],
@@ -127,36 +134,56 @@ describe('what the runtime knows of the models on this Mac', () => {
     }
   });
 
-  it('what Ollama said is believed for five minutes and then not at all', async () => {
+  it('a silent listing is not a yes: what Ollama said a moment ago is not believed once it stops answering', async () => {
     let now = 0;
     let up = true;
     const models = new LocalModels({ now: () => now });
     const o = listening(() => (up ? tags(HERE) : new Response('', { status: 503 })));
     expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
-    // It stops answering: asked again each time, and its last word still holds for now.
+    // It stops answering. The next call asks, hears nothing, and does not fall back on what it heard before.
     up = false;
-    now = PLACE_ASK_EVERY_MS + 1;
-    expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
-    now = PLACE_MAX_AGE_MS;
-    expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
-    expect(o.seen).toHaveLength(3);
-    // Five minutes after it last answered, nothing on it is known to be here.
-    now = PLACE_MAX_AGE_MS + 1;
+    now = LISTING_WORD_MS + 1;
     expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(false);
+    now += 30_000;
+    expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(false);
+    expect(o.seen).toHaveLength(3);
+    // It answers again: here again, on its own fresh word.
     up = true;
+    now += 1;
     expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
-    expect(o.seen).toHaveLength(5);
+    expect(o.seen).toHaveLength(4);
+    // The same for a listing that hangs, or is refused, after one that answered.
+    for (const silent of [hangs, () => { throw new TypeError('fetch failed'); }]) {
+      let t = 0;
+      let quiet = false;
+      const m = new LocalModels({ now: () => t, timeoutMs: 30 });
+      const l = listening(() => (quiet ? silent() : tags(HERE)));
+      expect(await m.runsHere({ url: URL_, model: MODEL }, l.fetch)).toBe(true);
+      quiet = true;
+      t = LISTING_WORD_MS + 1;
+      expect(await m.runsHere({ url: URL_, model: MODEL }, l.fetch)).toBe(false);
+    }
   });
 
-  it('a model that is repointed at Ollama’s servers stops being here at the next listing', async () => {
+  it('a model that is repointed at Ollama’s servers stops being here at the very next call', async () => {
     let now = 0;
     let rows: unknown[] = HERE;
     const models = new LocalModels({ now: () => now });
     const o = listening(() => tags(rows));
     expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
     rows = [{ name: MODEL, remote_host: 'https://ollama.com:443' }];
-    now = PLACE_ASK_EVERY_MS + 1;
+    now = LISTING_WORD_MS + 1;
     expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(false);
+    // "Runs elsewhere" is Ollama's own word too: it stands, and is asked about again like any other.
+    now += LISTING_WORD_MS + 1;
+    expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(false);
+    rows = HERE;
+    now += LISTING_WORD_MS + 1;
+    expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
+    // An answer that is no listing after one that was: it is no Ollama's word any more, and nothing is believed.
+    now += LISTING_WORD_MS + 1;
+    const other = listening(() => new Response('not found', { status: 404 }));
+    expect(await models.runsHere({ url: URL_, model: MODEL }, other.fetch)).toBe(false);
   });
 
   it('a listing that hangs is given up: not here, in about the time it is allowed', async () => {
@@ -204,13 +231,13 @@ describe('what the runtime knows of the models on this Mac', () => {
 describe('the one reader of Ollama’s lists', () => {
   const both = (installed: unknown[], loaded: unknown[]) => listening(() => tags(installed), (async () => tags(loaded)) as unknown as typeof fetch);
 
-  it('gives each list as Ollama gave it, and what the listing said is what the next local call goes by', async () => {
-    const models = new LocalModels();
+  it('gives each list as Ollama gave it, and what the listing said is what a local call that comes with it goes by', async () => {
+    const models = new LocalModels({ now: () => 0 });
     const o = both([ALIAS, ...HERE], [{ name: MODEL }]);
     expect(await models.list({ url: URL_ }, '/api/tags', o.fetch)).toEqual([ALIAS, ...HERE]);
     expect(await models.list({ url: URL_ }, '/api/ps', o.fetch)).toEqual([{ name: MODEL }]);
     expect(o.seen).toEqual([{ method: 'GET', url: `${URL_}/api/tags` }, { method: 'GET', url: `${URL_}/api/ps` }]);
-    // A local call right after asks nothing more: the listing a health run heard is believed.
+    // A local call that comes with it asks nothing more: the listing a health run just heard is the same word.
     expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
     expect(await models.runsHere({ url: URL_, model: 'mine' }, o.fetch)).toBe(false);
     expect(o.seen).toHaveLength(2);
@@ -337,17 +364,35 @@ describe.each(CALLERS)('%s asks only a model on this Mac', (_name, call, good) =
     expect(o.seen.map((s) => `${s.method} ${s.url}`)).toEqual(Array(listings).fill(`GET ${URL_}/api/tags`));
   };
 
-  it('a model Ollama says is here is asked, after one look at the listing', async () => {
+  it('a model Ollama says is here is asked, after a look at the listing before each call', async () => {
     const sent = { n: 0 };
     const o = listening(() => tags(HERE), model(sent));
     const n = { claims: 0, loads: 0 };
-    const models = new LocalModels();
+    let now = 0;
+    const models = new LocalModels({ now: () => now });
     expect(await call({ url: URL_, model: MODEL }, o, models, n)).toMatchObject({ ok: true, requests: 1 });
     expect(o.seen.map((s) => `${s.method} ${new URL(s.url).pathname}`)).toEqual(['GET /api/tags', 'POST /api/chat']);
     expect(n).toEqual({ claims: 1, loads: 1 });
-    // Within the minute the listing is believed: the next call asks the model only.
+    // A call that comes within two seconds shares that answer; the next one asks again.
     expect(await call({ url: URL_, model: MODEL }, o, models, n)).toMatchObject({ ok: true, requests: 1 });
-    expect(o.seen.map((s) => new URL(s.url).pathname)).toEqual(['/api/tags', '/api/chat', '/api/chat']);
+    now = LISTING_WORD_MS + 1;
+    expect(await call({ url: URL_, model: MODEL }, o, models, n)).toMatchObject({ ok: true, requests: 1 });
+    expect(o.seen.map((s) => new URL(s.url).pathname)).toEqual(['/api/tags', '/api/chat', '/api/chat', '/api/tags', '/api/chat']);
+  });
+
+  it('a model that was here and is now listed with a remote host is not asked at the next call', async () => {
+    let rows: unknown[] = HERE;
+    let now = 0;
+    const models = new LocalModels({ now: () => now });
+    const sent = { n: 0 };
+    const o = listening(() => tags(rows), model(sent));
+    const n = { claims: 0, loads: 0 };
+    expect(await call({ url: URL_, model: MODEL }, o, models, n)).toMatchObject({ ok: true });
+    rows = [{ name: MODEL, remote_host: 'https://ollama.com:443', remote_model: 'gpt-oss:120b' }];
+    now = LISTING_WORD_MS + 1;
+    expect(await call({ url: URL_, model: MODEL }, o, models, n)).toMatchObject({ ok: false, why: 'unavailable' });
+    expect(sent.n).toBe(1);
+    expect(n).toEqual({ claims: 1, loads: 1 });
   });
 
   it('a cloud tag: unavailable, and not even the listing is asked', async () => {

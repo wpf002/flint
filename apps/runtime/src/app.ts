@@ -70,7 +70,7 @@ export const HEALTH_RUN_STALE_MS = 10 * 60_000;
 
 export interface AppDeps {
   db: Db;
-  config: Pick<Config, 'tokens' | 'rp' | 'tz'> & Partial<Pick<Config, 'triage' | 'home' | 'planner' | 'predict' | 'assets'>>;
+  config: Pick<Config, 'tokens' | 'rp' | 'tz'> & Partial<Pick<Config, 'triage' | 'home' | 'planner' | 'predict' | 'assets' | 'ollama'>>;
   logger?: boolean;
   /** Where the log lines go (tests read them); stdout by default. */
   logStream?: { write(line: string): void };
@@ -358,7 +358,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerGoalRoutes(app, { db, need, tz: config.tz, reviews: config.planner ?? false, bus: () => deps.status?.bus });
   // P4 part 4: the Predictions panel (scope proposals: the runtime connector's token can never read a forecast's
   // numbers or a question's words, nor answer one for Will).
-  registerPredictionRoutes(app, { db, need, tz: config.tz, predict: config.predict ?? false });
+  registerPredictionRoutes(app, { db, need, tz: config.tz, predict: config.predict ?? false, model: config.ollama !== undefined });
   // P5: assets and tasks (scope proposals: no model reads a task's words, and chat has no tool that files or runs one).
   registerTaskRoutes(app, { db, need, tz: config.tz, on: assetsOn });
   // P2.6: Flint Calendar's push (scope calendar:push only; up to the wire's byte budget, 2 MiB, this route alone).

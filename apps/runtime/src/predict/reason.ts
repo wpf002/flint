@@ -298,6 +298,8 @@ export interface ReasonDeps {
   timeoutMs?: number;
   models?: LocalModels;
   now?: () => Date;
+  /** Test seam: called after the second look, just before the estimate is written. */
+  hooks?: { beforeRecord?: () => Promise<void> };
 }
 
 const READ_COMMITTED = { maxWait: 10_000, timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted } as const;
@@ -434,6 +436,7 @@ export async function runReason(d: ReasonDeps, job: ReasonJob): Promise<{ outcom
       const again = await rideOf(tx, job.runId, now);
       if (again === 'exists') return 'exists' as const;
       if (!again) return 'nothing' as const;
+      await d.hooks?.beforeRecord?.();
       await emitPrediction(tx, {
         kind: 'binary', type: 'threshold_cross', claim: again.question.claim, probability: asked.estimate.probability,
         method: 'model_reasoning', model: `ollama:${ollama.model}`,

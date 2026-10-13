@@ -7,7 +7,7 @@ import { noteProblems } from '@flint/policy';
 import { PanelSentence, PanelWords, noteProblems as problems } from '@flint/policy';
 import {
   PANEL, aboutValue, aboveLabel, answeredSays, calledSays, chanceParts, chancePhrase, chanceSays, chanceValue, dayWords, dueSays, earlySays, errorScoreSays, expectSays, forecastPhrase, gapSays, noTrendPhrase, noTrendSays,
-  rangePhrase, rangesHeldSays, recordSays, saidSays, scoredValue, shortSays, steadySays, stepLabel, stepRangeSays, templatedClaim, thresholdClaim, tooFewSays, unitSpan, unitValue, unsettledSays, waitingSays,
+  opinionSays, opinionTooFewSays, opinionVersusSays, rangePhrase, rangesHeldSays, recordSays, saidSays, scoredValue, shortSays, steadySays, stepLabel, stepRangeSays, templatedClaim, thresholdClaim, tooFewSays, unitSpan, unitValue, unsettledSays, waitingSays,
 } from '../../src/predict/phrasing';
 import { hasLoosePrediction, phrase, phraseBefore } from '../../src/templates/escalations';
 import { FORECAST_SERIES } from '../../src/predict/series';
@@ -290,5 +290,44 @@ describe('the Predictions panel\'s words (P4 part 4)', () => {
       PANEL.better, PANEL.noBetter, PANEL.noResults,
       ...(['expired', 'late', 'declined', 'void'] as const).flatMap((kind) => [1, 2, 40].map((n) => unsettledSays(kind, n))),
     ]) sentence(s);
+  });
+
+  it('the local model\'s second opinion is one plain sentence: the percentage it said, and nothing else of its reply (P4 part 5)', () => {
+    expect(opinionSays(0.6)).toBe('The local model said about 60%.');
+    expect([opinionSays(0.05), opinionSays(0.95), opinionSays(0.624), opinionSays(0.625), opinionSays(0.5)]).toEqual([
+      'The local model said about 5%.', 'The local model said about 95%.', 'The local model said about 62%.', 'The local model said about 63%.', 'The local model said about 50%.',
+    ]);
+    // No word for the chance, no reason, no model's name, no decimal: a percentage inside one fixed sentence.
+    for (let p = 0.05; p <= 0.951; p += 0.01) {
+      const says = opinionSays(p);
+      sentence(says);
+      expect(says, says).toMatch(/^The local model said about \d{1,2}%\.$/);
+    }
+    expect([PANEL.noOpinion, PANEL.opinionOff, PANEL.noLocalModel]).toEqual([
+      'The local model has no estimate for this forecast.', 'The local model doesn’t estimate this number.', 'No local model is set on this Mac.',
+    ]);
+    for (const s of [PANEL.noOpinion, PANEL.opinionOff, PANEL.noLocalModel]) sentence(s);
+  });
+
+  it('Accuracy compares the local model with the other two answers to the same questions, a sentence each', () => {
+    expect([opinionVersusSays('forecast', 45, 'closer'), opinionVersusSays('forecast', 45, 'further'), opinionVersusSays('forecast', 45, 'same')]).toEqual([
+      'Over 45 questions, the local model was closer than the forecast.',
+      'Over 45 questions, the forecast was closer than the local model.',
+      'Over 45 questions, the local model and the forecast did about as well.',
+    ]);
+    expect([opinionVersusSays('usual', 33, 'closer'), opinionVersusSays('usual', 33, 'further'), opinionVersusSays('usual', 33, 'same'), opinionVersusSays('usual', 1, 'closer')]).toEqual([
+      'Over 33 questions, the local model was closer than the usual rate.',
+      'Over 33 questions, the usual rate was closer than the local model.',
+      'Over 33 questions, the local model and the usual rate did about as well.',
+      'Over 1 question, the local model was closer than the usual rate.',
+    ]);
+    expect(opinionTooFewSays(12, 30)).toBe('The local model has 12 of the 30 results it needs to be compared.');
+    for (const other of ['forecast', 'usual'] as const) for (const verdict of ['closer', 'further', 'same'] as const) for (const n of [1, 30, 4000]) {
+      const says = opinionVersusSays(other, n, verdict);
+      sentence(says);
+      // Counts and fixed words: never a method's name, a score or a model's.
+      expect(says, says).not.toMatch(/statistical|base.rate|model_reasoning|brier|0\.\d|ollama/i);
+    }
+    sentence(opinionTooFewSays(1, 30));
   });
 });

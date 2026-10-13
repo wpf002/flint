@@ -31,10 +31,10 @@ const row = (over: Record<string, unknown> = {}) => ({
   key: KEY, name: 'Anthropic Spend', about: 'This is what Flint spends with Anthropic each day.', step: 'day', on: true, state: 'range', value: `About ${VALUE}`,
   says: `Flint expects about ${VALUE}, with an 80% range of $2.00 to $6.00.`, ...over,
 });
-const page = (over: Record<string, unknown> = {}) => ({ state: 'on', numbers: [row()], waiting: [], questions: 1, announce: false, ...over });
+const page = (over: Record<string, unknown> = {}) => ({ state: 'on', numbers: [row()], waiting: [], questions: 1, announce: false, secondOpinion: false, ...over });
 const fact = { label: 'Today', value: `About ${VALUE}`, says: 'The 80% range is $2.00 to $6.00.' };
 const seriesView = (over: Record<string, unknown> = {}) => ({
-  number: row(), forecast: [fact], chance: { label: 'Above $3.00', value: 'Likely · 70%', says: 'It’s likely, around 70%, that today runs above $3.00.' }, record: '22 of its last 27 ranges held.', waiting: false, offHere: false, ...over,
+  number: row(), forecast: [fact], chance: { label: 'Above $3.00', value: 'Likely · 70%', says: 'It’s likely, around 70%, that today runs above $3.00.' }, opinion: null, record: '22 of its last 27 ranges held.', waiting: false, offHere: false, ...over,
 });
 const question = (over: Record<string, unknown> = {}) => ({ id: PID, title: `${CANARY} lands by Friday`, says: 'Flint said likely, around 70%, on Oct 3. It was due Oct 5 at 3:00 PM.', answer: null, answerable: true, ...over });
 const accuracy = { scored: true, scoring: 'on', areas: [{ name: 'Spend', value: '41 Scored', lines: ['When Flint said about 70%, it happened 64% of the time, over 41 predictions.'] }], unsettled: ['3 predictions ran out before they could be checked.'] };
@@ -166,7 +166,7 @@ describe('reads', () => {
     }
     expect(asked).toEqual([]);
     // What is not a predictions route is not handled here at all.
-    for (const p of ['/predictions/turn-on', `/predictions/questions/${PID}/answer`, `/predictions/series/${KEY}/turn-off`, '/predictions/everything', '/predictionsx']) expect((await get(p)).status, p).toBe(404);
+    for (const p of ['/predictions/turn-on', `/predictions/questions/${PID}/answer`, `/predictions/series/${KEY}/turn-off`, `/predictions/series/${KEY}/second-opinion-off`, '/predictions/everything', '/predictionsx']) expect((await get(p)).status, p).toBe(404);
     for (const p of ['/predictions', '/predictions/accuracy', `/predictions/series/${KEY}`, `/predictions/questions/${PID}/resolve`, '/predictions/turn-off']) expect((await post(p, {})).status, p).toBe(404);
     expect(asked).toEqual([]);
   });
@@ -186,6 +186,16 @@ describe('reads', () => {
     ]) {
       answer = () => ({ status: 200, body: bad });
       expect(await get('/predictions')).toEqual({ status: 502, body: { error: 'The runtime sent an answer Flint can’t read.', ref: 'ref123' } });
+    }
+    // The local model's second opinion passes as its one sentence, its switch and whether it can be turned on.
+    for (const opinion of [{ on: true, says: 'The local model said about 60%.', offer: false }, { on: false, says: 'The local model doesn’t estimate this number.', offer: true }]) {
+      answer = () => ({ status: 200, body: { series: seriesView({ opinion }) } });
+      expect((await get(`/predictions/series/${KEY}`)).body).toEqual({ series: seriesView({ opinion }) });
+    }
+    // Anything else the model said (its number, its reason, its name) never reaches the console beside the sentence.
+    for (const opinion of [{ on: true, says: 'The local model said about 60%.', offer: false, probability: 0.6 }, { on: true, says: 'The local model said about 60%.', offer: false, reasonCode: 'trend' }, { on: true, says: 'The local model said about 60%.', offer: false, model: 'muse-glimmer:30b' }, { on: true, offer: false }]) {
+      answer = () => ({ status: 200, body: { series: seriesView({ opinion }) } });
+      expect((await get(`/predictions/series/${KEY}`)).status, JSON.stringify(opinion)).toBe(502);
     }
     for (const bad of [seriesView({ values: [1, 2, 3] }), seriesView({ chance: { label: 'Above 3', value: 'Likely', says: 'It’s likely.', probability: 0.7 } }), seriesView({ record: CANARY })]) {
       answer = () => ({ status: 200, body: { series: bad } });
@@ -262,6 +272,17 @@ describe('writes', () => {
     }
     expect((await post('/predictions/turn-on?now=1', { series: [KEY] })).status).toBe(400);
     expect(asked).toHaveLength(1);
+    // With the local model's second opinion switched on: the one switch rides along, as it was sent, and nothing else.
+    expect(await post('/predictions/turn-on', { series: [KEY], opinion: true })).toEqual({ status: 200, body: { id: 'pr1', deduped: false } });
+    expect(asked.at(-1)).toEqual({ method: 'POST', url: '/v1/predictions/turn-on', auth: `Bearer ${TOKEN}`, body: JSON.stringify({ series: [KEY], opinion: true }) });
+    expect(await post('/predictions/turn-on', { series: [KEY], opinion: false })).toEqual({ status: 200, body: { id: 'pr1', deduped: false } });
+    expect(asked.at(-1)!.body).toBe(JSON.stringify({ series: [KEY], opinion: false }));
+    asked = [];
+    for (const bad of [{ series: [KEY], opinion: 'yes' }, { series: [KEY], opinion: 1 }, { series: [KEY], opinion: [KEY] }, { series: [KEY], opinion: true, model: 'gpt-oss:120b-cloud' }, { series: [KEY], opinion: true, reason: [KEY] }]) {
+      expect(await post('/predictions/turn-on', bad), JSON.stringify(bad).slice(0, 80)).toEqual({ status: 400, body: { error: PREDICTIONS_SAY.invalid } });
+    }
+    expect(asked).toEqual([]);
+    asked = [{ method: 'POST', url: '', auth: '', body: '' }];
     // An answer that is not the contract's never reaches the console.
     answer = () => ({ status: 200, body: { id: 'pr1', deduped: false, args: { series: [KEY] } } });
     expect((await post('/predictions/turn-on', { series: [KEY] })).status).toBe(502);
@@ -278,8 +299,16 @@ describe('writes', () => {
       expect(await post(`/predictions/questions/${PID}/answer`, { answer: a })).toEqual({ status: 200, body: { ok: true } });
       expect(asked.at(-1)).toEqual({ method: 'POST', url: `/v1/predictions/questions/${PID}/answer`, auth: `Bearer ${TOKEN}`, body: JSON.stringify({ answer: a }) });
     }
+    // The second opinion alone: its own route, the number's key, and nothing in the body.
+    expect(await post(`/predictions/series/${KEY}/second-opinion-off`)).toEqual({ status: 200, body: { ok: true } });
+    expect(asked.at(-1)).toEqual({ method: 'POST', url: `/v1/predictions/series/${KEY}/second-opinion-off`, auth: `Bearer ${TOKEN}`, body: '{}' });
+    expect(await post(`/predictions/series/${KEY}/second-opinion-off`, {})).toEqual({ status: 200, body: { ok: true } });
     asked = [];
     for (const [p, b] of [
+      [`/predictions/series/${KEY}/second-opinion-off`, { reason: false }],
+      [`/predictions/series/${KEY}/second-opinion-off`, { why: CANARY }],
+      ['/predictions/series/NOPE/second-opinion-off', {}],
+      [`/predictions/series/${KEY}/second-opinion-off?force=1`, {}],
       [`/predictions/series/${KEY}/turn-off`, { on: false }],
       [`/predictions/series/${KEY}/turn-off`, { why: CANARY }],
       ['/predictions/series/NOPE/turn-off', {}],
@@ -313,6 +342,11 @@ describe('writes', () => {
     }
     answer = () => ({ status: 409, body: { error: CANARY, code: 'alreadyOff' } });
     expect(await post(`/predictions/series/${KEY}/turn-off`)).toEqual({ status: 409, body: { error: 'Forecasts for this number are already off.', code: 'alreadyOff' } });
+    // The second opinion's two refusals: no local model to give one, and one that is already off.
+    answer = () => ({ status: 409, body: { error: CANARY, code: 'noModel' } });
+    expect(await post('/predictions/turn-on', { series: [KEY], opinion: true })).toEqual({ status: 409, body: { error: 'No local model is set on this Mac, so there is no second opinion to turn on.', code: 'noModel' } });
+    answer = () => ({ status: 409, body: { error: CANARY, code: 'opinionOff' } });
+    expect(await post(`/predictions/series/${KEY}/second-opinion-off`)).toEqual({ status: 409, body: { error: 'The second opinion for this number is already off.', code: 'opinionOff' } });
     // A code outside the set, or none: the runtime's words never pass.
     answer = () => ({ status: 409, body: { error: `forbidden: ${CANARY}`, code: 'forbidden' } });
     expect((await post('/predictions/turn-on', { series: [KEY] })).body).toEqual({ error: PREDICTIONS_SAY.stuck });
@@ -394,12 +428,12 @@ describe('nothing is kept', () => {
 
 describe('where the routes sit', () => {
   it('a predictions route is never reported back to the runtime as a route.error: a number\'s key in a path is no event', () => {
-    for (const p of ['/predictions', '/predictions/waiting', '/predictions/accuracy', '/predictions/questions', `/predictions/series/${KEY}`, `/predictions/series/${KEY}/turn-off`, `/predictions/questions/${PID}/answer`, '/predictions/turn-on']) expect(routeOf(p), p).toBeUndefined();
+    for (const p of ['/predictions', '/predictions/waiting', '/predictions/accuracy', '/predictions/questions', `/predictions/series/${KEY}`, `/predictions/series/${KEY}/turn-off`, `/predictions/series/${KEY}/second-opinion-off`, `/predictions/questions/${PID}/answer`, '/predictions/turn-on']) expect(routeOf(p), p).toBeUndefined();
     expect(routeOf('/predictionsx')).toBe('other');
   });
 
   it('only the console\'s full token reaches them: a voice or eval token reaches none', () => {
-    for (const [method, p] of [['GET', '/predictions'], ['GET', '/predictions/waiting'], ['GET', `/predictions/series/${KEY}`], ['GET', '/predictions/questions'], ['GET', '/predictions/accuracy'], ['POST', '/predictions/turn-on'], ['POST', `/predictions/series/${KEY}/turn-off`], ['POST', `/predictions/questions/${PID}/answer`]] as const) {
+    for (const [method, p] of [['GET', '/predictions'], ['GET', '/predictions/waiting'], ['GET', `/predictions/series/${KEY}`], ['GET', '/predictions/questions'], ['GET', '/predictions/accuracy'], ['POST', '/predictions/turn-on'], ['POST', `/predictions/series/${KEY}/turn-off`], ['POST', `/predictions/series/${KEY}/second-opinion-off`], ['POST', `/predictions/questions/${PID}/answer`]] as const) {
       expect(scopeAllows('full', method, p), p).toBe(true);
       expect(scopeAllows('voice', method, p), p).toBe(false);
       expect(scopeAllows('eval', method, p), p).toBe(false);

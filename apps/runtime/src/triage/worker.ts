@@ -24,6 +24,7 @@ import { loadFacts } from './facts.js';
 import { watchdog } from '../health/watchdog.js';
 import { refreshUndecided } from '../events/record.js';
 import { judge } from './judge.js';
+import type { LocalModels } from '../model/here.js';
 import { chatLoad, type Load } from './load.js';
 import { decide } from './triage.js';
 import type { CodeRuleContext } from './critical.js';
@@ -40,9 +41,10 @@ export interface WorkerDeps {
   db: Db;
   config: Pick<Config, 'tz' | 'server' | 'ollama'> & Partial<Pick<Config, 'home'>>;
   bus: Pick<Bus, 'boss'>;
-  /** For the tests: the load check and the model's fetch. */
+  /** For the tests: the load check, the model's fetch, and what is known of the models on this Mac. */
   load?: () => Promise<Load>;
   fetch?: typeof fetch;
+  models?: LocalModels;
   now?: () => Date;
 }
 
@@ -136,6 +138,7 @@ export async function processEvent(job: TriageJob, d: WorkerDeps): Promise<Outco
               load: d.load ?? chatLoad(config.server),
               claim: async () => (await claim(db, 'triage.local_model', cap, config.tz)) !== null,
               ...(d.fetch ? { fetch: d.fetch } : {}),
+              ...(d.models ? { models: d.models } : {}),
             }),
         }
       : { noJudge: model.may ? ('unavailable' as const) : ('skipped' as const) }),

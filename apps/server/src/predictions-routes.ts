@@ -9,8 +9,9 @@
  *   GET  /predictions/series/:key                  -> one number, open
  *   GET  /predictions/questions                    -> Will's questions
  *   GET  /predictions/accuracy                     -> how Flint has done
- *   POST /predictions/turn-on {series}             -> the Turn On Predictions card
+ *   POST /predictions/turn-on {series, opinion?}   -> the Turn On Predictions card (with the local model's second opinion, when asked)
  *   POST /predictions/series/:key/turn-off {}      -> unsigned
+ *   POST /predictions/series/:key/second-opinion-off {}  -> unsigned: the local model stops estimating it, its forecasts stay on
  *   POST /predictions/questions/:id/answer {answer}  -> his yes, no or skip: unsigned, recorded as his
  *
  * Every key, id and body is checked here with the shared contracts
@@ -165,6 +166,7 @@ async function forward<T extends z.ZodTypeAny>(res: ServerResponse, deps: Predic
 
 const SERIES = /^\/predictions\/series\/([^/]+)$/;
 const TURN_OFF = /^\/predictions\/series\/([^/]+)\/turn-off$/;
+const OPINION_OFF = /^\/predictions\/series\/([^/]+)\/second-opinion-off$/;
 const ANSWER = /^\/predictions\/questions\/([^/]+)\/answer$/;
 const READS: Readonly<Record<string, readonly [string, z.ZodTypeAny, string]>> = {
   // What the console asks on load: two facts, so a forecast's numbers are read only when the panel is opened.
@@ -184,9 +186,10 @@ export async function predictionsRoutes(req: IncomingMessage, res: ServerRespons
   const read = get && Object.prototype.hasOwnProperty.call(READS, path) ? READS[path] : undefined;
   const one = get ? SERIES.exec(path) : null;
   const off = post ? TURN_OFF.exec(path) : null;
+  const opinionOff = post ? OPINION_OFF.exec(path) : null;
   const answer = post ? ANSWER.exec(path) : null;
   const on = post && path === '/predictions/turn-on';
-  if (!read && !one && !off && !answer && !on) return false;
+  if (!read && !one && !off && !opinionOff && !answer && !on) return false;
   const rt = deps.runtime();
   // Without the runtime there are no predictions: the console hides its button, as for an older runtime.
   if (!rt) {
@@ -221,6 +224,12 @@ export async function predictionsRoutes(req: IncomingMessage, res: ServerRespons
     const b = PredictEmptyBody.safeParse(body ?? {});
     if (!key.success || !b.success) return invalid(res, deps, 'turn off', b.success ? undefined : b.error);
     return forward(res, deps, rt, 'POST', `/v1/predictions/series/${key.data}/turn-off`, {}, PredictDone, 'turn off');
+  }
+  if (opinionOff) {
+    const key = SeriesKey.safeParse(opinionOff[1]);
+    const b = PredictEmptyBody.safeParse(body ?? {});
+    if (!key.success || !b.success) return invalid(res, deps, 'second opinion off', b.success ? undefined : b.error);
+    return forward(res, deps, rt, 'POST', `/v1/predictions/series/${key.data}/second-opinion-off`, {}, PredictDone, 'second opinion off');
   }
   const id = PredictionRef.safeParse(answer![1]);
   const b = AnswerBody.safeParse(body);

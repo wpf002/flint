@@ -311,8 +311,10 @@ would review itself every day.) A review has two stages:
    templates, steps, items and checks by id. It never writes a step's title, or
    any other word that is stored or shown: a new step's title comes from a
    template ("Check on wpf002/flint #57"). One model request runs at a time
-   across triage and reviews, and each waits while a chat turn is running. A
-   review asks the model at most twice. If the model isn't there at all, the
+   across triage, reviews and second opinions, and each waits while a chat
+   turn is running. Before it is asked, Ollama's own list of models is checked:
+   a model that isn't on this Mac is never sent a goal's words (see "A model
+   on this Mac"). A review asks the model at most twice. If the model isn't there at all, the
    plan stage comes back 2 minutes later, up to 3 times, before the review
    says the model didn't answer.
 
@@ -822,7 +824,9 @@ they are. This is also the first step of rolling P3 back.
   is refused when filed and again when it runs.
 - **The local model reads a goal's words.** A review's plan stage sends the
   goal's title, why it matters, its checks and its steps to Ollama on this Mac,
-  inside data blocks, and nowhere else. A linked item is sent as a short ref and
+  inside data blocks, and nowhere else. "On this Mac" is checked before each
+  request, with Ollama itself, for that exact model: its address alone isn't
+  enough (see "A model on this Mac"). A linked item is sent as a short ref and
   its state (open, merged, healthy), never its title. Logs, jobs, audit entries
   and errors carry ids and counts only.
 - **A model request already running is not interrupted.** A review checks for a
@@ -904,8 +908,10 @@ Predictions arrive in parts. The first part was the store and what the
 database guarantees about it. The second is Flint checking its own predictions
 (see "Checking predictions" below). The third is the numbers themselves and
 their forecasts (see "Daily numbers and forecasts"). The fourth is where you
-see it all: the console's Predictions panel (see "The Predictions panel"). All
-of it is off until you turn it on. Flint forecasts its own numbers on this
+see it all: the console's Predictions panel (see "The Predictions panel"). The
+fifth is the local model's own estimate beside each forecast (see "The local
+model's second opinion"), which has a switch of its own. All of it is off
+until you turn it on. Flint forecasts its own numbers on this
 Mac: no series is sent anywhere, and no part of this calls an outside
 service.
 
@@ -1204,6 +1210,114 @@ Chat has its own, older view of Flint's track record (see "The scores can
 reach chat, when chat asks" below). For the spend and calendar areas it no
 longer includes the range loss.
 
+### The local model's second opinion
+
+Flint's forecasts are arithmetic. A second opinion is the local model's own
+answer to the yes/no question each forecast already asks ("does today run
+above its usual level?"). It never replaces the forecast. Both answers are
+kept, both are checked against what happened, and Flint compares them. It's
+off until you turn it on, number by number.
+
+**Turning it on.** On the Turn On Predictions sheet, under LOCAL MODEL, switch
+on **Second Opinion**, then **Continue**. The card you approve says so, under
+SECOND OPINION. For a number that's already on: open it in Predictions and
+click **Turn On** under SECOND OPINION. That shows a card for that one number.
+Either way, nothing changes until you approve the card with Touch ID.
+
+The switch is offered only where a local model is set (`FLINT_TRIAGE_MODEL`,
+the model triage and goal reviews use). Without one, the open number says "No
+local model is set on this Mac."
+
+**Turning it off.** Open the number and click **Turn Off** under SECOND
+OPINION. No signature is needed, because it only narrows what Flint does. The
+number's forecasts stay on, and the estimates already made stay on record.
+Turning the number itself off turns its second opinion off too.
+
+**What you see.**
+
+- On the open number, one sentence: "The local model said about 60%." If it
+  hasn't answered for this forecast: "The local model has no estimate for this
+  forecast."
+- Under **Accuracy**, once the local model and the forecast have both answered
+  30 of the same questions in an area: "Over 45 questions, the forecast was
+  closer than the local model." (or the local model was closer, or they "did
+  about as well"). The same is said against "the usual rate", for the
+  questions where no forecast beat a plain guess. Below 30 it says how far
+  along it is: "The local model has 12 of the 30 results it needs to be
+  compared."
+- Nothing is announced: no note, no dot, no line in the morning summary.
+
+An area's own lines under Accuracy count every answer on record, the local
+model's among them.
+
+**What the model is asked.** Each night at 03:50, after the forecasts are
+written, one question for each number with the switch on: the number's name,
+its unit, its last 28 values, the level the question is about, the forecast's
+own range, and how the question has come out before. Numbers and fixed words
+only. It can reply with only a chance from 5% to 95% and one of six fixed
+reasons. A chance outside that range is thrown away, never rounded into
+range, and so is a reply with any other word in it. It's asked at most twice
+for a number, and at most 30 numbers a day.
+
+**When there's no answer.** A number with no forecast that night (it hasn't
+changed, it's still waiting for history, or yesterday's value isn't in) gets no
+second opinion either. The model waits while you're chatting, for up to 10
+minutes. Then it gives up for the night, and **Settings > Health > Forecasts**
+says so for an hour: "Chat was busy for 10 minutes, so a forecast went without
+the local model's second opinion." A model that isn't set, isn't running or
+isn't on this Mac means no second opinion. It never becomes a call to an
+outside model. The forecast is already written by then, and isn't affected.
+
+**What stays on this Mac.** The model reads a number's values, spend and
+calendar hours among them, because it runs here. Its question goes to Ollama
+on this Mac and nowhere else, and isn't kept: not in a log, a job or the audit
+trail. What's kept of its answer is the chance and the reason code.
+
+### A model on this Mac
+
+Three things in the runtime ask the local model: triage (an item's title), a
+goal review (the goal's title and why it matters, in your words) and a second
+opinion (a number's values). Each may only ask a model that runs on this Mac.
+
+Ollama's address on this Mac isn't enough to know that. Ollama can serve a
+model from its own servers under any name: a cloud model copied to a plain
+name looks local, and isn't. So before every one of those requests the runtime
+asks Ollama for its list of models, and asks the model only when all of this
+holds:
+
+- the model's name isn't a cloud model's (`-cloud` or `:cloud`);
+- Ollama's address is this Mac, and Node isn't set to send requests through a
+  proxy (`NODE_USE_ENV_PROXY`), which would carry them off this Mac first;
+- Ollama's own list holds that exact model, and says nothing of a remote host
+  for it.
+
+The list is asked again for each request (one answer is shared for two
+seconds, so requests that come together ask once). If the list doesn't come,
+hangs, or doesn't hold the model, the answer is no. What Ollama said a moment
+ago isn't trusted once it stops answering.
+
+When the answer is no, nothing is sent to the model, and each caller does what
+it does with no model:
+
+| Caller | What happens | What you see |
+| --- | --- | --- |
+| Triage | The item is logged to Other without the model's review. It's never escalated on a guess. | The item is in Other. |
+| A goal review | It tries again 2 minutes later, up to 3 times, then suggests nothing. | "The local model didn't answer, so Flint suggested no plan changes." |
+| A second opinion | None is recorded that night. | "The local model has no estimate for this forecast." |
+
+**Settings > Health > Local Model** reads the same list, and says which it is:
+"The local model isn't on this Mac.", "The local model isn't installed.", or
+"Flint couldn't check which models are installed."
+
+The server decides the same question for chat with the same rules (they're
+shared code, in `packages/policy/src/models.ts`). It keeps a watch on the
+list and trusts it for a few minutes, because it reads it on every chat turn.
+The runtime's requests are few and carry your own words, so it asks each time.
+
+To fix a model that isn't on this Mac: set `FLINT_TRIAGE_MODEL` in
+`~/.flint/runtime.override.env` to a model `ollama list` shows without a cloud
+tag, and restart the runtime. Claude does this with your OK.
+
 ### Checking predictions
 
 Flint now settles and scores its own predictions. Until this part, nothing
@@ -1443,13 +1557,24 @@ action so named.
     carries that day's end); the history it's read from is what moves. Don't
     change `FLINT_TZ` with predictions on until the days are stored by their
     date.
-- **The local model's estimate** (a later part) is the only file under
+- **The local model's estimate** (`predict/reason.ts`) is the only file under
   `predict/` that may reach anything, and only loopback Ollama through
   `scopedFetch`. `test/predict/no-egress.test.ts` lists every file there and
-  must name that one. `test/predict/no-egress-db.test.ts` runs the night's
+  names that one. `test/predict/no-egress-db.test.ts` runs the night's
   jobs with the network taken away and every command recorded: a new command,
-  or anything that reaches for the network, fails it.
-- **Whatever writes a run** (the runner does; the local model's estimate will)
+  or anything that reaches for the network, fails it. For the estimate's job
+  it gives one thing back, a stand-in for Ollama on this Mac, and holds the
+  job to two requests: the list of models, then the question.
+- **Anything new that asks the local model** asks `model/here.ts` first
+  (`runsHere`), before it builds a request, and treats a no as "unavailable".
+  It sends through the shared slot (`model/slot.ts`), so two local requests
+  never run at once. `test/model/here.test.ts` lists every file that asks a
+  model and fails when a new one isn't on the list;
+  `test/model/here-server.test.ts` holds each to "nothing is sent" against a
+  stand-in Ollama whose list says the model runs elsewhere, hangs, or fails.
+- **Anything that reads Ollama's lists** (what's installed, what's loaded)
+  reads them through `model/here.ts` (`list`). Settings > Health does.
+- **Whatever writes a run** (the runner does, and the local model's estimate)
   must write it and its predictions at READ COMMITTED
   (the database refuses them above it). A refused run means the number was
   turned off: skip it, don't retry it. A run's provider is `local` and its
@@ -1598,6 +1723,16 @@ The Predictions panel (P4's fourth part) added no database update. Rolling
 it back is deploying the code from before it: the Predictions button goes
 away, the morning's questions stop being picked, and every question already
 asked and every answer stays in the database.
+
+The second opinion (P4's fifth part) added no database update either. To stop
+it without a deploy, turn it off for each number (open the number, **Turn
+Off** under SECOND OPINION). Rolling it back is deploying the code from before
+it: no second opinion is asked for, the switch and its sentences go away, and
+the estimates already made stay on record and are still checked. A number's
+Second Opinion switch stays set in the database, and does nothing until the
+code is back. That part also changed how triage and goal reviews decide a
+model is on this Mac (see "A model on this Mac"); rolling it back puts back
+the older check, which looked at Ollama's address only.
 
 A Turn On Predictions card still waiting expires on its own. One you approve
 while P4 is rolled back isn't carried out ("not carried out by the runtime")

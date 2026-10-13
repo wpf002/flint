@@ -48,7 +48,7 @@ import { PlanJob, runReview } from '../../src/goals/review';
 import { Diff, dueIn, type ReplyOp } from '../../src/goals/steps';
 import { goalView } from '../../src/goals/view';
 import { CANARY, DAY, FakeBus, goalFixture, type GoalFixture } from './fixture';
-import { modelsHere } from '../ollama-kit';
+import { fresh, hangs, listening, modelsHere, tags } from '../ollama-kit';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const OLLAMA = { url: 'http://127.0.0.1:11434', model: 'muse-glimmer:30b' };
@@ -167,6 +167,48 @@ describe.skipIf(NO_DB)('a review’s plan stage on flint_test', () => {
     const audit = await db.auditEntry.findFirstOrThrow({ where: { action: 'goal.review.local', inputs: { path: ['stage'], equals: 'plan' } }, orderBy: { seq: 'desc' } });
     expect(audit).toMatchObject({ actor: 'runtime:goals', context: 'autonomous', outcome: 'ok', decision: 'log', tier: 'approval' });
     expect(audit.inputs).toMatchObject({ goalId: g.id, planner: 'ollama', reasonCode: 'slipping', suggested: 4, minor: 2, material: 2, cards: 0, shadow: true, requests: 1 });
+  });
+
+  it('a model this Mac’s Ollama serves from elsewhere is never sent a goal’s words: the listing is asked first, and the review suggests nothing', async () => {
+    const g = await planned(240);
+    // The goal's title and why it matters are Will's own sentences (the fixture's hold a marker).
+    expect(g.title).toContain(CANARY);
+    await fx.owner(`UPDATE "ActionCounter" SET count = 0 WHERE action = 'goal.review.local'`);
+    const claims = async () => (await db.actionCounter.findUnique({ where: { action_day: { action: 'goal.review.local', day: day() } } }))?.count ?? 0;
+    const cases: Array<[string, () => Response | Promise<Response>]> = [
+      ['its listing marks the model as run elsewhere', () => tags([{ name: OLLAMA.model, remote_host: 'https://ollama.com:443', remote_model: 'gpt-oss:120b' }])],
+      ['its listing hangs', hangs],
+      ['its listing fails while chat would have answered', () => new Response('{"error":"x"}', { status: 500 })],
+      ['its listing does not hold the model', () => tags([{ name: 'llama3.1:latest' }])],
+    ];
+    for (const [what, listing] of cases) {
+      const id = await reviewed(g.id);
+      prompts = [];
+      bus.clear();
+      // The stand-in's chat would answer with a plan change: it is never asked.
+      const o = listening(listing, model([answer([{ op: 'set_status', step: 's2', template: 'none', ref: '', criterion: '', dueInDays: -1, status: 'blocked', after: '' }])]));
+      // (Each run of the stage comes minutes after the last: it asks again, with nothing remembered.)
+      const over = () => ({ fetch: o.fetch, models: fresh(40) });
+      // Not there: the stage comes back later, as for an Ollama that is down, and gives up after its tries.
+      expect(await stage(g.id, id, [], over()), what).toEqual({ outcome: 'retrying', reviewId: id });
+      expect(await stage(g.id, id, [], over(), { retries: MAX_RETRIES }), what).toMatchObject({ outcome: 'none', why: 'unavailable' });
+      expect((await row(id)).planner, what).toBe('none:unavailable');
+      // The listing was asked each time, and that was the whole conversation: no prompt, so none of his words.
+      expect(prompts, what).toEqual([]);
+      expect(o.sent(), what).toBe(0);
+      expect(o.seen.map((x) => `${x.method} ${new URL(x.url).pathname}`), what).toEqual(['GET /api/tags', 'GET /api/tags']);
+      expect((await cards(g.id)).length, what).toBe(0);
+    }
+    // Nothing was claimed of the day's cap for any of them.
+    expect(await claims()).toBe(0);
+    // Listed as run here, the same review asks the model, which reads the goal's words.
+    const id = await reviewed(g.id);
+    prompts = [];
+    const here = listening(() => tags([{ name: OLLAMA.model }]), model([answer([], 'on_track')]));
+    expect(await stage(g.id, id, [], { fetch: here.fetch, models: fresh(40) })).toMatchObject({ outcome: 'planned', reviewId: id });
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain(CANARY);
+    expect(await claims()).toBe(1);
   });
 
   it('whatever the model does, the review and its forecast are already recorded; the review says why it suggests nothing', async () => {

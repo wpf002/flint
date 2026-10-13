@@ -17,14 +17,20 @@
  *    (waiting), or there is not enough history yet, or none at all, or it is
  *    ready and forecast tonight.
  *
+ * The local model's second opinion (part 5) is shown in one place, the open
+ * number, as one sentence: the percentage it said of the run's question, or
+ * that it has said nothing. Its reason code and its model are never shown. The
+ * Accuracy tab compares it with the forecaster's own answer to the very same
+ * questions, once there are 30 of them.
+ *
  * These views hold a series' values in words (spend and calendar hours among
  * them). They go to Will's console only, over the runtime's `proposals` scope:
  * nothing here writes a log line, an audit entry or a note.
  */
-import { ACCURACY_MIN, localDay, localDayBounds, type AccuracyArea, type AccuracyView, type ForecastRow, type PanelFact, type PredictionsPage, type SeriesView } from '@flint/policy';
+import { ACCURACY_MIN, localDay, localDayBounds, type AccuracyArea, type AccuracyView, type ForecastRow, type PanelFact, type PredictionsPage, type SecondOpinion, type SeriesView } from '@flint/policy';
 import { z } from 'zod';
 import type { Db } from '../db.js';
-import { FORECAST_WRITER } from '../ledger/emit.js';
+import { FORECAST_WRITER, REASON_WRITER } from '../ledger/emit.js';
 import { reliabilityGap, type Bin } from '../ledger/scoring.js';
 import { MIN_SCORED } from '../ledger/calibration.js';
 import { announcedSince, predictionsStarted } from '../ledger/sweep.js';
@@ -42,6 +48,9 @@ import {
   expectSays,
   gapSays,
   noTrendSays,
+  opinionSays,
+  opinionTooFewSays,
+  opinionVersusSays,
   rangesHeldSays,
   recordSays,
   scoredValue,
@@ -61,6 +70,8 @@ export interface ViewDeps {
   tz: string;
   /** Predictions may run on this Mac (FLINT_PREDICT is on). */
   predict: boolean;
+  /** A local model is set on this Mac, so its second opinion can be turned on. */
+  model?: boolean;
   now?: Date;
 }
 
@@ -173,7 +184,8 @@ export async function predictionsPage(db: Db, d: ViewDeps): Promise<PredictionsP
   const cards = await waitingCards(db, now);
   // Switched off on this Mac, nothing can be answered here: nothing is said to wait (as the console's own check says).
   const [questions, announce] = d.predict ? [await questionsWaiting(db, now), await questionsAnnounced(db, now)] : [0, false];
-  return { state, numbers, waiting: cards.map((c) => ({ id: c.id, numbers: c.series.length })), questions, announce };
+  // The sheet may offer the local model's second opinion only where there is one to ask.
+  return { state, numbers, waiting: cards.map((c) => ({ id: c.id, numbers: c.series.length })), questions, announce, secondOpinion: d.predict && d.model === true };
 }
 
 /** One number, open. Undefined for a key outside the registry. */
@@ -202,6 +214,17 @@ export async function seriesView(db: Db, key: string, d: ViewDeps): Promise<Seri
       chance = { label: aboveLabel(threshold, unit), value: chanceValue(q.probability), says: chanceSays(q.probability, def.step, threshold, unit) };
     }
   }
+  // The local model's second opinion, for a number that is on: what it said of this run's question, in one sentence.
+  let opinion: SecondOpinion | null = null;
+  if (live) {
+    const sw = await db.forecastSeries.findUnique({ where: { seriesKey: def.key }, select: { reason: true } });
+    if (sw?.reason) {
+      const said = s.run ? await db.prediction.findFirst({ where: { forecastRunId: s.run.id, kind: 'binary', createdBy: REASON_WRITER, status: { not: 'void' } }, select: { probability: true } }) : null;
+      opinion = { on: true, says: said && said.probability !== null ? opinionSays(said.probability) : PANEL.noOpinion, offer: false };
+    } else {
+      opinion = d.model === true ? { on: false, says: PANEL.opinionOff, offer: true } : { on: false, says: PANEL.noLocalModel, offer: false };
+    }
+  }
   // How its latest ranges held: each against the number the series took.
   const settled = await db.prediction.findMany({
     where: { seriesKey: def.key, kind: 'interval', createdBy: FORECAST_WRITER, status: { not: 'void' }, resolution: { is: { outcomeValue: { not: null } } } },
@@ -211,7 +234,7 @@ export async function seriesView(db: Db, key: string, d: ViewDeps): Promise<Seri
   });
   const held = settled.filter((p) => p.lower !== null && p.upper !== null && p.resolution!.outcomeValue! >= p.lower && p.resolution!.outcomeValue! <= p.upper).length;
   const cards = await waitingCards(db, now);
-  return { number: rowOf(def, live, s), forecast, chance, record: recordSays(held, settled.length), waiting: cards.some((c) => c.series.includes(def.key)), offHere: !d.predict };
+  return { number: rowOf(def, live, s), forecast, chance, opinion, record: recordSays(held, settled.length), waiting: cards.some((c) => c.series.includes(def.key)), offHere: !d.predict };
 }
 
 /** The areas Flint predicts in, as the console names them, in the order it lists them. */
@@ -238,8 +261,69 @@ interface Snapshot {
   brierCiHigh: number | null;
 }
 
-/** One area's lines, from its groups' scores pooled by how many results each holds. */
-function areaOf(name: string, rows: readonly Snapshot[]): AccuracyArea {
+/** The local model's answers and the forecaster's to the same questions, for one area: how many, and each one's mean squared error. */
+interface Versus {
+  n: number;
+  model: number;
+  other: number;
+}
+type Compared = Partial<Record<'forecast' | 'usual', Versus>>;
+/** Two error scores this close are "about as well". */
+export const SAME_SCORE = 0.01;
+
+/**
+ * The questions both the forecaster and the local model answered (the same run, the same claim), settled, from the
+ * scores' own window: per area, against the forecast (a run that beat a plain guess: `statistical`) and against the
+ * usual rate (`base_rate`). Probabilities and outcomes only: never a series' value.
+ */
+async function compared(db: Db, from: Date, to: Date): Promise<Map<string, Compared>> {
+  const settled = { status: { not: 'void' }, probability: { not: null }, resolution: { is: { outcome: { not: null } } } } as const;
+  const mine = await db.prediction.findMany({
+    where: { createdBy: REASON_WRITER, kind: 'binary', forecastRunId: { not: null }, createdAt: { gte: from, lt: to }, ...settled },
+    orderBy: { id: 'asc' }, take: 20_000, select: { domain: true, probability: true, forecastRunId: true, resolution: { select: { outcome: true } } },
+  });
+  const out = new Map<string, Compared>();
+  if (!mine.length) return out;
+  const theirs = await db.prediction.findMany({
+    where: { createdBy: FORECAST_WRITER, kind: 'binary', forecastRunId: { in: [...new Set(mine.map((m) => m.forecastRunId!))] }, ...settled },
+    select: { forecastRunId: true, method: true, probability: true },
+  });
+  const byRun = new Map(theirs.map((t) => [t.forecastRunId!, t]));
+  const sums = new Map<string, { n: number; model: number; other: number }>();
+  for (const m of mine) {
+    const t = byRun.get(m.forecastRunId!);
+    if (!t || (t.method !== 'statistical' && t.method !== 'base_rate')) continue;
+    const o = m.resolution!.outcome ? 1 : 0;
+    const k = `${m.domain}\u0000${t.method === 'statistical' ? 'forecast' : 'usual'}`;
+    const sum = sums.get(k) ?? { n: 0, model: 0, other: 0 };
+    sum.n += 1;
+    sum.model += (m.probability! - o) ** 2;
+    sum.other += (t.probability! - o) ** 2;
+    sums.set(k, sum);
+  }
+  for (const [k, sum] of sums) {
+    const [domain, other] = k.split('\u0000') as [string, 'forecast' | 'usual'];
+    out.set(domain, { ...out.get(domain), [other]: { n: sum.n, model: sum.model / sum.n, other: sum.other / sum.n } });
+  }
+  return out;
+}
+
+/** The local model against the other two answers, a sentence each once there are 30 questions both answered; before that, how far along it is. */
+function comparedLines(c: Compared | undefined): string[] {
+  if (!c) return [];
+  const lines: string[] = [];
+  for (const other of ['forecast', 'usual'] as const) {
+    const v = c[other];
+    if (!v || v.n < ACCURACY_MIN) continue;
+    lines.push(opinionVersusSays(other, v.n, Math.abs(v.model - v.other) < SAME_SCORE ? 'same' : v.model < v.other ? 'closer' : 'further'));
+  }
+  const most = Math.max(c.forecast?.n ?? 0, c.usual?.n ?? 0);
+  if (!lines.length && most > 0) lines.push(opinionTooFewSays(most, ACCURACY_MIN));
+  return lines;
+}
+
+/** One area's lines, from its groups' scores pooled by how many results each holds; then the local model's second opinions, compared. */
+function areaOf(name: string, rows: readonly Snapshot[], versus?: Compared): AccuracyArea {
   const yesNo = rows.filter((r) => r.kind === 'binary' && r.n > 0 && r.brier !== null && r.baseRate !== null);
   const ranges = rows.filter((r) => r.kind === 'interval' && r.n > 0 && r.intervalCoverage !== null);
   const bn = yesNo.reduce((t, r) => t + r.n, 0);
@@ -278,6 +362,7 @@ function areaOf(name: string, rows: readonly Snapshot[]): AccuracyArea {
   if (rn >= ACCURACY_MIN) lines.push(rangesHeldSays(LEVEL, pctOf(ranges.reduce((t, r) => t + r.intervalCoverage! * r.n, 0) / rn), rn));
   else if (rn > 0) lines.push(tooFewSays('range', rn, ACCURACY_MIN));
   if (!lines.length) lines.push(PANEL.noResults);
+  lines.push(...comparedLines(versus));
   return { name, value: scoredValue(bn + rn), lines };
 }
 
@@ -291,9 +376,11 @@ export async function accuracyView(db: Db, d: Pick<ViewDeps, 'predict'>): Promis
   const latest = await db.calibrationSnapshot.findFirst({ orderBy: { windowEnd: 'desc' }, select: { windowEnd: true } });
   if (!latest) return { scored: false, scoring, areas: [], unsettled: [] };
   const rows = await db.calibrationSnapshot.findMany({ where: { windowEnd: latest.windowEnd } });
+  // The local model's second opinions against the forecaster's answers to the same questions, over the scores' own window.
+  const versus = rows.length ? await compared(db, rows.reduce((a, r) => (r.windowStart < a ? r.windowStart : a), rows[0]!.windowStart), latest.windowEnd) : new Map<string, Compared>();
   const areas = AREAS.flatMap(([domain, name]) => {
     const own = rows.filter((r) => r.domain === domain);
-    return own.length ? [areaOf(name, own)] : [];
+    return own.length ? [areaOf(name, own, versus.get(domain))] : [];
   });
   const sum = (f: (r: (typeof rows)[number]) => number) => rows.reduce((t, r) => t + f(r), 0);
   const left: Array<['expired' | 'late' | 'declined' | 'void', number]> = [
