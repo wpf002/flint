@@ -1368,7 +1368,14 @@ describe('the console Approvals panel', () => {
       await open();
       const list = ids.apprlist!.children[0]!;
       const first = list.children[0]!;
-      first.button('Show Details').onclick!();
+      const toggle = first.button('Show Details');
+      expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      toggle.onclick!();
+      // (Open, and it says so to a screen reader, which is what turns its chevron.)
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+      toggle.onclick!();
+      expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      toggle.onclick!();
       first.button('Approve with Password').onclick!();
       expect(held.map((h) => h.id)).toEqual(['p5d']);
       expect(held[0]!.card).toBe(first);
@@ -1442,6 +1449,40 @@ describe('the console Approvals panel', () => {
       for (const id of ['__proto__', 'constructor!', '../x', 'a b', '']) run(`apprSaid(${JSON.stringify(id)},'x','bad')`);
       expect(run('JSON.stringify(APPR.said)')).toBe('{}');
       expect(run('({}).x')).toBeUndefined();
+    });
+
+    it('an approval that starts while a list just read still waits for its names: that list is held back too, and drawn after the approval settles', async () => {
+      const timers = clock();
+      const learns: Array<(n: number) => void> = [];
+      ctx.taskNames = (_ps: unknown[], done: (n: number) => void) => learns.push(done);
+      answer = () => ({ status: 200, body: { proposals: [P5.cancel, plain({ id: 'x1' })], signed: true } });
+      await open();
+      learns[0]!(0);
+      const list = ids.apprlist!.children[0]!;
+      // The list is read again (its answer is in, its names are not), and he presses Approve on the card in front of him.
+      answer = () => ({ status: 200, body: { proposals: [P5.cancel, P5.accept, plain({ id: 'x1' })], signed: true } });
+      run('loadApprovals()');
+      await settle();
+      expect(learns).toHaveLength(2);
+      held = [];
+      list.children[0]!.button('Approve with Password').onclick!();
+      expect(held.map((h) => h.id)).toEqual(['p5d']);
+      // The names land, and the deadline passes: neither draws over the card being signed.
+      learns[1]!(0);
+      for (const t of timers.filter((x) => x[1] === 600)) t[0]();
+      expect(ids.apprlist!.children[0]).toBe(list);
+      expect(run('APPR.redraw')).toBe(true);
+      expect(JSON.parse(run('JSON.stringify(APPR.pending.map(function(p){return p.id;}))') as string)).toEqual(['p5d', 'x1']);
+      // It goes through: the list is read again, as after any approval, and that reading is drawn.
+      held[0]!.ok({ action: { status: 'done' } });
+      await settle();
+      held = null;
+      answer = () => ({ status: 200, body: { proposals: [P5.accept, plain({ id: 'x1' })], signed: true } });
+      timers.find((t) => t[1] === 1200)![0]();
+      await settle();
+      learns[2]!(0);
+      expect(cardsDrawn().map((c) => c.getAttribute('data-id'))).toEqual(['p5c', 'x1']);
+      expect(run('APPR.redraw')).toBe(false);
     });
 
     it('an approval that goes through with a list held back draws the next list when it is read; Approve All holds the list back the same way', async () => {

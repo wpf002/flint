@@ -499,6 +499,9 @@ describe('switched off on this Mac', () => {
     const offNow = (key: string) => (routes = answers({ [key]: OFF, 'GET /assets': OFF }));
     const isOff = () => {
       expect(empty()).toEqual(['Tasks Are Off', TASK_SAYS.off]);
+      // Learned from whatever answer said so: the header's button goes, and the panel remembers.
+      expect(ids.tasksbtn!.hidden).toBe(true);
+      expect(run('taskIsOff()')).toBe(true);
       expect(body().buttons()).toEqual([]);
       expect(foot().hidden).toBe(true);
       expect(ids.taskadd!.hidden).toBe(true);
