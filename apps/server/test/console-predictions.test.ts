@@ -829,6 +829,17 @@ describe('the local model\'s second opinion', () => {
     foot().button('Continue').onclick!();
     await settle();
     expect((calls[0]!.body as Record<string, unknown>).opinion).toBeUndefined();
+    // Whatever was left set by another view, opening the sheet puts the switch off: what is sent is what it shows.
+    run('closePredictions()');
+    routes = answers({ 'GET /predictions': { status: 200, body: offPage({ secondOpinion: true }) } });
+    await open();
+    run('PRED.opinion=true');
+    body().button('Turn On Predictions').onclick!();
+    expect(opinionSwitch()!.getAttribute('aria-checked')).toBe('false');
+    calls = [];
+    foot().button('Continue').onclick!();
+    await settle();
+    expect(calls[0]!.body).toEqual({ series: offPage().numbers.map((n) => n.key).sort() });
   });
 
   it('a card refused for want of a local model is said in the server\'s sentence, and the sheet stays', async () => {
