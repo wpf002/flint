@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { FlintError, isFlintError, makeAiError, type ProviderAdapter } from '@flint/core';
+import { FlintError, OllamaProvider, isFlintError, makeAiError, type ProviderAdapter } from '@flint/core';
 import {
   classifyMessage,
   parseTierSpec,
@@ -22,6 +22,8 @@ import {
   LONG_CONVERSATION,
 } from '../src/brains';
 import { DEFAULT_HISTORY_TURNS } from '../src/history-window';
+import { LOCAL_ERROR_SENTENCES } from '../src/local-errors';
+import { brainOf } from '../src/policy';
 
 /** A provider that is never called — tier resolution only needs a name. */
 function stubProvider(name: string): ProviderAdapter {
@@ -535,5 +537,63 @@ describe("envProviderFactory: 'local', an OpenAI-compatible local server as a ti
     expect(envProviderFactory({ FLINT_LOCAL_BASE_URL: 'http://10.0.0.9:8080/v1', FLINT_LOCAL_ALLOW_REMOTE: '1' })('local')).toBeUndefined();
     expect(envProviderFactory({ FLINT_LOCAL_BASE_URL: 'https://10.0.0.9:8443/v1', FLINT_LOCAL_ALLOW_REMOTE: '1' })('local')?.name).toBe('local');
     expect(envProviderFactory({ FLINT_LOCAL_BASE_URL: 'http://10.0.0.9:8080/v1', FLINT_LOCAL_ALLOW_REMOTE: '1', FLINT_LOCAL_ALLOW_INSECURE_REMOTE: '1' })('local')?.name).toBe('local');
+  });
+});
+
+// A review (2026-10-13): the main model and the standby no longer repeat what their model server says when it
+// fails (../src/local-errors), and a tier brain on the same kind of server still did.
+describe('a tier brain on a local wire: what its model server says when it fails is not repeated', () => {
+  let server: Server | undefined;
+  afterEach(async () => {
+    await new Promise((r) => (server ? server.close(r) : r(undefined)));
+    server = undefined;
+  });
+  /** A model server that answers every request with an error that repeats the request. */
+  const echoing = async (): Promise<string> => {
+    server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (d: Buffer) => (body += d.toString()));
+      req.on('end', () => {
+        res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: `decode failed ECHOMARK ${body.slice(0, 4000)}` }));
+      });
+    });
+    await new Promise<void>((r) => server!.listen(0, '127.0.0.1', r));
+    return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  };
+  const args = { model: 'big:70b', messages: [{ id: 'u', role: 'user' as const, content: 'TIERSECRETQ what is this?', timestamp: 0 }] };
+  const failure = (p: ProviderAdapter): Promise<unknown> =>
+    p.generate(args).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+
+  it('the ollama tier, the OpenAI-compatible tier and a legacy frontier on a server of Will’s own: the class, a fixed sentence, none of the request', async () => {
+    const origin = await echoing();
+    // (Bare, the adapter does repeat it: this is what the wrap is for.)
+    const bare = await failure(new OllamaProvider({ baseURL: origin }));
+    expect(isFlintError(bare) && bare.error.message).toContain('TIERSECRETQ');
+    const brains: Array<[string, ProviderAdapter]> = [
+      ['the ollama tier', envProviderFactory({ FLINT_TIER_OLLAMA_HOST: origin })('ollama')!],
+      ['the local tier', envProviderFactory({ FLINT_LOCAL_BASE_URL: `${origin}/v1` })('local')!],
+      ['the legacy frontier', buildFrontierProvider({ FLINT_FRONTIER_PROVIDER: 'ollama', FLINT_FRONTIER_BASE_URL: origin, FLINT_FRONTIER_MODEL: 'big:70b' })!.provider],
+    ];
+    for (const [what, p] of brains) {
+      const err = await failure(p);
+      expect(isFlintError(err), what).toBe(true);
+      if (!isFlintError(err)) continue;
+      expect(JSON.stringify(err.error), what).not.toMatch(/ECHOMARK|TIERSECRETQ|decode failed/);
+      expect(err.error.message, what).toBe(LOCAL_ERROR_SENTENCES[err.error.kind]);
+      // Its class is kept: the chain moves on to the next brain as it did.
+      expect(shouldFallBack(err), what).toBe(true);
+      const events: unknown[] = [];
+      for await (const ev of p.stream(args)) events.push(ev);
+      expect(JSON.stringify(events), what).not.toMatch(/ECHOMARK|TIERSECRETQ|decode failed/);
+      expect(events.at(-1), what).toMatchObject({ type: 'error' });
+    }
+    // Where the brain is, and its window, still read through the wrap: that is what says whether it is on this Mac.
+    expect(brainOf(brains[0]![1], 'big:70b')).toEqual({ provider: 'ollama', model: 'big:70b', baseURL: origin, numCtx: 8192 });
+    expect(brainOf(brains[2]![1], 'big:70b')).toEqual({ provider: 'ollama', model: 'big:70b', baseURL: origin, numCtx: 8192 });
+    expect(brainOf(brains[1]![1], 'm')).toMatchObject({ provider: 'local', baseURL: `${origin}/v1` });
   });
 });
