@@ -2413,7 +2413,9 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       // A row of Will's own that forbids restoring: the command reads it from the database in use and stops.
       await signedPolicy({ owner: q.owner, app: q.app, approver: q.approver }, keys.a, { pattern: 'restore.*', tier: 'forbidden' });
       const forbidden = await refusal(restoreProductionCommand(['--check', '--dump', basename(dump)], config(q), { say: () => {}, uid: 501, exec }));
-      expect(forbidden.message).toBe('One of your own rules forbids restoring the database. Switch that rule off in the console first.');
+      expect(forbidden.message).toBe('One of your own rules forbids restoring the database. Switch that rule off first.');
+      // How: the command that lists his rules and files the card (a rule that holds an action back goes off only on a card he signs).
+      expect(forbidden.lines).toEqual(['This lists your rules and says how to switch one off:', '  cd ~/flint && pnpm --silent --filter @flint/runtime rules']);
       expect(forbidden.stage).toBe('tier');
     });
 

@@ -35,6 +35,7 @@ import { resolveTier, type PolicyRow } from '@flint/policy';
 import type { RestoreConfig } from '../config.js';
 import { client, targetOf } from './backup.js';
 import { carryLines, type CarryReport } from './carry.js';
+import { RULES_COMMAND } from '../governance/rules.js';
 import { KEEP_DAYS, REPAIR, RestoreRefused, compareDatabase, repairDatabase, restoreDatabase, type RestoreOptions, type RestoreSummary } from './restore.js';
 
 /** apps/runtime, whichever directory the command was started from. */
@@ -319,7 +320,10 @@ export async function restoreProductionCommand(argv: string[], config: RestoreCo
   const rows = await policies(config.ownerUrl);
   const tier = resolveTier('restore.production', { context: 'console', tainted: false, ...(rows ? { policies: rows } : {}), now });
   if (tier.tier === 'forbidden') {
-    throw new RestoreRefused('One of your own rules forbids restoring the database. Switch that rule off in the console first.', { stage: 'tier' });
+    // A rule that holds an action back goes off only on a card he signs (the rules command lists them and files it).
+    throw new RestoreRefused('One of your own rules forbids restoring the database. Switch that rule off first.', {
+      stage: 'tier', lines: ['This lists your rules and says how to switch one off:', `  ${RULES_COMMAND}`],
+    });
   }
   // A real restore is confirmed at the keyboard. A trial run changes nothing in use and asks nothing.
   if (!checkOnly && !ask) throw new RestoreRefused('Run this yourself in Terminal: it asks you to confirm before it changes anything.', { stage: 'terminal' });
