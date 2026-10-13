@@ -153,9 +153,11 @@ describe.skipIf(NO_DB)('the Tasks panel’s writes and views on flint_test', () 
     expect(await cancelTask(db, t.id)).toEqual({ ok: true });
     expect(await fx.task(t.id)).toMatchObject({ status: 'cancelled', dispatchApprovalId: null });
     expect(await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } })).toMatchObject({ status: 'rejected', error: TASK_STATUS_SAYS.cancelled, approvalId: null });
-    const entry = await db.auditEntry.findFirstOrThrow({ where: { correlationId: `task:${t.id}`, action: 'task.cancel' } });
+    // On record under its own name: it is not the signed cancellation, which is for a task that went out.
+    const entry = await db.auditEntry.findFirstOrThrow({ where: { correlationId: `task:${t.id}`, action: 'task.withdraw' } });
     expect(entry).toMatchObject({ actor: 'will:console', kind: 'action', outcome: 'ok' });
     expect(entry.inputs).toEqual({ taskId: t.id, why: 'will' });
+    expect(await db.auditEntry.count({ where: { correlationId: `task:${t.id}`, action: 'task.cancel' } })).toBe(0);
     // Done once; a task that is not there is said so.
     expect(await refusal(cancelTask(db, t.id))).toMatchObject({ status: 409, message: TASK_STATUS_SAYS.cancelled });
     expect(await refusal(cancelTask(db, 'tk0000000000000000'))).toMatchObject({ status: 404, message: TASK_SAYS.noTask });
@@ -182,7 +184,7 @@ describe.skipIf(NO_DB)('the Tasks panel’s writes and views on flint_test', () 
     expect(await row('active')).toMatchObject({ title: 'Watch a CI Run', about: 'wpf002/panel CI', status: 'proposed', line: 'It’s waiting for your approval.', runsOn: 'CI Watcher', outside: false, costs: false });
     expect(await row('finished')).toBeUndefined();
     expect(await open()).toMatchObject({
-      result: null, checks: [{ id: 'a1', name: 'CI Run Passed', state: 'waiting' }], checkedBy: null, askedBy: 'you', goalId: null, dueAt: null, chance: null, cost: null,
+      result: null, checks: [{ id: 'a1', name: 'CI Run Passed', state: 'waiting' }, { id: 'a2', name: 'Names Only Your Items', state: 'waiting' }], checkedBy: null, askedBy: 'you', goalId: null, dueAt: null, chance: null, cost: null,
       card: t.proposalId, can: { cancel: true, accept: false, reject: false },
     });
     await fx.signRun(t.proposalId);
@@ -196,19 +198,19 @@ describe.skipIf(NO_DB)('the Tasks panel’s writes and views on flint_test', () 
     await checkTaskJob({ db }, { taskId: t.id });
     const accept = (await fx.cardFor('task.check_bar', t.id))!;
     expect(await open()).toMatchObject({
-      status: 'checking', line: 'It passed its checks and is waiting for you.', checks: [{ id: 'a1', name: 'CI Run Passed', state: 'passed' }], checkedBy: 'rules',
+      status: 'checking', line: 'It passed its checks and is waiting for you.', checks: [{ id: 'a1', name: 'CI Run Passed', state: 'passed' }, { id: 'a2', name: 'Names Only Your Items', state: 'passed' }], checkedBy: 'rules',
       card: accept.id, can: { cancel: true, accept: false, reject: true },
     });
     await fx.signRun(accept.id);
     // Accepted on his own card: his answer, and final.
-    expect(await open()).toMatchObject({ status: 'accepted', line: 'It passed 1 of 1 check.', card: null, can: { cancel: false, accept: false, reject: false } });
+    expect(await open()).toMatchObject({ status: 'accepted', line: 'It passed 2 of 2 checks.', card: null, can: { cancel: false, accept: false, reject: false } });
     expect(await row('active')).toBeUndefined();
     expect(await row('finished')).toMatchObject({ status: 'accepted', about: 'wpf002/panel CI' });
 
     // One that failed its check: Flint rejected it, and Will may accept it anyway, once.
     const red = await fx.checked('wpf002/panel-red', 'failure');
     const failed = TaskAnswer.parse({ task: await taskView(db, red, 'UTC') }).task;
-    expect(failed).toMatchObject({ status: 'rejected', line: 'It failed 1 of 1 check.', result: 'The run failed.', checks: [{ id: 'a1', name: 'CI Run Passed', state: 'failed' }], can: { cancel: false, accept: true, reject: false } });
+    expect(failed).toMatchObject({ status: 'rejected', line: 'It failed 1 of 2 checks.', result: 'The run failed.', checks: [{ id: 'a1', name: 'CI Run Passed', state: 'failed' }, { id: 'a2', name: 'Names Only Your Items', state: 'passed' }], can: { cancel: false, accept: true, reject: false } });
     await fx.signRun((await overrideTask(db, red, 'accepted')).proposalId);
     expect(TaskAnswer.parse({ task: await taskView(db, red, 'UTC') }).task).toMatchObject({ status: 'accepted', line: 'You accepted it.', checkedBy: 'you', can: { accept: false, reject: false } });
     // A task about an item that was forgotten says nothing of it.

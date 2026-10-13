@@ -13,18 +13,23 @@
  *     the result is handed in: it names that result, and carries ids and
  *     counts only) until he promotes task.check_bar. Once he has, the proof
  *     and the acceptance are written here in one transaction.
- *  5. An accept card that did not run because he signed something newer about
- *     the task is asked for again, unless he has turned one down: of his cards
- *     about one task, only the latest acts.
+ *  5. An accept card that did not run (he signed something newer about the
+ *     task, a rule stopped it, the database refused it) is asked for again,
+ *     unless he has turned one down or let one lapse: of his cards about one
+ *     task, only the latest acts, and only his own answer ends the wait.
+ *  6. Accepting alone has a daily cap the code holds (the tier engine's
+ *     ALONE_CAPS). Past it, a passing result goes to him on a card like any
+ *     other.
  *
  * Checking runs in shadow at APPROVAL: it computes and files, and accepts
  * nothing on its own word. A rule that forbids task.check_bar stops it.
  */
 import { Prisma } from '@prisma/client';
-import { ACCEPT_TEMPLATE, Acceptance, TASKS_ORIGIN, TASK_SAYS, TaskSpec, evaluateChecks, resolveTier, runsInShadow, specItems, type CheckFinding } from '@flint/policy';
+import { ACCEPT_TEMPLATE, Acceptance, TASKS_ORIGIN, TaskSpec, evaluateChecks, resolveTier, runsInShadow, specItems, type Cap, type CheckFinding } from '@flint/policy';
 import type { Db } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
 import { activePolicies, createProposal } from '../governance/proposals.js';
+import { claim } from '../governance/counters.js';
 import { sqlState } from '../dbcodes.js';
 import { countsOf, endingCost, writeProof } from './card.js';
 import { taskLog } from './errors.js';
@@ -37,17 +42,28 @@ export const RULE_CHECKER = 'flint:rule';
 
 export interface CheckDeps {
   db: Db;
+  /** Will's time zone: the day the cap on accepting alone is counted in. */
+  tz?: string;
   now?: () => Date;
   log?: (msg: string) => void;
 }
 
 const RC = { maxWait: 10_000, timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted } as const;
 
-/** Where checking stands: promoted (Flint accepts a passing result itself), in shadow (it files the accept card), or stopped by a rule. */
-export async function checkStanding(db: Db, now: Date): Promise<'alone' | 'shadow' | 'stopped'> {
+export type Standing = 'alone' | 'shadow' | 'stopped';
+
+/**
+ * Where checking stands: promoted (Flint accepts a passing result itself, up
+ * to the day's cap), in shadow (it files the accept card), or stopped by a
+ * rule. Promoted always comes with a cap (the tier engine's own, which a rule
+ * of Will's can only lower); a reading without one is taken as shadow.
+ */
+export async function checkTier(db: Db, now: Date): Promise<{ standing: Standing; alone?: { key: string; cap: Cap } }> {
   const t = resolveTier('task.check_bar', { context: 'autonomous', tainted: false, policies: await activePolicies(db, now), now });
-  return t.tier === 'alone' ? 'alone' : t.tier === 'approval' && runsInShadow('task.check_bar') ? 'shadow' : 'stopped';
+  if (t.tier === 'alone' && t.cap) return { standing: 'alone', alone: { key: t.key, cap: t.cap } };
+  return { standing: t.tier === 'forbidden' || !runsInShadow('task.check_bar') ? 'stopped' : 'shadow' };
 }
+export const checkStanding = async (db: Db, now: Date): Promise<Standing> => (await checkTier(db, now)).standing;
 
 /** The accept card of a task that is waiting, approved or running, if there is one. */
 export async function liveAcceptCard(db: Db, taskId: string): Promise<string | undefined> {
@@ -60,15 +76,15 @@ export async function liveAcceptCard(db: Db, taskId: string): Promise<string | u
 
 /**
  * Has Will turned this task's accept card down, or let one lapse? That is his
- * answer for now: none is filed again. (One that failed because he signed
- * something newer about the task is not an answer about its result.)
+ * answer for now: none is filed again. Only those two count. A card that
+ * failed, for whatever reason (he signed something newer about the task, a
+ * rule of his stopped it after he approved it, the database refused it), is
+ * not an answer about the result: the task keeps waiting, and is offered to
+ * him again.
  */
 export async function acceptDeclined(db: Db, taskId: string): Promise<boolean> {
   const dead = await db.proposal.findFirst({
-    where: {
-      action: 'task.check_bar', args: { path: ['taskId'], equals: taskId },
-      OR: [{ status: { in: ['rejected', 'expired'] } }, { status: 'failed', NOT: { error: TASK_SAYS.superseded } }],
-    },
+    where: { action: 'task.check_bar', args: { path: ['taskId'], equals: taskId }, status: { in: ['rejected', 'expired'] } },
     select: { id: true },
   });
   return dead !== null;
@@ -82,7 +98,7 @@ export async function checkTaskJob(d: CheckDeps, job: TaskJob): Promise<CheckOut
   const now = d.now?.() ?? new Date();
   let task = await db.task.findUnique({ where: { id: job.taskId }, include: { asset: { select: { spends: true } }, output: true } });
   if (!task || (task.status !== 'submitted' && task.status !== 'checking')) return 'skipped';
-  const standing = await checkStanding(db, now);
+  const { standing, alone } = await checkTier(db, now);
   if (standing === 'stopped') return 'stopped';
   // A task whose result is not on record under the reference it was handed in with is not checked on a guess: it
   // fails, as unusable. (The database refuses to check one, too.)
@@ -131,26 +147,33 @@ export async function checkTaskJob(d: CheckDeps, job: TaskJob): Promise<CheckOut
     task = await db.task.findUnique({ where: { id: job.taskId }, include: { asset: { select: { spends: true } }, output: true } });
   }
   if (!task || task.status !== 'checking' || task.metBar !== true) return 'skipped';
-  return settle(d, task, standing, now);
+  return settle(d, task, alone, now);
 }
 
 type Passed = NonNullable<Awaited<ReturnType<Db['task']['findUnique']>>> & { asset: { spends: boolean } };
 
-/** A result that passed its bar: accepted here once Will has promoted that, otherwise offered to him on a card. */
-async function settle(d: CheckDeps, task: Passed, standing: 'alone' | 'shadow', now: Date): Promise<CheckOutcome> {
+/**
+ * A result that passed its bar: accepted here once Will has promoted that (and
+ * while the day's cap on accepting alone has room), otherwise offered to him
+ * on a card.
+ */
+async function settle(d: CheckDeps, task: Passed, alone: { key: string; cap: Cap } | undefined, now: Date): Promise<CheckOutcome> {
   const { db } = d;
   const counts = countsOf(task.barEvidence as CheckFinding[] | null);
-  if (standing === 'alone') {
+  if (alone) {
     try {
       const accepted = await db.$transaction(async (tx) => {
         const [row] = await tx.$queryRaw<Array<{ status: string }>>`SELECT status FROM "Task" WHERE id = ${task.id} FOR UPDATE`;
-        if (row?.status !== 'checking') return false;
+        if (row?.status !== 'checking') return 'moved' as const;
+        // One of the day's places for accepting alone, taken with the acceptance or not at all.
+        if ((await claim(tx, alone.key, alone.cap, d.tz ?? 'UTC', now)) === null) return 'capped' as const;
         const proof = await writeProof(tx, { taskId: task.id, action: 'task.check_bar', actor: TASKS_ORIGIN, context: 'autonomous', tier: 'alone', inputs: { checks: counts.total, met: counts.met, by: task.barCheckedBy } }, now);
         await tx.task.update({ where: { id: task.id }, data: { status: 'accepted', acceptedAuditId: proof, ...endingCost(task, task.asset.spends) } });
-        return true;
+        return 'accepted' as const;
       }, RC);
-      if (accepted) d.log?.(taskLog(task.id, 'accepted', 'alone'));
-      return accepted ? 'accepted' : 'skipped';
+      if (accepted === 'accepted') d.log?.(taskLog(task.id, 'accepted', 'alone'));
+      if (accepted !== 'capped') return accepted === 'accepted' ? 'accepted' : 'skipped';
+      // Past the cap, the result still reaches Will: on a card, like any other.
     } catch (err) {
       // The database holds accepting alone to its own reading of Will's policy rows. Where it is stricter
       // than the tier engine (a row with a scope), the result still reaches him: on a card.
@@ -158,7 +181,8 @@ async function settle(d: CheckDeps, task: Passed, standing: 'alone' | 'shadow', 
     }
   }
   if (await liveAcceptCard(db, task.id)) return 'waiting';
-  // One that Will turned down, or let expire, is his answer for now: it is not filed again (the tick ends the task).
+  // One that Will turned down, or let expire, is his answer for now: none is filed again (the tick ends the task).
+  // One that failed is no answer: a new one is filed.
   if (await acceptDeclined(db, task.id)) return 'waiting';
   // Filed now that the result is handed in (the database takes an accept card only if he signed it after that),
   // naming the result it accepts and that it met its bar.

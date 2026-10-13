@@ -129,7 +129,7 @@ export const P3C_SHADOW_DAYS = 14;
 export const NEVER_PROMOTED: ReadonlySet<string> = new Set([
   'runtime.frontier.complete', 'triage.rule.create', 'world.commitment.from_mail', ...GOAL_SIGNED_ACTIONS, 'nexus.remember_goal_decision',
   ...FORECAST_SIGNED_ACTIONS, ...PROPHET_ACTIONS,
-  'asset.enable', 'review.enforce', 'task.bar_override', PAID_DISPATCH, 'review.trident_panel', HIVE_DISPATCH,
+  'asset.enable', 'review.enforce', 'task.cancel', 'task.bar_override', PAID_DISPATCH, 'review.trident_panel', HIVE_DISPATCH,
 ]);
 
 export const PHASES_LIST = ['p1', 'p2', 'p25', 'p26', 'p3', 'p3c'] as const;

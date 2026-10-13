@@ -43,11 +43,13 @@ async function aboutOf(db: Db, t: Loaded, tz: string, now: Date): Promise<string
 }
 
 async function rowOf(db: Db, t: Loaded, waiting: Map<string, string>, tz: string, now: Date): Promise<Row> {
-  const checks = t.metBar === null ? null : countsOf(t.barEvidence);
+  // Once a task's details are cleared, what its checks found is gone with them: said, never counted as none.
+  const checksCleared = t.metBar !== null && t.barEvidence === null;
+  const checks = t.metBar === null || checksCleared ? null : countsOf(t.barEvidence);
   return {
     id: t.id, title: t.title, about: await aboutOf(db, t, tz, now), status: t.status as TaskStatus,
     line: taskLine({
-      status: t.status as TaskStatus, assetKind: t.asset.kind as AssetKind, failure: t.failure as TaskFailure | null, checks,
+      status: t.status as TaskStatus, assetKind: t.asset.kind as AssetKind, failure: t.failure as TaskFailure | null, checks, checksCleared,
       overridden: t.barCheckedBy === 'will', waitingForWill: waiting.has(t.id),
       // It passed its checks and still ended: only its accept card, turned down or left to lapse, ends a task that way.
       declined: t.status === 'failed' && t.failure === 'expired' && t.metBar === true,

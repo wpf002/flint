@@ -409,7 +409,7 @@ export function taskJobs(ctx: JobContext): JobSpec[] {
       handler: async (jobs) => {
         for (const job of jobs) {
           const data = TaskJob.safeParse(job.data);
-          if (data.success) await checkTaskJob({ db: ctx.db, log }, data.data);
+          if (data.success) await checkTaskJob({ db: ctx.db, tz: ctx.config.tz, log }, data.data);
         }
       },
     },

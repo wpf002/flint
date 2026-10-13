@@ -34,6 +34,7 @@ import { Refused, createProposal, rejectProposal } from '../governance/proposals
 import { ASSETS, assetFor, sameAsset, type AssetDef } from '../assets/registry.js';
 import { CONSOLE_ACTOR } from '../assets/service.js';
 import type { AdapterSet } from './adapters/types.js';
+import { WITHDRAW_ACTION } from './card.js';
 import { SAY, taskStatusWords } from './errors.js';
 import { ADAPTERS } from './run.js';
 
@@ -65,7 +66,7 @@ const audit = (db: Parameters<typeof appendAudit>[0], action: string, taskId: st
 async function cancelProposed(db: Db, id: string, why: string, now: Date): Promise<boolean> {
   return db.$transaction(async (tx) => {
     const r = await tx.task.updateMany({ where: { id, status: 'proposed' }, data: { status: 'cancelled' } });
-    if (r.count) await audit(tx, 'task.cancel', id, { why }, now);
+    if (r.count) await audit(tx, WITHDRAW_ACTION, id, { why }, now);
     return r.count > 0;
   }, RC);
 }

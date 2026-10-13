@@ -17,10 +17,15 @@
  * record, and is accepted only with its result and its own successful check on
  * record, on a card that names that result. Of two cards Will signed about the
  * same asset, task or gate, only the later one acts. The checks here come
- * first so that Will reads a sentence, not a refusal.
+ * first so that Will reads a sentence, not a refusal; when a later signature
+ * lands between a check here and the write, the database refuses the write and
+ * the card still fails with that sentence (runTaskCard asks again).
  *
  * A card whose subject he had Flint forget (its args are gone) does not run:
- * it fails with a sentence and no result.
+ * it fails with a sentence and no result. A dispatch's place under the day's
+ * cap is taken only once the dispatch is made: a card that is refused uses
+ * none. When a cancellation or an override runs, the task's other cards that
+ * were still waiting are set aside with a sentence.
  *
  * Results, audit entries, log lines and errors carry ids, classes and counts,
  * never a task's title, spec or result.
@@ -50,7 +55,7 @@ import type { z } from 'zod';
 import type { Db, Tx } from '../db.js';
 import { inTx, type Bus } from '../bus.js';
 import { appendAudit } from '../governance/audit.js';
-import { Refused, claimIn, completeIn, contextOf, type CreateProposal } from '../governance/proposals.js';
+import { Refused, claimCap, claimIn, completeIn, contextOf, type CreateProposal } from '../governance/proposals.js';
 import { dbRefused, failureOf, failureReport, schemaSkew, sqlState } from '../dbcodes.js';
 import { GoalFailure, sanitize } from '../goals/errors.js';
 import { failApproved } from '../goals/apply.js';
@@ -61,6 +66,13 @@ import { recordForecast } from './forecast.js';
 
 /** The queue a dispatched task's run is sent to. */
 export const RUN_QUEUE = 'tasks.run';
+/**
+ * The end of a task that never went out, as the audit trail names it: Will
+ * dropped it before its card ran, or its card was gone. It needs no signature
+ * (nothing went out), so it is never on record as `task.cancel`, which is his
+ * signed card for a task that did.
+ */
+export const WITHDRAW_ACTION = 'task.withdraw';
 
 export interface TaskCardDeps {
   /** True only while tasks and assets are switched on (FLINT_ASSETS=on); otherwise no card runs. */
@@ -70,11 +82,28 @@ export interface TaskCardDeps {
   /** The bus, to send a dispatched task's run in the card's own transaction; without it the tick sends it. */
   bus?: Pick<Bus, 'boss'> | undefined;
   /**
-   * A spending asset's dispatch asks for its money first (millionths of a
-   * dollar). No paid path is built, so there is nothing to ask: absent, the
-   * answer is no, and the card fails saying paid tasks are off.
+   * A spending asset's dispatch asks for its money first. No paid path is
+   * built, so there is nothing to ask: absent, the answer is no, and the card
+   * fails saying paid tasks are off.
    */
-  reserve?: (micros: number) => Promise<boolean>;
+  reserve?: Reserve;
+}
+
+/**
+ * Setting a paid task's money aside, by the card that sends it out. `take` is
+ * asked inside the dispatch's transaction, before anything is written, and is
+ * idempotent: asked again under the same key (a card run again after a fault)
+ * it answers as it did and sets nothing more aside. `release` gives back what a
+ * key holds, and nothing when it holds nothing; it is called whenever the
+ * dispatch did not happen (a refusal, a fault, the day's cap). When it cannot
+ * be told whether the dispatch happened, nothing is released: the same card's
+ * next run takes nothing more, and a reservation is never short of a task that
+ * went out.
+ */
+export interface Reserve {
+  /** `key` is the card's id; `micros` is millionths of a dollar. */
+  take(key: string, micros: number): Promise<boolean>;
+  release(key: string): Promise<void>;
 }
 
 /** A provenance ref on a card is an id: a proposal's provenance is kept for good. */
@@ -103,11 +132,20 @@ export function countsOf(evidence: unknown): { total: number; met: number } {
   return { total: rows.length, met: rows.filter((r) => r?.met === true).length };
 }
 
+/** Is the result a task was handed in with still on record, under the reference the task carries? */
+export async function outputOnRecord(db: Db | Tx, t: { id: string; outputRef: string | null }): Promise<boolean> {
+  if (!t.outputRef?.startsWith('out:')) return false;
+  const o = await db.taskOutput.findUnique({ where: { taskId: t.id }, select: { sha256: true } });
+  return o !== null && o.sha256.startsWith(t.outputRef.slice(4));
+}
+
 /**
  * Why Will cannot end a task against its check this way, or undefined. His
  * override corrects what Flint accepted or rejected by its checks; a result he
  * already decided himself (his accept card, an earlier override) is final, and
- * so is one whose forecast is scored.
+ * so is one whose forecast is scored. A task is accepted only with its result
+ * on record (the database holds that too), so once the result is no longer
+ * kept there is nothing left to accept.
  */
 export async function overrideProblem(db: Db | Tx, t: TaskRow, to: 'accepted' | 'rejected'): Promise<{ status: 400 | 409; say: string } | undefined> {
   if (!['checking', 'accepted', 'rejected'].includes(t.status)) return { status: 409, say: taskStatusWords(t.status) };
@@ -116,6 +154,7 @@ export async function overrideProblem(db: Db | Tx, t: TaskRow, to: 'accepted' | 
   if (t.barCheckedBy === 'will') return { status: 409, say: SAY.decided };
   if (await db.proposal.findFirst({ where: { action: 'task.check_bar', status: 'executed', args: { path: ['taskId'], equals: t.id } }, select: { id: true } })) return { status: 409, say: SAY.decided };
   if (t.predictionId && (await db.resolution.findUnique({ where: { predictionId: t.predictionId }, select: { id: true } }))) return { status: 409, say: SAY.scored };
+  if (to === 'accepted' && !(await outputOnRecord(db, t))) return { status: 409, say: SAY.outputGone };
   return undefined;
 }
 
@@ -247,6 +286,9 @@ interface ApplyContext {
   now: Date;
   tz: string;
   deps: TaskCardDeps;
+  hooks: TaskHooks;
+  /** The reservation this run asked for, by its key: set before the asking, so a fault while asking is covered too. */
+  held: { reservation?: string };
 }
 type Result = Record<string, string | number | boolean>;
 type Applied = { result: Result } | { refusal: string };
@@ -263,12 +305,52 @@ function signed<T extends z.ZodTypeAny>(schema: T, raw: unknown, ctx: ApplyConte
  * act (it records what each one was for as it is recorded); said here first, as
  * a sentence.
  */
-async function superseded(tx: Tx, approvalId: string, subject: string): Promise<boolean> {
+async function superseded(tx: Db | Tx, approvalId: string, subject: string, hooks: TaskHooks = {}): Promise<boolean> {
   const [row] = await tx.$queryRaw<Array<{ later: boolean }>>`
     SELECT EXISTS (
       SELECT 1 FROM "Approval" mine JOIN "Approval" other ON other."signedFor" = ${subject} AND (other."createdAt", other.id) > (mine."createdAt", mine.id)
       WHERE mine.id = ${approvalId}) AS later`;
+  if (row?.later !== true) await hooks.afterOrderCheck?.();
   return row?.later === true;
+}
+
+/** What a task or asset card is about, as the database records it with each signature: its asset, its gate or its task. */
+function subjectOf(action: string, args: unknown): string | undefined {
+  const a = args !== null && typeof args === 'object' ? (args as Record<string, unknown>) : {};
+  const named = (key: 'assetId' | 'gate' | 'taskId') => (typeof a[key] === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(a[key]) ? `${key}:${a[key]}` : undefined);
+  return action === 'asset.enable' ? named('assetId') : action === 'review.enforce' ? named('gate') : named('taskId');
+}
+
+/**
+ * An approved card the database would not carry out: has Will signed something
+ * newer about the same asset, task or gate? (A signature that landed after
+ * the executor's own look, and before its write.)
+ */
+async function signedOver(db: Db, id: string): Promise<boolean> {
+  const p = await db.proposal.findUnique({ where: { id }, select: { status: true, action: true, args: true, approvalId: true } });
+  const subject = p ? subjectOf(p.action, p.args) : undefined;
+  return !!p && p.status === 'approved' && !!p.approvalId && !!subject && superseded(db, p.approvalId, subject);
+}
+
+/**
+ * A task has ended by Will's own card (a cancellation, an override): his other
+ * cards about it that were still waiting are set aside, with a sentence, in
+ * the same transaction. None of them could act any more, and one left waiting
+ * would only be refused when he approved it.
+ */
+async function setAside(tx: Tx, taskId: string, own: string, actor: string, now: Date): Promise<number> {
+  const waiting = await tx.$queryRaw<Array<{ id: string; action: string; origin: string; argsDigest: string; tainted: boolean }>>`
+    SELECT id, action, origin, "argsDigest", tainted FROM "Proposal"
+    WHERE status = 'pending' AND id <> ${own} AND action LIKE 'task.%' AND args->>'taskId' = ${taskId}
+    ORDER BY id FOR UPDATE`;
+  for (const p of waiting) {
+    await tx.proposal.update({ where: { id: p.id }, data: { status: 'rejected', error: SAY.setAside } });
+    await appendAudit(tx, [{
+      actor, context: contextOf(p.origin), kind: 'rejection', action: p.action, decision: 'deny', outcome: 'denied',
+      inputs: { proposalId: p.id, argsDigest: p.argsDigest, why: 'set_aside', by: own }, correlationId: p.id, tainted: p.tainted,
+    }], now);
+  }
+  return waiting.length;
 }
 
 /** The task, locked for this transaction before anything of it is read or written. */
@@ -313,7 +395,7 @@ async function applyTask(tx: Tx, action: string, raw: unknown, ctx: ApplyContext
     if (row.enabled) return { refusal: SAY.nothing };
     const why = await enableProblem(tx, def);
     if (why) return { refusal: why };
-    if (await superseded(tx, approvalId, `assetId:${row.id}`)) return { refusal: SAY.superseded };
+    if (await superseded(tx, approvalId, `assetId:${row.id}`, ctx.hooks)) return { refusal: SAY.superseded };
     await tx.asset.update({ where: { id: row.id }, data: { enabled: true, approvalId } });
     return { result: { assetId: row.id, enabled: true } };
   }
@@ -324,7 +406,7 @@ async function applyTask(tx: Tx, action: string, raw: unknown, ctx: ApplyContext
     const [gate] = await tx.$queryRaw<Array<{ enforced: boolean }>>`SELECT enforced FROM "ReviewGate" WHERE id = ${args.gate} FOR UPDATE`;
     if (!gate || gate.enforced === args.enforced) return { refusal: SAY.nothing };
     if (args.enforced && !(await tx.asset.findFirst({ where: { kind: 'local_reviewer', enabled: true }, select: { id: true } }))) return { refusal: SAY.reviewerFirst };
-    if (await superseded(tx, approvalId, `gate:${args.gate}`)) return { refusal: SAY.superseded };
+    if (await superseded(tx, approvalId, `gate:${args.gate}`, ctx.hooks)) return { refusal: SAY.superseded };
     await tx.reviewGate.update({ where: { id: args.gate }, data: { enforced: args.enforced, approvalId } });
     return { result: { gate: args.gate, enforced: args.enforced } };
   }
@@ -338,9 +420,13 @@ async function applyTask(tx: Tx, action: string, raw: unknown, ctx: ApplyContext
     const asset = await tx.asset.findUnique({ where: { id: t.assetId } });
     if (!asset || asset.kind !== args.assetKind || asset.dispatchAction !== action || !sameTask(t, args)) return { refusal: SAY.changed };
     if (!asset.enabled) return { refusal: SAY.assetOff };
-    if (await superseded(tx, approvalId, `taskId:${t.id}`)) return { refusal: SAY.superseded };
-    // Money first: a spending asset's task goes out only once its amount is set aside.
-    if (asset.spends && !(await ctx.deps.reserve?.(args.estCostMicros))) return { refusal: SAY.paidOff };
+    if (await superseded(tx, approvalId, `taskId:${t.id}`, ctx.hooks)) return { refusal: SAY.superseded };
+    // Money first: a spending asset's task goes out only once its amount is set aside, under this card's id.
+    if (asset.spends) {
+      if (!ctx.deps.reserve) return { refusal: SAY.paidOff };
+      ctx.held.reservation = ctx.proposalId;
+      if (!(await ctx.deps.reserve.take(ctx.proposalId, args.estCostMicros))) return { refusal: SAY.paidOff };
+    }
     const forecast = await recordForecast(tx, { id: t.id, assetKind: asset.kind, template: args.spec.template, dueAt: t.dueAt }, ctx.tz, now);
     await tx.task.update({ where: { id: t.id }, data: { status: 'queued', dispatchApprovalId: approvalId, predictionId: forecast.id } });
     // Its run, in this transaction: it is sent, or the dispatch is not made. (Without a bus, the tick sends it.)
@@ -356,7 +442,7 @@ async function applyTask(tx: Tx, action: string, raw: unknown, ctx: ApplyContext
     if (t.status !== 'checking') return { refusal: taskStatusWords(t.status) };
     const counts = countsOf(t.barEvidence);
     if (t.metBar !== true || t.outputRef !== args.outputRef || t.barCheckedBy !== args.by || counts.total !== args.checks || counts.met !== args.met) return { refusal: SAY.changed };
-    if (await superseded(tx, approvalId, `taskId:${t.id}`)) return { refusal: SAY.superseded };
+    if (await superseded(tx, approvalId, `taskId:${t.id}`, ctx.hooks)) return { refusal: SAY.superseded };
     const asset = await tx.asset.findUniqueOrThrow({ where: { id: t.assetId }, select: { spends: true } });
     const proof = await writeProof(tx, { taskId: t.id, action: 'task.check_bar', actor: ctx.actor, context: 'console', tier: 'approval', inputs: { proposalId: ctx.proposalId, approvalId, checks: counts.total, met: counts.met, by: args.by } }, now);
     await tx.task.update({ where: { id: t.id }, data: { status: 'accepted', acceptedAuditId: proof, ...endingCost(t, asset.spends) } });
@@ -370,9 +456,10 @@ async function applyTask(tx: Tx, action: string, raw: unknown, ctx: ApplyContext
     const t = await lockTask(tx, args.taskId);
     if (!t) return { refusal: SAY.noTask };
     if (!STILL_OUT.includes(t.status)) return { refusal: taskStatusWords(t.status) };
-    if (await superseded(tx, approvalId, `taskId:${t.id}`)) return { refusal: SAY.superseded };
+    if (await superseded(tx, approvalId, `taskId:${t.id}`, ctx.hooks)) return { refusal: SAY.superseded };
     const asset = await tx.asset.findUniqueOrThrow({ where: { id: t.assetId }, select: { spends: true } });
     await tx.task.update({ where: { id: t.id }, data: { status: 'cancelled', ...endingCost(t, asset.spends) } });
+    await setAside(tx, t.id, ctx.proposalId, ctx.actor, now);
     return { result: { taskId: t.id, cancelled: true } };
   }
 
@@ -383,18 +470,24 @@ async function applyTask(tx: Tx, action: string, raw: unknown, ctx: ApplyContext
   if (!t) return { refusal: SAY.noTask };
   const why = await overrideProblem(tx, t, args.to);
   if (why) return { refusal: why.say };
-  if (await superseded(tx, approvalId, `taskId:${t.id}`)) return { refusal: SAY.superseded };
+  if (await superseded(tx, approvalId, `taskId:${t.id}`, ctx.hooks)) return { refusal: SAY.superseded };
   const asset = await tx.asset.findUniqueOrThrow({ where: { id: t.assetId }, select: { spends: true } });
   // Accepted by his word: the proof is his override, on record. (A proof a task already has is kept: it is set once.)
   const proof = args.to === 'accepted' && t.acceptedAuditId === null
     ? await writeProof(tx, { taskId: t.id, action: 'task.bar_override', actor: ctx.actor, context: 'console', tier: 'approval', inputs: { proposalId: ctx.proposalId, approvalId, to: args.to } }, now)
     : undefined;
   await tx.task.update({ where: { id: t.id }, data: { status: args.to, barCheckedBy: 'will', ...(proof ? { acceptedAuditId: proof } : {}), ...endingCost(t, asset.spends) } });
+  await setAside(tx, t.id, ctx.proposalId, ctx.actor, now);
   return { result: { taskId: t.id, to: args.to } };
 }
 
-/** Why a card is not one this executor runs as it stands, or undefined: who filed it, as what kind, under which template. */
-function cardProblem(action: string, p: { origin: string; templateId: string | null; kind: string; tainted: boolean }): string | undefined {
+/**
+ * Why a card is not one this executor runs as it stands, or undefined: who
+ * filed it, as what kind, under which template. (The claim before it has
+ * already refused a card from chat by its tier; this holds whatever the tier
+ * engine says.)
+ */
+export function cardProblem(action: string, p: { origin: string; templateId: string | null; kind: string; tainted: boolean }): string | undefined {
   const context = contextOf(p.origin);
   if (context === 'chat') return SAY.fromConsole;
   if (action === 'task.check_bar') return p.origin === TASKS_ORIGIN && p.templateId === ACCEPT_TEMPLATE && p.kind === 'task' && !p.tainted ? undefined : SAY.flintFiles;
@@ -416,20 +509,33 @@ async function completeForgotten(tx: Tx, id: string, actor: string, now: Date): 
   }], now);
 }
 
-/** Test seams: a fault injected after the writes, before the card completes. */
+/**
+ * Test seams: a fault injected after the writes, before the card completes;
+ * and the moment between the executor's look for a later signature and its
+ * write, where a signature of Will's can still land.
+ */
 export interface TaskHooks {
   afterWrites?: (tx: Tx) => Promise<void>;
+  afterOrderCheck?: () => Promise<void>;
 }
 
 /**
  * Claim, apply and complete one approved task or asset card, in one
- * transaction. A refusal fails the card with a sentence; any other error rolls
- * everything back, leaving the card approved, and is rethrown as its class and
- * SQLSTATE. While tasks are switched off no card runs, and it stays approved.
+ * transaction. A refusal fails the card with a sentence, and uses none of the
+ * day's cap: the cap is taken last, once the change is made, and when it is
+ * reached everything rolls back and the card stays approved. Any other error
+ * rolls everything back too, leaving the card approved, and is rethrown as its
+ * class and SQLSTATE. While tasks are switched off no card runs, and it stays
+ * approved.
  */
 export async function runTask(db: Db, id: string, rp: WebAuthnRelyingParty | undefined, tz: string, actor: string, deps: TaskCardDeps = {}, hooks: TaskHooks = {}): Promise<Result> {
   if (deps.assets !== true) throw new Refused(409, SAY.off);
   const now = new Date();
+  const held: ApplyContext['held'] = {};
+  /** Give back what this run set aside. Never throws: a release that fails leaves the key held, and the next run takes nothing more. */
+  const release = async () => {
+    if (held.reservation) await deps.reserve?.release(held.reservation).catch(() => {});
+  };
   let out: { refused: Refused } | { done: Result };
   try {
     out = await db.$transaction(
@@ -441,7 +547,7 @@ export async function runTask(db: Db, id: string, rp: WebAuthnRelyingParty | und
           await completeForgotten(tx, id, actor, now);
           return { refused: new Refused(409, SAY.forgotten) };
         }
-        const c = await claimIn(tx, id, rp, tz, actor, now);
+        const c = await claimIn(tx, id, rp, tz, actor, now, { deferCap: true });
         if ('refused' in c) return c;
         const p = await tx.proposal.findUniqueOrThrow({ where: { id }, select: { approvalId: true, origin: true, templateId: true, kind: true, tainted: true } });
         const r: Applied = !isTaskCard(c.claimed.action)
@@ -450,12 +556,15 @@ export async function runTask(db: Db, id: string, rp: WebAuthnRelyingParty | und
               const why = cardProblem(c.claimed.action, p);
               if (why) return { refusal: why };
               await tx.$queryRaw`SELECT set_config('flint.actor', ${`will:approval:${p.approvalId}`}, true)`;
-              return applyTask(tx, c.claimed.action, c.claimed.args, { proposalId: id, approvalId: p.approvalId!, argsDigest: c.claimed.argsDigest, actor, now, tz, deps });
+              return applyTask(tx, c.claimed.action, c.claimed.args, { proposalId: id, approvalId: p.approvalId!, argsDigest: c.claimed.argsDigest, actor, now, tz, deps, hooks, held });
             })();
         if ('refusal' in r) {
           await completeIn(tx, id, { ok: false, error: r.refusal }, actor, now);
           return { refused: new Refused(409, r.refusal) };
         }
+        // A dispatch's place under the day's cap, now that it is made (a refusal above took none). Only a
+        // dispatch has one: the cap on accepting counts what Flint accepts alone, never a card Will signed.
+        if (c.cap && isTaskDispatch(c.claimed.action)) await claimCap(tx, c.cap, tz, now);
         await hooks.afterWrites?.(tx);
         await completeIn(tx, id, { ok: true, result: r.result }, actor, now);
         return { done: r.result };
@@ -464,9 +573,18 @@ export async function runTask(db: Db, id: string, rp: WebAuthnRelyingParty | und
       { maxWait: 10_000, timeout: 30_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
     );
   } catch (err) {
+    // Nothing was changed, unless the failure was the commit's own and it cannot be told: only a card that is
+    // known not to have run gives its reservation back.
+    if (held.reservation) {
+      const ran = await db.proposal.findUnique({ where: { id }, select: { status: true } }).then((p) => p?.status === 'executed', () => undefined);
+      if (ran === false) await release();
+    }
     throw sanitize(err);
   }
-  if ('refused' in out) throw out.refused;
+  if ('refused' in out) {
+    await release();
+    throw out.refused;
+  }
   return out.done;
 }
 
@@ -477,12 +595,22 @@ export async function runTask(db: Db, id: string, rp: WebAuthnRelyingParty | und
  * When the database refused the change itself, the card fails, saying so with
  * the reference only; after anything else (a lost connection, a crash, a
  * schema the code does not expect yet) it stays approved, to run again.
+ *
+ * One refusal of the database's has a sentence of its own: Will signed
+ * something newer about the same asset, task or gate after the executor
+ * looked and before it wrote. The executor asks again, and when that is so the
+ * card fails as it would have a moment earlier, with that sentence.
  */
 export async function runTaskCard(db: Db, id: string, rp: WebAuthnRelyingParty | undefined, tz: string, actor: string, deps: TaskCardDeps = {}, hooks: TaskHooks = {}): Promise<Result> {
   try {
     return await runTask(db, id, rp, tz, actor, deps, hooks);
   } catch (err) {
     if (err instanceof Refused) throw err;
+    const refusedAsUnsigned = (err instanceof GoalFailure ? err.code : sqlState(err)) === '42501';
+    if (refusedAsUnsigned && (await signedOver(db, id).catch(() => false))) {
+      await failApproved(db, id, SAY.superseded, 'superseded', actor);
+      throw new Refused(409, SAY.superseded);
+    }
     const ref = `err${Date.now().toString(36)}`;
     const failure = failureOf(err);
     console.error(`[runtime] ${ref} running proposal ${id} failed: ${failureReport(err)}`);

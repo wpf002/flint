@@ -4,10 +4,14 @@
  * refuses a dispatch without it), and scored once the task has ended.
  *
  * The probability is a base rate, not a model's: how often tasks of the same
- * template on the same kind of asset were accepted in the last 90 days, with
- * one imagined success and one imagined failure added, kept within 5% and 95%
- * (Flint never claims certainty). With no history it is 50%. Its claim names
- * the task only by ref (task#<last 6 of its id>); its evidence cites counts.
+ * template on the same kind of asset were accepted, among those that ended in
+ * the last 90 days and still say their template (retention clears a task's
+ * details 30 days after it ended, 7 for a personal, financial or tainted one,
+ * and a cleared task is not counted), with one imagined success and one
+ * imagined failure added, kept within 5% and 95% (Flint never claims
+ * certainty). With no history it is 50%. Its claim names the task only by ref
+ * (task#<last 6 of its id>); its evidence cites the counts and says which
+ * tasks they are of.
  * It is counted under its own counter and never claims the 50 a day chat's and
  * triage's predictions share.
  *
@@ -48,6 +52,10 @@ export function meetsBarProbability(accepted: number, n: number): number {
   return Math.round(Math.min(0.95, Math.max(0.05, p)) * 100) / 100;
 }
 
+/** What the evidence says the counts are of: the tasks the base rate really read, not the whole 90 days. */
+export const baseRateNote = (accepted: number, n: number): string =>
+  `${accepted} of ${n} like it were accepted, among those that ended in the last 90 days and whose details are still kept`;
+
 /** When the forecast resolves: the task's due time (a day from now without one) and the time to settle after it. */
 export function forecastResolveBy(dueAt: Date | null, now: Date): Date {
   return new Date(Math.max(dueAt?.getTime() ?? 0, now.getTime() + DAY) + SETTLE_MS);
@@ -76,7 +84,7 @@ export async function recordForecast(
     {
       template: { id: 'task_meets_bar', params: { task: ref, by: localDay(tz, resolveBy) } },
       kind: 'binary', probability, method: 'base_rate', domain: TASK_FORECAST.domain, type: TASK_FORECAST.type,
-      evidence: [{ kind: 'base_rate', ref: MEETS_BAR_RULE, note: `${accepted} of ${n} like it were accepted in the last 90 days` }],
+      evidence: [{ kind: 'base_rate', ref: MEETS_BAR_RULE, note: baseRateNote(accepted, n) }],
       resolutionCriteria: `True if ${ref} ends accepted. False if it ends rejected or failed.`,
       resolver: 'auto_world', resolverSpec: { taskId: task.id, rule: TASK_FORECAST_RULE },
       resolveBy: resolveBy.toISOString(), tainted: false,

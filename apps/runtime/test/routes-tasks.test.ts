@@ -16,7 +16,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createHash } from 'node:crypto';
-import { AssetsPage, GOAL_SAYS, PAID_DISPATCH, TASK_SAYS, TASK_SIGNED_ACTIONS, TASK_STATUS_SAYS, TaskAnswer, TaskCardFiled, TaskFiled, TasksPage } from '@flint/policy';
+import { AssetsPage, GOAL_SAYS, PAID_DISPATCH, TASK_SAYS, TASK_SIGNED_ACTIONS, TASK_STATUS_SAYS, TaskAnswer, TaskCardFiled, TaskFiled, TasksPage, digestOf } from '@flint/policy';
 import { buildApp, type RuntimeStatus } from '../src/app';
 import type { RuntimeScope } from '../src/config';
 import { createDb, type Db } from '../src/db';
@@ -24,7 +24,7 @@ import { SPEND_NEEDS_ESTIMATE, WHOLE_NUMBERS_ONLY } from '../src/governance/prop
 import { CI_WATCHER } from '../src/assets/registry';
 import { checkTaskJob } from '../src/tasks/check';
 import { runTaskJob } from '../src/tasks/run';
-import { NO_DB, freshDb, type TestUrls } from './db';
+import { NO_DB, freshDb, id, withClient, type TestUrls } from './db';
 import { FakeBus, draft, taskFixture, type TaskFixture } from './tasks/fixture';
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -134,10 +134,13 @@ describe('the task routes, before the database', () => {
         expect((await h.call(method, url, body, null)).statusCode, `${method} ${url}`).toBe(401);
         expect((await h.call(method, url, body, MCP)).statusCode, `${method} ${url}`).toBe(403);
       }
-      for (const action of [...TASK_SIGNED_ACTIONS, PAID_DISPATCH]) {
-        const r = await h.call('POST', '/v1/proposals', { kind: 'task', origin: 'console', action, args: { taskId: TASK }, argsProvenance: {} });
-        expect(r.statusCode, action).toBe(409);
-        expect(r.json()).toEqual({ error: TASK_SAYS.off });
+      // Nor a card under any other name of a task, an asset or a review, or the Hive's dispatch.
+      for (const action of [...TASK_SIGNED_ACTIONS, PAID_DISPATCH, 'task.note', 'review.local', 'review.trident_panel', 'asset.disable', 'hive.dispatch_job']) {
+        for (const origin of ['console', 'chat:turn-1']) {
+          const r = await h.call('POST', '/v1/proposals', { kind: 'task', origin, action, args: { taskId: TASK }, argsProvenance: {} });
+          expect(r.statusCode, `${action} from ${origin}`).toBe(409);
+          expect(r.json()).toEqual({ error: TASK_SAYS.off });
+        }
       }
       expect(h.lines.join('\n')).not.toContain(CANARY);
       expect(h.lines.some((l) => l.includes('task route refused'))).toBe(false);
@@ -278,5 +281,77 @@ describe.skipIf(NO_DB)('the task routes on flint_test', () => {
     expect(await ok('POST', `/v1/assets/${CI_WATCHER.id}/off`, {})).toEqual({ ok: true });
     const late = await h.call('POST', `/v1/proposals/${t.proposalId}/run`, {});
     expect([late.statusCode, late.json()]).toEqual([409, { error: TASK_SAYS.assetOff }]);
+  });
+
+  it('no card about a task, an asset or a review is a caller’s to claim or to report done; from chat no such name is filed; and chat’s token is handed no task’s forecast', async () => {
+    await fx.watcherOn();
+    const NOT_YET = { error: 'Flint can’t carry this out yet.' };
+    const card = (pid: string) => db.proposal.findUniqueOrThrow({ where: { id: pid }, select: { status: true, result: true } });
+    // A Hive dispatch from the console is an ordinary card that waits for Will. Signed, it is still nobody's to
+    // claim: nothing carries it out, and reported done it would say whatever the caller said.
+    const hive = await h.call('POST', '/v1/proposals', { kind: 'tool_call', origin: 'console', action: 'hive.dispatch_job', args: { pool: 'research', job: 'index' }, argsProvenance: {} });
+    expect(hive.statusCode).toBe(201);
+    const hiveId = (hive.json() as { id: string }).id;
+    await ok('POST', `/v1/proposals/${hiveId}/approve`, { approvalId: await fx.sign(hiveId) });
+    // Other names, written straight into the table as a caller with the database might: a dispatch that spends, a
+    // review, and a name Flint does not know.
+    const t = TaskFiled.parse(await ok('POST', '/v1/tasks', { draftKey: draft(), template: 'watch_ci', params: { item: await fx.ciRun('wpf002/http-claim') } }));
+    const args = (await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } })).args as Record<string, unknown>;
+    const planted = async (action: string, a: Record<string, unknown>, kind = 'task'): Promise<string> => {
+      const pid = id('pr');
+      await withClient(urls.app, (c) => c.query(
+        `INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", tainted, sensitivity, consequential, "estCostUsd", "expiresAt")
+         VALUES ($1, $2, 'console', $3, $4::jsonb, $5, '{}'::jsonb, false, 'ops', $6, $7, now() + interval '1 hour')`,
+        [pid, kind, action, JSON.stringify(a), digestOf(a), kind === 'spend', kind === 'spend' ? 0.25 : null],
+      ));
+      return pid;
+    };
+    const others = [await planted('review.local', { taskId: t.id }), await planted('review.trident_panel', { taskId: t.id }), await planted('task.note', { taskId: t.id }), await planted('asset.disable', { assetId: CI_WATCHER.id })];
+    for (const pid of [hiveId, ...others]) {
+      const before = await card(pid);
+      const claim = await h.call('POST', `/v1/proposals/${pid}/claim`, {});
+      expect([claim.statusCode, claim.json()], pid).toEqual([409, NOT_YET]);
+      const done = await h.call('POST', `/v1/proposals/${pid}/complete`, { ok: true, result: { anything: 'a caller says' } });
+      expect([done.statusCode, done.json()], pid).toEqual([409, NOT_YET]);
+      expect(await card(pid)).toEqual(before);
+    }
+    expect(await card(hiveId)).toEqual({ status: 'approved', result: null });
+    // One of the seven is the runtime's own: reporting it done is refused too, as claiming it is.
+    for (const step of ['claim', 'complete']) {
+      const r = await h.call('POST', `/v1/proposals/${t.proposalId}/${step}`, step === 'complete' ? { ok: true, result: { taskId: t.id } } : {});
+      expect([r.statusCode, r.json()], step).toEqual([409, { error: 'task.dispatch.ci_runner is carried out by the runtime: use /run' }]);
+    }
+    expect(await fx.task(t.id)).toMatchObject({ status: 'proposed' });
+    // A card of any other kind is claimed and reported as before.
+    const other = await h.call('POST', '/v1/proposals', { kind: 'tool_call', origin: 'console', action: 'mcp:web.fetch_url', args: { url: 'https://example.com/' }, argsProvenance: {} });
+    const otherId = (other.json() as { id: string }).id;
+    await ok('POST', `/v1/proposals/${otherId}/approve`, { approvalId: await fx.sign(otherId) });
+    expect((await h.call('POST', `/v1/proposals/${otherId}/claim`, {})).statusCode).toBe(200);
+    expect((await h.call('POST', `/v1/proposals/${otherId}/complete`, { ok: true, result: { status: 200 } })).statusCode).toBe(200);
+
+    // From chat, no name of a task, an asset or a review is filed, known or not: in a sentence, and nothing is written.
+    const names = ['task.note', 'task.cancel.v2', 'review.local', 'review.trident_panel', 'asset.disable', 'asset.enable.v2', 'hive.dispatch_job'];
+    const filed = () => db.proposal.count({ where: { origin: { startsWith: 'chat:' } } });
+    const chatBefore = await filed();
+    for (const action of names) {
+      const r = await h.call('POST', '/v1/proposals', { kind: 'tool_call', origin: 'chat:turn-7', action, args: { taskId: t.id, pool: 'research' }, argsProvenance: {} });
+      expect([r.statusCode, r.json()], action).toEqual([409, { error: TASK_SAYS.fromConsole }]);
+    }
+    expect(await filed()).toBe(chatBefore);
+
+    // A task that went out has a forecast on record, open. Chat's token reads open predictions, and is handed
+    // none of a task's: not its row, and so not its task's id.
+    await signRun(t.proposalId);
+    const forecast = await db.prediction.findFirstOrThrow({ where: { createdBy: 'runtime:tasks', status: 'open', resolverSpec: { path: ['taskId'], equals: t.id } } });
+    const mine = (await ok('POST', '/v1/ledger/predictions', { claim: 'the deploy finishes today', probability: 0.7, domain: 'assets', type: 'event_occurs', resolutionCriteria: 'Will says whether it did.', resolveBy: new Date(Date.now() + 86_400_000).toISOString(), method: 'model_reasoning', resolver: 'will', evidence: [], tainted: false })) as { id: string };
+    for (const token of [MCP, SERVER]) {
+      const open = await h.call('GET', '/v1/ledger/open?limit=200', undefined, token);
+      expect(open.statusCode).toBe(200);
+      const rows = (open.json() as { predictions: Array<{ id: string; createdBy: string; type: string }> }).predictions;
+      expect(rows.some((p) => p.id === mine.id), 'an ordinary prediction in the assets domain is listed').toBe(true);
+      expect(rows.filter((p) => p.createdBy === 'runtime:tasks' || p.type === 'task_meets_bar')).toEqual([]);
+      expect(open.body).not.toContain(forecast.id);
+      expect(open.body).not.toContain(t.id);
+    }
   });
 });
