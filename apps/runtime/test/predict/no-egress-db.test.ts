@@ -2,7 +2,7 @@
  * The night's prediction jobs with the network taken away (P4 part 3; review
  * finding 10). The static test (no-egress.test.ts) reads the files as text,
  * which cannot see a fetch built from pieces, an import decided at run time, or
- * a call inside a helper those files use. This one runs the four jobs as the
+ * a call inside a helper those files use. This one runs the prediction jobs as the
  * runtime runs them, in the night's order, on flint_test, with:
  *
  *  - Node's net, tls, http, https and dns made to throw (and fetch with them),

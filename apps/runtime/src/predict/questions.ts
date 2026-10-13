@@ -133,15 +133,15 @@ const TEMPLATED: ReadonlyArray<readonly [RegExp, 'healthy' | 'deploy' | 'closed'
 const THRESHOLD = /^([a-z0-9_]+(?:\.[a-z0-9_-]+)+) is (above|below) (-?\d+(?:\.\d+)?(?:e[+-]?\d+)?) at the resolve time$/;
 
 /**
- * A prediction as the panel says it. One made from Flint's own reading is in
- * its own words. One made from outside text was stored as a fixed template
- * around an item's ref or a series' key (never free text): it is said in fixed
- * words around the item's own label or the number's name, and when neither can
- * be named, only as a prediction Flint made in a chat. A ref or a key is never
- * shown.
+ * A prediction as the panel says it. Chat records one in its own words, or as a
+ * fixed template around an item's ref or a series' key (always a template when
+ * the turn read outside text). A template is said in fixed words around the
+ * item's own label or the number's name, so a ref or a key is never shown; its
+ * own words are shown as they are. One made from outside text whose template
+ * cannot be named (its item is gone, or is a person) is said only as a
+ * prediction Flint made in a chat: never in words that could be a stranger's.
  */
 async function titleOf(db: Db, p: { claim: string; tainted: boolean }, tz: string, now: Date): Promise<string> {
-  if (!p.tainted) return p.claim.replace(/\s+/g, ' ').trim().slice(0, 300) || PANEL.outsideClaim;
   for (const [shape, kind] of TEMPLATED) {
     const m = p.claim.match(shape);
     if (!m) continue;
@@ -150,9 +150,12 @@ async function titleOf(db: Db, p: { claim: string; tainted: boolean }, tz: strin
     return found.length === 1 ? templatedClaim(kind, await labelFor(db, found[0]!, tz, now)).slice(0, 300) : PANEL.outsideClaim;
   }
   const t = p.claim.match(THRESHOLD);
-  const def = t ? forecastSeries(t[1]!) : undefined;
-  if (t && def && Number.isFinite(Number(t[3]))) return thresholdClaim(def.name, t[2] as 'above' | 'below', Number(t[3]), def.unit as ForecastUnit);
-  return PANEL.outsideClaim;
+  if (t) {
+    const def = forecastSeries(t[1]!);
+    return def && Number.isFinite(Number(t[3])) ? thresholdClaim(def.name, t[2] as 'above' | 'below', Number(t[3]), def.unit as ForecastUnit) : PANEL.outsideClaim;
+  }
+  if (p.tainted) return PANEL.outsideClaim;
+  return p.claim.replace(/\s+/g, ' ').trim().slice(0, 300) || PANEL.outsideClaim;
 }
 
 /** The Questions tab: what waits for Will, oldest first, and the latest he answered. */

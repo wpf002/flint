@@ -620,9 +620,9 @@ describe('turning predictions on', () => {
     await settle();
     expect(title()).toBe('Predictions');
     expect(calls).toEqual([{ url: '/predictions', method: 'GET', body: undefined }]);
-    expect(said()).toEqual(['Predictions are on. Flint makes its first forecasts tonight.', 'res ok']);
+    expect(said()).toEqual(['Approved. Flint starts keeping these numbers tonight.', 'res ok']);
     expect(headers()).toEqual(['Today', 'This Week']);
-    ownWords([], ['Predictions are on. Flint makes its first forecasts tonight.', 'Flint is waiting for your approval.']);
+    ownWords([], ['Approved. Flint starts keeping these numbers tonight.', 'Flint is waiting for your approval.']);
   });
 
   it('a cancelled prompt, Not Now, a card that has not run and a failure are each said; the card stays where it was', async () => {

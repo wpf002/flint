@@ -356,7 +356,9 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     const healthy = await wills(4 * HOUR, { tainted: true, probability: 0.4, claim: `service#${service.slice(-6)} reports healthy at the resolve time` });
     const above = await wills(3 * HOUR, { tainted: true, probability: 0.2, claim: `${DEPLOYS} is above 4 at the resolve time` });
     const gone = await wills(2 * HOUR, { tainted: true, claim: 'service#zzzzzz reports healthy at the resolve time' });
-    expect(await askQuestions(k.db, { tz: TZ })).toMatchObject({ asked: 4, shadow: true });
+    // A template chat chose on its own (no outside text) is said the same way: a ref or a key never reaches the screen.
+    const closed = await wills(HOUR, { tainted: false, probability: 0.9, claim: `service#${service.slice(-6)} is closed by the resolve time` });
+    expect(await askQuestions(k.db, { tz: TZ })).toMatchObject({ asked: 5, shadow: true });
 
     const made = (pid: string) => k.db.prediction.findUniqueOrThrow({ where: { id: pid }, select: { createdAt: true, resolveBy: true } });
     const before = QuestionsPage.parse((await call('GET', '/v1/predictions/questions')).body);
@@ -368,13 +370,14 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
       { id: healthy, title: `${serviceName} reports healthy.`, says: `Flint said somewhat unlikely, around 40%, on ${dayWords((await made(healthy)).createdAt, TZ, now)}.`, answer: null },
       { id: above, title: 'Deploys is above 4.', says: `Flint said unlikely, around 20%, on ${dayWords((await made(above)).createdAt, TZ, now)}.`, answer: null },
       { id: gone, title: 'Flint made this prediction in a chat.', says: `Flint said likely, around 70%, on ${dayWords((await made(gone)).createdAt, TZ, now)}.`, answer: null },
+      { id: closed, title: `${serviceName} is closed.`, says: `Flint said very likely, around 90%, on ${dayWords((await made(closed)).createdAt, TZ, now)}.`, answer: null },
     ]);
     for (const q of before.waiting) {
       expect(q.title).not.toMatch(/#|daily\.|at the resolve time/);
       expect(noteProblems('Predictions', q.says), q.says).toEqual([]);
     }
     // In shadow they wait in the panel, counted, and nothing announces them.
-    expect(await page()).toMatchObject({ questions: 4, announce: false });
+    expect(await page()).toMatchObject({ questions: 5, announce: false });
 
     // The database takes no result as Will's without his answer, whoever says it is his.
     const ownDue = (await made(own)).resolveBy;
@@ -394,8 +397,8 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     expect([skip.status, skip.body]).toEqual([200, { ok: true }]);
     expect(await k.resolution(healthy)).toBeUndefined();
     expect(await k.status(healthy)).toBe('open');
-    const stored = (await k.owner(`SELECT "predictionId", answer, "answeredAt" FROM "PredictionQuestion" WHERE "predictionId" = ANY($1)`, [[own, above, healthy, gone]])).rows;
-    expect(Object.fromEntries(stored.map((r) => [r.predictionId, r.answer]))).toEqual({ [own]: 'yes', [above]: 'no', [healthy]: 'skip', [gone]: null });
+    const stored = (await k.owner(`SELECT "predictionId", answer, "answeredAt" FROM "PredictionQuestion" WHERE "predictionId" = ANY($1)`, [[own, above, healthy, gone, closed]])).rows;
+    expect(Object.fromEntries(stored.map((r) => [r.predictionId, r.answer]))).toEqual({ [own]: 'yes', [above]: 'no', [healthy]: 'skip', [gone]: null, [closed]: null });
     for (const r of stored.filter((x) => x.answer)) expect(Math.abs((r.answeredAt as Date).getTime() - Date.now())).toBeLessThan(MIN);
 
     // Once: a second answer, the same or another, is refused, and nothing changes.
@@ -422,14 +425,14 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     ]);
     expect(JSON.stringify(entries)).not.toContain(WORDS);
 
-    // The list now: one still waits, and the three he answered say what he said, newest first.
+    // The list now: two still wait, and the three he answered say what he said, newest first.
     const after = QuestionsPage.parse((await call('GET', '/v1/predictions/questions')).body);
-    expect(after.waiting.map((q) => q.id)).toEqual([gone]);
+    expect(after.waiting.map((q) => q.id)).toEqual([gone, closed]);
     const today = dayWords(new Date(), TZ, new Date());
     expect(after.answered.map((q) => [q.id, q.answer, q.says])).toEqual([
       [healthy, 'skip', `You skipped it on ${today}.`], [above, 'no', `You said no on ${today}.`], [own, 'yes', `You said yes on ${today}.`],
     ]);
-    expect((await page()).questions).toBe(1);
+    expect((await page()).questions).toBe(2);
   });
 
   it('how Flint has done: the night\'s scores by area, in sentences; "not enough" below thirty; what was left unsettled', async () => {
