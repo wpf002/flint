@@ -29,6 +29,9 @@
  *    main model's name re-pointed while Flint runs (N1, N5, N9);
  *  - `helper`: the local model on this Mac and OLLAMA_HOST on another machine
  *    that FLINT_LOCAL_ALLOW_REMOTE does not vouch for (N2).
+ * And one more, started later on the `modes` server's own HOME once that one has
+ * stopped (`again`): the same Mac restarted with goals from chat switched on,
+ * mining the turns the first run really took in Local mode and with Local Only.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { statSync } from 'node:fs';
@@ -37,6 +40,7 @@ import { ROUTE_FIELDS } from '../../src/route-log';
 import { HISTORY_GAP } from '../../src/goals-now';
 import { PRIVATE_TOOL_REFUSED, PRIVATE_TURN_NOTE } from '../../src/outside-ai';
 import { SUGGEST_GOALS_PROMPT, SUGGEST_PROMPT } from '../../src/memory-extract';
+import { FRESH_MS } from '../../src/ollama-locality';
 import { WAITING } from '../../src/goal-candidates';
 import { startMockLocalServer, type MockLocalServer } from '../mock-local-server';
 import { chatFacts, forward, reservePort, startCloudStub, startOllamaStub, startRuntimeStub, type CloudStub, type OllamaStub, type RuntimeStub } from './stubs';
@@ -114,6 +118,17 @@ let wire: { mock: MockLocalServer; cloud: CloudStub; runtime: RuntimeStub; srv: 
 let late: { mock: MockLocalServer; cloud: CloudStub; srv: Running; port: number; closers: Array<() => Promise<void>> };
 let tier: { ollama: OllamaStub; mock: MockLocalServer; srv: Running };
 let helper: { lm: MockLocalServer; other: OllamaStub; srv: Running };
+/** The `modes` Mac, restarted (its describe starts it once `modes` has stopped). */
+let again: { runtime: RuntimeStub; srv: Running } | undefined;
+/** When the tiers' own Ollama last had a tier asked of it (./goals-chat run asks it what runs on it first). */
+let tierAskedAt = 0;
+/** What Will said in the `modes` run, for the restart to mine: a goal in each, by the kind of turn it was said on. */
+const GOALS_SAID = {
+  ordinary: { conversationId: 'g-open', said: 'I want to plant the IVORYLARK orchard by autumn.', quote: 'I want to plant the IVORYLARK orchard by autumn', text: 'plant the IVORYLARK orchard', word: 'IVORYLARK' },
+  localMode: { conversationId: 'g-local', said: 'I want to finish the PEARLFINCH boat deck by spring.', quote: 'I want to finish the PEARLFINCH boat deck by spring', text: 'finish the PEARLFINCH boat deck', word: 'PEARLFINCH' },
+  localOnly: { conversationId: 'g-private', said: 'I want to repaint the SLATEHERON fence by summer.', quote: 'I want to repaint the SLATEHERON fence by summer', text: 'repaint the SLATEHERON fence', word: 'SLATEHERON' },
+  localOnlyInLocalMode: { conversationId: 'g-both', said: 'I want to restring the COPPERWREN guitar by June.', quote: 'I want to restring the COPPERWREN guitar by June', text: 'restring the COPPERWREN guitar', word: 'COPPERWREN' },
+} as const;
 
 /** A complete stored turn, as the conversation store writes one. */
 const storedTurn = (conversationId: string, id: string, user: string, context?: unknown) => {
@@ -284,7 +299,8 @@ beforeAll(async () => {
   [modes, remote, alias, wire, late, tier, helper] = await Promise.all([startModes(), startRemote(), startAlias(), startWire(), startLate(), startTier(), startHelper()]);
 });
 afterAll(async () => {
-  await Promise.all([modes, remote, alias, wire, late, tier, helper].map((s) => s?.srv.stop()));
+  await Promise.all([modes, remote, alias, wire, late, tier, helper, again].map((s) => s?.srv.stop()));
+  await again?.runtime.close();
   await Promise.all([
     modes?.ollama.close(), modes?.cloud.close(), remote?.cloud.close(), remote?.there.close(), alias?.ollama.close(), alias?.cloud.close(), alias?.runtime.close(),
     wire?.mock.close(), wire?.cloud.close(), wire?.runtime.close(), late?.mock.close(), late?.cloud.close(), ...(late?.closers ?? []).map((c) => c()), tier?.ollama.close(), tier?.mock.close(), helper?.lm.close(), helper?.other.close(),
@@ -605,9 +621,34 @@ describe('the real server, as a process: Cloud mode, then Local mode', () => {
     expect(await srv.post('/speak', { text: 'Synthetic words.', conversationId: 'l-then-cloud', turnId: staysHere(taken)?.turn })).toMatchObject({ status: 409, json: { fallback: 'browser' } });
   });
 
+  // What the restart below mines (goals from chat): the same kind of sentence, said on each kind of turn.
+  it('a goal is said on an ordinary turn, with Local Only on, in Local mode, and with Local Only on in Local mode', async () => {
+    expect(await mode()).toBe('cloud');
+    const open = await srv.post('/chat', { conversationId: GOALS_SAID.ordinary.conversationId, message: GOALS_SAID.ordinary.said });
+    expect(open.events?.[0]).toMatchObject({ brain: 'frontier' });
+    const priv = await srv.post('/chat', { conversationId: GOALS_SAID.localOnly.conversationId, message: GOALS_SAID.localOnly.said, localOnly: true });
+    expect(priv.events?.[0]).toMatchObject({ brain: 'local', route: { mode: 'cloud', private: true } });
+    expect((await srv.post('/inference/mode', { mode: 'local' })).json).toMatchObject({ mode: 'local' });
+    const local = await srv.post('/chat', { conversationId: GOALS_SAID.localMode.conversationId, message: GOALS_SAID.localMode.said });
+    expect(local.events?.[0]).toMatchObject({ brain: 'local', route: { mode: 'local', reason: 'mode_local' } });
+    const both = await srv.post('/chat', { conversationId: GOALS_SAID.localOnlyInLocalMode.conversationId, message: GOALS_SAID.localOnlyInLocalMode.said, localOnly: true });
+    expect(both.events?.[0]).toMatchObject({ brain: 'local', route: { mode: 'local', private: true } });
+    expect((await srv.post('/inference/mode', { mode: 'cloud' })).json).toMatchObject({ mode: 'cloud' });
+    // All three that stay here are told so, and only the one Local mode alone kept carries the note on its mark.
+    for (const r of [priv, local, both]) expect(staysHere(r)).toMatchObject({ staysHere: true });
+    expect(staysHere(open)).toMatchObject({ staysHere: false });
+    await waitFor(() => Object.values(GOALS_SAID).every((g) => srv.read('memory', 'conversations.json').includes(g.word)));
+    const stored = (JSON.parse(srv.read('memory', 'conversations.json')) as { conversations: Record<string, Array<{ context?: unknown }>> }).conversations;
+    expect(stored[GOALS_SAID.ordinary.conversationId]!.map((t) => t.context)).toEqual([undefined]);
+    expect(stored[GOALS_SAID.localOnly.conversationId]!.map((t) => t.context)).toEqual([{ private: true }]);
+    expect(stored[GOALS_SAID.localMode.conversationId]!.map((t) => t.context)).toEqual([{ private: true, byMode: true }]);
+    expect(stored[GOALS_SAID.localOnlyInLocalMode.conversationId]!.map((t) => t.context)).toEqual([{ private: true }]);
+  });
+
   it('the log holds none of what was asked or answered, and every [route] line is made of the fields on the list', () => {
     const log = srv.log();
     expect(log).not.toContain(SECRET);
+    for (const g of Object.values(GOALS_SAID)) expect(log, g.word).not.toContain(g.word);
     expect(log).not.toMatch(/LOCAL\(|CLOUD\(|synthetic question|Synthetic words|Synthetic private words/);
     for (const canary of ['GARNETFINCH', 'TOPAZWREN', 'OPALHERON']) expect(log).not.toContain(canary);
     expect(log).not.toContain('process-test-token');
@@ -954,6 +995,7 @@ describe('the real server, as a process: a tier on the OpenAI-compatible wire, a
     expect(staysHere(r)).toMatchObject({ staysHere: true });
     // The alias was asked nothing more.
     expect(tierChats(ALIAS)).toHaveLength(1);
+    tierAskedAt = Date.now();
   });
 
   // N9. The embedding model here is a cloud model under a plain name: it embeds on Ollama's servers. An ordinary
@@ -1088,6 +1130,107 @@ describe('the real server, as a process: the local model on this Mac, and OLLAMA
     expect(other.saw('SILVERTERN')).toBe(false);
     expect(srv.log()).not.toMatch(/SILVERTERN|HAZELWREN|PRIVLIVEH|PRIVWORDH|LOCALWORDH|GARNETFINCH|JASPERLARK/);
     // Nothing but this machine and that stand-in was ever reached.
+    expect(blocked(srv)).toEqual([]);
+  });
+});
+
+// Goals from chat (P3 part 5) and the two notions. "Stays here" is a turn Will asked to keep private OR any turn of
+// Local mode; "explicitly private" is his own word for a turn. Suggestions follow the second, as tools do: a turn
+// taken in Local mode is asked for the goal he set in it, and one he asked to keep private never is. Here the turns
+// are the ones the server above really took, marked by its own code, and the pass is a real one after a restart.
+// (Placed here, after the other servers' cases: it needs the `modes` server stopped, and nothing else of them.)
+describe('the real server, as a process: the same Mac restarted with goals from chat on', () => {
+  let srv: Running;
+  let runtime: RuntimeStub;
+  const ollama = () => modes.ollama;
+  const mined = () => ollama().chats().filter((c) => c.body?.format !== undefined && chatFacts(c.body).last.includes('TURNS:'));
+  const callWith = (word: string) => mined().find((c) => (chatFacts(c.body).last.split('TURNS:')[1] ?? '').includes(word))!;
+
+  beforeAll(async () => {
+    await modes.srv.stop();
+    runtime = await startRuntimeStub();
+    // The "model" makes a goal of every turn it is shown that holds one of the four sentences, asked or not.
+    ollama().toolFor = undefined;
+    ollama().replyFor = (body, last) => {
+      if (body.format === undefined || !last.includes('TURNS:')) return undefined;
+      const shown = (last.split('TURNS:')[1] ?? '').split('### Turn ').slice(1);
+      const suggestions = shown.flatMap((text, i) =>
+        Object.values(GOALS_SAID).filter((g) => (text.split('\nWILL: ').at(-1) ?? '').includes(g.word)).map((g) => ({ turn: i + 1, kind: 'goal', quote: g.quote, text: g.text, dueOn: '' })),
+      );
+      return JSON.stringify({ facts: [], suggestions });
+    };
+    const before = mined().length;
+    srv = await startServer({
+      dir: runs.modes.dir,
+      env: {
+        OLLAMA_HOST: ollama().origin, OLLAMA_MODEL: MAIN, OLLAMA_NUM_CTX: '16384',
+        FLINT_MEMORY_BRAIN: 'local', FLINT_EXTRACT_FIRST_PASS_MS: '300', FLINT_EXTRACT_CANDIDATES: '1', FLINT_RUNTIME_URL: runtime.origin,
+      },
+      seed: [RUNTIME_TOKEN],
+    });
+    again = { runtime, srv };
+    expect(before).toBe(0);
+    await waitFor(() => /\[memory-extract\] v2 local pass: /.test(srv.log()), 15_000);
+  });
+
+  it('it came back in the mode it was left in, with the turns of the first run in its store', async () => {
+    expect((await srv.get('/health', null)).json).toMatchObject({ ok: true, mode: 'cloud', model: MAIN });
+    expect(srv.log()).toContain('[memory-extract] goals Will sets in chat are suggested');
+    expect(srv.log()).toMatch(/\[memory-extract\] v2 local pass: sent \d+ turn\(s\) in \d+ call\(s\)/);
+  });
+
+  it('a turn taken in Local mode is asked for the goal he set in it, and it is filed with the runtime on this Mac; so is an ordinary turn’s', () => {
+    const filed = runtime.candidates();
+    expect(filed.map((c) => c.text).sort()).toEqual(['Finish the PEARLFINCH boat deck', 'Plant the IVORYLARK orchard']);
+    expect(filed.find((c) => c.text === 'Finish the PEARLFINCH boat deck')).toMatchObject({ kind: 'goal', quote: GOALS_SAID.localMode.said, conversationId: GOALS_SAID.localMode.conversationId });
+    // Its call asked for goals: the lines in the prompt, and the reply held to a schema with them.
+    const asked = callWith('PEARLFINCH');
+    expect(chatFacts(asked.body).last).toContain(SUGGEST_GOALS_PROMPT);
+    expect(JSON.stringify(asked.body?.format)).toContain('suggestions');
+  });
+
+  it('a turn he asked to keep private is never asked for one, in Cloud mode or in Local mode: no lines, no schema, nothing filed', () => {
+    for (const g of [GOALS_SAID.localOnly, GOALS_SAID.localOnlyInLocalMode]) {
+      const call = callWith(g.word);
+      expect(call, g.word).toBeDefined(); // it was mined for facts, on this Mac
+      expect(chatFacts(call.body).last, g.word).not.toContain(SUGGEST_GOALS_PROMPT);
+      expect(chatFacts(call.body).last, g.word).not.toContain(SUGGEST_PROMPT);
+      expect(JSON.stringify(call.body?.format), g.word).not.toContain('suggestions');
+      expect(runtime.saw(g.word), g.word).toBe(false);
+      // ...and it never shared a call with the turn Local mode alone kept.
+      expect(chatFacts(call.body).last, g.word).not.toContain('PEARLFINCH');
+    }
+    // The pass says how many turns were not asked, by a count, and none of his words is in the log.
+    expect(srv.log()).toMatch(/\[memory-extract\] v2 local pass: [^\n]*suggestion-private-turn=\d+[^\n]*suggestion\(s\) → kept 2, filed 2; /);
+    for (const g of Object.values(GOALS_SAID)) expect(srv.log(), g.word).not.toContain(g.word);
+    expect(blocked(srv)).toEqual([]);
+  });
+});
+
+// The follow-up to N5. Only a turn that stays here by its route asked the model server first. A tier on a local
+// wire answers ORDINARY turns, and its server's listing was asked once a minute: a name pointed at a cloud model in
+// between stayed a brain on this Mac until the next one, and was handed the turns and the facts that stay here.
+// (Last in the file, so that the tiers' Ollama was last asked more than two seconds ago without waiting for it.)
+describe('the real server, as a process: a tier pointed at a cloud model while Flint runs', () => {
+  it('the next ordinary turn asks its server first: the tier is asked as an outside brain, and is handed nothing that stays here', async () => {
+    const { mock, srv } = tier;
+    const tierChats = () => mock.chats().filter((q) => q.path === '/v1/chat/completions' && q.model === REAL);
+    // `ollama cp gpt-oss:120b-cloud real:7b`, on the tiers' own Ollama. Nothing looks at that server on a timer for
+    // another minute; what it last said is more than two seconds old by now.
+    mock.models.get(REAL)!.remoteHost = 'https://ollama.com:443';
+    await sleep(Math.max(0, tierAskedAt + FRESH_MS + 150 - Date.now()));
+    const listings = mock.requests.filter((q) => q.path === '/api/tags').length;
+    const before = tierChats().length;
+    const r = await srv.post('/chat', { conversationId: 'mix', message: 'Think it through step by step: where is the spare key kept, and the regatta entry?' });
+    expect(r.events?.[0]).toMatchObject({ type: 'meta', brain: 'frontier', tier: 'hard', model: `local:${REAL}` });
+    expect(tierChats()).toHaveLength(before + 1);
+    // Its server was asked what runs on it before it was asked anything...
+    expect(mock.requests.filter((q) => q.path === '/api/tags').length).toBe(listings + 1);
+    // ...and so it was handed what any brain may have: no private turn, no goals turn, no fact from either.
+    const sent = JSON.stringify(tierChats().at(-1)!.body);
+    for (const word of ['PRIVWORDT', 'GARNETFINCH', 'GOALWORDT', 'MARLINGOAL']) expect(sent, word).not.toContain(word);
+    expect(sent).toContain(HISTORY_GAP);
+    expect(staysHere(r)).toMatchObject({ staysHere: false });
     expect(blocked(srv)).toEqual([]);
   });
 });
