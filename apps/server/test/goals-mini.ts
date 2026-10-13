@@ -246,7 +246,10 @@ export function miniServer(o: MiniOptions) {
       for await (const ev of events) {
         const here = asked.meta();
         if (here) metas.push(here);
-        if (ev.type === 'text') answerText += ev.delta;
+        if (ev.type === 'text') {
+          answerText += ev.delta;
+          asked.said(ev.delta); // as /chat: what the client may ask to have spoken, as this turn's own words
+        }
         if (tried !== undefined && ev.type === 'error' && answerText.length === 0) throw new Error(ev.error.message);
       }
     };

@@ -556,13 +556,25 @@ describe('the real server, as a process: a cloud model under a plain name, and w
   it('an ordinary reply may be sent out to be spoken: the speech service is asked for it, and for nothing that stays here', async () => {
     const r = await srv.post('/chat', { conversationId: 'speak-1', message: 'An ordinary synthetic question to be spoken.' });
     expect(staysHere(r)).toMatchObject({ staysHere: false });
+    expect(r.text).toMatch(/^CLOUD\(/);
     expect(blocked(srv)).toEqual([]);
     // The stored private turn's reply: refused by its turn, and the speech service is not looked up.
     expect(await srv.post('/speak', { text: 'Noted.', conversationId: 'kept-1', turnId: 'turn_kept' })).toMatchObject({ status: 409, json: { fallback: 'browser' } });
     expect(blocked(srv)).toEqual([]);
-    const spoken = await srv.post('/speak', { text: 'Synthetic ordinary words.', conversationId: 'speak-1', turnId: staysHere(r)?.turn });
+    // The privacy review's N3: a turn that may be spoken vouches for its own words and no others. The private
+    // reply's words under the ordinary turn's name are refused...
+    expect(await srv.post('/speak', { text: 'Noted.', conversationId: 'speak-1', turnId: staysHere(r)?.turn })).toMatchObject({ status: 409, json: { fallback: 'browser' } });
+    expect(await srv.post('/speak', { text: `${r.text} Noted.`, conversationId: 'speak-1', turnId: staysHere(r)?.turn })).toMatchObject({ status: 409 });
+    // ...and so is a request that names only a conversation which still carries a kept turn, whatever words it sends.
+    expect(await srv.post('/speak', { text: r.text, conversationId: 'kept-1' })).toMatchObject({ status: 409, json: { fallback: 'browser' } });
+    expect(blocked(srv)).toEqual([]);
+    // The ordinary reply's own words, under its own turn: sent (the fence stops the one lookup).
+    const spoken = await srv.post('/speak', { text: r.text, conversationId: 'speak-1', turnId: staysHere(r)?.turn });
     expect(spoken.status).not.toBe(409);
     expect(blocked(srv).map((e) => [e.kind, e.hostname])).toEqual([['dns-blocked', 'api.openai.com']]);
+    // A sentence of it, as the console sends one: the same.
+    expect((await srv.post('/speak', { text: 'reply.', conversationId: 'speak-1', turnId: staysHere(r)?.turn })).status).not.toBe(409);
+    expect(blocked(srv)).toHaveLength(2);
   });
 
   it('the log holds none of it', () => {

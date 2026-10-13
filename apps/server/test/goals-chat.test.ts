@@ -73,7 +73,7 @@ describe('the `meta` event: the client is told whether the reply stays here, and
 describe('speechStaysHere: a reply that stays on this Mac is never sent to an outside speech service', () => {
   /** /speak as index.ts answers it: the refusal the client falls back on, or the outside call. */
   async function speak(s: { goalsChat: GoalsChat<Persona> }, body: { text: string; conversationId?: unknown; turnId?: unknown }, synth: (text: string) => Promise<string>) {
-    if (s.goalsChat.speechStaysHere({ conversationId: body.conversationId, turnId: body.turnId })) return { status: 409, body: { error: SPEECH_STAYS_HERE, fallback: 'browser' } };
+    if (s.goalsChat.speechStaysHere({ conversationId: body.conversationId, turnId: body.turnId, text: body.text })) return { status: 409, body: { error: SPEECH_STAYS_HERE, fallback: 'browser' } };
     return { status: 200, audio: await synth(body.text) };
   }
 
@@ -104,7 +104,7 @@ describe('speechStaysHere: a reply that stays on this Mac is never sent to an ou
     expect(about(second.metas[0]!.turn)).toBe(false);
   });
 
-  it('a request that names the conversation and no turn the store holds is about its newest turn, pending ones included', async () => {
+  it('a request that names the conversation and no turn could be about any reply in it: it stays here while any turn the conversation still carries does, pending ones included', async () => {
     const s = server({ frontier: claude });
     await s.chat('frontier', 'what is the weather?');
     expect(s.goalsChat.speechStaysHere({ conversationId: 'c1' })).toBe(false);
@@ -113,6 +113,22 @@ describe('speechStaysHere: a reply that stays on this Mac is never sent to an ou
     expect(s.goalsChat.speechStaysHere({ conversationId: 'c1' })).toBe(true);
     expect(s.goalsChat.speechStaysHere({ conversationId: 'c1', turnId: '' })).toBe(true);
     expect(s.goalsChat.speechStaysHere({ conversationId: 'c1', turnId: null })).toBe(true);
+  });
+
+  // The privacy review's N3. The conversation alone named the NEWEST turn, so a kept reply's words sent after a newer
+  // ordinary turn went out. It names no reply at all, so every reply the conversation still carries answers for it.
+  it('a newer ordinary turn does not free a kept reply: the conversation alone is refused while the kept turn is in its window, and spoken again once it has left', async () => {
+    const store = tmpStore({ history: { maxTurns: 2, maxAgeMs: Number.POSITIVE_INFINITY } });
+    await storedTurn(store, { id: 'kept', context: GOALS_TURN, user: 'goals?', assistant: T1 });
+    await storedTurn(store, { id: 'after', user: 'thanks', assistant: 'ok' });
+    expect(speechStaysHere(store, { conversationId: 'c1', text: T1 })).toBe(true);
+    expect(speechStaysHere(store, { conversationId: 'c1', text: 'ok' })).toBe(true);
+    // Named by its turn, the ordinary reply is still spoken.
+    expect(speechStaysHere(store, { conversationId: 'c1', turnId: 'after', text: 'ok' })).toBe(false);
+    // Two ordinary turns later the kept one is no longer carried by the conversation's next message.
+    await storedTurn(store, { id: 'later', user: 'and the weather?', assistant: 'sunny' });
+    expect(speechStaysHere(store, { conversationId: 'c1', text: 'sunny' })).toBe(false);
+    expect(speechStaysHere(store, { conversationId: 'c1', turnId: 'kept', text: T1 })).toBe(true); // its own name still holds
   });
 
   it('a wrong name is not a weaker claim than no name: an unknown conversation, or a turn that is not the named conversation’s, is treated as naming nothing', async () => {
@@ -134,9 +150,10 @@ describe('speechStaysHere: a reply that stays on this Mac is never sent to an ou
       [{ conversationId: 'c1', turnId: 'nope' }, true], [{ conversationId: 'c2', turnId: 'nope' }, true], [{ conversationId: 'c2', turnId: 42 }, true], [{ conversationId: 'c2', turnId: ['plain'] }, true],
       [{ conversationId: 5 }, true], [{ conversationId: '' }, true], [{ conversationId: ['c1'] }, true], [{ turnId: 'marked' }, true],
     ]);
-    // A newer ordinary turn after the marked one: the conversation alone names that newer turn; the marked turn's own name still holds.
+    // A newer ordinary turn after the marked one: the conversation alone still carries the marked turn (this store keeps
+    // every turn in its window), the newer turn may be named, and the marked turn's own name still holds.
     await storedTurn(store, { conversationId: 'c1', id: 'after', user: 'thanks', assistant: 'ok' });
-    answers([[{ conversationId: 'c1' }, false], [{ conversationId: 'c1', turnId: 'marked' }, true], [{}, true], [{ conversationId: 'never-seen' }, true]]);
+    answers([[{ conversationId: 'c1' }, true], [{ conversationId: 'c1', turnId: 'after' }, false], [{ conversationId: 'c1', turnId: 'marked' }, true], [{}, true], [{ conversationId: 'never-seen' }, true]]);
   });
 
   it('the rule for a request that cannot be placed is not bounded by time: a conversation that ends on a marked turn holds it for good', async () => {
@@ -149,6 +166,60 @@ describe('speechStaysHere: a reply that stays on this Mac is never sent to an ou
     await storedTurn(aged, { id: 'after', user: 'thanks', assistant: 'ok' });
     expect(speechStaysHere(aged, {})).toBe(false);
     expect(speechStaysHere(aged, { conversationId: 'c1', turnId: 'marked' })).toBe(true);
+  });
+
+  // The other half of N3: a turn that may be spoken vouches for its own words and no others.
+  it('a named turn speaks for its own reply only: another reply’s words under an ordinary turn’s name are refused', async () => {
+    const store = tmpStore();
+    const PRIVATE_REPLY = 'The synthetic appointment is at the JUNIPER clinic on Tuesday.';
+    await storedTurn(store, { id: 'kept', context: GOALS_TURN, user: 'a private thing', assistant: PRIVATE_REPLY });
+    await storedTurn(store, { id: 'plain', user: 'weather?', assistant: 'It is **97°F** and sunny in Austin. Winds are 5 mph from the south.' });
+    const about = (text: unknown, turnId = 'plain') => speechStaysHere(store, { conversationId: 'c1', turnId, text });
+    // Its own reply: whole, a sentence at a time, and made sayable as the console does before it asks.
+    expect(about('It is **97°F** and sunny in Austin. Winds are 5 mph from the south.')).toBe(false);
+    expect(about('Winds are 5 mph from the south.')).toBe(false);
+    expect(about('It is 97 degrees Fahrenheit and sunny in Austin.')).toBe(false);
+    expect(about('Winds are 5 miles per hour from the south.')).toBe(false);
+    // Another reply's words, however they are dressed: refused.
+    expect(about(PRIVATE_REPLY)).toBe(true);
+    expect(about('at the JUNIPER clinic')).toBe(true);
+    expect(about(`It is sunny. ${PRIVATE_REPLY}`)).toBe(true);
+    expect(about('sunny It is')).toBe(true); // its words, but not as it said them
+    // Text that is no words, or no text at all, is no part of any reply.
+    for (const text of ['', '   ', '...', 42, null, ['sunny'], { text: 'sunny' }]) expect(about(text), JSON.stringify(text)).toBe(true);
+    // A caller that asks about the turn alone (no text given) is answered about the turn.
+    expect(speechStaysHere(store, { conversationId: 'c1', turnId: 'plain' })).toBe(false);
+    // The kept turn's own words under its own name stay here, as ever.
+    expect(about(PRIVATE_REPLY, 'kept')).toBe(true);
+  });
+
+  it('while a reply is being streamed its turn holds no reply yet: the words the server sent for that turn are what it may speak', async () => {
+    const s = server({ frontier: claude });
+    const turn = await s.goalsChat.forTurn('c1', 'what is the weather?');
+    const asked = turn.ask({ styleGuide: '' } as never, { context: 'ctx', whole: 'ctx', outside: 'ctx', tools: [] });
+    await s.store.beginTurn({ conversationId: 'c1', turnId: 'live', createdAt: Date.now(), userMessage: { id: 'u', role: 'user', content: 'what is the weather?', timestamp: Date.now() } });
+    const about = (text: string, turnId = 'live') => s.goalsChat.speechStaysHere({ conversationId: 'c1', turnId, text });
+    // Before the server has said which turn the reply is, nothing was sent under its name.
+    asked.said('Too early. ');
+    expect(about('Too early.')).toBe(true);
+    expect(asked.meta()).toEqual({ type: 'meta', staysHere: false, turn: 'live' });
+    asked.said('It is sunny in ');
+    asked.said('Austin. Winds are light.');
+    expect(about('It is sunny in Austin.')).toBe(false);
+    expect(about('Winds are light.')).toBe(false);
+    expect(about('The synthetic appointment is on Tuesday.')).toBe(true);
+    // Another turn's live words are not this turn's.
+    await storedTurn(s.store, { id: 'other', user: 'hi', assistant: 'hello there' });
+    expect(about('It is sunny in Austin.', 'other')).toBe(true);
+    expect(about('hello there', 'other')).toBe(false);
+  });
+
+  it('a whole turn through the server: the reply it streamed is spoken under its turn, and no other text is', async () => {
+    const s = server({ frontier: claude });
+    const out = await s.chat('frontier', 'what is the weather?');
+    const turnId = out.metas[0]!.turn;
+    expect(s.goalsChat.speechStaysHere({ conversationId: 'c1', turnId, text: out.answer })).toBe(false);
+    expect(s.goalsChat.speechStaysHere({ conversationId: 'c1', turnId, text: 'Some other reply entirely.' })).toBe(true);
   });
 
   it('a request that names nothing cannot be placed (an older client): it stays here while any conversation’s newest turn or recent history is marked', async () => {

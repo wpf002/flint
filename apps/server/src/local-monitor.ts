@@ -128,6 +128,13 @@ export interface MonitorDeps {
    * not become a reload every five minutes for as long as nobody is there.
    */
   rewarm?: () => boolean;
+  /**
+   * May this model be loaded ahead of a turn at all? Asked at every warm-up.
+   * No for a model the server says runs somewhere else (a cloud model under a
+   * plain name): Flint never asks it for a turn that stays here, and a load
+   * with no prompt would still be a request to wake it. Left out: yes.
+   */
+  mayWarm?: (model: string) => boolean;
   now?: () => number;
   log?: (msg: string) => void;
 }
@@ -317,6 +324,7 @@ export class LocalMonitor {
     const backend = this.backend;
     if (!s || !backend || s.warming || !s.settled || this.closed) return;
     if (s.health.state === 'unavailable') return;
+    if (this.deps.mayWarm?.(s.health.model) === false) return;
     if (s.health.state === 'loaded' && !this.slow(s)) return;
     s.warming = true;
     if (s.health.state === 'cold') this.to(s, 'loading', undefined, 'warm-up started');

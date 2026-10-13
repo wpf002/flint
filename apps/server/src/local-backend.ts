@@ -21,6 +21,7 @@
  */
 import { connect as netConnect } from 'node:net';
 import { canonicalModel } from './memory-brain';
+import { placeSaid, type PlaceSaid } from './ollama-locality';
 
 export type ServerKind = 'ollama' | 'llamacpp' | 'openai';
 
@@ -259,6 +260,63 @@ export class WarmFailed extends Error {
     super(`warm-up answered ${status}`);
     this.name = 'WarmFailed';
   }
+}
+
+// ---------------------------------------------------------------------------
+// which server is it, as far as "does this model run here" goes
+
+/** The one path every local server is asked, whatever kind it was taken for: the listing only an Ollama gives. */
+export const PLACE_PATH = '/api/tags';
+
+/**
+ * Ask a server whether it is an Ollama, the only way that is sure: ask for the
+ * model listing an Ollama gives (./ollama-locality placeSaid reads the answer:
+ * a listing, "no such thing here", or nothing either way). Never throws;
+ * undefined when the server did not say. `headers`: the key the server's other
+ * requests carry, so one that wants it on every path still answers.
+ */
+export async function askPlace(f: Fetch, origin: string, signal: AbortSignal, headers: Record<string, string> = {}): Promise<PlaceSaid | undefined> {
+  try {
+    const res = await f(`${origin}${PLACE_PATH}`, { headers, signal });
+    if (res.status < 200 || res.status >= 300) {
+      await res.body?.cancel().catch(() => {});
+      return await placeSaid(res.status, async () => undefined);
+    }
+    const text = await res.text();
+    // An answer too long to read says nothing either way: it is never taken as "no Ollama here".
+    if (text.length > MAX_ANSWER) return undefined;
+    return await placeSaid(res.status, async () => JSON.parse(text) as unknown);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A backend whose every look ALSO asks the server what it is, and tells
+ * `told`. A server on the OpenAI-compatible wire is taken for llama.cpp or a
+ * plain OpenAI-compatible server by what answered at boot, or by what
+ * FLINT_LOCAL_SERVER says; either can be wrong, and an Ollama behind that wire
+ * serves cloud models under plain names like any other. So the question is
+ * asked of every kind, at every look, and ./policy takes nothing on that wire
+ * for local until the server has answered it.
+ */
+export function withPlace(backend: LocalBackend, look: (signal: AbortSignal) => Promise<PlaceSaid | undefined>, told: (said: PlaceSaid) => void): LocalBackend {
+  return {
+    kind: backend.kind,
+    async probe(models, signal) {
+      const [out, said] = await Promise.all([backend.probe(models, signal), look(signal)]);
+      if (said) {
+        try {
+          told(said);
+        } catch {
+          /* whoever keeps the answer has its own trouble: a look at the server never fails for it */
+        }
+      }
+      return out;
+    },
+    warm: (model, opts) => backend.warm(model, opts),
+    describe: (model, signal) => backend.describe(model, signal),
+  };
 }
 
 // ---------------------------------------------------------------------------

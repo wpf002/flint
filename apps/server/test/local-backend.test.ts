@@ -5,7 +5,9 @@ import {
   DETECT_PATHS,
   GuardRefusal,
   OLLAMA_PATHS,
+  PLACE_PATH,
   WarmFailed,
+  askPlace,
   detectServer,
   guardedFetch,
   llamaCppBackend,
@@ -13,7 +15,9 @@ import {
   ollamaBackend,
   openAiBackend,
   openAiPaths,
+  withPlace,
 } from '../src/local-backend';
+import type { PlaceSaid } from '../src/ollama-locality';
 import { startMockLocalServer, type MockLocalServer } from './mock-local-server';
 
 /**
@@ -247,6 +251,94 @@ describe('openAiBackend', () => {
     await backend(server).warm('a', { signal: signal() });
     expect(server.chats()[0]!.body).toMatchObject({ model: 'a', max_tokens: 1 });
     expect(server.models.get('a')!.loaded).toBe(true);
+  });
+});
+
+// The privacy review's N1. What KIND of server sits behind the OpenAI-compatible wire is read off what answered at
+// boot, or off FLINT_LOCAL_SERVER, and either can be wrong: an Ollama taken for a plain OpenAI-compatible server
+// serves cloud models under plain names all the same. So every look asks the one question only an Ollama answers
+// with a listing, whatever the kind, and ../src/policy takes nothing on that wire for local until it is answered.
+describe('askPlace / withPlace: every look asks the server what it is', () => {
+  const open = (s: MockLocalServer) => guardedFetch({ origin: s.origin, paths: [...openAiPaths('/v1'), PLACE_PATH] });
+
+  it('the question is the listing an Ollama gives, at the server’s origin', () => {
+    expect(PLACE_PATH).toBe('/api/tags');
+  });
+
+  it('an Ollama answers with its listing, as it came: every model, with what its row says of a remote host', async () => {
+    server = await startMockLocalServer({ kind: 'ollama', models: { 'main-model:30b': { loaded: true }, 'mine:latest': { remoteHost: 'https://ollama.com:443' } } });
+    const said = await askPlace(open(server), server.origin, signal());
+    expect(said).not.toBe('other');
+    expect((said as { ollama: Array<Record<string, unknown>> }).ollama.map((r) => [r.name, r.remote_host])).toEqual([['main-model:30b', undefined], ['mine:latest', 'https://ollama.com:443']]);
+    expect(server.requests.map((q) => `${q.method} ${q.path}`)).toEqual(['GET /api/tags']);
+  });
+
+  it('llama.cpp and a plain OpenAI-compatible server answer that there is no such thing: some other server', async () => {
+    for (const kind of ['llamacpp', 'openai'] as const) {
+      server = await startMockLocalServer({ kind, models: { 'only-model': { loaded: true } } });
+      expect(await askPlace(open(server), server.origin, signal()), kind).toBe('other');
+      await server.close();
+      server = undefined;
+    }
+  });
+
+  it('a server that says nothing either way teaches nothing: down, an error, not let through, an answer too long to read', async () => {
+    const answering = (status: number, body = '{}') => (async () => new Response(body, { status })) as unknown as typeof fetch;
+    for (const status of [401, 403, 429, 500, 503]) expect(await askPlace(answering(status), 'http://127.0.0.1:9', signal()), String(status)).toBeUndefined();
+    const down = (async () => {
+      throw new TypeError('fetch failed');
+    }) as unknown as typeof fetch;
+    expect(await askPlace(down, 'http://127.0.0.1:9', signal())).toBeUndefined();
+    // Too long to be read is not "no Ollama here": that would make every model on it local by its address.
+    const huge = (async () => ({ status: 200, text: async () => ({ length: 9 * 1024 * 1024 }) as unknown as string, body: null })) as unknown as typeof fetch;
+    expect(await askPlace(huge, 'http://127.0.0.1:9', signal())).toBeUndefined();
+    // A 200 that is no listing is another server (LM Studio answers 200 to a path it does not know).
+    expect(await askPlace(answering(200, '{"error":"Unexpected endpoint"}'), 'http://127.0.0.1:9', signal())).toBe('other');
+    expect(await askPlace(answering(200, 'not json'), 'http://127.0.0.1:9', signal())).toBe('other');
+  });
+
+  it('it carries the key the server’s other requests carry, and the look’s own deadline', async () => {
+    const seen: Array<{ url: string; init: RequestInit }> = [];
+    const f = (async (url: string, init?: RequestInit) => {
+      seen.push({ url, init: init ?? {} });
+      return new Response('{"models":[]}');
+    }) as unknown as typeof fetch;
+    const s = signal();
+    expect(await askPlace(f, 'http://127.0.0.1:1234', s, { authorization: 'Bearer test-key-not-real' })).toEqual({ ollama: [] });
+    expect(seen).toEqual([{ url: 'http://127.0.0.1:1234/api/tags', init: { headers: { authorization: 'Bearer test-key-not-real' }, signal: s } }]);
+  });
+
+  it('withPlace: every probe also asks, and whoever keeps the answer is told each time; the backend is otherwise itself', async () => {
+    server = await startMockLocalServer({ kind: 'ollama', models: { 'mine:latest': { loaded: true, remoteHost: 'https://ollama.com:443' } } });
+    const f = open(server);
+    const told: PlaceSaid[] = [];
+    // An Ollama that Will's settings called a plain OpenAI-compatible server.
+    const inner = openAiBackend(server.origin, '/v1', f);
+    const b = withPlace(inner, (sig) => askPlace(f, server!.origin, sig), (said) => told.push(said));
+    expect(b.kind).toBe('openai');
+    const r = await b.probe(['mine:latest'], signal());
+    expect(r).toEqual(await inner.probe(['mine:latest'], signal()));
+    await b.probe(['mine:latest'], signal());
+    expect(told).toHaveLength(2);
+    expect((told[0] as { ollama: Array<Record<string, unknown>> }).ollama.map((row) => [row.name, row.remote_host])).toEqual([['mine:latest', 'https://ollama.com:443']]);
+    expect(server.requests.filter((q) => q.path === '/api/tags')).toHaveLength(2);
+  });
+
+  it('withPlace: a server that did not say is not reported, and trouble keeping the answer never fails a look', async () => {
+    server = await startMockLocalServer({ kind: 'llamacpp', models: { 'only-model': { loaded: true } } });
+    const f = guardedFetch({ origin: server.origin, paths: [...llamaCppPaths('/v1'), PLACE_PATH] });
+    const inner = llamaCppBackend(server.origin, '/v1', f);
+    const told: PlaceSaid[] = [];
+    const silent = withPlace(inner, async () => undefined, (said) => told.push(said));
+    expect((await silent.probe(['only-model'], signal())).reachable).toBe(true);
+    expect(told).toEqual([]);
+    const broken = withPlace(inner, (sig) => askPlace(f, server!.origin, sig), () => {
+      throw new Error('the keeper is broken');
+    });
+    expect((await broken.probe(['only-model'], signal())).reachable).toBe(true);
+    const heard = withPlace(inner, (sig) => askPlace(f, server!.origin, sig), (said) => told.push(said));
+    await heard.probe(['only-model'], signal());
+    expect(told).toEqual(['other']);
   });
 });
 

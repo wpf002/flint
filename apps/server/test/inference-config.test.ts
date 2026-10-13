@@ -201,6 +201,30 @@ describe('readInferenceConfig: a refused value never stops Flint, and lands on t
     expect(ollamaIsLocal(read({ ...host, FLINT_LOCAL_PROVIDER: 'openai' }).cfg)).toBe(false);
   });
 
+  // The privacy review's N2. FLINT_LOCAL_ALLOW_REMOTE says ONE server on another machine is Will's own: the local
+  // model server. It used to make OLLAMA_HOST "here" as well, even with the model server somewhere else.
+  it('FLINT_LOCAL_ALLOW_REMOTE vouches for the model server only: OLLAMA_HOST on another machine is "local" only when it IS that server', () => {
+    const allow = { FLINT_LOCAL_ALLOW_REMOTE: '1', FLINT_LOCAL_ALLOW_INSECURE_REMOTE: '1' };
+    const ollamaAway = { OLLAMA_HOST: 'https://ollama-box.example:11434' };
+    // The local model on this Mac over the OpenAI-compatible wire, Ollama elsewhere: that Ollama is not here.
+    const lmHere = read({ ...ollamaAway, ...allow, FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: 'http://127.0.0.1:8080/v1' }).cfg;
+    expect(endpointIsLocal(lmHere)).toBe(true);
+    expect(ollamaIsLocal(lmHere)).toBe(false);
+    // The model server on a third machine he allowed: it is his, and Ollama's is still not.
+    const third = read({ ...ollamaAway, ...allow, FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: 'https://gpu-box.example/v1' }).cfg;
+    expect(endpointIsLocal(third)).toBe(true);
+    expect(ollamaIsLocal(third)).toBe(false);
+    // One server for both, on either wire: vouched for, as before.
+    expect(ollamaIsLocal(read({ ...ollamaAway, ...allow }).cfg)).toBe(true);
+    expect(ollamaIsLocal(read({ ...ollamaAway, ...allow, FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: 'https://ollama-box.example:11434/v1' }).cfg)).toBe(true);
+    // The same host on another port is another server.
+    expect(ollamaIsLocal(read({ ...ollamaAway, ...allow, FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: 'https://ollama-box.example:8443/v1' }).cfg)).toBe(false);
+    // Ollama on this Mac is here whatever the model server is.
+    expect(ollamaIsLocal(read({ ...allow, FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: 'https://gpu-box.example/v1' }).cfg)).toBe(true);
+    // Without the switch nothing on another machine is.
+    expect(ollamaIsLocal(read({ ...ollamaAway }).cfg)).toBe(false);
+  });
+
   it('the other keys fall back as documented', () => {
     const { cfg } = read({
       FLINT_LOCAL_PROVIDER: 'vllm',

@@ -104,8 +104,8 @@ import { Notifications, Watcher, signalNote, upcomingNote, watcherEnabled, type 
 import { stampUiVersion, uiVersionOf } from './ui-version';
 import { TrainingLogger } from './training';
 import { LocalPersonaCache, localDefaultNote, overridePersonaCache, parseLocalModelRequest, type OverridePersona } from './local-model';
-import { buildInference, type Inference } from './inference';
-import { OUTSIDE_OFF_PRIVATE, keptHereOnPrivate } from './outside-ai';
+import { buildInference, helperModel, type Inference } from './inference';
+import { OUTSIDE_OFF_PRIVATE, keptHereOnPrivate, notOfferedOnPrivate } from './outside-ai';
 import { inferenceRoutes } from './inference-routes';
 import type { ModelSource } from './local-brains';
 import { mayUseCloud } from './mode-route';
@@ -526,9 +526,17 @@ async function main(): Promise<void> {
   // The conversation as each brain may read it: all of it for a brain on this Mac; for any other, without
   // the turns that stay here.
   const historyOf = (p: ProviderAdapter, m: string) => goalsChat.history(p, m);
+  // The private rule, as every place that applies it reads it (./outside-ai): held once, so the tools' own
+  // refusal (keptHereOnPrivate, below) and the answer for a tool that was not offered cannot disagree.
+  const privately = { isPrivate: isPrivateTurn, allowedRemote: () => inference.allowedRemote(), onRefused: (name: string) => inference.outsideRefused(name, OUTSIDE_OFF_PRIVATE) };
+  // Every tool the server has, by name (filled once they are wired, below). A local model that calls one a private
+  // turn was not offered is told why, in the private rule's own sentence, instead of "Unknown tool": nothing runs
+  // either way (./outside-ai notOfferedOnPrivate, @flint/core FlintConfig.unknownTool).
+  const wiredNames: string[] = [];
+  const notOffered = (call: { toolName: string }) => notOfferedOnPrivate(call.toolName, wiredNames, privately);
   // A local model's whole prompt is sized to its real window (fitToWindow): tools give way, then the oldest
   // history, and nothing is sent that Ollama would have to cut the start of. What was left out is logged.
-  let flint = new Flint({ provider, defaultModel: model, memory: historyOf(provider, model), observer, fitToWindow: true });
+  let flint = new Flint({ provider, defaultModel: model, memory: historyOf(provider, model), observer, fitToWindow: true, unknownTool: notOffered });
   // No voice-exemplar retriever here on purpose: with 42 tool schemas already in
   // the prompt, injecting 3 more writing samples bloats it enough that the local
   // model degrades to empty turns. The style guide alone carries the voice.
@@ -571,7 +579,7 @@ async function main(): Promise<void> {
       provider: inference.standby.provider,
       // The compact local guide, whatever the main model's: the standby's window is small, and the default
       // guide alone (about 3,980 tokens) would leave it no room for the question.
-      persona: localPersonaFor(new Flint({ provider: inference.standby.provider, defaultModel: inference.standby.model, memory: historyOf(inference.standby.provider, inference.standby.model), observer, fitToWindow: true }), STANDBY_STYLE, inference.standby.model),
+      persona: localPersonaFor(new Flint({ provider: inference.standby.provider, defaultModel: inference.standby.model, memory: historyOf(inference.standby.provider, inference.standby.model), observer, fitToWindow: true, unknownTool: notOffered }), STANDBY_STYLE, inference.standby.model),
     };
   let standby = makeStandby();
   // Eval-only local-model override (apps/parity --local-model / --local-think, see
@@ -582,7 +590,7 @@ async function main(): Promise<void> {
   const localModels =
     provider.name === 'ollama'
       ? overridePersonaCache(process.env, (candidate, m, variant) =>
-          localPersonaFor(new Flint({ provider: candidate, defaultModel: m, memory: historyOf(candidate, m), observer, fitToWindow: true }), variant ?? localStyleFor(styles.local, candidate.getCapabilities(m).maxContextTokens), m),
+          localPersonaFor(new Flint({ provider: candidate, defaultModel: m, memory: historyOf(candidate, m), observer, fitToWindow: true, unknownTool: notOffered }), variant ?? localStyleFor(styles.local, candidate.getCapabilities(m).maxContextTokens), m),
         )
       : undefined;
 
@@ -591,8 +599,10 @@ async function main(): Promise<void> {
   // hybrid modes nothing is sent to an Ollama on another machine that Will has not said is his (./inference
   // helpersOff): their requests then fail like an Ollama that is down, which each of them already lives with
   // (recall goes lexical, only the core tools are offered, extraction waits). Read on every request.
+  // (...and the model matters as well as the address: a cloud model under a plain name answers at this Mac's own
+  // Ollama. The request's own `model` is read, and the facade asks what Ollama says of it.)
   const helperFetch = ((url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-    const off = inference.helpersOff();
+    const off = inference.helpersOff(helperModel(init?.body));
     return off ? Promise.reject(new TypeError(`fetch refused: ${off}`)) : fetch(url, init);
   }) as typeof fetch;
   const embedHost = process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434';
@@ -606,7 +616,9 @@ async function main(): Promise<void> {
   // Long-term compounding memory: durable facts Flint learns about Will, pulled
   // into context by relevance. The `remember` tool lets Flint save them mid-chat.
   // A fact that stays on this Mac is embedded only when the embedder is here too (./goals-chat embedderHere).
-  const knowledge = new KnowledgeStore(join(dataDir, 'knowledge.json'), embedder, undefined, undefined, { embedderHere: () => embedderHere(embedHost) });
+  // (...and when its model really runs there: its Ollama is asked, like a brain's.)
+  goalsChat.hears({ provider: 'ollama', model: inference.embedModel, baseURL: embedHost });
+  const knowledge = new KnowledgeStore(join(dataDir, 'knowledge.json'), embedder, undefined, undefined, { embedderHere: () => embedderHere(embedHost, inference.embedModel) });
 
   // Action approval — read-only tools run freely; any write the model attempts is
   // captured as a proposal for one-tap approval (see ActionQueue). This is what
@@ -723,7 +735,7 @@ async function main(): Promise<void> {
   inference.declareTools(wiredMcp);
   // On a private turn nothing leaves this Mac: every tool that does not run here refuses when it is called,
   // whoever calls it (./outside-ai keptHereOnPrivate). It is the outer wrapper, so it is asked first.
-  const heldOnPrivate = <T extends Tool>(list: readonly T[]): T[] => keptHereOnPrivate(list, { isPrivate: isPrivateTurn, allowedRemote: () => inference.allowedRemote(), onRefused: (name) => inference.outsideRefused(name, OUTSIDE_OFF_PRIVATE) });
+  const heldOnPrivate = <T extends Tool>(list: readonly T[]): T[] => keptHereOnPrivate(list, privately);
   const mcpTools = heldOnPrivate(
     meterPaidTools(wiredMcp, {
       guard: spend,
@@ -768,6 +780,7 @@ async function main(): Promise<void> {
     spendStatusTool(spend),
     ], tierOpts)),
   ];
+  wiredNames.push(...tools.map((t) => t.definition.name));
   if (registry) console.error(`[mcp] connected: ${registry.connectedServers().join(', ') || '(none)'}; ${tools.length} tool(s)`);
 
   // Per-query tool selection — all tools stay wired; the model sees only the relevant few.
@@ -948,8 +961,9 @@ async function main(): Promise<void> {
   let backgroundBrain = makeBackground();
   // The local model costs nothing, so a kind is bounded by its calls a day, not its dollars.
   const callCaps = readKindCallCaps(process.env, (m) => console.error(`[spend] ${m}`));
-  // (With the Ollama server on another machine in a mode that sends nothing off this Mac, there is no local model to ask.)
-  const completeGate = new CompleteGate({ guard: spend, kindCaps, callCaps, audit, brain: () => (inference.helpersOff() ? undefined : backgroundBrain), log: (m) => console.error(m) });
+  // (With the Ollama server on another machine in a mode that sends nothing off this Mac, or a model that Ollama's own
+  // listing does not say runs on it, there is no local model to ask: ./inference helperBrain.)
+  const completeGate = new CompleteGate({ guard: spend, kindCaps, callCaps, audit, brain: () => inference.helperBrain(backgroundBrain), log: (m) => console.error(m) });
   startInternal({
     tokenSha256: internalSha,
     // The runtime's words stay in the console; the phone only ever gets the content-free ping.
@@ -1003,7 +1017,7 @@ async function main(): Promise<void> {
       const seen = inference.local;
       const next = inference.primary;
       const nextEnv = { ...process.env, ...next.env };
-      const nextFlint = new Flint({ provider: next.provider, defaultModel: next.model, memory: historyOf(next.provider, next.model), observer, fitToWindow: true });
+      const nextFlint = new Flint({ provider: next.provider, defaultModel: next.model, memory: historyOf(next.provider, next.model), observer, fitToWindow: true, unknownTool: notOffered });
       const nextGuide = localGuideFor(next.provider, next.model, next.settled);
       const nextPersona = localPersonaFor(nextFlint, nextGuide, next.model, next.provider);
       const nextStandby = makeStandby();
@@ -1366,9 +1380,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if (noCloud) return json(res, 503, { error: noCloud, fallback: 'browser' });
     // ...and a reply that stays on this Mac is never sent to it, in any mode (./goals-chat speechStaysHere): a
     // private turn's, any turn's from Local mode, one answered with Will's goals. The client names the
-    // conversation and the turn, and speaks with its own voice instead.
+    // conversation and the turn, and speaks with its own voice instead. The words must be that turn's own reply:
+    // a request that names an ordinary turn and carries another reply's words is refused too.
     // 409, not 503: a 503 tells the client the neural voice is out for the next ten minutes.
-    if (ctx.goals.speechStaysHere({ conversationId: body.conversationId, turnId: body.turnId })) return json(res, 409, { error: SPEECH_STAYS_HERE, fallback: 'browser' });
+    if (ctx.goals.speechStaysHere({ conversationId: body.conversationId, turnId: body.turnId, text })) return json(res, 409, { error: SPEECH_STAYS_HERE, fallback: 'browser' });
     try {
       const spoken = await speakWithinBudget(text, { guard: ctx.spend, model: TTS_MODEL, maxChars: TTS_MAX_CHARS, synth: synthesizeSpeech });
       if (spoken.status === 'no-key') return json(res, 503, { error: 'no tts key' });
@@ -1427,6 +1442,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // and a hybrid turn is finished below, once its tier and tools are known.
     const pre = ctx.inference.preRoute({ message: prompt, localOnly, deep: body.deep === true, evalMode, hasFrontier: !!ctx.frontier, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
     if ('error' in pre) return json(res, pre.status, { error: pre.error });
+    // A turn that stays here: the model server is asked what runs on it NOW, before a word of the prompt is sent
+    // anywhere, the embedder included (./inference lookFirst).
+    const elsewhere = await ctx.inference.lookFirst(pre);
+    if (elsewhere) return json(res, elsewhere.status, { error: elsewhere.error });
     const asText = [prompt, summarizeAttachments(attachments)].filter(Boolean).join(' ');
     const scored = await ctx.router.selectScored(asText);
     // A private turn: only the tools that run on this Mac; Local mode: none that is an outside AI or a paid service.
@@ -1688,6 +1707,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // (And the mode decides first, ./mode-route: cloud is routeTurn as before, local never leaves this Mac, hybrid is finished below.)
     const pre = ctx.inference.preRoute({ message, localOnly, deep: body.deep === true, evalMode: false, hasFrontier: !!ctx.frontier, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
     if ('error' in pre) return json(res, pre.status, { error: pre.error });
+    // A turn that stays here: the model server is asked what runs on it NOW, before a word of the message is sent
+    // anywhere, the embedder included (./inference lookFirst).
+    const elsewhere = await ctx.inference.lookFirst(pre);
+    if (elsewhere) return json(res, elsewhere.status, { error: elsewhere.error });
     // From here until the turn ends, however it ends, it is a chat turn in flight
     // (POST /internal/load): the runtime's triage leaves the local model to it.
     return ctx.chatLoad.run(async () => {
@@ -1806,8 +1829,14 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           // a standby that failed, or gave way to the next step, uses up nothing.
           if (ev.type === 'done' && !note && standbyLine && answer.trim() && ctx.standbyNotes.take(conversationId)) note = standbyLine;
           // The budget note rides just ahead of `done`: shown, but never stored as the answer.
-          if (note && ev.type === 'done') res.write(`data: ${JSON.stringify({ type: 'text', delta: `\n\n${note}` })}\n\n`);
-          if (ev.type === 'text') answer += ev.delta;
+          if (note && ev.type === 'done') {
+            res.write(`data: ${JSON.stringify({ type: 'text', delta: `\n\n${note}` })}\n\n`);
+            asked.said(`\n\n${note}`);
+          }
+          if (ev.type === 'text') {
+            answer += ev.delta;
+            asked.said(ev.delta); // what the client may ask to have spoken, as this turn's own words
+          }
           if (ev.type === 'tool_call') acted = true;
           // A provider error arrives as an event, not a throw. With no text out yet it is
           // thrown instead: to the next tier, or, from the last frontier tier, to the local

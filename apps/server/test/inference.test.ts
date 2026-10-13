@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EMBEDDING_MODEL, hardwareTier, isFlintError, type Tool } from '@flint/core';
-import { buildInference, type Inference } from '../src/inference';
+import { buildInference, helperModel, type Inference } from '../src/inference';
 import type { Hardware } from '../src/hardware';
 import type { ModeRoute } from '../src/mode-route';
 import { OUTSIDE_OFF_LOCAL_MODE, OUTSIDE_OFF_PRIVATE, OUTSIDE_OFF_PRIVATE_SERVER, PRIVATE_TURN_NOTE } from '../src/outside-ai';
@@ -328,6 +328,122 @@ describe('a cloud model under a plain name: the model server says where it runs,
     expect(inference.planLocal(route({}), main).steps).toEqual([]);
   });
 
+  // The privacy review's N1. The alias check above held on that wire only once the server had been HEARD as an
+  // Ollama at that exact address; until then "not known to be an Ollama" was taken as "so it is local".
+  it('N1 (a): FLINT_LOCAL_SERVER=openai says what kind of server it is, and the server is still asked: the alias is a cloud model', async () => {
+    server = await startMockLocalServer({ models: aliased });
+    const { inference } = await boot(aliased, { FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_SERVER: 'openai', FLINT_LOCAL_BASE_URL: server.baseURL, FLINT_LOCAL_MODEL: ALIAS, FLINT_INFERENCE_MODE: 'cloud', FLINT_LOCAL_FALLBACK_MODEL: 'off' });
+    expect(inference.local.wire).toBe('openai');
+    expect(inference.local.server).toBe('openai'); // taken at Will's word for what it is asked like...
+    expect(LOCALITY.said(server.baseURL)).toBe('ollama'); // ...and it said what it is
+    expect(inference.confined).toEqual({ ok: false, why: 'cloud_model' });
+    expect(inference.brainIsLocal(inference.primary.provider, ALIAS)).toBe(false);
+    expect(ask(inference)).toEqual({ error: "The local model is one that runs on Ollama's servers, and a private message never leaves this Mac.", status: 503 });
+    inference.mode.set('local', 'console');
+    expect(inference.planLocal(route({}), main)).toMatchObject({ steps: [], refusal: "The local model is one that runs on Ollama's servers, and Local mode never uses the cloud." });
+    const st = await inference.status();
+    expect(st.local).toMatchObject({ confined: false, notConfined: 'cloud_model' });
+    expect(st.local.primary.sentence).toBe("The local model is an Ollama cloud model, which runs on Ollama's servers, so Local and Hybrid modes will not use it.");
+  });
+
+  it('N1 (b): the model server was not up when Flint booted: nothing on it is local until it has said what it is, and then the alias is refused', async () => {
+    server = await startMockLocalServer({ models: aliased });
+    const dir = mkdtempSync(join(tmpdir(), 'flint-inference-'));
+    dirs.push(dir);
+    let up = false;
+    const gate = ((url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => (up ? fetch(url, init) : Promise.reject(new TypeError('fetch failed')))) as typeof fetch;
+    const inference = await buildInference({
+      env: { OLLAMA_HOST: server.origin, FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: server.baseURL, FLINT_LOCAL_MODEL: ALIAS, FLINT_INFERENCE_MODE: 'cloud', FLINT_LOCAL_FALLBACK_MODEL: 'off' },
+      modeFile: join(dir, 'inference.json'), fetch: gate, connect: async () => {}, detect, pick: { capMs: 300 },
+    });
+    built.push(inference);
+    await inference.ready;
+    expect(inference.local.server).toBe('openai'); // nothing answered, so the wire's own guess
+    expect(LOCALITY.said(server.baseURL)).toBeUndefined();
+    // Not known yet is not "so, yes": the model is not local, and a turn that stays here is not planned for it.
+    expect(inference.brainIsLocal(inference.primary.provider, ALIAS)).toBe(false);
+    expect(inference.planLocal(route({ mode: 'cloud', reason: 'private', private: true }), main).steps).toEqual([]);
+    // The server comes up. The private turn's own look is where it says what it is, before a word is sent.
+    up = true;
+    const pre = ask(inference);
+    expect(pre).toMatchObject({ brain: 'local', private: true }); // routed on what was known: nothing said it was elsewhere
+    expect(await inference.lookFirst(pre as { mode: 'cloud'; private: boolean })).toEqual({ error: "The local model is one that runs on Ollama's servers, and a private message never leaves this Mac.", status: 503 });
+    expect(LOCALITY.said(server.baseURL)).toBe('ollama');
+    expect(inference.confined).toEqual({ ok: false, why: 'cloud_model' });
+    expect(server.chats()).toEqual([]);
+  });
+
+  it('N1: a server that says it is no Ollama (llama.cpp) is local by its address, once it has said so and not before', async () => {
+    server = await startMockLocalServer({ kind: 'llamacpp', models: { 'model.gguf': { loaded: true } } });
+    const { inference } = await boot({}, { FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: server.baseURL, FLINT_LOCAL_MODEL: 'model.gguf', FLINT_INFERENCE_MODE: 'local', FLINT_LOCAL_FALLBACK_MODEL: 'off' });
+    expect(inference.local.server).toBe('llamacpp');
+    expect(LOCALITY.said(server.baseURL)).toBe('other');
+    expect(inference.brainIsLocal(inference.primary.provider, 'model.gguf')).toBe(true);
+    expect(inference.planLocal(route({}), { primary: { persona: 'main', model: 'model.gguf' } }).steps).toHaveLength(1);
+    // Its word forgotten (as after five minutes of silence): not local until the next look hears it again.
+    LOCALITY.clear();
+    expect(inference.brainIsLocal(inference.primary.provider, 'model.gguf')).toBe(false);
+    expect(await inference.lookFirst({ mode: 'local', private: false })).toBeUndefined();
+    expect(inference.brainIsLocal(inference.primary.provider, 'model.gguf')).toBe(true);
+  });
+
+  // The privacy review's N5. In Cloud mode nothing watches the model server, so a name pointed at a cloud model
+  // while Flint ran (`ollama cp`) kept answering private turns until the next look, up to a minute later.
+  it('N5: a turn that stays here asks the server first, in every mode: a name re-pointed while Flint runs is caught by the very next one', async () => {
+    const { inference, s } = await boot(loaded, { FLINT_INFERENCE_MODE: 'cloud', FLINT_LOCAL_FALLBACK_MODEL: 'off' });
+    const looks = () => s.requests.filter((q) => q.path === '/api/tags').length;
+    const privately = { mode: 'cloud', private: true } as const;
+    expect(inference.local.monitor.running).toBe(false); // Cloud mode: no timer
+    expect(ask(inference)).toMatchObject({ brain: 'local', private: true });
+    // Every such turn looks, however fresh the last look is.
+    const before = looks();
+    expect(await inference.lookFirst(privately)).toBeUndefined();
+    expect(await inference.lookFirst(privately)).toBeUndefined();
+    expect(looks()).toBe(before + 2);
+    // A turn that does not stay here is not held up, and asks nothing.
+    expect(await inference.lookFirst({ mode: 'cloud', private: false })).toBeUndefined();
+    expect(await inference.lookFirst({ mode: 'hybrid', private: false })).toBeUndefined();
+    expect(looks()).toBe(before + 2);
+    // `ollama cp gpt-oss:120b-cloud main-model:30b`, while Flint runs.
+    s.models.get(MAIN)!.remoteHost = 'https://ollama.com:443';
+    expect(inference.brainIsLocal(inference.primary.provider, MAIN)).toBe(true); // what was known, a moment old
+    expect(await inference.lookFirst(privately)).toEqual({ error: "The local model is one that runs on Ollama's servers, and a private message never leaves this Mac.", status: 503 });
+    expect(inference.brainIsLocal(inference.primary.provider, MAIN)).toBe(false);
+    expect(ask(inference)).toMatchObject({ status: 503 });
+    // Local mode: an ordinary turn stays here too, so it looks; its refusal is the plan's.
+    inference.mode.set('local', 'console');
+    const inLocal = looks();
+    expect(await inference.lookFirst({ mode: 'local', private: false })).toBeUndefined();
+    expect(looks()).toBe(inLocal + 1);
+    expect(inference.planLocal(route({}), { primary: { persona: 'main', model: MAIN } }).steps).toEqual([]);
+    // Pointed back at a model of its own, the next look takes that too.
+    delete s.models.get(MAIN)!.remoteHost;
+    expect(await inference.lookFirst({ mode: 'local', private: true })).toBeUndefined();
+    expect(inference.brainIsLocal(inference.primary.provider, MAIN)).toBe(true);
+  });
+
+  it('N5: a model server that does not answer the look holds a turn for the look and no longer; it then goes on with what was known', async () => {
+    const { inference } = await boot(loaded, { FLINT_INFERENCE_MODE: 'cloud', FLINT_LOCAL_FALLBACK_MODEL: 'off' });
+    const monitor = inference.local.monitor as unknown as { check: () => Promise<unknown> };
+    monitor.check = () => Promise.reject(new Error('the look failed'));
+    expect(await inference.lookFirst({ mode: 'cloud', private: true })).toBeUndefined();
+    expect(inference.brainIsLocal(inference.primary.provider, MAIN)).toBe(true); // believed for a few minutes, as ever
+  });
+
+  // The privacy review's N10: a standby that is a cloud model under a plain name was still loaded ahead of a turn.
+  it('N10: a standby that is a cloud model under a plain name is never warmed, in any mode', async () => {
+    const flipped: Record<string, MockModel> = { [MAIN]: { loaded: true, contextLength: 16384 }, [ALIAS]: { loaded: false, remoteHost: 'https://ollama.com:443' }, [EMBED]: {} };
+    const { inference, s } = await boot(flipped, { FLINT_INFERENCE_MODE: 'hybrid', FLINT_LOCAL_FALLBACK_MODEL: ALIAS });
+    await inference.local.monitor.check();
+    inference.local.monitor.warm('fallback');
+    inference.mode.set('local', 'console');
+    await inference.local.monitor.check();
+    inference.local.monitor.warm('fallback');
+    await new Promise((r) => setTimeout(r, 60));
+    expect(s.requests.filter((q) => q.path === '/api/generate')).toEqual([]);
+    expect(s.chats()).toEqual([]);
+  });
+
   it('an Ollama that stops answering is believed for a few minutes and then not at all: unknown is not "here"', async () => {
     const { inference, s } = await boot(loaded, { FLINT_INFERENCE_MODE: 'local', FLINT_LOCAL_FALLBACK_MODEL: 'off' });
     expect(inference.brainIsLocal(inference.primary.provider, MAIN)).toBe(true);
@@ -591,6 +707,11 @@ describe('which brain is on this Mac, as the facade answers it', () => {
     // The embedder at that address is here too (it is Ollama's own address, and Will said that machine is his).
     expect(embedderHere('https://gpu-box.invalid:11434')).toBe(true);
     expect(embedderHere('https://someone-else.invalid:11434')).toBe(false);
+    // ...for a model that server lists as its own, and not for a cloud model it has under a plain name.
+    expect(embedderHere('https://gpu-box.invalid:11434', 'other-model:7b')).toBe(true);
+    expect(embedderHere('https://gpu-box.invalid:11434', 'mine')).toBe(false);
+    expect(embedderHere('https://gpu-box.invalid:11434', 'never-pulled')).toBe(false);
+    expect(embedderHere('https://someone-else.invalid:11434', MAIN)).toBe(false);
     // Without the setting, that server is not local, whatever it lists.
     const refused = await buildInference({ env: { ...env, OLLAMA_HOST: 'https://gpu-box.invalid:11434', FLINT_LOCAL_ALLOW_REMOTE: '0' }, modeFile: join(dir, 'b.json'), fetch: offline, detect, observeOnly: true });
     built.push(refused);
@@ -657,6 +778,102 @@ describe('the helpers that always talk to Ollama\'s own address', () => {
     expect((await at({ OLLAMA_HOST: 'https://gpu-box.invalid:11434', FLINT_LOCAL_ALLOW_REMOTE: '1', FLINT_INFERENCE_MODE: 'local' })).helpersOff()).toBeUndefined();
     expect((await at({ ...REMOTE, FLINT_LOCAL_ALLOW_REMOTE: '1', FLINT_INFERENCE_MODE: 'local' })).helpersOff()).toBe(OFF);
     expect((await at({ ...REMOTE, FLINT_LOCAL_ALLOW_REMOTE: '1', FLINT_LOCAL_ALLOW_INSECURE_REMOTE: '1', FLINT_INFERENCE_MODE: 'local' })).helpersOff()).toBeUndefined();
+  });
+
+  // The privacy review's N2. FLINT_LOCAL_ALLOW_REMOTE vouched for OLLAMA_HOST as well as for the model server: with
+  // the local model on this Mac and OLLAMA_HOST on another machine, that machine was "here", and was sent the
+  // private message to embed and the stored private turn to mine, under sentences that said "this Mac".
+  it('N2: the switch vouches for the model server and nothing else: OLLAMA_HOST on some other machine is never "here" because of it', async () => {
+    const OTHER = 'https://ollama-box.invalid:11434';
+    const lmHere = { OLLAMA_HOST: OTHER, FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: 'http://127.0.0.1:8080/v1', FLINT_LOCAL_SERVER: 'openai', FLINT_LOCAL_ALLOW_REMOTE: '1', FLINT_LOCAL_ALLOW_INSECURE_REMOTE: '1' };
+    for (const mode of ['local', 'hybrid'] as const) {
+      const i = await at({ ...lmHere, FLINT_INFERENCE_MODE: mode });
+      expect(i.local.confined, mode).toEqual({ ok: true }); // the model server is this Mac
+      expect(i.helpersOff(), mode).toBe(OFF);
+      expect(i.helperBrain({ model: MAIN }), mode).toBeUndefined();
+      expect(placedHere(OTHER), mode).toBe(false);
+      expect(embedderHere(OTHER, 'nomic-embed-text'), mode).toBe(false);
+      // Even with that Ollama's own word that the model runs on it: it is not this Mac, and not the server he allowed.
+      listed(OTHER, [MAIN, 'nomic-embed-text']);
+      expect(embedderHere(OTHER, 'nomic-embed-text'), mode).toBe(false);
+      expect(keepsPrivate({ provider: 'ollama', model: MAIN, baseURL: OTHER }), mode).toBe(false);
+      // So the sentences that say where things stay are true: nothing names a second machine, because none is used.
+      expect(i.allowedRemote(), mode).toBe(false);
+      LOCALITY.clear();
+    }
+    const cloud = await at({ ...lmHere, FLINT_INFERENCE_MODE: 'cloud' });
+    expect(cloud.sentences()).toEqual({ modeSentence: 'Cloud models answer, and private messages stay on this Mac.', localOnlySentence: 'Answers stay on this Mac.' });
+    expect(cloud.helpersOff()).toBeUndefined(); // an ordinary request in Cloud mode is as it always was
+    expect(await withTurnTaint(async () => (cloud.preRoute({ message: 'x', localOnly: true, deep: false, evalMode: false, hasFrontier: true, needs: {}, frontierCan: {} }), cloud.helpersOff()))).toBe('the Ollama server is on another machine, and a private message is not sent off this Mac');
+    // A model server on a THIRD machine that he allowed does not make OLLAMA_HOST his either.
+    const third = await at({ ...lmHere, FLINT_LOCAL_BASE_URL: 'https://gpu-box.invalid/v1', FLINT_INFERENCE_MODE: 'local' });
+    expect(third.allowedRemote()).toBe(true);
+    expect(placedHere('https://gpu-box.invalid/v1')).toBe(true);
+    expect(placedHere(OTHER)).toBe(false);
+    expect(third.helpersOff()).toBe(OFF);
+    // When Ollama's address IS the model server's, they are one server, and it is vouched for (as before).
+    const same = await at({ OLLAMA_HOST: 'https://gpu-box.invalid:11434', FLINT_LOCAL_ALLOW_REMOTE: '1', FLINT_INFERENCE_MODE: 'local' });
+    expect(same.helpersOff()).toBeUndefined();
+    expect(placedHere('https://gpu-box.invalid:11434')).toBe(true);
+    const sameOpenAi = await at({ OLLAMA_HOST: 'https://gpu-box.invalid:11434', FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: 'https://gpu-box.invalid:11434/v1', FLINT_LOCAL_ALLOW_REMOTE: '1', FLINT_INFERENCE_MODE: 'local' });
+    expect(sameOpenAi.helpersOff()).toBeUndefined();
+  });
+
+  // The privacy review's N9. The helpers judged "is it here" by the address and the model's name, never by what the
+  // Ollama there lists: a cloud model under a plain name would embed a private message, or answer a background call.
+  it('N9: the helpers ask the same listing: a model Ollama says runs elsewhere is sent nothing that stays here, and never answers a background call', async () => {
+    const HERE = 'http://127.0.0.1:11434';
+    const i = await at({ FLINT_INFERENCE_MODE: 'cloud' });
+    const privately = <T>(fn: () => T): Promise<T> => withTurnTaint(async () => (i.preRoute({ message: 'x', localOnly: true, deep: false, evalMode: false, hasFrontier: true, needs: {}, frontierCan: {} }), fn()));
+    const NOT_KNOWN = 'the model asked for is not known to run on this Mac, and a private message is not sent to it';
+    const ELSEWHERE = "the model asked for runs on Ollama's servers, and in this mode nothing is sent off this Mac";
+    // Nothing heard from Ollama yet. An ordinary request is as it always was; a private message waits for its word.
+    expect(i.helpersOff('nomic-embed-text')).toBeUndefined();
+    expect(await privately(() => i.helpersOff('nomic-embed-text'))).toBe(NOT_KNOWN);
+    expect(await privately(() => i.helpersOff())).toBeUndefined(); // a request that names no model (a listing) carries none of it
+    expect(i.helperBrain({ model: MAIN })).toBeUndefined(); // background calls: only a model Ollama has said is its own
+    listed(HERE, [MAIN, 'nomic-embed-text', { name: 'embed-alias', remote_host: 'https://ollama.com:443' }, { name: 'mine', remote_host: 'https://ollama.com:443' }]);
+    expect(await privately(() => i.helpersOff('nomic-embed-text'))).toBeUndefined();
+    expect(await privately(() => i.helpersOff('nomic-embed-text:latest'))).toBeUndefined();
+    expect(await privately(() => i.helpersOff('embed-alias'))).toBe(NOT_KNOWN);
+    expect(await privately(() => i.helpersOff('never-pulled'))).toBe(NOT_KNOWN);
+    expect(await privately(() => i.helpersOff(''))).toBe(NOT_KNOWN); // a body whose model could not be read
+    // Cloud mode, an ordinary request: as it always was, alias or not.
+    expect(i.helpersOff('embed-alias')).toBeUndefined();
+    // Local and Hybrid: nothing is sent to a model known to run on Ollama's servers. One not heard of is still
+    // asked (the tools' descriptions are embedded while Flint boots, and they are nobody's private words).
+    for (const mode of ['local', 'hybrid'] as const) {
+      i.mode.set(mode, 'console');
+      expect(i.helpersOff('embed-alias'), mode).toBe(ELSEWHERE);
+      expect(i.helpersOff('nomic-embed-text'), mode).toBeUndefined();
+      expect(i.helpersOff('never-pulled'), mode).toBeUndefined();
+    }
+    // The background helper (/internal/complete): the chat model, in every mode, only when Ollama lists it as its own.
+    for (const mode of ['cloud', 'hybrid', 'local'] as const) {
+      i.mode.set(mode, 'console');
+      const real = { model: MAIN };
+      expect(i.helperBrain(real), mode).toBe(real);
+      expect(i.helperBrain({ model: 'mine' }), mode).toBeUndefined();
+      expect(i.helperBrain({ model: 'never-pulled' }), mode).toBeUndefined();
+      expect(i.helperBrain(undefined), mode).toBeUndefined();
+    }
+    // Its word too old to believe: no background call is answered until it is heard again.
+    LOCALITY.clear();
+    expect(i.helperBrain({ model: MAIN })).toBeUndefined();
+    // An Ollama on another machine: asked in Cloud mode as it always was, and never in a mode that keeps things here.
+    const remote = await at({ ...REMOTE, FLINT_INFERENCE_MODE: 'cloud' });
+    const there = { model: MAIN };
+    expect(remote.helperBrain(there)).toBe(there);
+    remote.mode.set('hybrid', 'console');
+    expect(remote.helperBrain(there)).toBeUndefined();
+  });
+
+  it('helperModel: the model a helper\'s request names, read from its body', () => {
+    expect(helperModel(undefined)).toBeUndefined();
+    expect(helperModel(null)).toBeUndefined();
+    expect(helperModel(JSON.stringify({ model: 'nomic-embed-text', prompt: 'x' }))).toBe('nomic-embed-text');
+    // A body that names no model, or cannot be read, names a model Ollama does not list.
+    for (const body of [JSON.stringify({ prompt: 'x' }), JSON.stringify({ model: 7 }), 'not json', 'null', new Uint8Array([1, 2]), {}]) expect(helperModel(body), String(body)).toBe('');
   });
 
   it('the rule is about Ollama\'s address even when the local brain is on the other wire, at this Mac', async () => {

@@ -289,6 +289,31 @@ describe('LocalMonitor: warm-ups', () => {
     expect(f.warms).toEqual([]);
   });
 
+  // The privacy review's N10. A standby that is a cloud model under a plain name was still loaded ahead of a turn.
+  it('a model the server says runs somewhere else is never warmed: not when asked, not after a slow turn, not when it leaves memory', async () => {
+    const f = fake();
+    f.world.models = { [P]: { installed: true, loaded: false }, [S]: { installed: true, loaded: false } };
+    const elsewhere = new Set([S]);
+    const asked: string[] = [];
+    const { m } = monitor(f, { rewarm: () => true, mayWarm: (model) => (asked.push(model), !elsewhere.has(model)) });
+    await m.check();
+    m.warm('fallback');
+    expect(f.warms).toEqual([]);
+    expect(m.snapshot().fallback?.state).toBe('cold'); // not "loading": nothing was started
+    m.warm('primary');
+    expect(f.warms).toEqual([{ model: P, numCtx: 16384 }]);
+    expect(asked).toEqual([S, P]);
+    // Asked at every warm-up, not once: a name pointed at a cloud model while Flint runs stops being loaded.
+    f.finishWarm(P);
+    await settle();
+    elsewhere.add(P);
+    m.observe('primary', { outcome: 'timeout_first_token' });
+    f.world.models[P] = { installed: true, loaded: false };
+    await m.check();
+    m.warm('primary');
+    expect(f.warms).toEqual([{ model: P, numCtx: 16384 }]);
+  });
+
   it('a server that cannot say what is in memory is loaded once a warm-up has made it answer', async () => {
     const f = fake('openai');
     f.world.models = { [P]: { installed: true } };

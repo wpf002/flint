@@ -52,6 +52,7 @@ import type { PersistentStore } from './persistent-store';
 import { brainIsLocal, brainOf, listedAt, placeUnknown, placedHere, type AnsweringBrain } from './policy';
 import { PRIVATE_TURN, corpusMark, turnStaysHere, type StayRoute } from './private-turns';
 import type { PaidToolSpec } from './spend';
+import { isPartOf } from './spoken-text';
 import { asLocalTurn, isLocalTurn } from './turn-taint';
 
 /** What the gate reads off a persona to size its prompt. */
@@ -106,9 +107,17 @@ export function toolsKeptHere(o: {
  * leaves this Mac (unless that machine is the model server Will said is his:
  * ./policy placedHere). A fact that stays here is then stored without an
  * embedding (./knowledge), and recall matches it by its words.
+ *
+ * `model`: the embedding model, when the caller knows it. The address is not
+ * the whole of it: a cloud model under a plain name answers at this Mac's own
+ * Ollama. With a model named, the embedder is here only while that Ollama
+ * lists the model as its own (./policy brainIsLocal, the one rule; the server
+ * has that Ollama asked: `GoalsChat.hears`). A fact stored before the answer
+ * is in has no embedding, and gets one after.
  */
-export function embedderHere(host: string | undefined): boolean {
-  return placedHere(host);
+export function embedderHere(host: string | undefined, model?: string): boolean {
+  if (model === undefined) return placedHere(host);
+  return brainIsLocal({ provider: 'ollama', model, baseURL: host });
 }
 
 /** A recall with the part of it any brain may be given (./grounding recallContext). */
@@ -132,18 +141,26 @@ export function recallForAnyBrain(recall: Recalled): { block: string; facts: str
  * any mark (./goals-now keptHere).
  *
  * The client names the reply: the conversation, and the turn its `meta` event
- * gave it. A request that names a conversation and no turn is about that
- * conversation's newest turn. A request that cannot be placed is held to the
- * strictest answer: it stays here while ANY conversation's newest turn is
- * marked (however old that turn is), or a marked turn is in any
- * conversation's history window. That is a request that names nothing, one
- * that names a conversation the store does not hold, and one that names a
- * turn its conversation does not hold: a wrong name is not a weaker claim
- * than no name.
+ * gave it. What it names is not taken on trust:
+ *  - a request that names a turn is about that turn, and the words it sends
+ *    must be that turn's own reply (`text`, ./spoken-text isPartOf: against
+ *    what the server streamed for the turn, `spoken`, or the stored reply).
+ *    Another reply's words under an ordinary turn's name are refused;
+ *  - a request that names a conversation and no turn could be about any reply
+ *    in it, so it is refused while ANY turn the conversation's next message
+ *    carries stays here (its window), and when its newest turn does;
+ *  - a request that cannot be placed is held to the strictest answer: it stays
+ *    here while ANY conversation's newest turn is marked (however old that
+ *    turn is), or a marked turn is in any conversation's history window. That
+ *    is a request that names nothing, one that names a conversation the store
+ *    does not hold, and one that names a turn its conversation does not hold:
+ *    a wrong name is not a weaker claim than no name.
+ * So whatever a client sends, a reply that stays here is not sent out by it.
  */
 export function speechStaysHere(
   store: Pick<PersistentStore, 'matches' | 'turnIds' | 'windowHas' | 'conversationIds'>,
-  said: { conversationId?: unknown; turnId?: unknown },
+  said: { conversationId?: unknown; turnId?: unknown; text?: unknown },
+  spoken?: (conversationId: string, turnId: string) => string | undefined,
 ): boolean {
   const newest = (cid: string): boolean => {
     const ids = store.turnIds(cid);
@@ -155,9 +172,17 @@ export function speechStaysHere(
   if (cid === undefined) return anywhere();
   const held = store.turnIds(cid);
   if (held.length === 0) return anywhere(); // a conversation the store does not hold
-  if (said.turnId === undefined || said.turnId === null || said.turnId === '') return newest(cid);
+  if (said.turnId === undefined || said.turnId === null || said.turnId === '') return newest(cid) || store.windowHas(cid, keptHere);
   if (typeof said.turnId !== 'string' || !held.includes(said.turnId)) return anywhere(); // a turn that is not this conversation's
-  return store.matches(cid, said.turnId, keptHere);
+  const turnId = said.turnId;
+  if (store.matches(cid, turnId, keptHere)) return true;
+  // The turn may go out. The words must be its own: what the server streamed for it, or the reply it is stored with.
+  if (said.text === undefined) return false; // (a caller that asks about the turn alone)
+  if (typeof said.text !== 'string') return true;
+  const text = said.text;
+  const live = spoken?.(cid, turnId);
+  if (live !== undefined && isPartOf(text, live)) return false;
+  return !store.matches(cid, turnId, (t) => isPartOf(text, t.messages.filter((m) => m.role === 'assistant').map((m) => m.content).join('\n')));
 }
 
 /** What `/speak` answers instead of calling an outside speech service. The client then speaks with its own voice. */
@@ -189,6 +214,13 @@ export interface ChatAsk {
    * event arrives: undefined until the turn is stored, and after it was given.
    */
   meta(): StaysHereEvent | undefined;
+  /**
+   * What the server has just streamed to the client as this ask's reply: the
+   * model's text, and any line of the server's own shown with it. Kept (for a
+   * while, in memory) under the stored turn, so `/speak` can tell that words a
+   * client asks to have spoken are that turn's own.
+   */
+  said(text: string): void;
 }
 
 export interface GoalsChatOptions {
@@ -203,10 +235,15 @@ export interface GoalsChatOptions {
   fetchImpl?: typeof fetch;
 }
 
+/** How many turns' streamed replies are kept for `/speak` (a reply is spoken within moments of being streamed). */
+const SPOKEN_TURNS = 64;
+
 export class GoalsChat<P extends Speaker> {
   #gate: GoalsNow<P> | undefined;
   #tools: KeptTools | undefined;
   #named: Promise<void> = Promise.resolve();
+  /** What was streamed as each recent turn's reply, by conversation and turn: the newest SPOKEN_TURNS of them. */
+  readonly #spoken = new Map<string, string>();
   readonly #o: GoalsChatOptions;
 
   constructor(opts: GoalsChatOptions) {
@@ -222,6 +259,16 @@ export class GoalsChat<P extends Speaker> {
   #watch(brain: AnsweringBrain | undefined): Promise<void> {
     const url = listedAt(brain);
     return url ? (this.#o.locality ?? LOCALITY).watch(url) : Promise.resolve();
+  }
+
+  /**
+   * Have a server that is no chat brain's asked what runs on it too: Ollama's
+   * own address, which the embedder and memory extraction use whatever wire
+   * the local brain is on. What it says is what `embedderHere` and the
+   * helpers' own rule read (./inference helpersOff).
+   */
+  hears(server: AnsweringBrain): void {
+    void this.#watch(server);
   }
 
   /**
@@ -282,7 +329,17 @@ export class GoalsChat<P extends Speaker> {
     const goals = await this.#gate?.forTurn();
     // With the persona's own words, the rest of the prompt: what the block's room is measured against.
     const restChars = message.length + this.#o.memory.historyChars(conversationId);
-    return new ChatTurn<P>(this.#o.memory, goals, conversationId, restChars, route !== undefined && turnStaysHere(route), this.#tools);
+    return new ChatTurn<P>(this.#o.memory, goals, conversationId, restChars, route !== undefined && turnStaysHere(route), this.#tools, (turnId, text) => this.#streamed(conversationId, turnId, text));
+  }
+
+  /** Keep what was just streamed as a turn's reply (`ChatAsk.said`). */
+  #streamed(conversationId: string, turnId: string, text: string): void {
+    const key = `${conversationId}\u0000${turnId}`;
+    const so_far = this.#spoken.get(key);
+    // (Set again, so the newest turn is the last one out.)
+    this.#spoken.delete(key);
+    this.#spoken.set(key, (so_far ?? '') + text);
+    while (this.#spoken.size > SPOKEN_TURNS) this.#spoken.delete(this.#spoken.keys().next().value!);
   }
 
   /**
@@ -373,9 +430,9 @@ export class GoalsChat<P extends Speaker> {
     return outside && isLocalTurn() ? 'the local model is answering this turn, so its question stays here' : undefined;
   }
 
-  /** Must this reply be spoken on the device (`speechStaysHere`)? */
-  speechStaysHere(said: { conversationId?: unknown; turnId?: unknown }): boolean {
-    return speechStaysHere(this.#o.memory, said);
+  /** Must this reply be spoken on the device (`speechStaysHere`)? `text`: the words the client asks to have spoken. */
+  speechStaysHere(said: { conversationId?: unknown; turnId?: unknown; text?: unknown }): boolean {
+    return speechStaysHere(this.#o.memory, said, (cid, tid) => this.#spoken.get(`${cid}\u0000${tid}`));
   }
 }
 
@@ -392,6 +449,8 @@ export class ChatTurn<P extends Speaker> {
     /** The turn stays here by its route: Will kept it private, or Flint is in Local mode. */
     private readonly kept = false,
     private readonly keptTools?: KeptTools,
+    /** Told what was streamed as a stored turn's reply (GoalsChat keeps it for `/speak`). */
+    private readonly streamed?: (turnId: string, text: string) => void,
   ) {}
 
   /**
@@ -431,6 +490,8 @@ export class ChatTurn<P extends Speaker> {
     const added = staysHere && asked.context.length > a.context.length && asked.context.startsWith(a.context) ? asked.context.slice(a.context.length).trim() : '';
     const before = new Set(this.memory.turnIds(this.conversationId));
     let given = false;
+    /** The stored turn this ask began, once it is known (and only when it is the one turn begun since). */
+    let turn: string | undefined;
     return {
       context: asked.context,
       tools: asked.tools,
@@ -444,7 +505,11 @@ export class ChatTurn<P extends Speaker> {
         if (begun.length === 0) return undefined; // the turn is not stored yet
         given = true;
         // Two turns begun at once in one conversation cannot be told apart here: the client then names none.
-        return { type: 'meta', staysHere, ...(begun.length === 1 ? { turn: begun[0]! } : {}) };
+        if (begun.length === 1) turn = begun[0]!;
+        return { type: 'meta', staysHere, ...(turn !== undefined ? { turn } : {}) };
+      },
+      said: (text) => {
+        if (turn !== undefined && text) this.streamed?.(turn, text);
       },
     };
   }

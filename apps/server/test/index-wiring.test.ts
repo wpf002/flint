@@ -65,7 +65,7 @@ describe('index.ts wiring', () => {
     // candidate, each frontier tier, the adopted brain. (A local model's client also sizes its prompt to its window.)
     expect(src).toContain('const historyOf = (p: ProviderAdapter, m: string) => goalsChat.history(p, m);');
     expect(src.match(/new Flint\(/g)).toHaveLength(5);
-    expect(src.match(/new Flint\(\{[^}]*\bmemory: historyOf\([^)]*\), observer(, fitToWindow: true)? \}\)/g)).toHaveLength(5);
+    expect(src.match(/new Flint\(\{[^}]*\bmemory: historyOf\([^)]*\), observer(, fitToWindow: true, unknownTool: notOffered)? \}\)/g)).toHaveLength(5);
     // The brains are named for it after the tiers exist, and again when the local brain is swapped: the local
     // brain, the tiers, and the standby local model when there is one (it answers while the main one loads).
     expect(src.match(/goalsChat\.name\(\{ persona, provider, model \}, brains, keptTools, standby \? \[standby\] : \[\]\);/g)).toHaveLength(2);
@@ -81,10 +81,15 @@ describe('index.ts wiring', () => {
     expect(between('complete: pausable(', 'calculateTool(),')).toMatch(/const held = goalsChat\.plannerHeld\(plannerVendor !== undefined\);\s*if \(held\) return held;/);
     expect(between('const startMemory = (): void => {', '// On the local model it reads the model that was settled')).toContain('...goalsChat.extractor({ brain: extractBrain, tainted: (cid, tid) => convTaint.isTainted(cid, tid) }),');
     expect(src).toContain("const extractBrain = memoryPlan.kind === 'local' ? { provider: 'ollama', model: memoryPlan.model.model, baseURL: memoryPlan.model.baseURL } : brains && brainOf(brains.primary.provider, brains.primary.model);");
-    expect(src).toContain('{ embedderHere: () => embedderHere(embedHost) }');
+    // The embedder is "here" on its own model's listing, which is watched from boot like any local brain's.
+    expect(src).toContain('{ embedderHere: () => embedderHere(embedHost, inference.embedModel) }');
+    expect(src).toContain("goalsChat.hears({ provider: 'ollama', model: inference.embedModel, baseURL: embedHost });");
+    // What a turn streams is kept as its own words, for the one question /speak asks of a text (the reply and its note).
+    expect(chat.match(/asked\.said\(/g)).toHaveLength(2);
     // /speak asks it before the outside speech service is called.
     const speak = between("url === '/speak'", "url === '/generate'");
-    expect(speak).toContain("if (ctx.goals.speechStaysHere({ conversationId: body.conversationId, turnId: body.turnId })) return json(res, 409, { error: SPEECH_STAYS_HERE, fallback: 'browser' });");
+    // (The text goes with the names: a turn that may be spoken vouches only for its own words, test/goals-chat.test.ts.)
+    expect(speak).toContain("if (ctx.goals.speechStaysHere({ conversationId: body.conversationId, turnId: body.turnId, text })) return json(res, 409, { error: SPEECH_STAYS_HERE, fallback: 'browser' });");
     expect(speak.indexOf('ctx.goals.speechStaysHere(')).toBeLessThan(speak.indexOf('speakWithinBudget('));
     // /generate has no gate: recall as any brain may have it, and a tier on this Mac asked as a local model's turn.
     expect(generate).toContain('const recalled = recallForAnyBrain(await recallContext(userContext(), asText, ctx.knowledge, { skip: !rc.recall }));');
@@ -250,7 +255,7 @@ describe('index.ts wiring', () => {
       'const seen = inference.local;',
       'const next = inference.primary;',
       'const nextEnv = { ...process.env, ...next.env };',
-      'const nextFlint = new Flint({ provider: next.provider, defaultModel: next.model, memory: historyOf(next.provider, next.model), observer, fitToWindow: true });',
+      'const nextFlint = new Flint({ provider: next.provider, defaultModel: next.model, memory: historyOf(next.provider, next.model), observer, fitToWindow: true, unknownTool: notOffered });',
       'const nextGuide = localGuideFor(next.provider, next.model, next.settled);',
       'const nextPersona = localPersonaFor(nextFlint, nextGuide, next.model, next.provider);',
       'const nextStandby = makeStandby();',
@@ -287,7 +292,7 @@ describe('index.ts wiring', () => {
     // already running keeps the persona it started with.
     const perRequest = between('const server = createServer(safeHandler((req, res) => withTurnTaint(() => {', 'const HOST = bindHost(process.env);');
     expect(perRequest).toContain('return handle(req, res, { inference, standby, standbyNotes, persona, localModels, styled, provider, model, localFrom: localBrain.from,');
-    expect(src).toContain('brain: () => (inference.helpersOff() ? undefined : backgroundBrain),');
+    expect(src).toContain('brain: () => inference.helperBrain(backgroundBrain),');
   });
 
   it('the breaker sees every provider request: its observer is on the one observer every Flint client shares', () => {
@@ -455,7 +460,8 @@ describe('index.ts wiring', () => {
     expect(block).toContain('const backgroundModel = localBackgroundModel(b.env, b.model,');
     expect(block).toContain('return backgroundModel && localBackgroundBrain(backgroundModel, { chatActive });');
     expect(block).toContain('let backgroundBrain = makeBackground();');
-    expect(block).toContain('brain: () => (inference.helpersOff() ? undefined : backgroundBrain),');
+    // The model a background call asks is one Ollama's own listing says runs on it (test/inference.test.ts helperBrain).
+    expect(block).toContain('brain: () => inference.helperBrain(backgroundBrain),');
     // Free calls are bounded by a count a day, read from the env beside the dollar caps.
     expect(block).toContain('const callCaps = readKindCallCaps(process.env,');
     expect(block).toContain('new CompleteGate({ guard: spend, kindCaps, callCaps, audit,');
@@ -506,7 +512,15 @@ describe('index.ts wiring', () => {
     expect(wired).toContain('inference.declareTools(wiredMcp);');
     // Two wrappers, the private one outermost: on a private turn a tool that does not run on this Mac refuses before
     // the meter is asked anything, whoever calls it; the meter then keeps Local mode off every paid service.
-    expect(wired).toContain('const heldOnPrivate = <T extends Tool>(list: readonly T[]): T[] => keptHereOnPrivate(list, { isPrivate: isPrivateTurn, allowedRemote: () => inference.allowedRemote(), onRefused: (name) => inference.outsideRefused(name, OUTSIDE_OFF_PRIVATE) });');
+    // The private rule is one object, read by the tools' own refusal and by the answer for a tool that was not offered.
+    expect(src).toContain('const privately = { isPrivate: isPrivateTurn, allowedRemote: () => inference.allowedRemote(), onRefused: (name: string) => inference.outsideRefused(name, OUTSIDE_OFF_PRIVATE) };');
+    expect(wired).toContain('const heldOnPrivate = <T extends Tool>(list: readonly T[]): T[] => keptHereOnPrivate(list, privately);');
+    // A local model that names a tool the private turn was not offered is told why, in the rule's own sentence (run
+    // in test/outside-ai.test.ts and, against the real server, test/process/behaviour.test.ts). Every local client
+    // has it; the names it knows are every tool the server wired.
+    expect(src).toContain('const notOffered = (call: { toolName: string }) => notOfferedOnPrivate(call.toolName, wiredNames, privately);');
+    expect(src).toContain('wiredNames.push(...tools.map((t) => t.definition.name));');
+    expect(src.match(/unknownTool: notOffered/g)).toHaveLength(4);
     expect(wired).toMatch(/const mcpTools = heldOnPrivate\(\s*meterPaidTools\(wiredMcp, \{\s*guard: spend,\s*specs: paidToolSpecs\(process\.env\),\s*outsideOff: \(\) => inference\.outsideOff\(\),\s*onOutsideRefused: \(name, why\) => inference\.outsideRefused\(name, why\),\s*\}\),\s*\);/);
     expect(src.indexOf('const mcpTools = heldOnPrivate(')).toBeLessThan(src.indexOf('deepResearchTool({'));
     expect(between('deepResearchTool({', 'calculateTool(),')).toContain('tools: mcpTools,');
@@ -528,7 +542,8 @@ describe('index.ts wiring', () => {
   it('/speak refuses a reply that stays here: Local mode\'s 503 first, then 409 for the stored turn, both before any speech is made', () => {
     const speak = between("url === '/speak'", "url === '/generate'");
     expect(speak).toMatch(/const noCloud = ctx\.inference\.cloudRefused\('tts'\);\s*if \(noCloud\) return json\(res, 503, \{ error: noCloud, fallback: 'browser' \}\);/);
-    expect(speak).toContain("if (ctx.goals.speechStaysHere({ conversationId: body.conversationId, turnId: body.turnId })) return json(res, 409, { error: SPEECH_STAYS_HERE, fallback: 'browser' });");
+    // (The text goes with the names: a turn that may be spoken vouches only for its own words, test/goals-chat.test.ts.)
+    expect(speak).toContain("if (ctx.goals.speechStaysHere({ conversationId: body.conversationId, turnId: body.turnId, text })) return json(res, 409, { error: SPEECH_STAYS_HERE, fallback: 'browser' });");
     expect(speak.indexOf("ctx.inference.cloudRefused('tts')")).toBeLessThan(speak.indexOf('ctx.goals.speechStaysHere('));
     expect(speak.indexOf('ctx.goals.speechStaysHere(')).toBeLessThan(speak.indexOf('speakWithinBudget('));
     // The client is not asked whether its reply is private: a flag it could leave out decides nothing.
@@ -570,7 +585,7 @@ describe('index.ts wiring', () => {
     const bg = between('const makeBackground = (b: { settled: boolean; env: Record<string, string | undefined>; model: string } = { settled: localBrain.settled, env: localEnv, model }) => {', 'let backgroundBrain = makeBackground();');
     expect(bg).toMatch(/if \(!b\.settled\) return undefined;\s*const backgroundModel = localBackgroundModel\(b\.env, b\.model,/);
     // The gate answers 503 no_local_model for a brain that is undefined (test/background-complete.test.ts).
-    expect(src).toContain('brain: () => (inference.helpersOff() ? undefined : backgroundBrain),');
+    expect(src).toContain('brain: () => inference.helperBrain(backgroundBrain),');
     // An eval replay that names its own local model is that model's turn, not the stand-in's.
     expect(generate).toContain('const localPlan = ctx.inference.planLocal(route, { primary: local, standby: ctx.standby, evalOwnModel: lm.model !== undefined });');
     // A local turn with nothing to answer it is a 503 with the plan's sentence, on both routes, before anything is asked.
@@ -601,6 +616,14 @@ describe('index.ts wiring', () => {
     }
     // /chat: before anything streams.
     expect(chat.indexOf('await ctx.inference.freshen(route);')).toBeLessThan(chat.indexOf("res.writeHead(200, {"));
+    // A turn that stays here takes its own look as soon as it is routed, on both routes: before the router or recall
+    // embeds a word of it, and before the plan (test/inference.test.ts N5 runs it; the process test re-points a name).
+    for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
+      expect(route, name).toMatch(/if \('error' in pre\) return json\(res, pre\.status, \{ error: pre\.error \}\);\s*(\/\/[^\n]*\s*)*const elsewhere = await ctx\.inference\.lookFirst\(pre\);\s*if \(elsewhere\) return json\(res, elsewhere\.status, \{ error: elsewhere\.error \}\);/);
+      expect(route.indexOf('ctx.inference.lookFirst(pre)'), name).toBeLessThan(route.indexOf('ctx.router.selectScored('));
+    }
+    expect(generate.indexOf('ctx.inference.lookFirst(pre)')).toBeLessThan(generate.indexOf('recallContext('));
+    expect(chat.indexOf('ctx.inference.lookFirst(pre)')).toBeLessThan(chat.indexOf('ctx.chatLoad.run('));
   });
 
   it('a local model\'s prompt is sized to its real window, and what was left out is on the [route] line; a cloud brain\'s is as it was', () => {
@@ -616,11 +639,12 @@ describe('index.ts wiring', () => {
 
   it('the helpers that always talk to Ollama (the embedder, local memory extraction, background calls) send nothing to another machine in a mode that keeps things here', () => {
     // One fetch, read on every request, for the embedder and the local memory brain.
-    expect(src).toMatch(/const helperFetch = \(\(url: Parameters<typeof fetch>\[0\], init\?: Parameters<typeof fetch>\[1\]\) => \{\s*const off = inference\.helpersOff\(\);\s*return off \? Promise\.reject\(new TypeError\(`fetch refused: \$\{off\}`\)\) : fetch\(url, init\);\s*\}\) as typeof fetch;/);
+    // (It reads the model each request names too: a cloud model under a plain name is not "here", test/inference.test.ts.)
+    expect(src).toMatch(/const helperFetch = \(\(url: Parameters<typeof fetch>\[0\], init\?: Parameters<typeof fetch>\[1\]\) => \{\s*const off = inference\.helpersOff\(helperModel\(init\?\.body\)\);\s*return off \? Promise\.reject\(new TypeError\(`fetch refused: \$\{off\}`\)\) : fetch\(url, init\);\s*\}\) as typeof fetch;/);
     expect(between('const embedder = new OllamaEmbedder({', 'const knowledge = new KnowledgeStore(')).toContain('fetch: helperFetch,');
     expect(between('const memoryPlan = chooseMemoryBrain(localEnv, {', "if (memoryPlan.kind === 'none') {")).toContain('fetch: helperFetch,');
     // The runtime's background calls have no local model to ask then.
-    expect(src).toContain('brain: () => (inference.helpersOff() ? undefined : backgroundBrain),');
+    expect(src).toContain('brain: () => inference.helperBrain(backgroundBrain),');
     expect(src.match(/new OllamaEmbedder\(/g)).toHaveLength(1);
   });
 
@@ -634,7 +658,7 @@ describe('index.ts wiring', () => {
     // eval candidate's, each frontier brain's, and the one adopted behind the boot. None is handed the bare store.
     const clients = [...src.matchAll(/new Flint\(\{[^}]*\}\)/g)].map((m) => m[0]);
     expect(clients).toHaveLength(5);
-    for (const c of clients) expect(c).toMatch(/memory: historyOf\([^)]+\), observer(, fitToWindow: true)? \}\)$/);
+    for (const c of clients) expect(c).toMatch(/memory: historyOf\([^)]+\), observer(, fitToWindow: true, unknownTool: notOffered)? \}\)$/);
     expect(src).not.toMatch(/new Flint\(\{[^}]*\bmemory,/);
     // /chat marks the turn in its call context, which the store keeps with the turn from the moment it begins. The
     // mark is the module's (Local Only, the private rule, any turn in Local mode, Will's goals: test/private-turns.test.ts
@@ -674,7 +698,7 @@ describe('index.ts wiring', () => {
   it('the standby model has its own Flint client and persona on the shared store, and its own engine line', () => {
     const block = between('const makeStandby = () =>', 'const localModels =');
     // The compact guide whatever the main model's (its window is small), and a prompt sized to its window.
-    expect(block).toContain('persona: localPersonaFor(new Flint({ provider: inference.standby.provider, defaultModel: inference.standby.model, memory: historyOf(inference.standby.provider, inference.standby.model), observer, fitToWindow: true }), STANDBY_STYLE, inference.standby.model),');
+    expect(block).toContain('persona: localPersonaFor(new Flint({ provider: inference.standby.provider, defaultModel: inference.standby.model, memory: historyOf(inference.standby.provider, inference.standby.model), observer, fitToWindow: true, unknownTool: notOffered }), STANDBY_STYLE, inference.standby.model),');
     // Built again when the local brain changes behind the boot (the tier's standby lands with the tier).
     expect(block).toContain('let standby = makeStandby();');
     expect(src).toContain('return handle(req, res, { inference, standby, standbyNotes, persona,');

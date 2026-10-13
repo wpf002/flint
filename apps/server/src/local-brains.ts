@@ -80,6 +80,8 @@ import { endpointIsLocal, viaProxy, type InferenceConfig } from './inference-con
 import {
   DETECT_PATHS,
   OLLAMA_PATHS,
+  PLACE_PATH,
+  askPlace,
   detectServer,
   guardedFetch,
   llamaCppBackend,
@@ -87,11 +89,13 @@ import {
   ollamaBackend,
   openAiBackend,
   openAiPaths,
+  withPlace,
   type GuardOptions,
   type LocalBackend,
   type ModelFacts,
   type ServerKind,
 } from './local-backend';
+import type { ListedModel, PlaceSaid } from './ollama-locality';
 import { LocalMonitor, type Which } from './local-monitor';
 import { LOCAL_MODEL_MAX_LEN, LOCAL_MODEL_RE, chooseLocalBrain, keepPickingLocal, liveOllamaOptions } from './local-model';
 import { watcher } from './local-serve';
@@ -201,12 +205,19 @@ export interface BuildLocalDeps {
    */
   preferTier?: () => boolean;
   /**
-   * Told what an Ollama lists, each time the monitor looks at it: the address
-   * the brain is asked at, and the rows of its model listing as they came. The
-   * server keeps it for ./policy (./ollama-locality): a model is on this Mac
-   * only on its Ollama's own word. Left out: nobody is told.
+   * Told what the model server says it is, each time the monitor looks at it:
+   * the address the brain is asked at, and either the rows of its model
+   * listing as they came (it is an Ollama) or that it is no Ollama. The server
+   * keeps it for ./policy (./ollama-locality): a model is on this Mac only on
+   * its server's own word. Left out: nobody is told.
    */
-  listed?: (baseURL: string, rows: ReadonlyArray<Record<string, unknown>>) => void;
+  place?: (baseURL: string, said: PlaceSaid) => void;
+  /**
+   * Is this model known to run somewhere else than the server at this address
+   * (./ollama-locality runsElsewhere)? Such a model is never warmed. Left out:
+   * none is.
+   */
+  elsewhere?: (baseURL: string, model: string) => boolean;
 }
 
 /** The local brain while the server runs: what the next turn uses, and when that changes. */
@@ -367,6 +378,8 @@ export async function startLocalBrains(deps: BuildLocalDeps): Promise<LocalHandl
     intervalMs: cfg.local.healthIntervalMs,
     log,
     ...(deps.rewarm ? { rewarm: deps.rewarm } : {}),
+    // A model its server says runs somewhere else is never loaded ahead of a turn (the standby as much as the main one).
+    ...(deps.elsewhere ? { mayWarm: (m: string) => !deps.elsewhere!(wire === 'ollama' ? `${cfg.local.ollama?.origin ?? ''}${cfg.local.ollama?.path ?? ''}` : (cfg.local.openai?.baseURL ?? ''), m) } : {}),
     ...(deps.now ? { now: deps.now } : {}),
   });
   // What the monitor learned about a model. A model nobody has asked about yet sets off a look, off the turn's path.
@@ -396,18 +409,30 @@ export async function startLocalBrains(deps: BuildLocalDeps): Promise<LocalHandl
   const ollamaAt = wire === 'ollama' ? cfg.local.ollama : undefined;
   const openaiAt = wire === 'openai' ? cfg.local.openai : undefined;
   const nativeFetch = ollamaAt ? guard(ollamaAt.origin, OLLAMA_PATHS.map((p) => `${ollamaAt.path}${p}`)) : undefined;
-  // What an Ollama lists is kept for ./policy (the server's own word on where each model runs), under the
-  // address the brain itself is asked at.
-  const listedAs = (baseURL: string) => (deps.listed ? (rows: ReadonlyArray<Record<string, unknown>>) => deps.listed!(baseURL, rows) : undefined);
-  const nativeBackend = ollamaAt && nativeFetch ? ollamaBackend(`${ollamaAt.origin}${ollamaAt.path}`, nativeFetch, listedAs(`${ollamaAt.origin}${ollamaAt.path}`)) : undefined;
+  // What the model server says it is, and where each of its models runs, is kept for ./policy (./ollama-locality),
+  // under the address the brain itself is asked at. Told at every look the monitor takes.
+  const placeOf = (baseURL: string) => (said: PlaceSaid): void => deps.place?.(baseURL, said);
+  const nativeBackend =
+    ollamaAt && nativeFetch
+      ? ollamaBackend(`${ollamaAt.origin}${ollamaAt.path}`, nativeFetch, (rows) => placeOf(`${ollamaAt.origin}${ollamaAt.path}`)({ ollama: [...rows] as ListedModel[] }))
+      : undefined;
   // One guarded fetch and one backend per kind of server, so a rebuild that changes nothing hands the monitor the backend it has.
   const openaiSites = new Map<ServerKind, { f: typeof fetch; backend: LocalBackend }>();
   const openaiSite = (k: ServerKind): { f: typeof fetch; backend: LocalBackend } | undefined => {
     if (!openaiAt) return undefined;
     let site = openaiSites.get(k);
     if (!site) {
-      const f = guard(openaiAt.origin, [...new Set([...openAiPaths(openaiAt.path), ...(k === 'ollama' ? OLLAMA_PATHS : k === 'llamacpp' ? llamaCppPaths(openaiAt.path) : [])])]);
-      const backend = k === 'ollama' ? ollamaBackend(openaiAt.origin, f, listedAs(openaiAt.baseURL)) : k === 'llamacpp' ? llamaCppBackend(openaiAt.origin, openaiAt.path, f) : openAiBackend(openaiAt.origin, openaiAt.path, f, cfg.local.apiKey);
+      // (The listing only an Ollama gives is asked of every kind: PLACE_PATH is on every list.)
+      const f = guard(openaiAt.origin, [...new Set([...openAiPaths(openaiAt.path), PLACE_PATH, ...(k === 'ollama' ? OLLAMA_PATHS : k === 'llamacpp' ? llamaCppPaths(openaiAt.path) : [])])]);
+      const told = placeOf(openaiAt.baseURL);
+      const key: Record<string, string> = cfg.local.apiKey ? { authorization: `Bearer ${cfg.local.apiKey}` } : {};
+      // What kind of server this is was read off what answered at boot, or off FLINT_LOCAL_SERVER, and either can be
+      // wrong: an Ollama taken for a plain OpenAI-compatible server serves cloud models under plain names all the
+      // same. So whatever the kind, every look asks the server whether it is an Ollama, and tells ./policy.
+      const backend =
+        k === 'ollama'
+          ? ollamaBackend(openaiAt.origin, f, (rows) => told({ ollama: [...rows] as ListedModel[] }))
+          : withPlace(k === 'llamacpp' ? llamaCppBackend(openaiAt.origin, openaiAt.path, f) : openAiBackend(openaiAt.origin, openaiAt.path, f, cfg.local.apiKey), (signal) => askPlace(f, openaiAt.origin, signal, key), told);
       site = { f, backend };
       openaiSites.set(k, site);
     }

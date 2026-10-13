@@ -103,10 +103,7 @@ export const PRIVATE_TOOL_REFUSED = privateToolRefused(false);
  * that runs here is returned as it is. `allowedRemote`: the local model is on
  * a server Will allowed, and the refusal says so.
  */
-export function keptHereOnPrivate<T extends { definition: { name: string }; handler: (call: never) => unknown }>(
-  tools: readonly T[],
-  deps: { isPrivate: () => boolean; onRefused?: (name: string) => void; allowedRemote?: () => boolean },
-): T[] {
+export function keptHereOnPrivate<T extends { definition: { name: string }; handler: (call: never) => unknown }>(tools: readonly T[], deps: PrivateRule): T[] {
   return tools.map((tool) => {
     if (runsHere(tool.definition.name)) return tool;
     const handler = ((call: never) => {
@@ -116,6 +113,39 @@ export function keptHereOnPrivate<T extends { definition: { name: string }; hand
     }) as T['handler'];
     return { ...tool, handler };
   });
+}
+
+/** What the private rule reads, wherever it is applied: one object, so the wrappers and the answer below cannot disagree. */
+export interface PrivateRule {
+  /** Is the turn being answered one Will asked to keep private (./turn-taint isPrivateTurn)? */
+  isPrivate: () => boolean;
+  onRefused?: (name: string) => void;
+  /** The local model is on a server Will allowed: the sentence names it. */
+  allowedRemote?: () => boolean;
+}
+
+/**
+ * What the model is told when, on a private turn, it calls a tool the turn was
+ * NOT OFFERED because the tool does not run here. A model that has used web
+ * search earlier in a conversation calls it again by name; the turn's list
+ * does not hold it, so nothing runs (@flint/core answers such a call itself),
+ * and by default the model is told "Unknown tool". This gives it the private
+ * rule's own sentence instead, so it tells Will why there was no search rather
+ * than guessing. Undefined, and so the default, for any other turn, for a tool
+ * that runs here, and for a name that is no wired tool's (a misspelling should
+ * get the list of what there is).
+ *
+ * `wired`: every tool the server has, by name. A name the model mangled the
+ * way models do (`web_search` for `web.web_search`) still counts.
+ */
+export function notOfferedOnPrivate(called: string, wired: readonly string[], rule: PrivateRule): { isError: true; content: string } | undefined {
+  if (!rule.isPrivate()) return undefined;
+  const plain = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const meant = wired.filter((name) => name === called || plain(name) === plain(called) || name.endsWith(`.${called}`));
+  const outside = meant.find((name) => !runsHere(name));
+  if (outside === undefined) return undefined;
+  rule.onRefused?.(outside);
+  return { isError: true, content: privateToolRefused(rule.allowedRemote?.() === true) };
 }
 
 interface ToolLike {

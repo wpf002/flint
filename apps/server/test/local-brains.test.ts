@@ -2,7 +2,8 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { OllamaProvider, isFlintError, type Message, type StreamEvent, type ToolDefinition } from '@flint/core';
 import { readInferenceConfig } from '../src/inference-config';
 import { hardwareTier } from '@flint/core';
-import { NO_LOCAL_MODEL, UNSETTLED, buildLocalBrains, disabledProvider, safeModelId, standbyContext, standbyModel, startLocalBrains, toolsAllowed, type LocalBrains, type LocalHandle } from '../src/local-brains';
+import { NO_LOCAL_MODEL, UNSETTLED, buildLocalBrains, disabledProvider, safeModelId, standbyContext, standbyModel, startLocalBrains, toolsAllowed, type BuildLocalDeps, type LocalBrains, type LocalHandle } from '../src/local-brains';
+import type { PlaceSaid } from '../src/ollama-locality';
 import { liveOllamaOptions } from '../src/local-model';
 import { startMockLocalServer, type MockLocalServer, type MockModel } from './mock-local-server';
 
@@ -30,7 +31,7 @@ const offline = (async () => {
   throw new TypeError('fetch failed');
 }) as unknown as typeof fetch;
 
-async function build(env: Record<string, string | undefined>, opts: { on?: () => boolean; connects?: number[]; fetch?: typeof fetch; tier?: ReturnType<typeof hardwareTier> } = {}) {
+async function build(env: Record<string, string | undefined>, opts: { on?: () => boolean; connects?: number[]; fetch?: typeof fetch; tier?: ReturnType<typeof hardwareTier>; place?: BuildLocalDeps['place']; elsewhere?: BuildLocalDeps['elsewhere'] } = {}) {
   const lines: string[] = [];
   const cfg = readInferenceConfig(env, (m) => lines.push(m));
   const brains = await buildLocalBrains({
@@ -41,6 +42,8 @@ async function build(env: Record<string, string | undefined>, opts: { on?: () =>
     log: (m) => lines.push(m),
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
     ...(opts.tier ? { tier: opts.tier } : {}),
+    ...(opts.place ? { place: opts.place } : {}),
+    ...(opts.elsewhere ? { elsewhere: opts.elsewhere } : {}),
     pick: { capMs: 500 },
   });
   return { brains, lines, cfg };
@@ -420,6 +423,83 @@ describe('disabledProvider', () => {
     expect(isFlintError(err)).toBe(true);
     if (isFlintError(err)) expect(err.error).toMatchObject({ kind: 'provider_unavailable', retryable: false, providerCode: 'config' });
     expect(p.getCapabilities('m').toolCalling).toBe('unsupported');
+  });
+});
+
+// The privacy review's N1. Where a model runs is the model SERVER's word, and the server is asked what it is at
+// every look, on either wire and whatever kind it was taken for (../src/local-backend withPlace, ../src/policy).
+describe('every look tells whoever keeps it what the model server says it is', () => {
+  const ALIAS = 'mine:latest';
+  const aliased: Record<string, MockModel> = { [MAIN]: { loaded: true, contextLength: 16384 }, [ALIAS]: { loaded: true, remoteHost: 'https://ollama.com:443' } };
+  const heard = () => {
+    const told: Array<{ baseURL: string; said: PlaceSaid }> = [];
+    return { told, place: (baseURL: string, said: PlaceSaid) => void told.push({ baseURL, said }) };
+  };
+  const rowsOf = (said: PlaceSaid | undefined) => (said && said !== 'other' ? said.ollama.map((r) => [r.name, r.remote_host]) : said);
+
+  it("Ollama's own API: its listing, under the address the brain is asked at", async () => {
+    const s = await start(aliased);
+    const h = heard();
+    const { brains } = await build({ OLLAMA_HOST: s.origin, OLLAMA_MODEL: MAIN }, h);
+    expect(h.told.length).toBeGreaterThan(0);
+    expect(h.told.every((t) => t.baseURL === s.origin)).toBe(true);
+    expect(rowsOf(h.told.at(-1)!.said)).toEqual([[MAIN, undefined], [ALIAS, 'https://ollama.com:443']]);
+    const before = h.told.length;
+    await brains.monitor.check();
+    expect(h.told.length).toBe(before + 1); // every look, not once
+  });
+
+  it('the OpenAI-compatible wire at an Ollama: the same listing, whether the server was detected or Will said what kind it is', async () => {
+    for (const said of [undefined, 'ollama', 'openai', 'llamacpp']) {
+      const s = await start(aliased);
+      const h = heard();
+      const { brains } = await build({ FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: s.baseURL, FLINT_LOCAL_MODEL: ALIAS, ...(said ? { FLINT_LOCAL_SERVER: said } : {}) }, h);
+      expect(brains.wire, String(said)).toBe('openai');
+      expect(h.told.length, String(said)).toBeGreaterThan(0);
+      expect(h.told.every((t) => t.baseURL === s.baseURL), String(said)).toBe(true);
+      expect(rowsOf(h.told.at(-1)!.said), String(said)).toEqual([[MAIN, undefined], [ALIAS, 'https://ollama.com:443']]);
+      await s.close();
+      server = undefined;
+    }
+  });
+
+  it('llama.cpp and a plain OpenAI-compatible server: "no Ollama here", so their models are local by their address', async () => {
+    for (const kind of ['llamacpp', 'openai'] as const) {
+      const s = await start({ 'model.gguf': { loaded: true } }, kind);
+      const h = heard();
+      await build({ FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: s.baseURL, FLINT_LOCAL_MODEL: 'model.gguf' }, h);
+      expect(h.told.map((t) => [t.baseURL, t.said]), kind).toContainEqual([s.baseURL, 'other']);
+      expect(h.told.every((t) => t.said === 'other'), kind).toBe(true);
+      await s.close();
+      server = undefined;
+    }
+  });
+
+  it('the server was down at boot (so nothing said what kind it is): the first look that reaches it hears that it is an Ollama', async () => {
+    const s = await start(aliased);
+    const h = heard();
+    let up = false;
+    const gate = ((url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => (up ? fetch(url, init) : Promise.reject(new TypeError('fetch failed')))) as typeof fetch;
+    const { brains } = await build({ FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: s.baseURL, FLINT_LOCAL_MODEL: ALIAS }, { ...h, fetch: gate });
+    expect(brains.server).toBe('openai'); // the wire's own guess
+    expect(h.told).toEqual([]);
+    up = true;
+    await brains.monitor.check();
+    expect(rowsOf(h.told.at(-1)?.said)).toEqual([[MAIN, undefined], [ALIAS, 'https://ollama.com:443']]);
+  });
+
+  it('a model the server says runs elsewhere is never loaded ahead of a turn: the standby as much as the main one', async () => {
+    const s = await start({ [MAIN]: { loaded: false }, [ALIAS]: { loaded: false, remoteHost: 'https://ollama.com:443' } });
+    const asked: Array<[string, string]> = [];
+    const { brains } = await build({ OLLAMA_HOST: s.origin, OLLAMA_MODEL: MAIN, FLINT_LOCAL_FALLBACK_MODEL: ALIAS }, { elsewhere: (baseURL, model) => (asked.push([baseURL, model]), model === ALIAS) });
+    await brains.monitor.check();
+    brains.monitor.warm('fallback');
+    brains.monitor.warm('primary');
+    await new Promise((r) => setTimeout(r, 50));
+    const loads = s.requests.filter((q) => q.path === '/api/generate').map((q) => q.body?.model);
+    expect(loads).toEqual([MAIN]);
+    expect(asked).toContainEqual([s.origin, ALIAS]);
+    expect(asked).toContainEqual([s.origin, MAIN]);
   });
 });
 

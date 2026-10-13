@@ -459,12 +459,24 @@ export function addressIsLocal(at: { loopback: boolean; secure: boolean; host?: 
 /**
  * May the helpers that always talk to Ollama's own address (OLLAMA_HOST: the
  * embedder, local memory extraction, the runtime's background calls) send it
- * text that must stay local? The same rule as the local brain's, applied to
- * that address: they are older than the modes and read OLLAMA_HOST as it is,
- * so in Local mode they would still send text to an Ollama on another machine.
+ * text that must stay local? They are older than the modes and read
+ * OLLAMA_HOST as it is, so in Local mode they would still send text to an
+ * Ollama on another machine.
+ *
+ * This Mac: yes. Another machine: only when it is the local model server
+ * itself, and Will said that server is his (FLINT_LOCAL_ALLOW_REMOTE, over
+ * https or on a network he called private). The switch vouches for the model
+ * server and for nothing else: with the local model on this Mac (or on some
+ * third machine) and OLLAMA_HOST elsewhere, that Ollama is not "here", whatever
+ * the switch says, and every sentence that says where things stay names only
+ * what is true.
  */
 export function ollamaIsLocal(cfg: Pick<InferenceConfig, 'local'>): boolean {
-  return addressIsLocal(cfg.local.ollama, cfg);
+  const at = cfg.local.ollama;
+  if (!at || viaProxy(at.host, cfg.local.proxy)) return false;
+  if (at.loopback) return true;
+  const server = cfg.local.provider === 'openai' ? cfg.local.openai : cfg.local.ollama;
+  return server !== undefined && server.origin === at.origin && addressIsLocal(server, cfg);
 }
 
 /**

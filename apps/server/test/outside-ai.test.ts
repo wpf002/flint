@@ -7,8 +7,10 @@ import {
   OUTSIDE_OFF_PRIVATE,
   PRIVATE_TOOL_REFUSED,
   PRIVATE_TURN_NOTE,
+  privateToolRefused,
   keptHereOnPrivate,
   keylessCapable,
+  notOfferedOnPrivate,
   offered,
   offeredPrivate,
   outsideOffText,
@@ -138,6 +140,43 @@ describe('a private turn: only the tools that run on this Mac', () => {
     }
     // The definitions the model sees are untouched.
     expect(kept.map((t) => t.definition)).toEqual(real.map((t) => t.definition));
+  });
+
+  // The privacy review's M34. A private turn is not OFFERED the tools that leave this Mac, so a model that names one
+  // anyway (it used web search earlier in the conversation) calls a tool its turn does not have. Nothing runs, and
+  // the model used to be told "Unknown tool": now it is told why, in the rule's own sentence.
+  it('notOfferedOnPrivate: a tool the private turn was not offered answers with the private rule’s sentence, not "Unknown tool"', () => {
+    let isPrivate = true;
+    const refused: string[] = [];
+    const names = everything.map((t) => t.definition.name);
+    const rule = { isPrivate: () => isPrivate, onRefused: (name: string) => refused.push(name) };
+    const ask = (called: string) => notOfferedOnPrivate(called, names, rule);
+    for (const name of ['web.web_search', 'web.fetch_url', 'trident.perplexity_search', 'google.gmail_search', 'deep_research', 'vantage.query', 'computer.screenshot']) {
+      expect(ask(name), name).toEqual({ isError: true, content: PRIVATE_TOOL_REFUSED });
+    }
+    expect(refused).toEqual(['web.web_search', 'web.fetch_url', 'trident.perplexity_search', 'google.gmail_search', 'deep_research', 'vantage.query', 'computer.screenshot']);
+    // A name the model mangled the way models do still means the tool it means.
+    for (const name of ['web__web_search', 'WEB.WEB_SEARCH', 'gmail_search', 'fetch_url', 'deepresearch']) expect(ask(name), name).toEqual({ isError: true, content: PRIVATE_TOOL_REFUSED });
+    refused.length = 0;
+    // A tool that runs here was offered, so it is not this function's to answer; a name that is nobody's gets the default.
+    for (const name of ['remember', 'calculate', 'runtime.world_search', 'no_such_tool', '', 'web']) expect(ask(name), name).toBeUndefined();
+    // Not a private turn: the default answer, whatever is called. (An ordinary turn that was not offered a tool is not told it is private.)
+    isPrivate = false;
+    for (const name of ['web.web_search', 'deep_research', 'remember']) expect(ask(name), name).toBeUndefined();
+    expect(refused).toEqual([]);
+    // With the local model on a server Will allowed, the sentence names it, as the tools' own refusal does.
+    expect(notOfferedOnPrivate('web.web_search', names, { isPrivate: () => true, allowedRemote: () => true })).toEqual({ isError: true, content: privateToolRefused(true) });
+    expect(privateToolRefused(true)).not.toBe(PRIVATE_TOOL_REFUSED);
+  });
+
+  it('the wrappers and that answer read ONE rule: the same object decides both, so they cannot disagree', async () => {
+    let isPrivate = false;
+    const rule = { isPrivate: () => isPrivate };
+    const kept = keptHereOnPrivate([{ ...tool('web.web_search'), handler: () => 'ran' }], rule);
+    const both = async () => [await kept[0]!.handler({ id: '1', name: 'web.web_search', args: {} } as never), notOfferedOnPrivate('web.web_search', ['web.web_search'], rule)];
+    expect(await both()).toEqual(['ran', undefined]);
+    isPrivate = true;
+    expect(await both()).toEqual([{ isError: true, content: PRIVATE_TOOL_REFUSED }, { isError: true, content: PRIVATE_TOOL_REFUSED }]);
   });
 
   it('the model is told once, in one plain sentence, and only on a private turn', () => {

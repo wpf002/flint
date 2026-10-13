@@ -56,6 +56,24 @@ function hostOf(baseURL: string | undefined): string | undefined {
   }
 }
 
+/**
+ * The model a helper's request to Ollama names (`"model"` in its JSON body):
+ * what ./inference helpersOff asks Ollama's listing about. Undefined for a
+ * request with no body (it names no model). An empty string for a body whose
+ * model cannot be read: that is no model Ollama lists, so a private message is
+ * not sent with it.
+ */
+export function helperModel(body: unknown): string | undefined {
+  if (body === undefined || body === null) return undefined;
+  if (typeof body !== 'string') return '';
+  try {
+    const model = (JSON.parse(body) as { model?: unknown } | null)?.model;
+    return typeof model === 'string' ? model : '';
+  } catch {
+    return '';
+  }
+}
+
 /** A cloud call that is not a chat turn: what Local mode refuses where it is made. */
 export type CloudCallKind = 'plan' | 'extract' | 'tts';
 
@@ -111,12 +129,15 @@ export class Inference {
   }
 
   /**
-   * Is this address a model server on another machine that Will said is his
-   * own? FLINT_LOCAL_ALLOW_REMOTE says so of two addresses and no other: the
-   * local model server's (FLINT_LOCAL_BASE_URL, or OLLAMA_HOST on Ollama's own
-   * API) and Ollama's (OLLAMA_HOST, which the embedder and local memory
-   * extraction always use), each only over https or on a network he called
-   * private (./inference-config addressIsLocal).
+   * Is this address the model server on another machine that Will said is his
+   * own? FLINT_LOCAL_ALLOW_REMOTE vouches for ONE server: the local model
+   * server itself (FLINT_LOCAL_BASE_URL, or OLLAMA_HOST on Ollama's own API),
+   * and then only over https or on a network he called private
+   * (./inference-config addressIsLocal). It vouches for no other address: an
+   * OLLAMA_HOST on some other machine, while the model server is here or
+   * elsewhere, is not "here" because of that switch, so the embedder and
+   * memory extraction there are given nothing that stays here. (When Ollama's
+   * address IS the model server's, they are one server, and it is vouched for.)
    */
   private ownServer(baseURL: string): boolean {
     let origin: string;
@@ -125,7 +146,8 @@ export class Inference {
     } catch {
       return false;
     }
-    return [localEndpoint(this.cfg), this.cfg.local.ollama].some((at) => at !== undefined && !at.loopback && at.origin === origin && addressIsLocal(at, this.cfg));
+    const at = localEndpoint(this.cfg);
+    return at !== undefined && !at.loopback && at.origin === origin && addressIsLocal(at, this.cfg);
   }
 
   /**
@@ -329,6 +351,36 @@ export class Inference {
   }
 
   /**
+   * Ask the model server what runs on it NOW, before anything of a turn that
+   * STAYS HERE is sent anywhere: a message Will kept private, in any mode, and
+   * every turn of Local mode. Called as soon as the turn is routed, ahead of
+   * the router's and recall's embeddings and of the plan.
+   *
+   * The look is where the server says where each of its models really runs
+   * (./ollama-locality), and what was known can be a minute old in the cloud
+   * mode, where no timer watches the server. A name pointed at a cloud model
+   * while Flint was running (`ollama cp gpt-oss:120b-cloud mine`) would
+   * otherwise keep answering private turns until the next look (the privacy
+   * review's N5). So a look taken a moment ago does not stand in for this one
+   * (only one already under way does), and the turn waits for it: as long as
+   * a look may take, two seconds, and then goes on with what is known, which
+   * ages into "not known to run here".
+   *
+   * Returns the refusal for a private turn whose model the server has just
+   * said runs somewhere else (the same sentence `preRoute` gives), or
+   * undefined. A turn that does not stay here is not held up at all.
+   */
+  async lookFirst(pre: { mode: InferenceMode; private: boolean }): Promise<{ error: string; status: number } | undefined> {
+    if (!turnStaysHere(pre)) return undefined;
+    await this.local.monitor.check().then(
+      () => undefined,
+      () => undefined,
+    );
+    const refusal = pre.private ? privateRefusal(pre, this.confined) : undefined;
+    return refusal ? { error: refusal, status: 503 } : undefined;
+  }
+
+  /**
    * Look at the model server again, when what is known of it is more than a
    * moment old, before a turn is planned. The plan is made from the monitor's
    * last look, and in the local and hybrid modes that look can be 15 seconds
@@ -344,7 +396,8 @@ export class Inference {
    * right now (./policy brainIsLocal: an Ollama's listing that nobody keeps
    * current in this mode, for a server on another machine that Will allowed or
    * an Ollama asked over the OpenAI-compatible wire). A private turn there is
-   * then decided on the server's own word, not refused for want of it.
+   * then decided on the server's own word, not refused for want of it. (A
+   * turn that stays here has already had its own look, `lookFirst`.)
    */
   async freshen(route?: { brain: 'local' | 'frontier' }): Promise<void> {
     const monitor = this.local.monitor;
@@ -387,15 +440,64 @@ export class Inference {
    * local memory extraction, the runtime's background calls) must not be sent
    * anything right now; undefined when they may. In the local and hybrid modes
    * "local" means this Mac, and those helpers read OLLAMA_HOST as it is: with
-   * an Ollama on another machine that Will has not said is his, they would
-   * still send it the text of his messages. The cloud mode is as it always was.
+   * an Ollama on another machine that is not the model server Will allowed,
+   * they would still send it the text of his messages. The cloud mode is as
+   * it always was, except for a private message.
+   *
+   * `model`: the model the request is for. The address is not the whole of it:
+   * a cloud model under a plain name answers at this Mac's own Ollama and runs
+   * on Ollama's servers (./ollama-locality has that Ollama's word on it). So:
+   *  - a private message is sent only to a model Ollama lists as its own: an
+   *    embedding model that is such a copy, or one Ollama has not been heard
+   *    on, embeds none of its words;
+   *  - in the local and hybrid modes nothing is sent to a model that is known
+   *    to be such a copy. (A model not heard on yet is still asked there: the
+   *    tools' descriptions are embedded while Flint boots, before any server
+   *    has answered, and they are nobody's private words.)
    */
-  helpersOff(): string | undefined {
-    if (ollamaIsLocal(this.cfg)) return undefined;
-    // A private message's words stay here in every mode, Cloud included (the request was marked where it was routed).
-    if (isPrivateRequest()) return 'the Ollama server is on another machine, and a private message is not sent off this Mac';
-    if (this.mode.current() === 'cloud') return undefined;
-    return 'the Ollama server is on another machine, and in this mode nothing is sent off this Mac';
+  helpersOff(model?: string): string | undefined {
+    const mustStay = isPrivateRequest() || this.mode.current() !== 'cloud';
+    if (!ollamaIsLocal(this.cfg)) {
+      // A private message's words stay here in every mode, Cloud included (the request was marked where it was routed).
+      if (isPrivateRequest()) return 'the Ollama server is on another machine, and a private message is not sent off this Mac';
+      return mustStay ? 'the Ollama server is on another machine, and in this mode nothing is sent off this Mac' : undefined;
+    }
+    if (model === undefined) return undefined;
+    if (isPrivateRequest() && !this.helperRunsHere(model)) return 'the model asked for is not known to run on this Mac, and a private message is not sent to it';
+    if (mustStay && this.helperElsewhere(model)) return "the model asked for runs on Ollama's servers, and in this mode nothing is sent off this Mac";
+    return undefined;
+  }
+
+  /** Ollama's own address, as the helpers use it (OLLAMA_HOST as config checked it); undefined when it was refused. */
+  private get helperBase(): string | undefined {
+    const at = this.cfg.local.ollama;
+    return at ? `${at.origin}${at.path}` : undefined;
+  }
+
+  /** Is this model, at Ollama's own address, one that Ollama lists as running on it? */
+  private helperRunsHere(model: string): boolean {
+    return LOCALITY.runsHere(this.helperBase, model);
+  }
+
+  /** Is this model, at Ollama's own address, a cloud model under another name (its listing gives it a remote host)? */
+  private helperElsewhere(model: string): boolean {
+    return LOCALITY.runsElsewhere(this.helperBase, model);
+  }
+
+  /**
+   * The local model a background call (the runtime's /internal/complete) may
+   * ask right now, or undefined: the gate then answers "no local model". Those
+   * calls carry Will's own data and are answered by a local model in every
+   * mode, never an outside one, so on this Mac's Ollama the model has to be one
+   * Ollama's own listing says runs there. A cloud model under a plain name is
+   * not, and neither is a model Ollama has not been heard on: this is the same
+   * listing every other "is it here" reads (./ollama-locality), never the name.
+   * (An Ollama on another machine is asked in the cloud mode only, as it
+   * always was, and `helpersOff` already keeps the other modes off it.)
+   */
+  helperBrain<T extends { model: string }>(brain: T | undefined): T | undefined {
+    if (!brain || this.helpersOff() !== undefined) return undefined;
+    return !ollamaIsLocal(this.cfg) || this.helperRunsHere(brain.model) ? brain : undefined;
   }
 
   /**
@@ -590,8 +692,11 @@ export async function buildInference(deps: BuildInferenceDeps): Promise<Inferenc
     // With no model named, this machine's tier chooses it in those modes only. In the cloud mode the choice is
     // what it always was (the model Ollama has loaded), so no local turn there loads another model.
     preferTier: () => mode.current() !== 'cloud',
-    // What the model server lists, each time the monitor looks at it: where each model really runs (./ollama-locality).
-    listed: (baseURL, rows) => LOCALITY.learn(baseURL, rows),
+    // What the model server says it is, each time the monitor looks at it, and where each of its models really runs
+    // (./ollama-locality).
+    place: (baseURL, said) => (said === 'other' ? LOCALITY.notOllama(baseURL) : LOCALITY.learn(baseURL, said.ollama)),
+    // ...and a model it says runs elsewhere is never loaded ahead of a turn.
+    elsewhere: (baseURL, model) => LOCALITY.runsElsewhere(baseURL, model),
     log,
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
     ...(deps.connect ? { connect: deps.connect } : {}),

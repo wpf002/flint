@@ -198,16 +198,19 @@ export function placedHere(baseURL: string | undefined): boolean {
  *    through a proxy. Any other Ollama elsewhere (OLLAMA_HOST or a tier's host
  *    set to another machine) is not local. (`allowRemote` is a caller's own
  *    word for it; nothing in the server passes it.)
- *  - an Ollama itself says the model runs on it (./ollama-locality: its
- *    listing gives the model no remote host). A name is not trusted: a cloud
- *    model copied under another name still runs on Ollama's servers. This is
- *    the check the model auto-picker already makes, cached, and it fails
- *    closed: until Ollama has said so, and whenever it cannot be asked, the
- *    model is not local. The OpenAI-compatible wire can be pointed at an
- *    Ollama too: once its server has listed models as an Ollama does, it is
- *    held to that listing the same way (a server that never has, llama.cpp or
- *    LM Studio, runs only its own models and has nothing to ask).
- * Anything unknown (no brain, another provider, no address, no listing) is not local.
+ *  - the server itself has said so (./ollama-locality, which knows a server
+ *    by its origin, so `…:11434` and `…:11434/v1` are one). An Ollama says it
+ *    per model: its listing gives the model no remote host. A name is not
+ *    trusted: a cloud model copied under another name still runs on Ollama's
+ *    servers. This is the check the model auto-picker already makes, cached.
+ *    The OpenAI-compatible wire can be pointed at an Ollama too, so on that
+ *    wire the server is asked the same question first: an Ollama is held to
+ *    its listing exactly as above, and a server that answers that it is no
+ *    Ollama (llama.cpp, LM Studio: it runs only its own models) is local by
+ *    its address. It fails closed on both wires: until the server has said
+ *    which it is, and whenever it cannot be asked, the model is not local.
+ *    "Not known yet" is never "so, yes".
+ * Anything unknown (no brain, another provider, no address, no word from the server) is not local.
  */
 export function brainIsLocal(brain: AnsweringBrain | undefined, opts: { allowRemote?: boolean; listed?: (baseURL: string | undefined, model: string) => boolean } = {}): boolean {
   if (!brain || !LOCAL_WIRES.has(brain.provider)) return false;
@@ -217,15 +220,17 @@ export function brainIsLocal(brain: AnsweringBrain | undefined, opts: { allowRem
   const listed = opts.listed ?? ((url, model) => LOCALITY.runsHere(url, model));
   // Ollama can serve a model from its own servers under any name, so an Ollama is asked.
   if (SERVES_REMOTE.has(brain.provider)) return listed(brain.baseURL, brain.model);
-  // The other wire: only a server that has shown itself to be an Ollama has anything to ask.
-  return !LOCALITY.isOllama(brain.baseURL) || listed(brain.baseURL, brain.model);
+  // The other wire: its server may be an Ollama too, and only the server knows. An Ollama is held to its listing;
+  // a server that has said it is none is local by its address; one that has not said is not known to be local.
+  const said = LOCALITY.said(brain.baseURL);
+  return said === 'ollama' ? listed(brain.baseURL, brain.model) : said === 'other';
 }
 
 /**
  * Is where this brain's model runs simply NOT KNOWN right now? A local wire at
- * an address that is here, a model not named as a cloud one, and an Ollama
- * that has not been heard on it: no listing yet, one too old to believe, or one
- * that does not hold the model. brainIsLocal says no to such a brain, as it
+ * an address that is here, a model not named as a cloud one, and a server
+ * that has not been heard on it: no word yet, one too old to believe, or a
+ * listing that does not hold the model. brainIsLocal says no to such a brain, as it
  * must, and that no may become a yes at the next listing. Whoever can wait for
  * it should, instead of treating the brain as one that will never be local
  * (./goals-chat extractor: a turn skipped is a turn never mined).
@@ -237,15 +242,23 @@ export function placeUnknown(brain: AnsweringBrain | undefined): boolean {
 }
 
 /**
- * The address whose model listing decides whether this brain is local, when
- * one does: an Ollama brain at an address that is here (this Mac, or the model
- * server Will said is his). brainIsLocal reads what that Ollama last said
- * (./ollama-locality); whoever names a brain has it asked, and asked again
- * every minute. (An Ollama anywhere else is never asked: nothing it lists
- * would make its models local.)
+ * Where the server that decides whether this brain is local is asked for its
+ * listing, when one decides: a brain on a local wire at an address that is
+ * here (this Mac, or the model server Will said is his). An Ollama brain's own
+ * address; for the OpenAI-compatible wire, its server's origin (`…/v1` is
+ * where chat is asked, the listing is at the origin). brainIsLocal reads what
+ * that server last said (./ollama-locality); whoever names a brain, a tier's
+ * included, has it asked, and asked again every minute. (A server anywhere
+ * else is never asked: nothing it says would make its models local.)
  */
 export function listedAt(brain: AnsweringBrain | undefined): string | undefined {
-  return brain && SERVES_REMOTE.has(brain.provider) && placedHere(brain.baseURL) ? brain.baseURL : undefined;
+  if (!brain || !LOCAL_WIRES.has(brain.provider) || !placedHere(brain.baseURL)) return undefined;
+  if (SERVES_REMOTE.has(brain.provider)) return brain.baseURL;
+  try {
+    return new URL(brain.baseURL!).origin;
+  } catch {
+    return undefined;
+  }
 }
 
 /** A provider adapter and its model as an AnsweringBrain: the adapter's own name, address and context size, never a label's. */

@@ -12,6 +12,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
+import { forVoice, isPartOf } from '../src/spoken-text';
 
 const html = readFileSync(join(__dirname, '..', '..', 'console', 'index.html'), 'utf8');
 const line = (re: RegExp): string => {
@@ -224,5 +225,47 @@ describe('the browser voice for a reply that stays here is one this device makes
     expect(b.pick(false)).toBe('English Male Two');
     const onlyFemale = browser([{ name: 'Google UK English Female', lang: 'en-GB', localService: true }]);
     expect(onlyFemale.pick(true)).toBe('Google UK English Female'); // the last rule: any English voice
+  });
+});
+
+// `/speak` checks that the words a client sends are the named turn's own reply (../src/goals-chat speechStaysHere).
+// The console does not send the reply as it came: it makes each sentence sayable first (`speakForVoice`). The server
+// makes the reply sayable the same way before it compares, so the two must stay word for word the same.
+describe('what the console sends to be spoken is still the reply’s own words to the server (../src/spoken-text)', () => {
+  const start = html.indexOf('function speakForVoice(s){');
+  const end = html.indexOf('\nfunction speakSynced(', start);
+  const ctx = createContext({});
+  runInContext(html.slice(start, end), ctx);
+  const consoleSays = (text: string): string => {
+    Object.assign(ctx, { __s: text });
+    return runInContext('speakForVoice(__s)', ctx) as string;
+  };
+  const REPLIES = [
+    'It is **97°F** (36°C) in Austin, RealFeel 104°, winds 5 mph, humidity 40%.',
+    '# Heading\n\n> A quote with `code` and a [link](https://example.test/a_b).\n\n* one\n* two',
+    'Plain words.   With   spaces\nand a line break.',
+    '10 ° F and 3 °C; 50 MPH; realfeel 90°; 7 % done; _underscored_ words; no marks at all',
+    '',
+  ];
+
+  it('the server makes a reply sayable exactly as the console does', () => {
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    for (const reply of REPLIES) expect(forVoice(reply), reply).toBe(consoleSays(reply));
+  });
+
+  it('so a sentence the console sends is part of the reply it came from, and another reply’s sentence is not', () => {
+    const reply = REPLIES[0]!;
+    const sentences = ['It is **97°F** (36°C) in Austin,', ' RealFeel 104°, winds 5 mph,', ' humidity 40%.'];
+    for (const sentence of sentences) expect(isPartOf(consoleSays(sentence), reply), sentence).toBe(true);
+    expect(isPartOf(consoleSays(reply), reply)).toBe(true);
+    expect(isPartOf(consoleSays('The synthetic appointment is on Tuesday.'), reply)).toBe(false);
+    // The voice app sends the whole reply as it came.
+    expect(isPartOf(reply.trim(), reply)).toBe(true);
+    // Words in another order, a word missing from the middle, and no words at all are not it.
+    expect(isPartOf('Austin in 97', reply)).toBe(false);
+    expect(isPartOf('It is in Austin', reply)).toBe(false);
+    expect(isPartOf(' ... ', reply)).toBe(false);
+    expect(isPartOf('', '')).toBe(false);
   });
 });
