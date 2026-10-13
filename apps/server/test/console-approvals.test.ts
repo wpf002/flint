@@ -935,6 +935,188 @@ describe('the console Approvals panel', () => {
     expect(told).toEqual(['g1']);
   });
 
+  describe('P5: the cards for assets and tasks', () => {
+    const TASK = 'tkk7Hq2LmN9pQr3sTv';
+    const WATCHER = 'as-ci-watcher-v1';
+    const ITEM = 'en8f3k2m9x7q1w5z4c6v0b1n';
+    const watch = (over: Record<string, unknown> = {}) => ({
+      taskId: TASK, assetId: WATCHER, assetKind: 'ci_runner', title: 'Watch a CI Run', spec: { template: 'watch_ci', params: { item: ITEM, sha: null } },
+      acceptance: [{ id: 'a1', text: 'CI Run Passed', check: { type: 'deterministic', op: 'ci', sha: null } }, { id: 'a2', text: 'Names Only Your Items', check: { type: 'deterministic', op: 'refs_known' } }],
+      goalId: null, stepKey: null, dueAt: null, sensitivity: 'ops', tainted: false, estCostMicros: 0, ...over,
+    });
+    const enable = (over: Record<string, unknown> = {}) => ({ assetId: WATCHER, kind: 'ci_runner', externalRef: 'github:ci:v1', name: 'CI Watcher', capabilities: ['watch_ci'], dispatchAction: 'task.dispatch.ci_runner', spends: false, entityId: null, ...over });
+    const P5 = {
+      enable: card({ id: 'p5a', fullName: 'asset.enable', kind: 'policy', origin: 'console', consequential: true, reason: 'Approving turns this asset on.', args: enable() }),
+      dispatch: card({ id: 'p5b', fullName: 'task.dispatch.ci_runner', kind: 'task', origin: 'console', reason: 'Approving runs this task.', cost: { micros: 0 }, args: watch() }),
+      accept: card({ id: 'p5c', fullName: 'task.check_bar', kind: 'task', origin: 'runtime:tasks', templateId: 'task.accept.v1', reason: 'Approving accepts this result.', args: { taskId: TASK, outputRef: 'out:0123456789abcdef', metBar: true, checks: 2, met: 2, by: 'flint:rule' } }),
+      cancel: card({ id: 'p5d', fullName: 'task.cancel', kind: 'task', origin: 'console', reason: 'Approving stops this task.', args: { taskId: TASK } }),
+      acceptAnyway: card({ id: 'p5e', fullName: 'task.bar_override', kind: 'task', origin: 'console', consequential: true, reason: 'Approving accepts this result against its checks.', args: { taskId: TASK, to: 'accepted' } }),
+      rejectAnyway: card({ id: 'p5f', fullName: 'task.bar_override', kind: 'task', origin: 'console', consequential: true, reason: 'Approving rejects this result against its checks.', args: { taskId: TASK, to: 'rejected' } }),
+    };
+    const words = (p: Record<string, unknown>) => [run(`apprTitle(${JSON.stringify(p)})`), run(`apprSub(${JSON.stringify(p)})`), run(`JSON.stringify(apprFacts(${JSON.stringify(p)}))`)] as [string, string, string];
+    const facts = (p: Record<string, unknown>) => JSON.parse(words(p)[2]) as Array<[string, string]>;
+    const EXPIRES = new Date('2026-10-12T14:00:00.000Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const SMALL = new Set(['a', 'an', 'the', 'and', 'but', 'or', 'nor', 'for', 'so', 'yet', 'as', 'at', 'by', 'from', 'in', 'into', 'of', 'off', 'on', 'onto', 'out', 'over', 'to', 'up', 'with']);
+    const titleCase = (s: string) => s.split(' ').every((w, i, all) => !w || /^[^a-z]/.test(w) || (i > 0 && i < all.length - 1 && SMALL.has(w)));
+
+    it('each has a title, a sentence and three facts or fewer, in words: never the action’s own name, an id, or a stored key', () => {
+      expect(words(P5.enable)).toEqual(['Turn On the CI Watcher', 'Flint reports how your CI runs end.', JSON.stringify([['Asset', 'CI Watcher'], ['Can Do', 'Watch CI Runs'], ['Cost', 'No Cost']])]);
+      expect(words(P5.dispatch)).toEqual(['Watch a CI Run', 'Flint waits for the run and tells you how it ended.', JSON.stringify([['Due', 'No Due Date'], ['Cost', 'No Cost']])]);
+      expect(words(P5.accept)).toEqual(['Accept a Task Result', 'It passed 2 of 2 checks.', JSON.stringify([['Checked By', 'Rules'], ['Expires', EXPIRES]])]);
+      expect(words(P5.cancel)).toEqual(['Cancel a Task', 'Flint stops working on it.', JSON.stringify([['Filed By', 'You'], ['Expires', EXPIRES]])]);
+      expect(words(P5.acceptAnyway).slice(0, 2)).toEqual(['Accept a Result Anyway', 'It ends as accepted, against Flint’s checks.']);
+      expect(words(P5.rejectAnyway).slice(0, 2)).toEqual(['Reject a Result Anyway', 'It ends as rejected, against Flint’s checks.']);
+      // The same words the notes use, where the card does not say more (which asset, which way).
+      for (const p of [P5.dispatch, P5.accept, P5.cancel]) expect(words(p)[0]).toBe(ACTION_WORDS[p.fullName as string]);
+      for (const p of Object.values(P5)) {
+        const [title, sub] = words(p);
+        expect(titleCase(title), title).toBe(true);
+        expect(sub, sub).toMatch(/^[A-Z].*\.$/);
+        expect(noteProblems('Approvals', sub), sub).toEqual([]);
+        expect(facts(p).length).toBeLessThanOrEqual(3);
+        for (const [label, value] of facts(p)) {
+          expect(titleCase(label), label).toBe(true);
+          expect(`${title} ${sub} ${label} ${value}`).not.toMatch(/tk[A-Za-z0-9]{16}|as-ci|\ben[0-9a-z]{20}|task\.|asset\.|ci_runner|watch_ci|flint:rule|[{}[\]"]|undefined|null/);
+        }
+      }
+      // A due time and a real cost are said; one check is singular; a check a model judged says so.
+      const due = '2026-10-20T21:59:00.000Z';
+      expect(facts({ ...P5.dispatch, cost: { micros: 250_000 }, args: watch({ dueAt: due, estCostMicros: 250_000 }) })).toEqual([['Due', new Date(due).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })], ['Cost', 'About $0.25']]);
+      expect(words({ ...P5.accept, args: { ...P5.accept.args, checks: 1, met: 1, by: 'ollama:qwen2.5:14b' } }).slice(1)).toEqual(['It passed 1 of 1 check.', JSON.stringify([['Checked By', 'Local Model'], ['Expires', EXPIRES]])]);
+    });
+
+    it('a card this page has fewer words for still reads in words: another kind of asset or task, an ending it does not know, counts that do not add up, args that were cleared', () => {
+      expect(words({ ...P5.enable, args: enable({ kind: 'local_worker', name: 'Local Tasks', capabilities: ['summarize_items', 'new_thing'], spends: true }) })).toEqual([
+        'Turn On an Asset', 'Flint can hand it work once it’s on.', JSON.stringify([['Asset', 'Local Tasks'], ['Can Do', 'Summarize Items · New Thing'], ['Cost', 'Costs Money']]),
+      ]);
+      expect(words({ ...P5.dispatch, fullName: 'task.dispatch.local_worker', cost: undefined, args: watch({ title: 'Summarize Items' }) })).toEqual(['Run a Task', 'Flint runs it once you approve it.', JSON.stringify([['Task', 'Summarize Items'], ['Due', 'No Due Date'], ['Cost', 'No Cost']])]);
+      expect(words({ ...P5.acceptAnyway, args: { taskId: TASK, to: 'archived' } }).slice(0, 2)).toEqual(['Overrule a Task’s Checks', 'It ends against Flint’s checks.']);
+      // A result is called passed only when every check is met, by the card's own counts.
+      for (const args of [{ checks: 3, met: 2 }, { checks: 0, met: 0 }, { checks: '2', met: '2' }, { checks: 2.5, met: 2.5 }, {}]) expect(words({ ...P5.accept, args: { taskId: TASK, ...args } })[1], JSON.stringify(args)).toBe('Flint checked its result.');
+      // A name a table does not hold is not a word: "constructor" is no kind of asset.
+      for (const kind of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) expect(words({ ...P5.enable, args: enable({ kind }) })[0], kind).toBe('Turn On an Asset');
+      expect(words({ ...P5.dispatch, fullName: 'task.dispatch.constructor', args: watch() })[0]).toBe('Run a Task');
+      for (const p of Object.values(P5)) {
+        const [title, sub, f] = words({ ...p, args: null, cost: undefined });
+        expect(title).toMatch(/^[A-Z]/);
+        expect(sub).toMatch(/\.$/);
+        expect(f).not.toMatch(/undefined|null/);
+      }
+    });
+
+    it('the cost on a dispatch card is the server’s reading of the number Will signs, or that number itself from an older server; anything else is never put in words', () => {
+      const cost = (p: Record<string, unknown>) => facts(p).find((x) => x[0] === 'Cost')?.[1] ?? null;
+      expect(cost(P5.dispatch)).toBe('No Cost');
+      expect(cost({ ...P5.dispatch, cost: undefined })).toBe('No Cost');
+      expect(cost({ ...P5.dispatch, cost: { micros: 12_500_000 }, args: watch({ estCostMicros: 12_500_000 }) })).toBe('About $12.50');
+      expect(cost({ ...P5.dispatch, cost: undefined, args: watch({ estCostMicros: 2_500 }) })).toBe('About $0.0025');
+      expect(cost({ ...P5.dispatch, cost: { micros: 1_000_000_000 }, args: watch({ estCostMicros: 1_000_000_000 }) })).toBe('About $1000.00');
+      for (const bad of [-100, 0.5, 250_050, 1_000_000_100, '0', null, true, NaN]) {
+        expect(cost({ ...P5.dispatch, cost: { micros: bad }, args: watch({ estCostMicros: bad }) }), String(bad)).toBeNull();
+        // Behind Show Details such a number is listed as it is stored, never rounded into a sentence.
+        const d = JSON.parse(run(`JSON.stringify(apprDetails(${JSON.stringify({ ...P5.dispatch, args: watch({ estCostMicros: bad }) })}))`) as string) as { says: string[]; facts: Array<[string, string]> };
+        expect(d.says.join(' '), String(bad)).not.toMatch(/costs/);
+        expect(d.facts.some((x) => x[0] === 'Cost in Millionths of a Dollar'), String(bad)).toBe(true);
+      }
+      // No card but a dispatch has a Cost fact of this kind, whatever its args hold.
+      for (const p of [P5.accept, P5.cancel, P5.acceptAnyway]) expect(cost({ ...p, cost: { micros: 0 }, args: { ...(p.args as object), estCostMicros: 0 } }), p.fullName as string).toBeNull();
+    });
+
+    it('turning an asset on and ending a task against its checks ask on their own, whatever the server marks; so does a task that costs money; the prompt says what Flint is doing', async () => {
+      const alone = (p: Record<string, unknown>) => run(`apprAlone(${JSON.stringify(p)})`) as boolean;
+      const reason = (p: Record<string, unknown>) => run(`apprReason(${JSON.stringify(p)})`) as string;
+      for (const p of [P5.enable, P5.acceptAnyway, P5.rejectAnyway]) {
+        expect(alone(p), p.fullName as string).toBe(true);
+        // Its name holds the line for a server that does not send the mark.
+        expect(alone({ ...p, consequential: false }), p.fullName as string).toBe(true);
+      }
+      for (const p of [P5.dispatch, P5.accept, P5.cancel]) expect(alone(p), p.fullName as string).toBe(false);
+      expect(alone({ ...P5.dispatch, cost: { micros: 100 }, args: watch({ estCostMicros: 100 }) })).toBe(true);
+      expect(alone({ ...P5.dispatch, cost: undefined, args: watch({ estCostMicros: 250_000 }) })).toBe(true);
+      expect(alone({ ...P5.dispatch, tainted: true })).toBe(true);
+      expect([P5.enable, P5.dispatch, P5.accept, P5.cancel, P5.acceptAnyway, P5.rejectAnyway].map(reason)).toEqual(['turn on the CI watcher', 'run this task', 'accept this result', 'cancel this task', 'accept this result', 'reject this result']);
+      expect(reason({ ...P5.enable, args: enable({ kind: 'local_worker' }) })).toBe('turn on this asset');
+      expect(reason({ ...P5.acceptAnyway, args: { taskId: TASK, to: 'archived' } })).toBe('end this task');
+      // In the panel: Approve All takes the three that may share a prompt and leaves the three that ask on their own.
+      answer = () => ({ status: 200, body: { proposals: Object.values(P5), signed: true } });
+      await open();
+      expect(noteSays()).toBe('You have 6 approvals waiting. Approve All skips 3.');
+      ids.apprall!.onclick!();
+      await settle();
+      expect(decided.map((d) => d[1])).toEqual(['p5b', 'p5c', 'p5d']);
+      // On its own card, Approve hands the stored args untouched, with a fresh touch where it asks on its own.
+      decided = [];
+      run("APPR.open='p5a';apprRender()");
+      ids.apprlist!.button('Approve with Password').onclick!();
+      await settle();
+      expect(decided).toEqual([['approve', 'p5a', { reason: 'turn on the CI watcher', fresh: true, args: P5.enable.args }]]);
+    });
+
+    it('in the panel a task card is opened in words, with everything it holds behind Show Details: sentences, labelled values and references, and never a <pre>', async () => {
+      answer = () => ({ status: 200, body: { proposals: Object.values(P5), signed: true } });
+      await open();
+      for (const p of Object.values(P5)) {
+        run(`APPR.open=${JSON.stringify(p.id)};apprRender()`);
+        const open = ids.apprlist!.all().find((e) => e.className.split(' ').includes('open'))!;
+        open.button('Show Details').onclick!();
+        const details = open.all().find((e) => e.className === 'details')!;
+        expect(details.hidden).toBe(false);
+        expect(open.all().some((e) => e.tagName === 'pre' || e.tagName === 'code'), p.fullName as string).toBe(false);
+        const lines = details.children.filter((c) => c.tagName === 'p').map((c) => c.textContent);
+        expect(lines[0]).toBe(p.reason);
+        for (const line of lines) expect(noteProblems('Details', line), line).toEqual([]);
+        for (const dt of details.all().filter((e) => e.tagName === 'dt')) expect(titleCase(dt.textContent), dt.textContent).toBe(true);
+        // Its ids are there, under REFERENCES; nothing is written as JSON.
+        expect(details.all().filter((e) => e.tagName === 'h4').map((e) => e.textContent)).toContain('REFERENCES');
+        expect(details.textContent).toContain(p.fullName === 'asset.enable' ? WATCHER : TASK);
+        expect(details.textContent).not.toMatch(/[{}"[\]]/);
+      }
+      // The icon: an asset is a switch, a task is a task.
+      expect(run(`apprIcon(${JSON.stringify(P5.enable)})`)).toBe('power');
+      for (const p of [P5.dispatch, P5.accept, P5.cancel, P5.acceptAnyway]) expect(run(`apprIcon(${JSON.stringify(p)})`)).toBe('tasks');
+    });
+
+    it('a task is named on a card’s face once the Tasks panel has read it; loading the list asks it to, lights its dot, and draws again when it has', async () => {
+      const seen: unknown[][] = [];
+      let learn: ((n: number) => void) | undefined;
+      ctx.taskNames = (ps: unknown[], done: (n: number) => void) => (seen.push(ps), (learn = done));
+      const dots: unknown[][] = [];
+      ctx.tasksDot = (ps: unknown[]) => void dots.push(ps);
+      answer = () => ({ status: 200, body: { proposals: [P5.cancel, P5.dispatch], signed: true } });
+      ids.approvals!.classList.add('open');
+      await open();
+      expect(seen).toHaveLength(1);
+      expect((seen[0] as Array<{ id: string }>).map((p) => p.id)).toEqual(['p5d', 'p5b']);
+      expect(dots).toHaveLength(1);
+      expect(facts(P5.cancel).map((x) => x[0])).toEqual(['Filed By', 'Expires']);
+      // The Tasks panel learned its title and what it is about: the card's face says so, beside what is signed.
+      run(`APPR_TASKS[${JSON.stringify(TASK)}]={title:'Watch a CI Run',about:'wpf002/flint CI'}`);
+      const before = ids.apprlist!.textContent;
+      learn!(1);
+      expect(ids.apprlist!.textContent).not.toBe(before);
+      expect(facts(P5.cancel)).toEqual([['Task', 'Watch a CI Run · wpf002/flint CI'], ['Filed By', 'You'], ['Expires', EXPIRES]]);
+      expect(facts(P5.dispatch)).toEqual([['CI Run', 'wpf002/flint CI'], ['Due', 'No Due Date'], ['Cost', 'No Cost']]);
+      expect(facts(P5.accept)[0]).toEqual(['Task', 'Watch a CI Run · wpf002/flint CI']);
+      // Nothing learned, or the panel closed since: the list is left as it is.
+      const drawn = ids.apprlist!.children[0];
+      learn!(0);
+      expect(ids.apprlist!.children[0]).toBe(drawn);
+      ids.approvals!.classList.remove('open');
+      learn!(1);
+      expect(ids.apprlist!.children[0]).toBe(drawn);
+      // What is looked up is display only: Show Details, and what is signed, hold only what the card carries.
+      expect(run(`JSON.stringify(apprDetails(${JSON.stringify(P5.cancel)}))`)).not.toContain('wpf002');
+      // A task id that is not one, or a name under a key the table does not own, is never looked up as a task.
+      expect(run(`apprTaskName(${JSON.stringify({ ...P5.cancel, args: { taskId: 'constructor' } })})`)).toBe('');
+      expect(run(`apprTaskName(${JSON.stringify({ ...P5.cancel, args: { taskId: '__proto__' } })})`)).toBe('');
+    });
+
+    it('a goal’s task step on a plan card says Flint would run it as a task', () => {
+      const says = JSON.parse(run(`JSON.stringify(apprDetails(${JSON.stringify(card({ fullName: 'plan.change', args: { goalId: 'go1', goalTitle: 'Finish Building Flint', ops: [{ op: 'add', key: 's4', step: { ordinal: 400, title: 'Watch the release run', kind: 'asset_task', tier: 'approval', dueAt: null, dependsOn: [] } }] } }))}).says)`) as string) as string[];
+      expect(says).toContain('Add the step “Watch the release run”. Flint would run this step as a task.');
+    });
+  });
+
   it('the approvals panel never writes HTML', () => {
     expect(apprJs.replace(/\/\*[\s\S]*?\*\//g, '')).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
   });
