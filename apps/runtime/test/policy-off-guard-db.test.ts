@@ -444,6 +444,8 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       ['it is the wide rule, over a narrower wide one', cap('F.*', 3), [cap('F.review.*', 9)], 'stays on'],
       ['a neighbour with no cap that matches none of its actions', cap('F.propose', 3), [cap('F.review.local'), cap('F.review.*'), cap('F.prop'), cap('F.propose.more'), cap('Fx.*')], 'goes off'],
       ['a name is read letter by letter: `_` is no wildcard', cap('FxA.propose', 3), [cap('F_A.*')], 'goes off'],
+      ['a wide rule for a family whose name only begins the same', cap('Fx.propose', 3), [cap('F.*')], 'goes off'],
+      ['it is the wide rule, beside an action whose family only begins the same', cap('F.*', 3), [cap('Fx.propose')], 'goes off'],
       ['the looser rule is switched off', cap('F.propose', 3), [cap('F.propose', undefined, { off: true })], 'goes off'],
       ['the other rule holds the action back, cap or none', cap('F.propose', 3), [{ pattern: 'F.propose', tier: 'approval' }, { pattern: 'F.*', tier: 'forbidden', dailyCap: 9 }], 'goes off'],
       ['the looser rule has ended (its end is not read)', cap('F.propose', 3), [cap('F.propose', undefined, { expiresAt: new Date(Date.now() - 86_400_000).toISOString() })], 'stays on'],
@@ -784,6 +786,17 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       const aid = await approve(filed.pid, filed.digest);
       await k.without('Proposal_transition', (q) => q(`UPDATE "Proposal" SET status = 'executing', "approvalId" = $2 WHERE id = $1`, [filed.pid, aid]));
       expect((await owner(`SELECT status, "approvalId" FROM "Proposal" WHERE id = $1`, [filed.pid])).rows).toEqual([{ status: 'executing', approvalId: aid }]);
+      expect(await failure(switchOff(hold))).toEqual(['42501', REFUSED(hold), null]);
+      expect(await isOn(hold)).toBe(true);
+      await k.finish(filed.pid);
+    });
+
+    it('a card of another action carried out under his yes to a policy change (the same forgery, the other way round) switches nothing off', async () => {
+      const [hold] = (await rule([{ pattern: `${fam()}.propose`, tier: 'approval' }])) as [string];
+      const filed = await k.file('world.source.enable', { off: [await named(hold)] }, { kind: 'policy', origin: 'cli', consequential: true });
+      const aid = await k.approval(filed.pid, 'policy.change', filed.digest);
+      await k.without('Proposal_transition', (q) => q(`UPDATE "Proposal" SET status = 'executing', "approvalId" = $2 WHERE id = $1`, [filed.pid, aid]));
+      expect((await owner(`SELECT status, action, "approvalId" FROM "Proposal" WHERE id = $1`, [filed.pid])).rows).toEqual([{ status: 'executing', action: 'world.source.enable', approvalId: aid }]);
       expect(await failure(switchOff(hold))).toEqual(['42501', REFUSED(hold), null]);
       expect(await isOn(hold)).toBe(true);
       await k.finish(filed.pid);
