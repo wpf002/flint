@@ -445,6 +445,9 @@ describe('the real server, as a process: Cloud mode, then Local mode', () => {
     // The client is told, ahead of the reply, that this one may be sent out to be spoken, and which stored turn it is.
     expect(staysHere(r)).toMatchObject({ staysHere: false });
     expect(typeof staysHere(r)?.turn).toBe('string');
+    // This server has no voice setting at all, so OpenAI speaks: the event is what it always was, exactly its three
+    // keys. It never says the server's speech is made on this Mac (./voice.test.ts has the servers where it is).
+    expect(Object.keys(staysHere(r)!).sort()).toEqual(['staysHere', 'turn', 'type']);
     const offered = names(cloud.requests.at(-1));
     expect(offered).toEqual(expect.arrayContaining(['remember', 'deep_research', 'web.web_search', 'web.fetch_url', 'trident.perplexity_search', 'trident.gmail_search']));
   });
@@ -458,6 +461,7 @@ describe('the real server, as a process: Cloud mode, then Local mode', () => {
     // ...and the client is told, ahead of the reply, that it stays on this Mac (the console and the voice app
     // then speak it with the device's own voice).
     expect(staysHere(r)).toMatchObject({ staysHere: true });
+    expect(Object.keys(staysHere(r)!).sort()).toEqual(['staysHere', 'turn', 'type']);
     // Not one request went to the outside brain for it.
     expect(cloud.requests).toHaveLength(before);
     const sent = lastLocal();
