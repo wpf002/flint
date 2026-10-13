@@ -233,9 +233,15 @@ describe.skipIf(NO_DB)('P5 assets, tasks and reviews on flint_test', () => {
       const after = await k.taskAt('checked', a);
       const proofAfter = await k.proof(after.id);
       expect(await k.code(k.setStatus(app, after.id, 'accepted', `, "acceptedAuditId" = $3`, [proofAfter]))).toBe('42501');
+      // The row that holds it back is a brake Will set: the runtime's role cannot switch it off (policy_off_guard), so
+      // the card stays needed. His own signed card switches it off, and the promotion then stands again.
+      expect(await k.code(app(`UPDATE "ActionPolicy" SET active = false WHERE id = $1`, [held]))).toBe('42501');
+      expect(await k.code(k.setStatus(app, after.id, 'accepted', `, "acceptedAuditId" = $3`, [proofAfter]))).toBe('42501');
+      const off = await k.card('policy.change', { off: [{ id: held, pattern: 'task.*', tier: 'approval' }] }, { kind: 'policy', origin: 'cli' });
       await app(`UPDATE "ActionPolicy" SET active = false WHERE id = $1`, [held]);
+      await k.finish(off.pid);
       await k.setStatus(app, after.id, 'accepted', `, "acceptedAuditId" = $3`, [proofAfter]);
-      // Switched off again (as Will can at any time), it is back to his card.
+      // The promotion itself the runtime may take back at any time: switched off, it is back to his card.
       await app(`UPDATE "ActionPolicy" SET active = false WHERE id = $1`, [alone]);
       const later = await k.taskAt('checked', a);
       expect(await k.code(k.setStatus(app, later.id, 'accepted', `, "acceptedAuditId" = $3`, [await k.proof(later.id)]))).toBe('42501');

@@ -131,7 +131,9 @@ describe.skipIf(NO_DB)('a goal from chat rests on a signed card, or on a rule Wi
     await finish(pc.pid);
     return ids;
   }
-  const retire = () => app(`UPDATE "ActionPolicy" SET active = false WHERE active`);
+  // As the owner: some of these tests leave a row that holds goals back, and the runtime's role may not switch such a
+  // row off (policy_off_guard, whose own test covers who may).
+  const retire = () => owner(`UPDATE "ActionPolicy" SET active = false WHERE active`);
   /** The intake's audit entry for a goal it adds under a rule, as the runtime's role writes it (it can write any). */
   const entry = (q: Q, src: string, over: Record<string, unknown> = {}, inputs: Record<string, unknown> = {}) => {
     const v: Record<string, unknown> = { actor: INTAKE, context: 'chat', kind: 'action', action: 'goal.propose', tier: 'alone', decision: 'act', outcome: 'ok', correlationId: src, tainted: false, ...over };

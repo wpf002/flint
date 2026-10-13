@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { CHAT_GOAL_FLOOR, NO_DB, URLS, MIGRATIONS, migrationDirs, migrateDown, migrateUp, pgError, prisma, withClient } from './db';
+import { CHAT_GOAL_FLOOR, POLICY_OFF_GUARD, NO_DB, URLS, MIGRATIONS, migrationDirs, migrateDown, migrateUp, pgError, prisma, withClient } from './db';
 import { grantLines } from '../src/backup/grants';
 import { buildReference, catalogLines, checkoutMigrations } from '../src/backup/catalog';
 import { p5Kit } from './p5';
@@ -114,7 +114,8 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
   const rollsBack = async (target: string): Promise<void> => {
     // Something true only while the target migration is applied, to see it go and come back. A new migration names its own here.
     // (P4 part 3's: its two columns, how many of a forecast's steps were filled in and where each number was read to. P5's: its first
-    // table. The chat goal floor's: its two triggers on Goal, switched on, and their function.)
+    // table. The chat goal floor's: its two triggers on Goal, switched on, and their function. The policy off guard's: its
+    // trigger on ActionPolicy, switched on, and the trigger's function.)
     const applied: Record<string, string> = {
       '20261014000000_p4_forecast_inputs': `(SELECT count(*) = 2 FROM information_schema.columns WHERE table_schema = 'public'
         AND ((table_name = 'ForecastRun' AND column_name = 'filled') OR (table_name = 'MetricSeries' AND column_name = 'readTo')))`,
@@ -122,6 +123,8 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
       '20261015000000_p7_resilience': `to_regclass('public."BackupRun_kind_location_path_key"') IS NOT NULL`,
       [CHAT_GOAL_FLOOR]: `(SELECT to_regprocedure('goal_chat_floor()') IS NOT NULL AND (SELECT count(*) FROM pg_trigger
         WHERE tgrelid = to_regclass('public."Goal"') AND tgname IN ('Goal_chat_floor', 'Goal_chat_floor_bind') AND NOT tgisinternal AND tgenabled = 'O') = 2)`,
+      [POLICY_OFF_GUARD]: `(SELECT to_regprocedure('action_policy_off_guard()') IS NOT NULL AND (SELECT count(*) FROM pg_trigger
+        WHERE tgrelid = to_regclass('public."ActionPolicy"') AND tgname = 'ActionPolicy_off_guard' AND NOT tgisinternal AND tgenabled = 'O') = 1)`,
     };
     expect(applied[target], `say what ${target} makes true`).toBeTruthy();
     const there = async () => withClient(owner, async (c) => (await c.query<{ t: boolean }>(`SELECT ${applied[target]} AS t`)).rows[0]!.t);
@@ -145,6 +148,36 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
       used: (await c.query(`SELECT to_regclass('public."GoalApprovalUse"') IS NOT NULL AS t`)).rows[0].t as boolean,
     }));
     const goalsBefore = target === CHAT_GOAL_FLOOR ? await goalStore() : undefined;
+    /** The policy table's own triggers and P1's functions under them: what the off guard's rollback must leave exactly as it was. */
+    const policyStore = () => withClient(owner, async (c) => ({
+      triggers: (await c.query(`SELECT tgname, tgenabled, pg_get_triggerdef(oid) AS def FROM pg_trigger WHERE tgrelid = to_regclass('public."ActionPolicy"') AND NOT tgisinternal AND tgname <> 'ActionPolicy_off_guard' ORDER BY 1`)).rows,
+      functions: await functionsNamed(['action_policy_matches_approval', 'action_policy_update_guard', 'row_history', 'p3_args_digest', 'p3_canonical']),
+      grants: (await grants(owner)).filter((g) => g.includes('ActionPolicy')),
+    }));
+    const policiesBefore = target === POLICY_OFF_GUARD ? await policyStore() : undefined;
+    /**
+     * After `target`'s down.sql (and every newer one's): the catalog is, line for line, that of a database built
+     * without it (a restore compares the two). Leaves the database as it found it: everything up, then `target`
+     * and anything newer down again.
+     */
+    const leavesWhatAnInstallWithoutItHas = async (): Promise<void> => {
+      const all = checkoutMigrations(MIGRATIONS);
+      const newer = migrationDirs().filter((d) => d > target);
+      const rolledBack = await withClient(owner, (c) => catalogLines(c));
+      await migrateDown(owner);
+      const without = await withClient(owner, async (c) => {
+        await buildReference(c, all.filter((m) => m.name < target));
+        return catalogLines(c);
+      });
+      await migrateDown(owner);
+      await migrateUp(owner);
+      for (const d of [...newer].reverse()) await runDown(d);
+      await runDown(target);
+      // Compared whatever came after it: anything newer was rolled back first, so what is left is exactly the
+      // migrations before this one, and the reference is built from the same ones.
+      expect({ gone: without.filter((l) => !rolledBack.includes(l)), left: rolledBack.filter((l) => !without.includes(l)) }).toEqual({ gone: [], left: [] });
+      expect(without.length).toBeGreaterThan(100);
+    };
     // Everything newer goes first, newest first, as a rollback past it would run them.
     for (const newer of migrationDirs().filter((d) => d > target).reverse()) await runDown(newer);
     await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, target, 'down.sql'), 'utf8')));
@@ -189,29 +222,25 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
       expect(await goalStore()).toEqual(goalsBefore);
       expect(goalsBefore!.triggers.map((t) => t.tgname)).toEqual(['Goal_guard', 'Goal_history', 'Goal_insert_check', 'Goal_no_truncate', 'Goal_valid']);
       // And what a database built without it has, line for line (a restore compares the two).
-      const all = checkoutMigrations(MIGRATIONS);
-      const newer = migrationDirs().filter((d) => d > target);
-      const rolledBack = await withClient(owner, (c) => catalogLines(c));
-      await migrateDown(owner);
-      const without = await withClient(owner, async (c) => {
-        await buildReference(c, all.filter((m) => m.name < CHAT_GOAL_FLOOR));
-        return catalogLines(c);
-      });
-      // Back to where this test stood: everything up, then this migration (and any newer) down again.
-      await migrateDown(owner);
-      await migrateUp(owner);
-      for (const d of [...newer].reverse()) await runDown(d);
-      await runDown(target);
-      // Compared whatever came after it: anything newer was rolled back first (above), so what is left is exactly the
-      // migrations before this one, and the reference is built from the same ones.
-      expect({ gone: without.filter((l) => !rolledBack.includes(l)), left: rolledBack.filter((l) => !without.includes(l)) }).toEqual({ gone: [], left: [] });
-      expect(without.length).toBeGreaterThan(100);
+      await leavesWhatAnInstallWithoutItHas();
+    }
+    if (target === POLICY_OFF_GUARD) {
+      // The guard is rules only: its trigger and the trigger's function are gone, and the policy table under it is to
+      // the letter what it was (P1's own triggers, their functions' bodies and grants, what each role may do to it).
+      expect(await withClient(owner, async (c) => (await c.query(
+        `SELECT (SELECT count(*)::int FROM pg_trigger WHERE NOT tgisinternal AND tgname = 'ActionPolicy_off_guard') AS triggers,
+                (SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'action_policy_off_guard') AS functions`)).rows[0])).toEqual({ triggers: 0, functions: 0 });
+      expect(await policyStore()).toEqual(policiesBefore);
+      expect(policiesBefore!.triggers.map((t) => t.tgname)).toEqual(['ActionPolicy_history', 'ActionPolicy_matches_approval', 'ActionPolicy_no_truncate', 'ActionPolicy_update_guard']);
+      expect(policiesBefore!.grants).toEqual(['flint_app INSERT public.ActionPolicy', 'flint_app SELECT public.ActionPolicy', 'flint_app UPDATE public.ActionPolicy.active']);
+      await leavesWhatAnInstallWithoutItHas();
     }
     const status = await prisma(['migrate', 'status'], owner);
     expect(status.stdout + status.stderr).toMatch(new RegExp(`not yet been applied:[\\s\\S]*${target}`));
     await migrateUp(owner);
     expect(await there()).toBe(true);
     if (goalsBefore) expect(await goalStore()).toEqual(goalsBefore);
+    if (policiesBefore) expect(await policyStore()).toEqual(policiesBefore);
     const diff = await prisma(['migrate', 'diff', '--from-url', owner, '--to-schema-datamodel', 'prisma/schema.prisma', '--exit-code'], owner);
     expect(diff.code, diff.stdout + diff.stderr).toBe(0);
     // Re-applied on top of P3's body: P5's rule is back.
@@ -236,6 +265,13 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
   // first (newest first), so these checks keep running when it is no longer the newest.
   it('the chat goal floor\'s down.sql, after any newer one\'s, leaves the goal store as it was and the catalog of a database built without it; a deploy re-applies it', async () => {
     await rollsBack(CHAT_GOAL_FLOOR);
+  });
+
+  // Who may switch a policy row off: rules only too. Its down.sql takes one trigger and its function away, leaves
+  // P1's own rules on the policy table to the letter, and gives back the catalog of a database built without it.
+  // Named here for the same reason: these checks keep running once something newer lands.
+  it('the policy off guard\'s down.sql, after any newer one\'s, leaves the policy table\'s own rules as they were and the catalog of a database built without it; a deploy re-applies it', async () => {
+    await rollsBack(POLICY_OFF_GUARD);
   });
 
   it('the newest migration\'s down.sql, then deploy, re-applies it (the documented rollback)', async () => {
