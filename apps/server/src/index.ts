@@ -1421,7 +1421,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // and a hybrid turn is finished below, once its tier and tools are known.
     // (A turn that stays here has the model server asked what runs on it NOW, before it is refused or a word of it
     // is sent anywhere, the embedder included: ./inference routeFirst.)
-    const pre = await ctx.inference.routeFirst({ message: prompt, localOnly, deep: body.deep === true, evalMode, hasFrontier: !!ctx.frontier, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {}, attachments });
+    const pre = await ctx.inference.routeFirst({ message: prompt, localOnly, deep: body.deep === true, evalMode, hasFrontier: !!ctx.frontier, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {}, attachments, ownLocalModel: lm.model !== undefined });
     if ('error' in pre) return json(res, pre.status, { error: pre.error });
     const asText = [prompt, summarizeAttachments(attachments)].filter(Boolean).join(' ');
     const scored = await ctx.router.selectScored(asText);
@@ -1437,7 +1437,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const ctxBlock = ctx.inference.withPrivateNote(recalled.block, pre); // a private turn's model is told, in one sentence, that nothing outside is asked for it
     const toolsLikely = ctx.router.toolsLikely(scored.appended);
     const tier = classifyMessage(prompt, { toolsLikely });
-    const route = ctx.inference.finishRoute(pre, { tier, toolsLikely, promptChars: asText.length + textChars(attachments) });
+    const route = ctx.inference.finishRoute(pre, { tier, toolsLikely, promptChars: asText.length + textChars(attachments) + ctx.inference.pdfTextChars(attachments) });
     // Which local model would answer (./local-serve): the main one when it is ready, else the standby. Decided once, from
     // the models' state now. A turn that must be local with none to answer it gets a sentence, never the cloud.
     // The plan is made from what the monitor last saw of the model server: when that is more than a moment old,
@@ -1701,7 +1701,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       const turns = mayUseCloud(pre) && ctx.brains?.tiered ? history.sent : 0;
       const toolsLikely = ctx.router.toolsLikely(scored.appended);
       const tier = classifyMessage(message, { turns, toolsLikely });
-      const route = ctx.inference.finishRoute(pre, { tier, toolsLikely, promptChars: asText.length + textChars(attachments) + ctx.memory.historyChars(conversationId) });
+      const route = ctx.inference.finishRoute(pre, { tier, toolsLikely, promptChars: asText.length + textChars(attachments) + ctx.inference.pdfTextChars(attachments) + ctx.memory.historyChars(conversationId) });
       // Which local model would answer (./local-serve): the main one when it is ready, else the standby. Decided once, from
       // the models' state now. A turn that must be local with none to answer it gets a sentence, never the cloud.
       // The plan is made from what the monitor last saw of the model server: when that is more than a moment old,

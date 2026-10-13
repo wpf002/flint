@@ -474,7 +474,8 @@ export async function runVisionBench(args: VisionArgs, deps: VisionDeps): Promis
       const ms = Math.round(deps.now() - began);
       read.set(`${kind}/${f.c.id}`, got);
       const lines = f.c.pages.flat().map((l) => plainText(l)).filter((l) => l.length > 0);
-      const back = got.ok ? got.text : '';
+      // (Whole lines, looked up in a set: sixty pages are 2,400 of them.)
+      const back = new Set(got.ok ? got.text.split('\n').map((l) => l.trim()) : []);
       result.pdfReads.push({
         reader: kind,
         id: f.c.id,
@@ -485,7 +486,7 @@ export async function runVisionBench(args: VisionArgs, deps: VisionDeps): Promis
         ms,
         outcome: got.ok ? 'text' : got.why,
         exact: got.ok && !got.cut && got.text === f.text,
-        linesFound: lines.filter((l) => back.includes(l)).length,
+        linesFound: lines.filter((l) => back.has(l)).length,
         lines: lines.length,
         ...(got.ok && got.pages !== undefined ? { pagesSaid: got.pages } : {}),
       });

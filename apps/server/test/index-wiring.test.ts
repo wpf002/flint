@@ -513,7 +513,7 @@ describe('index.ts wiring', () => {
   it('both routes are routed by the mode: routeFirst before anything else, finishRoute once the tier is known, and no routeTurn left here', () => {
     expect(src).not.toMatch(/\brouteTurn\(/);
     for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
-      expect(route, name).toMatch(/const pre = await ctx\.inference\.routeFirst\(\{ message(: prompt)?, localOnly, deep: body\.deep === true, evalMode(: false)?, hasFrontier: !!ctx\.frontier, needs: mediaNeeds\(attachments\), frontierCan: ctx\.frontier\?\.media \?\? \{\}, attachments \}\);/);
+      expect(route, name).toMatch(/const pre = await ctx\.inference\.routeFirst\(\{ message(: prompt)?, localOnly, deep: body\.deep === true, evalMode(: false)?, hasFrontier: !!ctx\.frontier, needs: mediaNeeds\(attachments\), frontierCan: ctx\.frontier\?\.media \?\? \{\}, attachments(, ownLocalModel: lm\.model !== undefined)? \}\);/);
       // (The turn's files go with it: a PDF is read on this Mac before the route is decided, when that is turned on.)
       expect(route, name).toContain("if ('error' in pre) return json(res, pre.status, { error: pre.error });");
       expect(route.indexOf('const tier = classifyMessage('), name).toBeLessThan(route.indexOf('const route = ctx.inference.finishRoute(pre, { tier, toolsLikely,'));
@@ -527,8 +527,12 @@ describe('index.ts wiring', () => {
     // A hybrid turn may still go to the cloud, so the "deep thread" rule counts its history as a frontier turn's.
     expect(chat).toContain('const turns = mayUseCloud(pre) && ctx.brains?.tiered ? history.sent : 0;');
     // The long-context rule is sized with the message, its text files and the history it is sent with.
-    expect(chat).toContain('promptChars: asText.length + textChars(attachments) + ctx.memory.historyChars(conversationId) });');
-    expect(generate).toContain('promptChars: asText.length + textChars(attachments) });');
+    // (A PDF the local model would be handed as text is part of it too, when PDFs are read here: ./inference pdfTextChars.)
+    expect(chat).toContain('promptChars: asText.length + textChars(attachments) + ctx.inference.pdfTextChars(attachments) + ctx.memory.historyChars(conversationId) });');
+    expect(generate).toContain('promptChars: asText.length + textChars(attachments) + ctx.inference.pdfTextChars(attachments) });');
+    // An eval replay that names its own local model is asked through a client of its own: nothing is said to be readable by it.
+    expect(generate).toContain('frontierCan: ctx.frontier?.media ?? {}, attachments, ownLocalModel: lm.model !== undefined });');
+    expect(chat).not.toContain('ownLocalModel');
   });
 
   it('a turn that must be local with no local model to answer it gets a 503 with a sentence, before any call and before anything streams', () => {

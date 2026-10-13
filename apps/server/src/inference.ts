@@ -96,7 +96,16 @@ const REFUSAL_LOG_EVERY_MS = 10 * 60 * 1000;
  * for that this object does not know itself, and the turn's files, which are
  * looked at here (`localReads`) and nowhere else on the way to a route.
  */
-export type RouteAsk = Omit<PreRouteInput, 'mode' | 'localCan' | 'keptCan' | 'pdfUnread'> & { attachments?: readonly Attachment[] | undefined };
+export type RouteAsk = Omit<PreRouteInput, 'mode' | 'localCan' | 'keptCan' | 'pdfUnread'> & {
+  attachments?: readonly Attachment[] | undefined;
+  /**
+   * The local model that would answer is not the main one: an eval replay that names its own (`localModel`),
+   * which is asked through a client of its own. What the main model's adapter can read says nothing of that
+   * one, so nothing is said to be readable, and such a replay with a picture or a PDF is refused as it always
+   * was.
+   */
+  ownLocalModel?: boolean | undefined;
+};
 
 /** What the local model can read of one turn's files (./mode-route PreRouteInput has each). */
 export type LocalReads = Pick<PreRouteInput, 'localCan' | 'keptCan' | 'pdfUnread'>;
@@ -267,6 +276,7 @@ export class Inference {
    * always was, whatever the local model can see.
    */
   async localReads(i: RouteAsk): Promise<LocalReads> {
+    if (i.ownLocalModel) return { localCan: {} };
     const can = this.localCan();
     const on = this.cfg.local.vision || this.media !== undefined;
     const said = (pdf: boolean, pdfUnread?: PdfUnread): LocalReads => {
@@ -277,7 +287,7 @@ export class Inference {
     // (No PDF among the files the route was handed: nothing was read, so nothing is said to be readable.)
     const pdfs = (i.attachments ?? []).filter(isPdf);
     if (pdfs.length === 0) return said(false);
-    const { attachments: _files, ...ask } = i;
+    const { attachments: _files, ownLocalModel: _own, ...ask } = i;
     const first = preRoute({ ...ask, mode: this.mode.current(), ...said(true) });
     if ('error' in first || (!('open' in first) && first.brain !== 'local')) return said(true);
     const reads = await Promise.all(pdfs.map((a) => this.media!.text(a)));
@@ -366,6 +376,15 @@ export class Inference {
    */
   withPrivateNote(context: string, route: { private: boolean }): string {
     return withPrivateNote(context, route.private, this.allowedRemote());
+  }
+
+  /**
+   * How many characters of a turn's PDFs the local model would be handed as text (./local-media): part of how
+   * long its prompt is, for the hybrid rules' long-context test. Nothing when no PDF is read here, and nothing
+   * for one that was not read for this turn (a turn a cloud model answers anyway).
+   */
+  pdfTextChars(attachments: readonly Attachment[]): number {
+    return this.media ? this.media.chars(attachments, this.primary.provider.getCapabilities(this.primary.model).maxContextTokens) : 0;
   }
 
   /** A hybrid turn, once its tier and tools are known. A route that was already decided passes through. */
@@ -499,7 +518,7 @@ export class Inference {
    * reached through a proxy): nothing that server says changes that answer.
    */
   async routeFirst(i: RouteAsk): Promise<PreRoute> {
-    const { attachments: _files, ...ask } = i;
+    const { attachments: _files, ownLocalModel: _own, ...ask } = i;
     // What the local model can read of this turn's files, once: a PDF is read here (./local-media) before the
     // route is decided, and both decisions below are made on the same answer.
     const reads = await this.localReads(i);

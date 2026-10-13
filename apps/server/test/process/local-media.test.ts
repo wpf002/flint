@@ -150,6 +150,8 @@ describe('nothing set: a turn with a picture or a PDF is what it always was', ()
     expect(st.local).toBeDefined();
     expect('pictures' in st.local!).toBe(false);
     expect('pdfReader' in st.local!).toBe(false);
+    expect((st.lines ?? []).length).toBeGreaterThan(3);
+    expect((st.lines ?? []).filter((l) => /picture|PDF/i.test(l))).toEqual([]);
     expect(blocked(srv)).toEqual([]);
   });
 });

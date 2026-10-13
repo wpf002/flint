@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { OllamaProvider, type Attachment, type GenerateArgs, type Message, type ModelCapabilities, type ProviderAdapter, type StreamEvent } from '@flint/core';
-import { KEPT_READS, MIN_PDF_CHARS, PDF_SHARE, asTextFile, isPdf, localMedia, pdfChars, pdfHeading, withPdfText } from '../src/local-media';
+import { KEPT_READS, MAX_PDF_CHARS, MIN_PDF_CHARS, PDF_SHARE, asTextFile, isPdf, localMedia, pdfChars, pdfHeading, withPdfText } from '../src/local-media';
 import type { PdfReader, PdfText } from '../src/pdf-text';
 import { textPdf } from '../src/synthetic-files';
 
@@ -71,11 +71,15 @@ describe('which attachment is a PDF to read', () => {
 });
 
 describe('how much of a PDF a model is given', () => {
-  it('a share of its window, and never so little that nothing is read', () => {
+  it('a share of its window, never so little that nothing is read, and never so much that the first word would be late', () => {
     expect(pdfChars(16_384)).toBe(Math.floor(16_384 * PDF_SHARE) * 4);
-    expect(pdfChars(32_768)).toBe(Math.floor(32_768 * PDF_SHARE) * 4);
+    expect(pdfChars(16_384)).toBe(22_936);
+    expect(pdfChars(8_192)).toBe(Math.floor(8_192 * PDF_SHARE) * 4);
     expect(pdfChars(1_024)).toBe(MIN_PDF_CHARS);
     expect(pdfChars(16_384)).toBeLessThan(16_384 * 4 * 0.5);
+    // A larger window does not buy a longer wait: the most is the same at 32K, 128K and 1M.
+    expect(MAX_PDF_CHARS).toBe(32_000);
+    for (const window of [32_768, 131_072, 1_048_576]) expect(pdfChars(window)).toBe(MAX_PDF_CHARS);
   });
 
   it('the heading says what the model is reading, and how much of it when that is not all', () => {
@@ -220,6 +224,26 @@ describe('reads are kept', () => {
     await tight.text(pdf('a.pdf', ['big-a']));
     expect(big.reads).toEqual(['big-a']);
     expect(KEPT_READS).toBeGreaterThanOrEqual(5); // every file one message may carry (./attachments LIMITS.maxCount)
+  });
+
+  it('`chars`: how much text a turn’s PDFs come to as they would be handed over, and nothing for one that was not read', async () => {
+    const r = reader({ alpha: ok('a'.repeat(900)), beta: ok('b'.repeat(90_000)), scan: { ok: false, why: 'no_text' } });
+    const media = localMedia(r);
+    const a = pdf('a.pdf', ['alpha']);
+    const b = pdf('b.pdf', ['beta']);
+    const scan = pdf('s.pdf', ['scan']);
+    expect(media.chars([PNG, TXT], 16_384)).toBe(0);
+    // Not read yet: nothing is counted, and counting reads nothing.
+    expect(media.chars([a, b], 16_384)).toBe(0);
+    expect(r.reads).toEqual([]);
+    await media.reads([a, b, scan]);
+    const heading = (given: number, of: number): number => asTextFile(a, ok('x'.repeat(of)), given).text!.length - given;
+    expect(media.chars([a], 16_384)).toBe(900 + heading(900, 900));
+    // The long one is counted as cut to the window's share, never as the 90,000 characters it holds.
+    const cap = pdfChars(16_384);
+    expect(media.chars([b], 16_384)).toBe(cap + heading(cap, 90_000));
+    expect(media.chars([a, b, scan, PNG], 16_384)).toBeLessThanOrEqual(cap + 2 * 300);
+    expect(media.chars([scan], 16_384)).toBe(0);
   });
 
   it('`reads` says whether every PDF among a turn’s files came out as text, and reads them on the way', async () => {

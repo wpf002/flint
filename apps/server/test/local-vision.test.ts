@@ -351,6 +351,47 @@ describe('routing a turn with a picture or a PDF', () => {
     expect(reader.reads).toEqual(['invoice']);
   });
 
+  it('an eval replay that names its own local model is asked through a client of its own: nothing is said to be readable by it, and it is refused as before', async () => {
+    const reader = standInReader(READS);
+    const { inference } = await boot(sees, { FLINT_LOCAL_VISION: 'on', FLINT_LOCAL_PDF: 'spotlight' }, { reader });
+    const replay = { evalMode: true, localOnly: true };
+    // The main model's own replay runs here, with what it can read.
+    expect(await inference.routeFirst(ask({ ...replay, files: [PNG] }))).toMatchObject({ brain: 'local', reason: 'eval' });
+    expect(await inference.routeFirst(ask({ ...replay, files: [INVOICE] }))).toMatchObject({ brain: 'local', reason: 'eval' });
+    reader.reads.length = 0;
+    // One that names another model: refused in the old words, and no PDF is read for it.
+    expect(await inference.routeFirst(ask({ ...replay, files: [PNG], ownLocalModel: true }))).toEqual({ error: "Local-only is on, and the on-device brain can't read images. Turn Local-only off to send the file to the frontier brain, or remove the attachment.", status: 422 });
+    expect(await inference.routeFirst(ask({ ...replay, files: [INVOICE], ownLocalModel: true }))).toEqual({ error: "Local-only is on, and the on-device brain can't read PDFs. Turn Local-only off to send the file to the frontier brain, or remove the attachment.", status: 422 });
+    expect(reader.reads).toEqual([]);
+    expect(await inference.localReads(ask({ ...replay, files: [PNG], ownLocalModel: true }))).toEqual({ localCan: {} });
+    // A replay with no file is routed as ever.
+    expect(await inference.routeFirst(ask({ ...replay, ownLocalModel: true }))).toMatchObject({ brain: 'local', reason: 'eval' });
+  });
+
+  it('a PDF the local model is handed counts toward how long the prompt is: in Hybrid a long one with a long thread goes to the cloud', async () => {
+    const long: PdfText = { ok: true, text: 'word '.repeat(20_000), cut: false, pages: 40 };
+    const reader = standInReader({ ...READS, invoice: long });
+    const { inference } = await boot({ [MAIN]: { loaded: true, contextLength: 16384, capabilities: BLIND }, [EMBED]: {} }, { FLINT_LOCAL_PDF: 'spotlight', FLINT_INFERENCE_MODE: 'hybrid' }, { reader });
+    // Before the turn's PDFs are read, and with no reader at all, a PDF adds nothing.
+    expect(inference.pdfTextChars([INVOICE])).toBe(0);
+    const open = (await inference.routeFirst(ask({ files: [INVOICE] }))) as OpenRoute;
+    expect(open).toMatchObject({ open: true, mediaLocalCannotRead: false });
+    const chars = inference.pdfTextChars([INVOICE]);
+    expect(chars).toBeGreaterThan(22_936);
+    expect(chars).toBeLessThan(22_936 + 400);
+    expect(inference.pdfTextChars([PNG])).toBe(0);
+    // On its own it fits the local window, and is answered here...
+    expect(inference.finishRoute(open, { tier: 'standard', toolsLikely: false, promptChars: 40 + chars })).toMatchObject({ brain: 'local', reason: 'default' });
+    // ...and with a thread behind it that fills the rest, the long-context rule sends it to the cloud, as for any long prompt.
+    expect(inference.finishRoute(open, { tier: 'standard', toolsLikely: false, promptChars: 40 + chars + 20_000 })).toMatchObject({ brain: 'frontier', reason: 'long_context' });
+    expect(inference.finishRoute(open, { tier: 'standard', toolsLikely: false, promptChars: 40 + 20_000 })).toMatchObject({ brain: 'local' });
+  });
+
+  it('with no reader a PDF adds nothing to the prompt’s size', async () => {
+    const { inference } = await boot(sees, {});
+    expect(inference.pdfTextChars([INVOICE, PNG])).toBe(0);
+  });
+
   it('PDFs on, and the route is told of a PDF it was not handed: nothing was read, so nothing is said to be readable', async () => {
     const reader = standInReader(READS);
     const { inference } = await boot({ [MAIN]: { loaded: true, contextLength: 16384, capabilities: BLIND }, [EMBED]: {} }, { FLINT_LOCAL_PDF: 'spotlight', FLINT_INFERENCE_MODE: 'local' }, { reader });

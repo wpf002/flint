@@ -15,8 +15,8 @@
  *    is handed the PDF itself or nothing, as before, and the text is never
  *    logged, embedded or saved;
  *  - the text is sized to the model's window (`PDF_SHARE` of it for one
- *    message), and a PDF that does not fit is cut with a line that says how
- *    much of it the model was given;
+ *    message, and never more than `MAX_PDF_CHARS`), and a PDF that does not
+ *    fit is cut with a line that says how much of it the model was given;
  *  - a PDF with no text (a scan), or one the program could not read, is left
  *    as it was: the adapter then tells the model a file it cannot read was
  *    attached, as it always did. The route does not let it get that far for a
@@ -40,6 +40,13 @@ export const PDF_SHARE = 0.35;
 const CHARS_PER_TOKEN = 4;
 /** The least text a PDF is given, however small the window: a cut that leaves nothing is not a read. */
 export const MIN_PDF_CHARS = 2_000;
+/**
+ * ...and the most, however large the window. A local model reads a prompt before it says a word, and a turn
+ * waits only so long for that first word (FLINT_LOCAL_FIRST_OUTPUT_TIMEOUT_MS, twenty seconds unless set). On
+ * this Mac the main model read 22,936 characters of a PDF (6,108 tokens) in about ten seconds; 32,000 is about
+ * fourteen. Past that a larger window would buy a PDF turn that times out.
+ */
+export const MAX_PDF_CHARS = 32_000;
 /** How many reads are kept, and how much text in all. The oldest goes first. */
 export const KEPT_READS = 16;
 export const KEPT_CHARS = 4_000_000;
@@ -51,7 +58,7 @@ export function isPdf(a: Attachment): boolean {
 
 /** How much text one message's PDFs may come to, for a model with this window. */
 export function pdfChars(windowTokens: number): number {
-  return Math.max(MIN_PDF_CHARS, Math.floor(windowTokens * PDF_SHARE) * CHARS_PER_TOKEN);
+  return Math.min(MAX_PDF_CHARS, Math.max(MIN_PDF_CHARS, Math.floor(windowTokens * PDF_SHARE) * CHARS_PER_TOKEN));
 }
 
 /** The line a PDF's text begins with: what the model is reading, and how much of it. */
@@ -109,6 +116,11 @@ export interface LocalMedia {
   text(a: Attachment, signal?: AbortSignal): Promise<PdfText>;
   /** Can every PDF among these be read here? Reads them (and keeps the reads). True when there is none. */
   reads(attachments: readonly Attachment[], signal?: AbortSignal): Promise<boolean>;
+  /**
+   * How many characters of text these files' PDFs come to for a model with this window, as it would be handed
+   * them: what has been read, cut as a message's PDFs are cut. A PDF that has not been read counts for nothing.
+   */
+  chars(attachments: readonly Attachment[], windowTokens: number): number;
   /** A local model's adapter that is handed a PDF as its text. */
   provider(inner: ProviderAdapter): ProviderAdapter;
 }
@@ -183,6 +195,11 @@ export function localMedia(reader: PdfReader, opts: { kept?: number; keptChars?:
       const pdfs = attachments.filter(isPdf);
       if (pdfs.length === 0) return true;
       return (await Promise.all(pdfs.map((a) => text(a, signal)))).every((r) => r.ok);
+    },
+    chars(attachments, windowTokens) {
+      if (!attachments.some(isPdf)) return 0;
+      const as = withPdfText({ id: 'size', role: 'user', content: '', timestamp: 0, attachments: [...attachments] }, known, pdfChars(windowTokens));
+      return (as.attachments ?? []).reduce((n, a, i) => n + (a !== attachments[i] && a.kind === 'text' ? (a.text?.length ?? 0) : 0), 0);
     },
     provider(inner) {
       // Where the adapter's server is, and the window it asks for, stay readable through the wrapper: ./policy
