@@ -5,8 +5,10 @@
  * around it, and nothing under this directory may import node's file, process
  * or network modules or call fetch (a test holds that).
  *
- * A result is data. The runner checks it against the template's shape before it
- * stores it, always marked as outside text, and nothing ever runs it.
+ * A result is data. The runner reads what an adapter gives back strictly (one
+ * of the three shapes below and nothing else, whatever this type says), checks
+ * a result against the template's shape before it stores it, always marked as
+ * outside text, and nothing ever runs it.
  */
 import type { AssetKind, TaskFailure, TaskSpec } from '@flint/policy';
 

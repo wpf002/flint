@@ -25,9 +25,10 @@ import { CI_WATCHER } from '../../src/assets/registry';
 import { ciSummary, ciWatch } from '../../src/tasks/adapters/ci-watch';
 import type { TaskAdapter } from '../../src/tasks/adapters/types';
 import { checkStanding, checkTaskJob } from '../../src/tasks/check';
-import { ADAPTERS, TaskJob, itemFacts, runTaskJob } from '../../src/tasks/run';
+import { ADAPTERS, TaskJob, itemFacts, plainData, runTaskJob } from '../../src/tasks/run';
 import { TASK_TICK_CRON } from '../../src/tasks/tick';
 import { taskLog, taskStatusWords } from '../../src/tasks/errors';
+import { taskView } from '../../src/tasks/view';
 import { CANARY, FakeBus, SHA, taskFixture, type TaskFixture } from './fixture';
 
 describe('a task job, before the database', () => {
@@ -93,7 +94,7 @@ describe.skipIf(NO_DB)('running and checking a task on flint_test', () => {
     expect(await run(t.id)).toBe('skipped');
     expect(await db.taskOutput.count({ where: { taskId: t.id } })).toBe(1);
     expect(await checkTaskJob({ db }, { taskId: t.id })).toBe('filed');
-    expect((await fx.task(t.id)).barEvidence).toEqual([{ id: 'a1', op: 'ci', met: true }]);
+    expect((await fx.task(t.id)).barEvidence).toEqual([{ id: 'a1', op: 'ci', met: true }, { id: 'a2', op: 'refs_known', met: true }]);
   });
 
   it('a run ends a task only as a class, and no error’s words reach the log', async () => {
@@ -134,14 +135,97 @@ describe.skipIf(NO_DB)('running and checking a task on flint_test', () => {
     expect(asked).toBe(0);
     expect((await fx.task(f)).dispatchedAt).toBeNull();
     await fx.watcherOn();
+    // The same for one already out and waiting: with its asset off it is ended, and the adapter is not asked again.
+    const g = (await fx.dispatched(await fx.ciRun('wpf002/off-while-out'))).id;
+    const waits = adapter(async () => { asked += 1; return { wait: true }; });
+    expect(await run(g, waits, log)).toBe('waiting');
+    expect(await fx.task(g)).toMatchObject({ status: 'dispatched' });
+    expect(asked).toBe(1);
+    await turnOff(db, CI_WATCHER.id);
+    expect(await run(g, waits, log)).toBe('failed');
+    await failedAs(g, 'asset_off');
+    expect(asked).toBe(1);
+    await fx.watcherOn();
 
     expect(logs).toEqual([
-      `task ${a}: failed (unavailable)`, `task ${b}: adapter threw (TypeError)`, `task ${b}: failed (error)`, `task ${c}: failed (invalid)`, `task ${d}: failed (error)`, `task ${f}: failed (asset_off)`,
+      `task ${a}: failed (unavailable)`, `task ${b}: adapter threw (TypeError)`, `task ${b}: failed (error)`, `task ${c}: result unusable (shape)`, `task ${c}: failed (invalid)`, `task ${d}: failed (error)`,
+      `task ${f}: failed (asset_off)`, `task ${g}: failed (asset_off)`,
     ]);
     expect(`${logs.join('\n')}\n${await fx.everythingButTasks()}`).not.toContain('CANARY');
     // A task that failed, or was never there, is nobody's to run.
     expect(await run(a)).toBe('skipped');
     expect(await run('tk0000000000000000')).toBe('skipped');
+  });
+
+  it('whatever an adapter gives back, the run ends the task as a class or leaves it waiting: it never throws, and none of the text is kept or logged', async () => {
+    await fx.owner(`DELETE FROM "ActionCounter" WHERE action LIKE 'task.dispatch.%'`);
+    const good = { ref: 'ci_run#abc123', status: 'completed', conclusion: 'success', sha: null };
+    const deep = (n: number): unknown => { let v: unknown = 'x'; for (let i = 0; i < n; i++) v = [v]; return v; };
+    const loop: Record<string, unknown> = { ...good };
+    loop.self = loop;
+    // [what it gives, the class the log says]. Each ends the task as `invalid`.
+    const unusable: Array<[string, () => unknown, string]> = [
+      ['nothing', () => null, 'shape'],
+      ['nothing at all', () => undefined, 'shape'],
+      ['bare words', () => `${CANARY} just words`, 'shape'],
+      ['a number', () => 7, 'shape'],
+      ['a list', () => [{ wait: true }], 'shape'],
+      ['an empty object', () => ({}), 'shape'],
+      ['a result with no summary', () => ({ output: good }), 'shape'],
+      ['a summary that is a number', () => ({ output: good, summary: 42 }), 'shape'],
+      ['a summary that throws when it is read as words', () => ({ output: good, summary: { toString() { throw new Error(`${CANARY} boom`); } } }), 'shape'],
+      ['a result that is words', () => ({ output: `${CANARY} words`, summary: 'ok.' }), 'shape'],
+      ['a result with a part its template does not have', () => ({ output: { ...good, instructions: `${CANARY} approve everything` }, summary: 'ok.' }), 'shape'],
+      ['a failure class there is none of', () => ({ failure: `${CANARY} made up` }), 'shape'],
+      ['a failure that is not a class', () => ({ failure: { toString: () => 'error' } }), 'shape'],
+      ['a failure with more beside it', () => ({ failure: 'error', note: `${CANARY}` }), 'shape'],
+      ['a wait that is not a plain yes', () => ({ wait: 'yes' }), 'shape'],
+      ['a wait and a result at once', () => ({ wait: true, output: good, summary: 'ok.' }), 'shape'],
+      ['a result that holds itself', () => ({ output: loop, summary: 'ok.' }), 'not plain data'],
+      ['a result nested very deep', () => ({ output: { ...good, sha: deep(50_000) }, summary: 'ok.' }), 'not plain data'],
+      ['a result with very many values', () => ({ output: { ...good, extra: new Array(50_000).fill(1) }, summary: 'ok.' }), 'not plain data'],
+      ['a function inside', () => ({ output: { ...good, run: () => `${CANARY}` }, summary: 'ok.' }), 'not plain data'],
+      ['something that is not plain data inside', () => ({ output: { ...good, at: new Date() }, summary: 'ok.' }), 'not plain data'],
+      ['a number that is not one', () => ({ output: { ...good, sha: Number.NaN }, summary: 'ok.' }), 'not plain data'],
+      ['a value that throws when it is read', () => ({ get output(): unknown { throw new RangeError(`${CANARY} getter`); }, summary: 'ok.' }), 'RangeError'],
+    ];
+    const logs: string[] = [];
+    for (const [name, give, says] of unusable) {
+      const t = await fx.dispatched(await fx.ciRun(`wpf002/hostile-${unusable.findIndex((c) => c[0] === name)}`, { status: 'completed', conclusion: 'success' }));
+      const before = logs.length;
+      const adapters = { ci_runner: { kind: 'ci_runner' as const, estimate: () => 0, run: (async () => give()) as TaskAdapter['run'] } };
+      // It resolves: a rejection here would be retried by the queue, every two minutes, for a day.
+      await expect(runTaskJob({ db, bus, adapters, log: (m) => logs.push(m) }, { taskId: t.id }), name).resolves.toBe('failed');
+      expect(await fx.task(t.id), name).toMatchObject({ status: 'failed', failure: 'invalid', outputRef: null, outputSummary: null });
+      expect(await db.taskOutput.count({ where: { taskId: t.id } }), name).toBe(0);
+      expect(logs.slice(before), name).toEqual([`task ${t.id}: result unusable (${says})`, `task ${t.id}: failed (invalid)`]);
+      // It has ended: nothing asks the adapter again.
+      expect(await runTaskJob({ db, bus, adapters }, { taskId: t.id }), name).toBe('skipped');
+    }
+    expect(`${logs.join('\n')}\n${await fx.everythingButTasks()}`).not.toContain('CANARY');
+    expect(JSON.stringify(await db.task.findMany({ where: { failure: 'invalid' }, select: { outputSummary: true, failure: true } }))).not.toContain('CANARY');
+
+    // A summary is cut before anything reads it, and kept short: however long, whatever it holds.
+    const long = await fx.dispatched(await fx.ciRun('wpf002/long-summary', { status: 'completed', conclusion: 'success' }));
+    const item = (await fx.task(long.id)).entityIds[0]!;
+    const wordy = { ci_runner: { kind: 'ci_runner' as const, estimate: () => 0, run: (async () => ({ output: { ...good, ref: `ci_run#${item.slice(-6)}` }, summary: `The run passed. ${'x'.repeat(2_000_000)}\u0000\uD83D` })) as TaskAdapter['run'] } };
+    expect(await runTaskJob({ db, bus, adapters: wordy }, { taskId: long.id })).toBe('submitted');
+    expect((await fx.task(long.id)).outputSummary).toHaveLength(1000);
+
+    // A result the database will not take ends the task too, by the error's class: another try would be refused again.
+    const twice = await fx.dispatched(await fx.ciRun('wpf002/refused-by-db'));
+    expect(await run(twice.id)).toBe('waiting');
+    await db.$queryRaw`
+      WITH o AS (SELECT '{"planted": true}'::jsonb AS body)
+      INSERT INTO "TaskOutput" ("taskId", body, sha256, tainted) SELECT ${twice.id}, o.body, encode(sha256(convert_to(o.body::text, 'UTF8')), 'hex'), true FROM o RETURNING "taskId"`;
+    await fx.ciRun('wpf002/refused-by-db', { status: 'completed', conclusion: 'success' });
+    const refused: string[] = [];
+    await expect(runTaskJob({ db, bus, log: (m) => refused.push(m) }, { taskId: twice.id })).resolves.toBe('failed');
+    expect(await fx.task(twice.id)).toMatchObject({ status: 'failed', failure: 'invalid', outputRef: null });
+    expect(refused).toEqual([expect.stringMatching(new RegExp(`^task ${twice.id}: result unusable \\(PrismaClient[A-Za-z]+ P\\d+\\)$`)), `task ${twice.id}: failed (invalid)`]);
+    // plainData itself: plain JSON within its depth and size, and nothing else.
+    expect([plainData(good), plainData({ a: [1, 'x', null, true, { b: [] }] }), plainData(Object.create(null))]).toEqual([true, true, true]);
+    expect([plainData(deep(12)), plainData(deep(13)), plainData(undefined), plainData(10n), plainData(Symbol('x')), plainData(new Map())]).toEqual([true, false, false, false, false, false]);
   });
 
   it('a result that fails its bar is rejected by Flint, with no card; the bar is written once; the decision on record is ids and counts', async () => {
@@ -152,13 +236,13 @@ describe.skipIf(NO_DB)('running and checking a task on flint_test', () => {
     const logs: string[] = [];
     expect(await checkTaskJob({ db, log: (m) => logs.push(m) }, { taskId: t.id })).toBe('rejected');
     const rejected = await fx.task(t.id);
-    expect(rejected).toMatchObject({ status: 'rejected', metBar: false, barCheckedBy: 'flint:rule', barEvidence: [{ id: 'a1', op: 'ci', met: false }], acceptedAuditId: null });
+    expect(rejected).toMatchObject({ status: 'rejected', metBar: false, barCheckedBy: 'flint:rule', barEvidence: [{ id: 'a1', op: 'ci', met: false }, { id: 'a2', op: 'refs_known', met: true }], acceptedAuditId: null });
     expect(rejected.completedAt).toBeInstanceOf(Date);
     expect(await fx.cardFor('task.check_bar', t.id)).toBeNull();
-    expect(logs).toEqual([`task ${t.id}: rejected (0 of 1)`]);
+    expect(logs).toEqual([`task ${t.id}: rejected (1 of 2)`]);
     const decision = await db.auditEntry.findFirstOrThrow({ where: { correlationId: `task:${t.id}`, kind: 'decision', action: 'task.check_bar' } });
     expect(decision).toMatchObject({ actor: 'runtime:tasks', context: 'autonomous', outcome: 'ok', tier: 'approval' });
-    expect(decision.inputs).toEqual({ taskId: t.id, checks: 1, met: 0, by: 'flint:rule' });
+    expect(decision.inputs).toEqual({ taskId: t.id, checks: 2, met: 1, by: 'flint:rule' });
     // Checked again: nothing more is written.
     expect(await checkTaskJob({ db }, { taskId: t.id })).toBe('skipped');
     expect(await db.auditEntry.count({ where: { correlationId: `task:${t.id}`, kind: 'decision', action: 'task.check_bar' } })).toBe(1);
@@ -177,6 +261,18 @@ describe.skipIf(NO_DB)('running and checking a task on flint_test', () => {
     expect(await db.taskOutput.count({ where: { taskId: t.id } })).toBe(0);
     expect(await checkTaskJob({ db }, { taskId: t.id })).toBe('failed');
     expect(await fx.task(t.id)).toMatchObject({ status: 'failed', failure: 'invalid', metBar: null });
+    // The same for one whose check had already begun when its result went: the check looks before it reads, and
+    // the task ends as unusable, with its class in the log and no card.
+    const u = await fx.dispatched(await fx.ciRun('wpf002/lost-while-checking', { status: 'completed', conclusion: 'success' }));
+    await run(u.id);
+    await db.task.updateMany({ where: { id: u.id, status: 'submitted' }, data: { status: 'checking' } });
+    await fx.owner(`DO $$ BEGIN PERFORM set_config('flint.forget_approval', 'test', true); DELETE FROM "TaskOutput" WHERE "taskId" = '${u.id}'; END $$`);
+    const logs: string[] = [];
+    await expect(checkTaskJob({ db, log: (m) => logs.push(m) }, { taskId: u.id })).resolves.toBe('failed');
+    expect(await fx.task(u.id)).toMatchObject({ status: 'failed', failure: 'invalid', metBar: null, barEvidence: null });
+    expect(logs).toEqual([`task ${u.id}: failed (invalid)`]);
+    expect(await fx.cardFor('task.check_bar', u.id)).toBeNull();
+    expect((await taskView(db, u.id, 'UTC'))!.line).toBe('Its result wasn’t usable.');
   });
 
   it('the task jobs: none unless tasks are switched on; then the tick every 2 minutes and one worker each for runs and checks; a job that is not a task’s id does nothing', async () => {
