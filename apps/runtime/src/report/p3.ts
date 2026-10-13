@@ -11,7 +11,7 @@
 import { GOALS_BLOCK_MAX_TOKENS, localDay, previousDay } from '@flint/policy';
 import type { Config } from '../config.js';
 import type { Db } from '../db.js';
-import { DAY, activeGoals, chatSuggestions, daysNotRunning, firstReviewAt, goalsBlockSize, overdueNow, planChanges, reviewCounts, reviewForecasts, signedGoals, watchedLatency } from '../goals/measures.js';
+import { DAY, activeGoals, addedAlone, chatSuggestions, daysNotRunning, firstReviewAt, goalsBlockSize, overdueNow, planChanges, reviewCounts, reviewForecasts, signedGoals, watchedLatency } from '../goals/measures.js';
 import type { Criterion } from './exit.js';
 
 /** Exit 2 looks back this far. */
@@ -95,15 +95,19 @@ export async function p3Report(db: Db, config: Pick<Config, 'tz'> & { planner?: 
     values: { reviews: f.reviews, withoutForecast: f.without },
   });
 
-  // 7. Nothing is suggested from chat without Will's own quoted words. A later part files the suggestions.
+  // 7. Nothing is suggested from chat without Will's own quoted words: the cards part 5 files (goals and
+  //    commitments), what he did with them, and what a signed rule added with no card. A card's quote is read from
+  //    the card; what was added alone left no card to read, so it is counted, and the criterion rests on the cards.
   const q = await chatSuggestions(db);
+  const alone = await addedAlone(db);
   out.push({
     n: 7, name: 'nothing is suggested from chat without your own quoted words',
     pass: q.filed === 0 ? null : q.withoutQuote === 0,
-    detail: q.filed === 0
-      ? 'no suggestion from chat yet: a later part files them (the database already refuses one without a quote)'
-      : `${plural(q.filed, 'suggestion')} from chat; ${q.withoutQuote} without your own quoted words; ${q.cleared} too old to read`,
-    values: { suggestions: q.filed, withoutQuote: q.withoutQuote, cleared: q.cleared },
+    detail: q.filed === 0 && alone === 0
+      ? 'no suggestion from chat yet (the server files them once it is told to; the database refuses one without a quote)'
+      : `${plural(q.filed, 'suggestion')} from chat; ${q.withoutQuote} without your own quoted words; ${q.cleared} too old to read; `
+        + `you approved ${q.executed} and rejected ${q.rejected}, and ${q.expired} expired${alone ? `; ${alone} more added under a rule you signed` : ''}`,
+    values: { suggestions: q.filed, withoutQuote: q.withoutQuote, cleared: q.cleared, approved: q.executed, rejected: q.rejected, expired: q.expired, addedAlone: alone },
   });
 
   // 8. The goals block in chat stays within 300 tokens, and its size is measured turn by turn.

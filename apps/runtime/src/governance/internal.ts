@@ -13,7 +13,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { GOAL_SIGNED_ACTIONS, SOURCES, isGoalSignedAction, type WebAuthnRelyingParty } from '@flint/policy';
+import { CHAT_SUGGESTION_ACTIONS, GOAL_SIGNED_ACTIONS, SOURCES, isChatSuggestion, isGoalSignedAction, type WebAuthnRelyingParty } from '@flint/policy';
 import { runForecastCard } from '../predict/enable.js';
 import type { Db } from '../db.js';
 import { GONE, Refused, claimProposal, completeProposal, createProposal } from './proposals.js';
@@ -22,11 +22,15 @@ import { RuleArgs, ruleProblems } from '../triage/rules.js';
 import { ACTION_TEMPLATES } from '../templates/actions.js';
 import { TEMPLATE as PERSON_TEMPLATE, createPeople } from '../world/person-create.js';
 import { runGoalCard } from '../goals/apply.js';
+import { runSuggestionCard } from '../goals/candidates.js';
 
-/** P4 adds forecast.series.enable (turning predictions on), and nothing else. */
+/**
+ * P4 adds forecast.series.enable (turning predictions on), and nothing else. P3 part 5 adds the two suggestions
+ * from chat: an approved one adds a proposed goal, or an unconfirmed commitment.
+ */
 export const INTERNAL_ACTIONS: ReadonlySet<string> = new Set([
   'world.source.enable', 'policy.change', 'triage.rule.create', 'world.relation.write', 'world.person.create', ...GOAL_SIGNED_ACTIONS,
-  'forecast.series.enable',
+  'forecast.series.enable', ...CHAT_SUGGESTION_ACTIONS,
 ]);
 
 /**
@@ -101,6 +105,8 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
   if (isGoalSignedAction(p.action)) return runGoalCard(db, id, rp, tz, actor);
   // P4: so is the card that turns predictions on.
   if (p.action === 'forecast.series.enable') return runForecastCard(db, id, rp, tz, actor);
+  // P3 part 5: and a suggestion from chat (a proposed goal, or an unconfirmed commitment).
+  if (isChatSuggestion(p.action)) return runSuggestionCard(db, id, rp, tz, actor);
   const claimed = await claimProposal(db, id, rp, tz, actor);
   try {
     if (claimed.action === 'world.source.enable') {

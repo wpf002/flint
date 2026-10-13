@@ -31,6 +31,7 @@ import { sqlState } from '../dbcodes.js';
 import { checkedItems, criteriaOf, evaluate, itemFacts, marksOf } from './criteria.js';
 import { SAY, goalStatusWords } from './errors.js';
 import { REVIEW_QUEUE, reviewStanding, reviewsLeft, type ReviewJob } from './review.js';
+import { waitingSuggestion } from './candidates.js';
 
 /** Who the panel's writes are by. */
 export const CONSOLE_ACTOR = 'will:console';
@@ -82,9 +83,16 @@ const SUPERSEDING: ReadonlySet<GoalCardVerb> = new Set<GoalCardVerb>(['edit', 't
  */
 export async function fileGoalCard(db: Db, verb: GoalCardVerb, goalId: string, args: Record<string, unknown> & { goalId: string }, now = new Date()) {
   if (args.goalId !== goalId) throw new Refused(400, SAY.invalid, 'the args name another goal');
-  if (!(await db.goal.findUnique({ where: { id: goalId }, select: { id: true } }))) throw new Refused(404, SAY.noGoal);
+  const goal = await db.goal.findUnique({ where: { id: goalId }, select: { id: true, status: true, origin: true } });
+  // Make It a Goal (part 5) starts a suggestion: a proposed goal Flint added from chat, or one whose own card
+  // still waits (there is no goal row yet; checkGoalCard looks for that card). Nothing else starts this way.
+  if (verb === 'start') {
+    if (goal && (goal.origin !== 'flint' || goal.status !== 'proposed')) throw new Refused(409, goal.origin !== 'flint' ? SAY.identity : goalStatusWords(goal.status));
+    if (!goal && !(await waitingSuggestion(db, goalId, now))) throw new Refused(404, SAY.suggestionGone);
+  } else if (!goal) throw new Refused(404, SAY.noGoal);
   const filed = await file(db, GOAL_CARD_VERBS[verb], args, now);
-  if (!filed.deduped && SUPERSEDING.has(verb)) await supersede(db, GOAL_CARD_VERBS[verb], goalId, filed.id);
+  // The newer form wins: an older card for the same change, still waiting, is set aside.
+  if (!filed.deduped && (SUPERSEDING.has(verb) || verb === 'start')) await supersede(db, GOAL_CARD_VERBS[verb], goalId, filed.id);
   return { id: filed.id, deduped: filed.deduped };
 }
 
@@ -135,8 +143,19 @@ export async function pauseGoal(db: Db, id: string, now = new Date()): Promise<v
   });
 }
 
-/** Dismiss a goal Flint suggested: it is never started. */
+/**
+ * Dismiss a goal Flint suggested: it is never started. One whose own card still
+ * waits has no goal row yet: dismissing it sets that card aside (unsigned, with
+ * a fixed sentence), and the same words are never suggested again.
+ */
 export async function dismissGoal(db: Db, id: string, now = new Date()): Promise<void> {
+  if (!(await db.goal.findUnique({ where: { id }, select: { id: true } }))) {
+    const card = await waitingSuggestion(db, id, now);
+    if (!card) throw new Refused(404, SAY.noGoal);
+    await rejectProposal(db, card.id, { error: SAY.dismissed }, undefined, CONSOLE_ACTOR);
+    await appendAudit(db, [{ actor: CONSOLE_ACTOR, context: 'console', kind: 'action', action: 'goal.dismiss', outcome: 'ok', correlationId: `${id}.dismiss`, tainted: false, inputs: { goalId: id, proposalId: card.id } }], now);
+    return;
+  }
   await plain(db, async (tx) => {
     const g = await lockGoal(tx, id);
     if (g.status !== 'proposed') throw new Refused(409, goalStatusWords(g.status));

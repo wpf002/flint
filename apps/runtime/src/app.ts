@@ -30,6 +30,7 @@ import {
 import { ChatPrediction, FORECAST_WRITER, Invalid, REASON_WRITER, emitPrediction } from './ledger/emit.js';
 import { INTERNAL_ACTIONS, runInternal } from './governance/internal.js';
 import { hasNul } from './jsonsize.js';
+import { isChatCommitmentKey } from './world/kinds.js';
 import { registerP2Routes } from './routes/p2.js';
 import { registerGoalRoutes } from './routes/goals.js';
 import { registerAppleCalendarRoutes } from './routes/apple-calendar.js';
@@ -264,9 +265,13 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   // ---- world (read) -------------------------------------------------------------------
   // "World now" never carries tainted text: a tainted name is rendered kind#id.
+  //
+  // A commitment from chat (P3 part 5) is Will's own words, and may come from a turn that stays on this Mac: no
+  // route on this scope serves one. It is not counted here, and reading it by id says there is no such entity.
+  const fromChat = { kind: 'commitment', state: { path: ['source'], equals: 'chat' } } as const;
   app.get('/v1/world/now', { preHandler: need('world:read') }, async () => {
     const services = await db.entity.findMany({ where: { kind: 'service', status: 'active' }, orderBy: { key: 'asc' }, take: 100 });
-    const counts = await db.entity.groupBy({ by: ['kind', 'status'], _count: { _all: true } });
+    const counts = await db.entity.groupBy({ by: ['kind', 'status'], where: { NOT: fromChat }, _count: { _all: true } });
     return {
       services: services.map((s) => ({ id: s.id, name: safeName(s), health: (s.state as { health?: string }).health ?? 'unknown', lastObservedAt: s.lastObservedAt })),
       counts: counts.map((c) => ({ kind: c.kind, status: c.status, n: c._count._all })),
@@ -280,7 +285,9 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.get('/v1/world/entities/:id', { preHandler: need('world:read') }, async (req, reply) => {
     const { id } = Id.parse(req.params);
     const found = await db.entity.findUnique({ where: { id }, include: { sources: { select: { source: true, lastSyncedAt: true } }, texts: { select: { field: true, text: true } } } });
-    if (!found || found.status === 'forgotten') return reply.code(404).send({ error: 'no such entity' });
+    if (!found || found.status === 'forgotten' || isChatCommitmentKey(found.key) || (found.kind === 'commitment' && (found.state as { source?: unknown } | null)?.source === 'chat')) {
+      return reply.code(404).send({ error: 'no such entity' });
+    }
     const { texts: rows, ...e } = found;
     const texts = Object.fromEntries(rows.map((t) => [t.field, t.text]));
     const taintedPaths = [...e.taintedPaths, ...rows.map((t) => `texts.${t.field}`)];

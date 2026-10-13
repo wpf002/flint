@@ -32,7 +32,7 @@
  * afternoon, and no more is claimed for it. What stands between a table and
  * its rule is Will's signature over the rows on the card.
  */
-import { CODE_TABLE, FORECAST_SIGNED_ACTIONS, GOAL_SIGNED_ACTIONS, PROPHET_ACTIONS, localDay, localDayBounds, previousDay } from '@flint/policy';
+import { CHAT_SUGGESTION_ACTIONS, CODE_TABLE, FORECAST_SIGNED_ACTIONS, GOAL_SIGNED_ACTIONS, PROPHET_ACTIONS, SUGGESTIONS_PER_DAY, localDay, localDayBounds, previousDay } from '@flint/policy';
 import type { Db } from '../db.js';
 import { createProposal, Refused } from './proposals.js';
 import { PolicyArgs } from './internal.js';
@@ -99,14 +99,13 @@ export const P3_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number }
 ];
 
 /**
- * P3's later table, for suggestions from chat: a goal Flint suggests from
- * Will's own quoted words lands as a suggestion (never active), 3 a day at
- * most. It takes two weeks of those cards, not one, and the part that files
- * them adds its commitments row here.
+ * P3's later table, for suggestions from chat: a goal Flint takes from Will's
+ * own quoted words lands as a suggestion (never active), 3 a day at most; a
+ * commitment lands unconfirmed, 10 a day at most (the numbers the candidates
+ * intake files under while each card still waits for him: @flint/policy
+ * SUGGESTIONS_PER_DAY). It takes two weeks of those cards, not one.
  */
-export const P3C_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number }> = [
-  { pattern: 'goal.propose', dailyCap: 3 },
-];
+export const P3C_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number }> = CHAT_SUGGESTION_ACTIONS.map((pattern) => ({ pattern, dailyCap: SUGGESTIONS_PER_DAY[pattern] }));
 /** p3c's evidence: two weeks of chat's suggestion cards. */
 export const P3C_SHADOW_DAYS = 14;
 
@@ -292,12 +291,12 @@ const PHASES: Record<Phase, PhaseOf> = {
     rows: P3C_PROMOTIONS,
     template: 'p3c.promotion',
     label: 'P3 chat',
-    lets: 'Flint suggest goals from your chats',
+    lets: 'Flint take goals and commitments from your chats',
     evidence: 'chat suggestions',
     shadowDays: P3C_SHADOW_DAYS,
-    says: /^Since [A-Z][a-z]{2} \d{1,2}, Flint suggested \d+ goals? from chat: you approved \d+, rejected \d+, and \d+ expired\.$/,
-    // The first goal chat suggested: Will has signed or rejected each one since.
-    first: async (db) => (await db.proposal.findFirst({ where: { action: 'goal.propose' }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }))?.createdAt,
+    says: /^Since [A-Z][a-z]{2} \d{1,2}, Flint suggested \d+ goals? and \d+ commitments? from chat: you approved \d+, rejected \d+, and \d+ expired\.$/,
+    // The first thing chat suggested: Will has signed or rejected each one since.
+    first: async (db) => (await db.proposal.findFirst({ where: { action: { in: [...CHAT_SUGGESTION_ACTIONS] } }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }))?.createdAt,
     // Two weeks of suggestions means there were some: the 14 whole local days before today, and today. The
     // card that opened the gate is 14 days old, so it is inside that window; one much older, with nothing
     // since, is not two weeks of evidence. The sentence counts the same cards.
@@ -305,9 +304,13 @@ const PHASES: Record<Phase, PhaseOf> = {
     measured: async () => '',
     weighed: async (db, now, tz) => {
       const since = windowStart(tz, now, P3C_SHADOW_DAYS);
-      const s = await chatSuggestions(db, { since, actions: ['goal.propose'] });
-      if (!s.filed) return { gap: `Flint suggested no goals from chat in the last ${P3C_SHADOW_DAYS} days` };
-      return { measured: `Since ${dayWords(tz, since)}, Flint suggested ${count(s.filed, 'goal')} from chat: you approved ${s.executed}, rejected ${s.rejected}, and ${s.expired} expired.` };
+      const g = await chatSuggestions(db, { since, actions: ['goal.propose'] });
+      const c = await chatSuggestions(db, { since, actions: ['world.commitment.from_chat'] });
+      if (!g.filed && !c.filed) return { gap: `Flint suggested nothing from chat in the last ${P3C_SHADOW_DAYS} days` };
+      return {
+        measured: `Since ${dayWords(tz, since)}, Flint suggested ${count(g.filed, 'goal')} and ${count(c.filed, 'commitment')} from chat: `
+          + `you approved ${g.executed + c.executed}, rejected ${g.rejected + c.rejected}, and ${g.expired + c.expired} expired.`,
+      };
     },
   },
 };

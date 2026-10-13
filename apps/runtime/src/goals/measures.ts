@@ -7,14 +7,14 @@
  * Numbers only. Nothing here reads a goal's title, a check's text or a step's
  * title, and nothing returns an id: counts, days and durations.
  */
-import { GOAL_SIGNED_ACTIONS, REVIEW_DOWN_MS, localDay, localDayBounds, previousDay } from '@flint/policy';
+import { CHAT_SUGGESTION_ACTIONS, GOAL_SIGNED_ACTIONS, REVIEW_DOWN_MS, localDay, localDayBounds, previousDay } from '@flint/policy';
 import { Prisma } from '@prisma/client';
 import type { Db } from '../db.js';
 import { REVIEWS_STOPPED, waitedMs } from './late.js';
 
 export const DAY = 86_400_000;
-/** The chat suggestions (part 5 files them): a goal, or a commitment, from Will's quoted words. */
-export const CHAT_SUGGESTION_ACTIONS = ['goal.propose', 'world.commitment.from_chat'] as const;
+/** The chat suggestions (part 5 files them): a goal, or a commitment, from Will's quoted words (@flint/policy's list). */
+export { CHAT_SUGGESTION_ACTIONS };
 
 /** When Flint first reviewed a goal: the trial week starts here. */
 export async function firstReviewAt(db: Db): Promise<Date | undefined> {
@@ -229,6 +229,13 @@ export async function chatSuggestions(
            count(*) FILTER (WHERE c.status = 'expired')::int AS expired
     FROM "Proposal" c WHERE c.action = ANY (${[...(o.actions ?? CHAT_SUGGESTION_ACTIONS)]}::text[]) AND (${since}::timestamptz IS NULL OR c."createdAt" >= ${since}::timestamptz)`;
   return r ?? { filed: 0, withoutQuote: 0, cleared: 0, executed: 0, rejected: 0, expired: 0 };
+}
+
+/** Exit 7, beside the cards: what the candidates intake added with no card, under a rule Will signed (its own audit entries). */
+export async function addedAlone(db: Db, since?: Date): Promise<number> {
+  return db.auditEntry.count({
+    where: { actor: 'runtime:goals.candidates', kind: 'action', outcome: 'ok', action: { in: [...CHAT_SUGGESTION_ACTIONS] }, ...(since ? { at: { gte: since } } : {}) },
+  });
 }
 
 /**

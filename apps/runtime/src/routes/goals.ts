@@ -10,7 +10,9 @@
  *   GET  /v1/goals/now                             the active goals for the server's chat block (GoalsNowAnswer, part 4)
  *   POST /v1/goals {draftKey, args}                a new goal's card
  *   POST /v1/goals/linkable {q}                    items a check may watch (a POST: q never lands in a log)
- *   POST /v1/goals/:id/edit|timing|done|abandon|resume|plan {args}   that card
+ *   POST /v1/goals/candidates {kind, text, quote, ...}   a goal or commitment Will set in chat, from the server's own
+ *                                                  check of his words (part 5): a card, or nothing twice
+ *   POST /v1/goals/:id/edit|timing|done|abandon|resume|start|plan {args}   that card (start: Make It a Goal, part 5)
  *   POST /v1/goals/:id/pause|dismiss               unsigned, audited
  *   POST /v1/goals/:id/review                      Review Now: unsigned, audited; it sends the goal's review job (part 3)
  *   POST /v1/goals/:id/criteria/:cid {met}         unsigned, audited
@@ -25,6 +27,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import {
+  CandidateAnswer,
   CriterionId,
   EmptyBody,
   GOAL_CARD_BODIES,
@@ -54,6 +57,7 @@ import { linkable } from '../goals/items.js';
 import { dismissGoal, fileGoalCard, fileNewGoal, markCriterion, pauseGoal, requestReview, setStep } from '../goals/service.js';
 import { goalView, goalsPage } from '../goals/view.js';
 import { goalsNow } from '../goals/now.js';
+import { takeCandidate } from '../goals/candidates.js';
 import { p3Report } from '../report/p3.js';
 
 export interface GoalRouteDeps {
@@ -91,13 +95,13 @@ const Step = z.object({ id: GoalId, key: StepKey }).strict();
 export function registerGoalRoutes(app: FastifyInstance, d: GoalRouteDeps): void {
   const { db, need, tz } = d;
   const reviews = d.reviews ?? false;
-  const view = { reviews };
+  const view = { reviews, tz };
   const pre = { preHandler: need('proposals') };
 
   /** A refusal as Will reads it, with its code (the server passes on only these); anything else to the app's handler. */
-  const guarded = <T>(fn: (req: FastifyRequest) => Promise<T>) => async (req: FastifyRequest, reply: FastifyReply) => {
+  const guarded = <T>(fn: (req: FastifyRequest, reply: FastifyReply) => Promise<T>) => async (req: FastifyRequest, reply: FastifyReply) => {
     try {
-      return await fn(req);
+      return await fn(req, reply);
     } catch (err) {
       if (!(err instanceof Refused)) throw err;
       const code = goalCodeOf(err.message);
@@ -132,6 +136,14 @@ export function registerGoalRoutes(app: FastifyInstance, d: GoalRouteDeps): void
   app.post('/v1/goals', pre, guarded(async (req) => {
     const body = parse(NewGoalBody, req.body);
     return out(GoalFiled, await fileNewGoal(db, body.args as typeof body.args & Record<string, unknown>));
+  }));
+
+  // A suggestion from chat (part 5). The server's own token only (`proposals`): the runtime connector's, the one a
+  // model's tools hold, never reaches it. The body is checked again here, whatever the server checked.
+  app.post('/v1/goals/candidates', pre, guarded(async (req, reply) => {
+    const answer = out(CandidateAnswer, await takeCandidate({ db, tz, reviews, ...(d.bus ? { bus: d.bus } : {}) }, req.body));
+    if (answer.outcome !== 'known') void reply.code(201);
+    return answer;
   }));
 
   app.post('/v1/goals/linkable', pre, guarded(async (req) => {
