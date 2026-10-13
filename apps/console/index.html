@@ -2420,7 +2420,7 @@ function apprShow(tab){if(APPR.flight>0||APPR.busy)return;APPR.tab=tab;apprRende
    an open card is never drawn again under him by a load, so it never gains a row while he reads or reaches for a
    button. He sees a looked-up name on it the next time he opens it. */
 function apprRender(keep){var list=document.getElementById('apprlist');list.textContent='';
-  var was=keep===true&&APPR.openEl&&APPR.openEl.id===APPR.open?APPR.openEl:null;
+  var was=keep===true?APPR.openEl:null;
   var seg=document.getElementById('apprseg');seg.hidden=!APPR.approved.length;
   document.getElementById('apprtab-waiting').classList.toggle('on',APPR.tab==='waiting');document.getElementById('apprtab-approved').classList.toggle('on',APPR.tab==='approved');
   document.getElementById('apprn-waiting').textContent=APPR.pending.length||'';document.getElementById('apprn-approved').textContent=APPR.approved.length||'';
@@ -2486,10 +2486,12 @@ function approveAll(){if(APPR.busy||APPR.flight>0)return;var queue=APPR.pending.
   var finish=function(e,unanswered){if(over)return;over=true;if(timer!==null&&typeof clearTimeout==='function')clearTimeout(timer);APPR.busy=false;
     note.textContent='You approved '+done+' of '+queue.length+'.'+(unanswered||(e&&promptDismissed(e))?' '+apprLeftSays(queue.length-done):e?' '+(typeof errText==='function'?errText(e):'It stopped.'):'');
     APPR.redraw=false;setTimeout(loadApprovals,e||unanswered?2500:1200);};
-  var wait=function(){if(typeof setTimeout!=='function')return;if(timer!==null&&typeof clearTimeout==='function')clearTimeout(timer);timer=setTimeout(function(){finish(null,true);},APPR_PROMPT_MS);};
+  /* Each card's prompt has a wait of its own; one that was answered takes its wait with it. */
+  var step=0,wait=function(){var mine=++step;if(typeof setTimeout!=='function')return;if(timer!==null&&typeof clearTimeout==='function')clearTimeout(timer);
+    timer=setTimeout(function(){if(mine===step)finish(null,true);},APPR_PROMPT_MS);};
   var next=function(i){if(over||i>=queue.length)return Promise.resolve();var p=queue[i];note.textContent='Approving '+(i+1)+' of '+queue.length+'…';
     var card=rows[p.id]||apprCard(p);wait();
-    return approveAction(p.id,card,{reason:i===0?'approve '+queue.length+' Flint card'+(queue.length===1?'':'s'):'approve: '+apprTitle(p),args:p.args}).then(function(){if(over)return;done++;return next(i+1);});};
+    return approveAction(p.id,card,{reason:i===0?'approve '+queue.length+' Flint card'+(queue.length===1?'':'s'):'approve: '+apprTitle(p),args:p.args}).then(function(){done++;return next(i+1);});};
   next(0).then(function(){finish(null,false);},function(e){finish(e||new Error('It stopped.'),false);});}
 function openApprovals(){if(!TOKEN){openSettings();return;}APPR.openEl=null;if(!APPR.pending.length&&!APPR.approved.length){var l=document.getElementById('apprlist');l.textContent='';l.appendChild(apprEl('div','empty','Loading…'));}showPanel('approvals',true);if(typeof loadCreds==='function')loadCreds();loadApprovals();}
 function closeApprovals(){showPanel('approvals',false);pollApprovals();}

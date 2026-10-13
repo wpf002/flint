@@ -1750,13 +1750,20 @@ describe('the console Approvals panel', () => {
       const reopened = ids.apprlist!.children[0]!.children[1]!;
       expect(reopened).not.toBe(opened);
       expect(rowsOn(reopened)).toEqual(['Task', 'Filed By', 'Expires']);
+      // Only the card that is open is kept. Another card made the open one before the list lands is drawn as the
+      // open card, and the one that was is drawn closed: never two open cards, never a card kept that is not open.
+      run("APPR.open='p5c'");
+      run('loadApprovals()');
+      await settle();
+      learns.at(-1)!(0);
+      expect(cardsDrawn().filter((c) => c.className.split(' ').includes('open')).map((c) => c.getAttribute('data-id'))).toEqual(['p5c']);
+      expect(cardsDrawn()).not.toContain(reopened);
       // A card that no longer waits is not kept on screen for having been open.
       answer = () => ({ status: 200, body: { proposals: [P5.accept, plain({ id: 'x1' })], signed: true } });
       run('loadApprovals()');
       await settle();
       learns.at(-1)!(0);
       expect(cardsDrawn().map((c) => c.getAttribute('data-id'))).toEqual(['p5c', 'x1']);
-      expect(cardsDrawn()).not.toContain(reopened);
       // The panel opened again starts from a drawing of its own.
       const before = ids.apprlist!.children[0]!.children[0];
       await open();
@@ -1854,14 +1861,26 @@ describe('the console Approvals panel', () => {
       expect(ids.apprnote!.textContent).toBe('You approved 0 of 3. You dismissed the prompt. 3 cards are still waiting.');
       // The second card's prompt hangs instead: the first is counted, and two still wait.
       held = [];
+      const waitsBefore = timers.filter((t) => t[1] === 120_000).length;
       run('approveAll()');
       held[0]!.ok({ action: { status: 'done' } });
       await settle();
       expect(held.map((h) => h.id)).toEqual(['p5d', 'p5c']);
       expect(ids.apprnote!.textContent).toBe('Approving 2 of 3…');
-      timers.filter((t) => t[1] === 120_000).at(-1)![0]();
+      // Each card's prompt has a wait of its own. The first card's wait, running out now that its prompt was
+      // answered, does nothing; the second card's lets the list go.
+      const waits = timers.filter((t) => t[1] === 120_000).slice(waitsBefore);
+      expect(waits).toHaveLength(2);
+      waits[0]![0]();
+      expect(run('APPR.busy')).toBe(true);
+      expect(ids.apprnote!.textContent).toBe('Approving 2 of 3…');
+      waits[1]![0]();
       expect(ids.apprnote!.textContent).toBe('You approved 1 of 3. You dismissed the prompt. 2 cards are still waiting.');
       expect(run('APPR.busy')).toBe(false);
+      // The prompt that hung answers at last: its card was signed, and the third is not asked for.
+      held[1]!.ok({ action: { status: 'done' } });
+      await settle();
+      expect(held.map((h) => h.id)).toEqual(['p5d', 'p5c']);
       // Each step has a wait of its own, and one that finished takes its wait with it.
       held = [];
       run('approveAll()');
