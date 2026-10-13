@@ -122,6 +122,17 @@ interface ProposalFacts {
   args?: unknown;
 }
 
+/** What Will reads when a spend card says no cost, and when a task or spend card's details hold a number that is not whole. */
+export const SPEND_NEEDS_ESTIMATE = 'A card that spends has to say what it will cost.';
+export const WHOLE_NUMBERS_ONLY = 'A task or spend card can hold whole numbers only.';
+/** Does a JSON value hold a number that is not a safe whole number, at any depth? */
+export function hasFraction(v: unknown): boolean {
+  if (typeof v === 'number') return !Number.isSafeInteger(v);
+  if (Array.isArray(v)) return v.some(hasFraction);
+  if (v !== null && typeof v === 'object') return Object.values(v).some(hasFraction);
+  return false;
+}
+
 /**
  * The pool a card's args name, for the tier engine's trading-pool rule (step 1).
  * As it is written when it is shaped like a name; otherwise only whether it
@@ -201,6 +212,11 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
     const { checkTaskCard } = await import('../tasks/card.js');
     input = await checkTaskCard(db, input);
   }
+  // Money and digests, said here so that Will reads a sentence (the database refuses each as the card is filed):
+  // a card that spends says an estimate above nothing, and a task or spend card's args hold whole numbers only
+  // (their digest is computed again by the database, where a fraction has no single form).
+  if (input.kind === 'spend' && !(input.estCostUsd !== undefined && input.estCostUsd > 0)) throw new Refused(400, SPEND_NEEDS_ESTIMATE);
+  if ((input.kind === 'spend' || input.kind === 'task') && hasFraction(input.args)) throw new Refused(400, WHOLE_NUMBERS_ONLY);
   // A policy change is checked against the database's rules before Will is asked to sign it.
   if (input.action === 'policy.change') {
     const { PolicyArgs } = await import('./internal.js');
