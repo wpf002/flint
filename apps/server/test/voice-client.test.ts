@@ -150,8 +150,8 @@ v.speak("Yeah?")
     expect(r.ran).toEqual([['afplay', '.mp3'], ['afplay', '.mp3']]);
   });
 
-  it('when the server refuses (409: the reply stays here) or fails, this Mac’s own voice speaks it', () => {
-    for (const status of [409, 503, 500]) {
+  it('when the server refuses (409: the reply stays here), is busy (429) or fails, this Mac’s own voice speaks it', () => {
+    for (const status of [409, 429, 503, 500]) {
       const r = run(`
 answer_with(${status})
 v.speak("Your goal is on track.", False, "turn_abc")

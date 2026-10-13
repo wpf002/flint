@@ -123,6 +123,16 @@ describe('the console’s voice: a reply that stays on this Mac', () => {
     expect(out.sent).toHaveLength(1);
   });
 
+  // The Mac's own voice is held to a line (../src/voice sayLine): past it the server answers 429. That is "this
+  // one reply, speak it yourself", not "the voice is out": the very next sentence is asked for again.
+  it('a busy server (429) is the browser voice for this reply only, like its refusal: the next sentence asks again', async () => {
+    const busy = page(429);
+    expect(await busy.call<Promise<unknown>>('_speechBlob(clean,vctx)', { clean: 'It is sunny.', vctx: fresh() })).toBeNull();
+    expect(busy.skipUntil()).toBe(0);
+    await busy.call<Promise<unknown>>('_speechBlob(clean,vctx)', { clean: 'And another.', vctx: fresh() });
+    expect(busy.sent).toHaveLength(2);
+  });
+
   // Local voice: when the server's own speech is made on this Mac (`say`, a speech server on this Mac), the meta
   // event says so (`speechHere`), and a reply that stays here may then be sent to it: nothing spoken there leaves.
   // The page starts from "it is not", and only the server's own yes changes that, for the reply it was said about.
@@ -153,7 +163,7 @@ describe('the console’s voice: a reply that stays on this Mac', () => {
   });
 
   it('...and when the server then refuses or fails, the device’s own voice speaks it, as for any reply', async () => {
-    for (const status of [409, 502, 503]) {
+    for (const status of [409, 429, 502, 503]) {
       const p = page(status);
       const vctx = { displayed: '', gen: 0, conv: 'c1', here: true, turn: 'turn_kept' as string | null, speechHere: true };
       expect(await p.call<Promise<unknown>>('_speechBlob(clean,vctx)', { clean: 'A private sentence.', vctx }), String(status)).toBeNull();
