@@ -63,7 +63,7 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
-import { loadBackupConfig, loadRuntimeConfig } from './config.js';
+import { backupEnvFile, loadBackupConfig, loadRuntimeConfig } from './config.js';
 import { p2Report } from './report/exit.js';
 import { p25Report } from './report/p25.js';
 import { p3Report } from './report/p3.js';
@@ -289,8 +289,7 @@ async function main(): Promise<void> {
   if (process.argv[2] === 'prune') return pruneOldBackups(process.argv.slice(3));
   if (process.argv[2] === 'nexus-setup') {
     const { database } = nexusSetupArgs(process.argv.slice(3));
-    const home = process.env.HOME ?? homedir();
-    const ok = await nexusSetup({ backupEnv: process.env.BACKUP_ENV_FILE ?? join(home, '.flint', 'backup.env'), database, say: (line) => console.log(line) });
+    const ok = await nexusSetup({ backupEnv: backupEnvFile(), database, say: (line) => console.log(line) });
     if (!ok) process.exitCode = 1;
     return;
   }

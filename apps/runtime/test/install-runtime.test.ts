@@ -7,7 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseTokens } from '../src/config';
@@ -290,6 +290,23 @@ describe('install-runtime.sh', () => {
     expect(night(7)).toEqual(['backup --auto', 'drill --auto', 'prune-backups --auto']);
     writeFileSync(join(dir, 'home', '.flint', 'backup-age-recipient'), 'age1example\n');
     expect(night(7)).toEqual(['backup --auto', 'offsite --auto', 'drill --auto', 'prune-backups --auto']);
+    // Nexus's own backup (P7) is off until its address is in backup.env: not one of its steps is even started.
+    const backupEnv = join(dir, 'home', '.flint', 'backup.env');
+    for (const off of ['FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/flint\n', 'FLINT_NEXUS_BACKUP_URL=\n', '# FLINT_NEXUS_BACKUP_URL=postgresql://x\n']) {
+      writeFileSync(backupEnv, off, { mode: 0o600 });
+      expect(night(7), off).toEqual(['backup --auto', 'offsite --auto', 'drill --auto', 'prune-backups --auto']);
+    }
+    // Switched on: the same three steps for Nexus, after Flint's own and before the cleanup; its test on Sundays
+    // only, and its copy off the box only with a recipient.
+    writeFileSync(backupEnv, 'FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/flint\nFLINT_NEXUS_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/nexus\n', { mode: 0o600 });
+    expect(night(7)).toEqual(['backup --auto', 'offsite --auto', 'drill --auto', 'nexus-backup --auto', 'nexus-offsite --auto', 'nexus-drill --auto', 'prune-backups --auto']);
+    expect(night(3)).toEqual(['backup --auto', 'offsite --auto', 'nexus-backup --auto', 'nexus-offsite --auto', 'prune-backups --auto']);
+    rmSync(join(dir, 'home', '.flint', 'backup-age-recipient'));
+    expect(night(3)).toEqual(['backup --auto', 'nexus-backup --auto', 'prune-backups --auto']);
+    writeFileSync(join(dir, 'home', '.flint', 'backup-age-recipient'), 'age1example\n');
+    // The address is never printed by the script, whatever it holds.
+    const said = spawnSync('/bin/zsh', [script], { env: { PATH: `${dir}/bin:/usr/bin:/bin`, HOME: join(dir, 'home'), FLINT_REPO: dir, FLINT_DOW: '7' }, encoding: 'utf8' });
+    expect(`${said.stdout}${said.stderr}`).not.toMatch(/postgres|flint_backup:x/);
     // Every step is a script of the runtime's own, and none has the name of one of pnpm's own commands: `pnpm prune`
     // removes packages, and pnpm runs its own command before a script of the same name.
     const scripts = Object.keys((JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')) as { scripts: Record<string, string> }).scripts);
@@ -300,8 +317,8 @@ describe('install-runtime.sh', () => {
       expect(pnpmOwn, step).not.toContain(step);
     }
     expect(scripts.filter((name) => pnpmOwn.includes(name))).toEqual([]);
-    // A step that fails never stops the ones after it.
+    // A step that fails never stops the ones after it: Flint's own, Nexus's, or the cleanup.
     writeFileSync(join(dir, 'bin', 'pnpm'), `#!/bin/zsh\necho "$*" >> ${dir}/pnpm-calls\nexit 1\n`, { mode: 0o755 });
-    expect(night(7)).toEqual(['backup --auto', 'offsite --auto', 'drill --auto', 'prune-backups --auto']);
+    expect(night(7)).toEqual(['backup --auto', 'offsite --auto', 'drill --auto', 'nexus-backup --auto', 'nexus-offsite --auto', 'nexus-drill --auto', 'prune-backups --auto']);
   });
 });

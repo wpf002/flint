@@ -412,7 +412,7 @@ export function offsiteFolder(home: string, set: string | undefined): { dir?: st
 export function loadBackupConfig(): BackupConfig {
   const home = process.env.HOME ?? '';
   const env = runtimeEnv(process.env.RUNTIME_ENV_FILE ?? join(home, '.flint', 'runtime.env'));
-  const backupEnv = runtimeEnv(process.env.BACKUP_ENV_FILE ?? join(home, '.flint', 'backup.env'), {});
+  const backupEnv = runtimeEnv(backupEnvFile(home), {});
   const config = loadConfig(env);
   const B = z
     .object({
@@ -466,6 +466,9 @@ export function loadBackupConfig(): BackupConfig {
   };
 }
 
+/** Where the backup commands' own settings are: ~/.flint/backup.env (0600), or the file BACKUP_ENV_FILE names. */
+export const backupEnvFile = (home: string = process.env.HOME ?? ''): string => process.env.BACKUP_ENV_FILE ?? join(home, '.flint', 'backup.env');
+
 /**
  * Whether Nexus's backup is switched on: ~/.flint/backup.env (or
  * BACKUP_ENV_FILE) has a FLINT_NEXUS_BACKUP_URL line that is not empty. Only
@@ -473,10 +476,12 @@ export function loadBackupConfig(): BackupConfig {
  * here: the runtime's service asks this to know whether Health has a Nexus
  * line at all, and has no use for the login in it.
  */
-export function nexusBackupWanted(home: string, file: string = process.env.BACKUP_ENV_FILE ?? join(home, '.flint', 'backup.env')): boolean {
+export function nexusBackupWanted(home: string, file: string = backupEnvFile(home)): boolean {
   try {
-    // The same lines the backup commands read it from (runtimeEnv): `NAME=value`, with or without `export` and quotes.
-    return /^(?:export[ \t]+)?FLINT_NEXUS_BACKUP_URL=[ \t]*["']?[^\s"']/m.test(readFileSync(file, 'utf8'));
+    // The same lines the backup commands read it from (runtimeEnv): `NAME=value`, with or without `export` and
+    // quotes, and of two lines for it the last one counts.
+    const lines = readFileSync(file, 'utf8').match(/^(?:export[ \t]+)?FLINT_NEXUS_BACKUP_URL=.*$/gm);
+    return !!lines && /=[ \t]*["']?[^\s"']/.test(lines[lines.length - 1]!);
   } catch {
     return false;
   }

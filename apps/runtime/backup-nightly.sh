@@ -30,9 +30,10 @@ run() {
   pnpm --silent --filter @flint/runtime "$1" --auto || echo "$(ts) $1 did not complete (see above)" >&2
 }
 
-# Whether Nexus's backup is switched on: backup.env has an address for it. Only whether the line is there is
-# looked at; its value is never read here (the runtime looks for the same line: config.ts, nexusBackupWanted).
-nexus_on() { [ -r "$DATA/backup.env" ] && grep -Eq "^(export[[:space:]]+)?FLINT_NEXUS_BACKUP_URL=[[:space:]]*[\"']?[^[:space:]\"']" "$DATA/backup.env"; }
+# Whether Nexus's backup is switched on: backup.env has an address for it (of two lines for it, the last one
+# counts, as for every setting there). Only whether it has a value is looked at; the value is never kept or
+# printed here (the runtime looks for the same line: config.ts, nexusBackupWanted).
+nexus_on() { [ -r "$DATA/backup.env" ] && grep -E "^(export[[:space:]]+)?FLINT_NEXUS_BACKUP_URL=" "$DATA/backup.env" | tail -1 | grep -Eq "=[[:space:]]*[\"']?[^[:space:]\"']"; }
 
 run backup
 [ -s "$DATA/backup-age-recipient" ] && run offsite
