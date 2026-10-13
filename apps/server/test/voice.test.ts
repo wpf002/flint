@@ -1,9 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { readInferenceConfig } from '../src/inference-config';
 import {
   AUDIO_TYPES,
+  MAX_SPEECH_BYTES,
+  MAX_TRANSCRIPT_BYTES,
+  SAY_AT_ONCE,
+  SAY_WAITING,
+  SpeechBusy,
   TTS_MAX_CHARS,
   audioTypeOf,
   buildVoice,
@@ -11,8 +16,11 @@ import {
   offTts,
   openAiCompatStt,
   openAiCompatTts,
+  openAiSpeech,
   openAiTts,
   planVoice,
+  runFile,
+  sayLine,
   speechPaths,
   voiceLine,
   whisperCppStt,
@@ -102,10 +110,105 @@ describe('whisper.cpp, on this Mac: what Flint has always done, moved behind the
     expect(stt).toMatchObject({ name: 'whisper-cpp', local: true, model: 'ggml-small.en.bin' });
   });
 
-  it('where the program and the model are: WHISPER_BIN and WHISPER_MODEL, else where they have always been', () => {
-    expect(whisperPaths({}, '/home/will')).toEqual({ bin: '/opt/homebrew/bin/whisper-cli', model: '/home/will/.flint/models/ggml-base.en.bin' });
-    expect(whisperPaths({ WHISPER_BIN: ' /x/whisper-cli ', WHISPER_MODEL: '/m/ggml-small.bin' }, '/home/will')).toEqual({ bin: '/x/whisper-cli', model: '/m/ggml-small.bin' });
-    expect(whisperPaths({ WHISPER_BIN: '  ', WHISPER_MODEL: '' }, '/h').bin).toBe('/opt/homebrew/bin/whisper-cli');
+  it('where the program and the model are: WHISPER_BIN and WHISPER_MODEL as config took them, else where they have always been', () => {
+    const paths = (env: Record<string, string>) => whisperPaths(readInferenceConfig(env, undefined, { home: '/home/will' }).voice, '/home/will');
+    expect(paths({})).toEqual({ bin: '/opt/homebrew/bin/whisper-cli', model: '/home/will/.flint/models/ggml-base.en.bin' });
+    expect(paths({ WHISPER_BIN: ' /x/whisper-cli ', WHISPER_MODEL: '/m/ggml-small.bin' })).toEqual({ bin: '/x/whisper-cli', model: '/m/ggml-small.bin' });
+    expect(paths({ WHISPER_BIN: '  ', WHISPER_MODEL: '' }).bin).toBe('/opt/homebrew/bin/whisper-cli');
+  });
+});
+
+// The review's M2. The benchmark told Will to set WHISPER_MODEL=~/.flint/models/<file>. Neither the settings file
+// nor a LaunchAgent expands `~`, so whisper.cpp was handed a path it could not open and EVERY recording failed.
+describe('WHISPER_BIN and WHISPER_MODEL are full paths: a leading ~/ is this home folder, and anything else that is not a full path is refused', () => {
+  const read = (env: Record<string, string>) => {
+    const warned: string[] = [];
+    const cfg = readInferenceConfig(env, (m) => warned.push(m), { home: '/Users/will' });
+    return { cfg, warned, plan: planVoice(cfg, env, { platform: 'darwin', home: '/Users/will' }) };
+  };
+
+  it('~/ is the home folder, for the model and for the program, and it is no problem', () => {
+    const { cfg, plan, warned } = read({ WHISPER_MODEL: '~/.flint/models/ggml-small.en.bin', WHISPER_BIN: '~/bin/whisper-cli' });
+    expect(cfg.problems).toEqual([]);
+    expect(warned).toEqual([]);
+    expect(plan.stt).toEqual({ name: 'whisper-cpp', local: true, bin: '/Users/will/bin/whisper-cli', model: '/Users/will/.flint/models/ggml-small.en.bin' });
+    expect(voiceLine(plan)).toContain('hearing=whisper-cpp (ggml-small.en.bin)');
+  });
+
+  it('whisper.cpp is never handed a path that starts with ~: what it is run with is the full path', async () => {
+    const env = { WHISPER_MODEL: '~/.flint/models/ggml-small.en.bin' };
+    const ran: string[][] = [];
+    const { stt } = buildVoice(planVoice(readInferenceConfig(env, undefined, { home: '/Users/will' }), env, { platform: 'darwin', home: '/Users/will' }), {
+      env,
+      run: async (file, args) => {
+        ran.push([file, ...args]);
+        if (file === '/usr/bin/afconvert') writeFileSync(args[1]!, 'RIFF');
+        return { stdout: 'heard' };
+      },
+    });
+    expect(await stt.transcribe(Buffer.from('a'))).toEqual({ text: 'heard' });
+    expect(ran[1]!.slice(0, 3)).toEqual(['/opt/homebrew/bin/whisper-cli', '-m', '/Users/will/.flint/models/ggml-small.en.bin']);
+    expect(ran.flat().filter((a) => a.startsWith('~'))).toEqual([]);
+  });
+
+  it("another user's home, a bare name and a relative path are refused with a sentence, and the usual one is used: no recording fails for it", () => {
+    for (const [value, key] of [
+      ['~someone/models/ggml-base.en.bin', 'WHISPER_MODEL'],
+      ['~', 'WHISPER_MODEL'],
+      ['models/ggml-base.en.bin', 'WHISPER_MODEL'],
+      ['./ggml-base.en.bin', 'WHISPER_MODEL'],
+      ['whisper-cli', 'WHISPER_BIN'],
+      ['../bin/whisper-cli', 'WHISPER_BIN'],
+    ] as const) {
+      const { cfg, plan, warned } = read({ [key]: value });
+      expect(plan.stt, value).toEqual({ name: 'whisper-cpp', local: true, bin: '/opt/homebrew/bin/whisper-cli', model: '/Users/will/.flint/models/ggml-base.en.bin' });
+      expect(cfg.problems, value).toEqual([{ key, reason: 'not a full path (one that starts with / or with ~/)', kind: 'invalid' }]);
+      expect(warned, value).toEqual([`[inference] ${key} is not a full path (one that starts with / or with ~/); using the usual transcription ${key === 'WHISPER_BIN' ? 'program' : 'model'}`]);
+    }
+  });
+
+  // L5: these two are shown (the model's file name is in the boot line and in the status), so nothing a terminal
+  // or a log acts on may be in them.
+  it('a path with a newline, an escape, a direction override, or a file name too long to show is refused, and never repeated', () => {
+    for (const value of ['/m/ggml-base.en.bin\n[route] {"fake":1}', '/m/ggml-\u001b[2Jbase.bin', '/m/ggml-\u202egnp.bin', '/m/a\u2028b.bin', `/m/${'x'.repeat(101)}.bin`, `/${'d/'.repeat(600)}m.bin`, '/m/models/']) {
+      const { cfg, plan, warned } = read({ WHISPER_MODEL: value, WHISPER_BIN: value });
+      expect(plan.stt, JSON.stringify(value)).toMatchObject({ bin: '/opt/homebrew/bin/whisper-cli', model: '/Users/will/.flint/models/ggml-base.en.bin' });
+      expect(cfg.problems.map((x) => x.key).sort(), JSON.stringify(value)).toEqual(['WHISPER_BIN', 'WHISPER_MODEL']);
+      const said = JSON.stringify(cfg.problems) + warned.join('\n') + voiceLine(plan);
+      expect(said, JSON.stringify(value)).not.toMatch(/fake|\u001b|\u202e|\u2028|xxxxx|d\/d\/d/);
+      expect(voiceLine(plan).split('\n'), JSON.stringify(value)).toHaveLength(1);
+    }
+    // A space, and a letter that is not ASCII, are a path like any other.
+    const fine = read({ WHISPER_MODEL: '/Users/josé/Library/Application Support/models/ggml-base.en.bin' });
+    expect(fine.cfg.problems).toEqual([]);
+    expect(fine.plan.stt).toMatchObject({ model: '/Users/josé/Library/Application Support/models/ggml-base.en.bin' });
+  });
+});
+
+describe("FLINT_TTS_MODEL and FLINT_TTS_VOICE are plain names: OpenAI's model and voice, in a request, a log and a status", () => {
+  const read = (env: Record<string, string>) => {
+    const warned: string[] = [];
+    const cfg = readInferenceConfig(env, (m) => warned.push(m), { home: '/h' });
+    return { cfg, warned, plan: planVoice(cfg, env, { platform: 'darwin', home: '/h' }) };
+  };
+
+  it('a name is taken as it is; unset is the usual one', () => {
+    expect(openAiSpeech(read({}).cfg.voice)).toEqual({ model: 'tts-1', voice: 'onyx' });
+    expect(openAiSpeech(read({ FLINT_TTS_MODEL: ' gpt-4o-mini-tts ', FLINT_TTS_VOICE: 'nova' }).cfg.voice)).toEqual({ model: 'gpt-4o-mini-tts', voice: 'nova' });
+    expect(read({ FLINT_TTS_MODEL: 'tts-1-hd', FLINT_TTS_VOICE: 'nova' }).cfg.problems).toEqual([]);
+  });
+
+  it('a newline, an escape, a space or a name too long is refused by name, the usual one is used, and no line of a log or a status carries it', () => {
+    for (const bad of ['tts-1\n[route] {"fake":1}', 'tts\u001b[2J', 'two words', 'x'.repeat(81), '-v', '$(id)']) {
+      const { cfg, plan, warned } = read({ FLINT_TTS_MODEL: bad, FLINT_TTS_VOICE: bad, OPENAI_API_KEY: 'sk-x' });
+      expect(plan.tts, JSON.stringify(bad)).toEqual({ name: 'openai', local: false, model: 'tts-1', voice: 'onyx', hasKey: true });
+      expect(cfg.problems.map((x) => x.key).sort(), JSON.stringify(bad)).toEqual(['FLINT_TTS_MODEL', 'FLINT_TTS_VOICE']);
+      const said = JSON.stringify(cfg.problems) + warned.join('\n') + voiceLine(plan);
+      expect(said, JSON.stringify(bad)).not.toMatch(/fake|\u001b|two words|xxxxx|\$\(id\)/);
+      for (const line of warned) expect(line.split('\n')).toHaveLength(1);
+    }
+    // Too long says so, in words that read after "is".
+    expect(read({ FLINT_TTS_VOICE: 'x'.repeat(41) }).warned).toEqual(["[inference] FLINT_TTS_VOICE is too long; using OpenAI's usual voice"]);
   });
 });
 
@@ -120,6 +223,21 @@ describe('OpenAI speech: what Flint has always done, moved behind the seam uncha
     expect(sent[0]!.init.method).toBe('POST');
     expect(headers(sent[0]!.init)).toEqual({ authorization: 'Bearer sk-test', 'content-type': 'application/json' });
     expect(JSON.parse(String(sent[0]!.init.body))).toEqual({ model: 'tts-1', voice: 'onyx', input: 'Hello.', response_format: 'mp3' });
+  });
+
+  // L1. main answered `audio/mpeg` whatever OpenAI called its answer: mp3 is what was asked for.
+  it('the client is told mp3 whatever OpenAI calls its answer, as it always was', async () => {
+    for (const type of ['audio/wav', 'audio/ogg', 'application/octet-stream', 'text/html', '']) {
+      const { f } = fetcher(() => new Response('mp3-bytes', { status: 200, headers: type ? { 'content-type': type } : {} }));
+      expect(await openAiTts({ apiKey: 'k', model: 'tts-1', voice: 'onyx', fetch: f }).synthesize('Hello.'), type).toEqual({ audio: Buffer.from('mp3-bytes'), contentType: 'audio/mpeg' });
+    }
+  });
+
+  // What main did, and still does: an answer with no audio in it is handed on as it is (200, no bytes). A local
+  // speech server's empty answer is a failure (below): that path is new, and has nothing to stay the same as.
+  it('an answer from OpenAI with no audio is handed on as it is, as it always was: not an error', async () => {
+    const { f } = fetcher(() => new Response(null, { status: 200, headers: { 'content-type': 'audio/mpeg' } }));
+    expect(await openAiTts({ apiKey: 'k', model: 'tts-1', voice: 'onyx', fetch: f }).synthesize('Hello.')).toEqual({ audio: Buffer.alloc(0), contentType: 'audio/mpeg' });
   });
 
   it('cuts the text at 4,000 characters, as before', async () => {
@@ -181,6 +299,42 @@ describe('an OpenAI-compatible local speech server: speaking', () => {
     expect((err as Error).message).toBe('tts HTTP 500');
   });
 
+  // The review's M23: nothing held the cap. A server that never stops answering is read to the cap and dropped.
+  it('an answer is read to 32 MB and no further: past that the read is dropped, and it is a failure', async () => {
+    expect(MAX_SPEECH_BYTES).toBe(32 * 1024 * 1024);
+    const piece = new Uint8Array(1024 * 1024);
+    const endless = () => {
+      let pulled = 0;
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>({
+        pull(c) {
+          pulled++;
+          c.enqueue(piece);
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      return { res: new Response(body, { status: 200, headers: { 'content-type': 'audio/mpeg' } }), seen: () => ({ pulled, cancelled }) };
+    };
+    const over = endless();
+    await expect(make(() => over.res).tts.synthesize('Hi.')).rejects.toThrow('tts answered with too much audio');
+    // It stopped at the cap (33 pieces of a megabyte, give or take what the stream had ready), and let the answer go.
+    expect(over.seen().cancelled).toBe(true);
+    expect(over.seen().pulled).toBeGreaterThanOrEqual(33);
+    expect(over.seen().pulled).toBeLessThan(40);
+    // Exactly the cap is still an answer.
+    let left = 32;
+    const exact = new ReadableStream<Uint8Array>({
+      pull(c) {
+        if (left-- > 0) c.enqueue(piece);
+        else c.close();
+      },
+    });
+    const out = await make(() => new Response(exact, { status: 200, headers: { 'content-type': 'audio/mpeg' } })).tts.synthesize('Hi.');
+    expect(out!.audio.length).toBe(MAX_SPEECH_BYTES);
+  });
+
   it('its words stay here (config lets it be at no address that is not), and it bills nobody', () => {
     expect(make(() => audio('x')).tts).toMatchObject({ name: 'local', local: true, model: 'kokoro', voice: 'af_heart' });
     expect(make(() => audio('x')).tts.vendor).toBeUndefined();
@@ -224,6 +378,31 @@ describe('an OpenAI-compatible local speech server: hearing', () => {
     expect(((await stt(() => new Response('your audio said: SECRET', { status: 500 })).transcribe(Buffer.from('a')).catch((e: Error) => e)) as Error).message).toBe('stt HTTP 500');
     await expect(stt(() => Response.json({ words: [] })).transcribe(Buffer.from('a'))).rejects.toThrow('stt answered without text');
     await expect(stt(() => new Response('not json', { status: 200 })).transcribe(Buffer.from('a'))).rejects.toThrow('stt answered without text');
+    for (const odd of ['null', '"text"', '[]', '7']) await expect(stt(() => new Response(odd, { status: 200 })).transcribe(Buffer.from('a')), odd).rejects.toThrow('stt answered without text');
+  });
+
+  // L3. A speech answer was capped and a transcript was not: `res.json()` read whatever the server sent.
+  it('an answer is read to a megabyte and no further: a transcript is text, and more than that is a failure', async () => {
+    expect(MAX_TRANSCRIPT_BYTES).toBe(1024 * 1024);
+    const make = (f: typeof fetch) => openAiCompatStt({ baseURL: 'http://127.0.0.1:1/v1', model: 'm', fetch: f, convert: false });
+    let pulled = 0;
+    let cancelled = false;
+    const piece = new TextEncoder().encode('word '.repeat(13_108)); // 64 KB of a transcript that never ends
+    const endless = new ReadableStream<Uint8Array>({
+      pull(c) {
+        pulled++;
+        c.enqueue(piece);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    await expect(make(fetcher(() => new Response(endless, { status: 200, headers: { 'content-type': 'application/json' } })).f).transcribe(Buffer.from('a'))).rejects.toThrow('stt answered with too much text');
+    expect(cancelled).toBe(true);
+    expect(pulled).toBeLessThan(24);
+    // A long transcript under the cap is an answer like any other.
+    const long = 'word '.repeat(150_000).trim();
+    expect((await make(fetcher(() => Response.json({ text: long })).f).transcribe(Buffer.from('a'))).text).toBe(long);
   });
 });
 
@@ -308,6 +487,149 @@ describe("the Mac's own say", () => {
   });
 });
 
+// L2. Every /speak started a `say` of its own: twenty requests at once were twenty programs.
+describe("the Mac's own say is held to a line: two at a time, a few waiting, and past that it says it is busy", () => {
+  /** A `say` that does not finish until it is let go, and counts how many are running. */
+  function held() {
+    const waiting: Array<{ out: string; go: () => void; fail: (e: Error) => void; signal: AbortSignal | undefined; dir: string }> = [];
+    let running = 0;
+    let most = 0;
+    const started: string[] = [];
+    const run: Run = (file, args, opts) =>
+      new Promise((resolve, reject) => {
+        const out = args[args.indexOf('-o') + 1]!;
+        started.push(readFileSync(args[args.indexOf('-f') + 1]!, 'utf8'));
+        running++;
+        most = Math.max(most, running);
+        const done = (): void => void running--;
+        const entry = {
+          out,
+          dir: dirname(out),
+          signal: opts?.signal,
+          go: () => {
+            writeFileSync(out, 'aac');
+            done();
+            resolve({ stdout: '' });
+          },
+          fail: (e: Error) => {
+            done();
+            reject(e);
+          },
+        };
+        waiting.push(entry);
+        // As execFile does: a signal that fires stops the program, and the call rejects.
+        opts?.signal?.addEventListener('abort', () => entry.fail(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' })), { once: true });
+      });
+    return { run, waiting, started, seen: () => ({ running, most }) };
+  }
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 5));
+
+  it('twenty at once: two run, eight wait, ten are told it is busy at once, and no more than two ever run together', async () => {
+    expect([SAY_AT_ONCE, SAY_WAITING]).toEqual([2, 8]);
+    const h = held();
+    const tts = macSayTts({ run: h.run });
+    const all = Array.from({ length: 20 }, (_, i) => tts.synthesize(`Sentence ${i}.`).then((s) => (s ? 'spoken' : 'null'), (e: Error) => e));
+    await tick();
+    expect(h.seen()).toEqual({ running: 2, most: 2 });
+    // The ten past the line were refused already, each with the error /speak answers 429 for.
+    const early = await Promise.all(all.slice(10));
+    expect(early.every((e) => e instanceof SpeechBusy)).toBe(true);
+    // The rest are spoken as the two in front finish, in the order they came.
+    for (let done = 0; done < 10; done++) {
+      while (h.waiting.length === 0) await tick();
+      h.waiting.shift()!.go();
+      await tick();
+      expect(h.seen().running).toBeLessThanOrEqual(2);
+    }
+    expect(await Promise.all(all.slice(0, 10))).toEqual(Array.from({ length: 10 }, () => 'spoken'));
+    expect(h.started).toEqual(Array.from({ length: 10 }, (_, i) => `Sentence ${i}.`));
+    expect(h.seen()).toEqual({ running: 0, most: 2 });
+    // The line is free again: the next one runs at once.
+    const next = tts.synthesize('Again.');
+    await tick();
+    h.waiting.shift()!.go();
+    expect(await next).toMatchObject({ contentType: 'audio/mp4' });
+  });
+
+  it('a say that fails gives up its place: the line does not jam', async () => {
+    const h = held();
+    const tts = macSayTts({ run: h.run, atOnce: 1, waiting: 1 });
+    const a = tts.synthesize('One.').catch((e: Error) => e.message);
+    const b = tts.synthesize('Two.');
+    await tick();
+    expect(h.seen().running).toBe(1);
+    h.waiting.shift()!.fail(new Error('say failed'));
+    expect(await a).toBe('say failed');
+    await tick();
+    h.waiting.shift()!.go();
+    expect(await b).toMatchObject({ contentType: 'audio/mp4' });
+  });
+
+  // L9. A client that hung up left its `say` running to the end, and its files with it.
+  it('a client that hangs up takes its say with it: the program is handed the signal, it is stopped, and its folder is gone', async () => {
+    const h = held();
+    const tts = macSayTts({ run: h.run });
+    const gone = new AbortController();
+    const spoken = tts.synthesize('Private words.', { signal: gone.signal }).catch((e: Error) => e);
+    await tick();
+    const call = h.waiting[0]!;
+    expect(call.signal).toBe(gone.signal);
+    expect(existsSync(call.dir)).toBe(true);
+    gone.abort();
+    expect(((await spoken) as Error).name).toBe('AbortError');
+    expect(existsSync(call.dir)).toBe(false);
+    expect(h.seen().running).toBe(0);
+  });
+
+  it('one that hangs up while it waits leaves the line: its say is never started, and its place goes to the next', async () => {
+    const h = held();
+    const tts = macSayTts({ run: h.run, atOnce: 1, waiting: 2 });
+    const first = tts.synthesize('One.');
+    const gone = new AbortController();
+    const second = tts.synthesize('Two.', { signal: gone.signal }).catch((e: Error) => e);
+    const third = tts.synthesize('Three.');
+    await tick();
+    gone.abort();
+    expect(((await second) as Error).name).toBe('AbortError');
+    // Its place is free: one more may wait where it stood.
+    const fourth = tts.synthesize('Four.');
+    h.waiting.shift()!.go();
+    await first;
+    await tick();
+    h.waiting.shift()!.go();
+    await third;
+    await tick();
+    h.waiting.shift()!.go();
+    await fourth;
+    expect(h.started).toEqual(['One.', 'Three.', 'Four.']);
+    // And one that had already hung up is never started at all.
+    const before = new AbortController();
+    before.abort();
+    await expect(tts.synthesize('Never.', { signal: before.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(h.started).not.toContain('Never.');
+  });
+
+  it('the line by itself: what it runs at once, what it lets wait, and what it refuses', async () => {
+    const line = sayLine(1, 1);
+    let free!: () => void;
+    const one = line(() => new Promise<string>((r) => (free = () => r('one'))));
+    const two = line(async () => 'two');
+    await expect(line(async () => 'three')).rejects.toBeInstanceOf(SpeechBusy);
+    free();
+    expect(await Promise.all([one, two])).toEqual(['one', 'two']);
+    expect(await line(async () => 'four')).toBe('four');
+  });
+
+  it('the real runner stops a program when its signal fires, and says so', async () => {
+    const gone = new AbortController();
+    const started = Date.now();
+    const ran = runFile('/bin/sleep', ['30'], { signal: gone.signal, killSignal: 'SIGKILL' }).catch((e: Error) => e);
+    setTimeout(() => gone.abort(), 50);
+    expect(((await ran) as Error).name).toBe('AbortError');
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+});
+
 describe('off', () => {
   it('makes no speech: null, so the client uses its own voice', async () => {
     expect(await offTts().synthesize('Hello.')).toBeNull();
@@ -376,7 +698,9 @@ describe('planVoice: which provider, from config', () => {
     // `localhost` is pinned to 127.0.0.1, and an address with no path gets /v1: the same parser as the model server's.
     expect(p.stt).toMatchObject({ name: 'local', local: true, model: 'small.en', server: { baseURL: 'http://127.0.0.1:8081/v1', host: '127.0.0.1:8081', loopback: true } });
     expect(p.tts).toMatchObject({ name: 'local', local: true, model: 'kokoro', voice: 'af_heart', server: { baseURL: 'http://127.0.0.1:8880/v1', loopback: true } });
-    expect(voiceLine(p)).toBe('[voice] hearing=local server 127.0.0.1:8081 (small.en) speaking=local server 127.0.0.1:8880 (kokoro, af_heart)');
+    // L5: the boot line says where in words. No address is in a log.
+    expect(voiceLine(p)).toBe('[voice] hearing=local server on this Mac (small.en) speaking=local server on this Mac (kokoro, af_heart)');
+    expect(voiceLine(p)).not.toMatch(/127\.0\.0\.1|808[01]|8880|localhost/);
   });
 
   it('a local speech server with defaults for the model and the voice', () => {
@@ -432,8 +756,8 @@ describe('a refused voice setting never lands on a less private choice, and neve
       ['http://u:p@127.0.0.1:1/v1', 'has_credentials'],
       ['http://127.0.0.1:1/v1?key=1', 'has_query'],
       ['http://127.0.0.1:1/a/b/c/d', 'bad_path'],
-      ['http://speech.example:8880/v1', 'not_loopback'],
-      ['https://speech.example/v1', 'not_loopback'],
+      ['http://speech.example:8880/v1', 'other_machine'],
+      ['https://speech.example/v1', 'other_machine'],
     ];
     for (const [url, kind] of cases) {
       const { plan: p, cfg, warned } = plan({ FLINT_TTS_PROVIDER: 'local', FLINT_LOCAL_TTS_BASE_URL: url, OPENAI_API_KEY: 'sk-x' });
@@ -449,7 +773,7 @@ describe('a refused voice setting never lands on a less private choice, and neve
     expect(plan({ FLINT_STT_PROVIDER: 'local' }).cfg.problems).toEqual([{ key: 'FLINT_LOCAL_STT_BASE_URL', reason: 'not set', kind: 'unset' }]);
     const refused = plan({ FLINT_STT_PROVIDER: 'local', FLINT_LOCAL_STT_BASE_URL: 'http://stt.example:9000/v1' });
     expect(refused.plan.stt.name).toBe('whisper-cpp');
-    expect(refused.cfg.problems.map((x) => [x.key, x.kind])).toEqual([['FLINT_LOCAL_STT_BASE_URL', 'not_loopback']]);
+    expect(refused.cfg.problems.map((x) => [x.key, x.kind])).toEqual([['FLINT_LOCAL_STT_BASE_URL', 'other_machine']]);
     expect(refused.warned[0]).toContain('transcription stays on whisper-cpp, on this Mac');
   });
 
@@ -469,8 +793,8 @@ describe('a refused voice setting never lands on a less private choice, and neve
     expect(off.plan.tts).toEqual({ name: 'off', local: true, why: 'no_server' });
     expect(off.plan.stt.name).toBe('whisper-cpp');
     expect(off.cfg.problems.map((x) => [x.key, x.kind])).toEqual([
-      ['FLINT_LOCAL_STT_BASE_URL', 'not_loopback'],
-      ['FLINT_LOCAL_TTS_BASE_URL', 'not_loopback'],
+      ['FLINT_LOCAL_STT_BASE_URL', 'other_machine'],
+      ['FLINT_LOCAL_TTS_BASE_URL', 'other_machine'],
     ]);
     // The switch on, over https, and it is still some other machine: refused, by its own reason.
     for (const more of [{}, { FLINT_LOCAL_ALLOW_INSECURE_REMOTE: '1' }, { FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: 'https://gpu-box.example/v1' }, { OLLAMA_HOST: 'https://gpu-box.example:11434' }]) {
@@ -504,6 +828,45 @@ describe('a refused voice setting never lands on a less private choice, and neve
     expect(plain.cfg.problems.map((x) => [x.key, x.kind])).toContainEqual(['FLINT_LOCAL_TTS_BASE_URL', 'insecure_remote']);
     const allowed = plan({ ...plainEnv, FLINT_LOCAL_ALLOW_INSECURE_REMOTE: '1' });
     expect(allowed.plan.tts).toMatchObject({ name: 'local', local: true, server: { secure: false } });
+  });
+
+  // L4. The sentences were the model server's: a speech URL with a password was told to use the MODEL server's key
+  // setting, and a speech server on another machine was told to set a switch that does not allow one.
+  it('what a refused speech address is told is its own: its own key setting, and no switch that would not help', () => {
+    for (const key of ['FLINT_LOCAL_TTS_BASE_URL', 'FLINT_LOCAL_STT_BASE_URL'] as const) {
+      const provider = key === 'FLINT_LOCAL_TTS_BASE_URL' ? { FLINT_TTS_PROVIDER: 'local' } : { FLINT_STT_PROVIDER: 'local' };
+      const creds = plan({ ...provider, [key]: 'http://user:PASSWORDSECRET@127.0.0.1:8880/v1' });
+      expect(creds.cfg.problems).toEqual([{ key, reason: 'a URL that carries credentials (use FLINT_LOCAL_VOICE_API_KEY)', kind: 'has_credentials' }]);
+      expect(creds.warned.join('\n')).not.toMatch(/FLINT_LOCAL_API_KEY|PASSWORDSECRET|user:/);
+      for (const env of [{}, { FLINT_LOCAL_ALLOW_REMOTE: '1' }, { FLINT_LOCAL_ALLOW_REMOTE: '1', FLINT_LOCAL_ALLOW_INSECURE_REMOTE: '1' }]) {
+        for (const url of ['https://speech.example/v1', 'http://10.0.0.5:8880/v1', 'http://127.0.0.2:8880/v1', 'http://[::ffff:127.0.0.1]:8880/v1', 'http://0.0.0.0:8880/v1']) {
+          const remote = plan({ ...provider, ...env, [key]: url });
+          expect(remote.cfg.problems.filter((x) => x.key === key), url).toEqual([{ key, reason: 'on another machine (a speech server runs on this Mac)', kind: 'other_machine' }]);
+          expect(remote.warned.join('\n'), url).not.toMatch(/FLINT_LOCAL_ALLOW_REMOTE|FLINT_LOCAL_ALLOW_INSECURE_REMOTE|speech\.example|10\.0\.0\.5/);
+        }
+      }
+    }
+  });
+
+  it('every refusal reads as a sentence after "is", and a name that is too long is told so', () => {
+    const { warned, cfg } = plan({
+      FLINT_TTS_PROVIDER: 'say',
+      FLINT_SAY_VOICE: 'A'.repeat(41),
+      FLINT_LOCAL_TTS_VOICE: 'v'.repeat(81),
+      FLINT_LOCAL_TTS_MODEL: 'two words',
+      FLINT_LOCAL_VOICE_API_KEY: 'has space',
+    });
+    expect(warned.sort()).toEqual([
+      '[inference] FLINT_LOCAL_TTS_MODEL is written with characters that are not allowed; using tts-1',
+      '[inference] FLINT_LOCAL_TTS_VOICE is too long; using alloy',
+      '[inference] FLINT_LOCAL_VOICE_API_KEY is written with characters that are not allowed; no key is sent',
+      "[inference] FLINT_SAY_VOICE is too long; using the Mac's own default voice",
+    ]);
+    for (const line of warned) expect(line).not.toMatch(/ is (has|is|are) /);
+    expect(cfg.voice.sayVoice).toBeUndefined();
+    // A voice of forty letters is one; so is the longest name the Mac gives.
+    expect(plan({ FLINT_TTS_PROVIDER: 'say', FLINT_SAY_VOICE: 'A'.repeat(40) }).cfg.problems).toEqual([]);
+    expect(plan({ FLINT_TTS_PROVIDER: 'say', FLINT_SAY_VOICE: 'Eddy (English (US))' }).plan.tts).toEqual({ name: 'say', local: true, voice: 'Eddy (English (US))' });
   });
 
   it("a speech server that Node's env proxy would carry the request to is not this Mac: refused", () => {
@@ -583,6 +946,49 @@ describe('buildVoice: the providers a plan names', () => {
     expect(sent[0]!.init.redirect).toBe('error');
     expect(headers(sent[0]!.init).authorization).toBe('Bearer k');
     expect(speechPaths('/v1')).toEqual(['/v1/audio/transcriptions', '/v1/audio/speech']);
+  });
+
+  // The review's M14 and M15. Nothing held which key goes where: the speech server's key could have gone to OpenAI,
+  // and OpenAI's key to the speech server, with every test green.
+  it('with both keys set, each goes to its own service and to no other', async () => {
+    const both = { OPENAI_API_KEY: 'sk-OPENAI-KEY', FLINT_LOCAL_VOICE_API_KEY: 'voice-KEY' };
+    const local = { FLINT_TTS_PROVIDER: 'local', FLINT_LOCAL_TTS_BASE_URL: 'http://127.0.0.1:8880/v1', FLINT_STT_PROVIDER: 'local', FLINT_LOCAL_STT_BASE_URL: 'http://127.0.0.1:8081/v1' };
+    const where = (sent: Sent[]) => sent.map((s) => [new URL(s.url).host, headers(s.init).authorization]);
+    // The local speech server, speaking and hearing: its own key, never OpenAI's.
+    const a = fetcher((url) => (url.endsWith('/transcriptions') ? Response.json({ text: 'ok' }) : audio('x')));
+    // (afconvert's part is played here: no program is run.)
+    const run: Run = async (_file, args) => {
+      writeFileSync(args[1]!, 'RIFF');
+      return { stdout: '' };
+    };
+    const here = buildVoice(planVoice(readInferenceConfig({ ...both, ...local }), { ...both, ...local }, { platform: 'darwin', home: '/h' }), { env: { ...both, ...local }, fetch: a.f, run, connect: async () => {} });
+    await here.tts.synthesize('Hello.');
+    await here.stt.transcribe(Buffer.from('a'));
+    expect(where(a.sent)).toEqual([
+      ['127.0.0.1:8880', 'Bearer voice-KEY'],
+      ['127.0.0.1:8081', 'Bearer voice-KEY'],
+    ]);
+    // ...and with no key of its own it is sent none: OpenAI's is not lent to it.
+    const b = fetcher((url) => (url.endsWith('/transcriptions') ? Response.json({ text: 'ok' }) : audio('x')));
+    const keyless = { OPENAI_API_KEY: 'sk-OPENAI-KEY', ...local };
+    const bare = buildVoice(planVoice(readInferenceConfig(keyless), keyless, { platform: 'darwin', home: '/h' }), { env: keyless, fetch: b.f, run, connect: async () => {} });
+    await bare.tts.synthesize('Hello.');
+    await bare.stt.transcribe(Buffer.from('a'));
+    expect(where(b.sent)).toEqual([
+      ['127.0.0.1:8880', undefined],
+      ['127.0.0.1:8081', undefined],
+    ]);
+    expect(JSON.stringify(b.sent.map((s) => s.init.headers))).not.toContain('OPENAI');
+    // OpenAI: its own key, never the speech server's, whatever else is set.
+    const c = fetcher(() => audio('x'));
+    const out = buildVoice(planVoice(readInferenceConfig({ ...both, FLINT_LOCAL_TTS_BASE_URL: 'http://127.0.0.1:8880/v1' }), both, { platform: 'darwin', home: '/h' }), { env: both, fetch: c.f });
+    await out.tts.synthesize('Hello.');
+    expect(where(c.sent)).toEqual([['api.openai.com', 'Bearer sk-OPENAI-KEY']]);
+    // With the speech server's key and none of its own, OpenAI is not asked at all.
+    const d = fetcher(() => audio('x'));
+    const none = { FLINT_LOCAL_VOICE_API_KEY: 'voice-KEY' };
+    expect(await buildVoice(planVoice(readInferenceConfig(none), none, { platform: 'darwin', home: '/h' }), { env: none, fetch: d.f }).tts.synthesize('Hello.')).toBeNull();
+    expect(d.sent).toEqual([]);
   });
 
   it('the OpenAI provider is NOT behind the local guard, and the local one cannot be pointed anywhere else', async () => {

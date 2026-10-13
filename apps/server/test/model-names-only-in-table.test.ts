@@ -147,9 +147,19 @@ const ALLOWED_NAMES: ReadonlyArray<{ name: string; files: readonly string[]; rea
   },
   {
     name: 'WHISPER_MODEL',
-    files: ['apps/server/src/voice-bench.ts'],
-    reason: 'the name of the SETTING that says which model file transcription uses, as a sentence names it for Will: a setting, not a model',
+    files: ['apps/server/src/voice-bench.ts', 'apps/server/src/inference-config.ts', 'apps/server/src/inference-status.ts'],
+    reason: 'the name of the SETTING that says which model file transcription uses: where config reads it, where a refusal of it is put in words, and where a sentence names it for Will. A setting, not a model',
   },
+  {
+    name: 'WHISPER_BIN',
+    files: ['apps/server/src/inference-config.ts', 'apps/server/src/inference-status.ts'],
+    reason: 'the name of the SETTING that says where the transcription program is: where config reads it, and where a refusal of it is put in words. A setting, not a model',
+  },
+  ...['whisperBin', 'whisperModel'].map((name) => ({
+    name,
+    files: ['apps/server/src/voice.ts'],
+    reason: "the name of a FIELD of the config object (what those two settings came to, as full paths), in the type of the function that reads it: a field's name, not a model",
+  })),
   {
     name: 'Whisper',
     files: ['apps/server/src/inference-status.ts'],

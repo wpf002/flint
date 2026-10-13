@@ -13,13 +13,19 @@
  * own server as Flint's local provider would), speaks ten sentences with the
  * Mac's own voices, and prints the time each took, the real-time factor and
  * the word error rate. The clips, the speech and the results (results.md,
- * results.json) are left in the output folder.
+ * results.json) are left in the output folder: a dated one under
+ * ~/Library/Caches/Flint/voice-bench unless `--out` names another, which only
+ * this user can read (the folder 0700, its files 0600). Never under ~/.flint:
+ * the nightly and the offsite backups would carry the audio.
  *
  * Nothing is downloaded or installed: for a model or an engine that is not
  * here it prints the exact command. Nothing is sent off this Mac, unless
  * OpenAI's speech is named with `--tts ... openai` AND a cap is given with
  * `--budget-usd`: then the estimate is printed before anything is sent, and
- * without a cap that covers it the command stops and sends nothing.
+ * without a cap that covers it the command stops and sends nothing. A paid
+ * run is outside Flint's spend record (the server's budget neither counts it
+ * nor stops it): it says so before it sends anything, and again afterwards
+ * with what it sent and what that costs.
  *
  * It changes no setting. Exit codes: 0 done; 1 nothing could be measured; 2
  * the arguments were not understood, or a paid provider was asked for and
@@ -31,8 +37,9 @@ import net from 'node:net';
 import { cpus, homedir, platform, release, tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { SENTENCES, USAGE, paidPlan, parseBenchArgs, renderBench, runBench, type BenchDeps, type BenchResult, type StartedServer } from '../src/voice-bench';
-import { runFile } from '../src/voice';
+import { readInferenceConfig } from '../src/inference-config';
+import { SENTENCES, USAGE, defaultOut, paidPlan, parseBenchArgs, renderBench, runBench, type BenchDeps, type BenchResult, type StartedServer } from '../src/voice-bench';
+import { openAiSpeech, runFile } from '../src/voice';
 
 type Env = Record<string, string | undefined>;
 
@@ -54,7 +61,7 @@ function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const s = net.createServer();
     s.once('error', reject);
-    s.listen(0, '127.0.0.1', () => {
+    s.listen(0, SERVER_HOST, () => {
       const at = s.address();
       s.close(() => (at && typeof at === 'object' ? resolve(at.port) : reject(new Error('no port'))));
     });
@@ -64,6 +71,14 @@ function freePort(): Promise<number> {
 /** How long whisper.cpp's server is given to read its model and answer. */
 const SERVER_START_MS = 90_000;
 
+/** The one address the transcription server this run starts may listen on: this Mac, and nothing a network can reach. */
+export const SERVER_HOST = '127.0.0.1';
+
+/** What whisper.cpp's server is started with: one model, this Mac alone, a port of its own, and the path an OpenAI-compatible client asks. */
+export function serverArgs(model: string, port: number): string[] {
+  return ['-m', model, '--host', SERVER_HOST, '--port', String(port), '--inference-path', '/v1/audio/transcriptions'];
+}
+
 /**
  * Start whisper.cpp's own server with one model: on 127.0.0.1 alone, on a
  * free port, answering the path an OpenAI-compatible client asks. Fixed
@@ -72,7 +87,7 @@ const SERVER_START_MS = 90_000;
 export async function startWhisperServer(bin: string, model: string): Promise<StartedServer | undefined> {
   const port = await freePort();
   const began = performance.now();
-  const child = spawn(bin, ['-m', model, '--host', '127.0.0.1', '--port', String(port), '--inference-path', '/v1/audio/transcriptions'], { stdio: 'ignore', shell: false, env: { PATH: '/usr/bin:/bin', HOME: tmpdir(), TMPDIR: tmpdir() } });
+  const child = spawn(bin, serverArgs(model, port), { stdio: 'ignore', shell: false, env: { PATH: '/usr/bin:/bin', HOME: tmpdir(), TMPDIR: tmpdir() } });
   started.add(child);
   let gone = false;
   child.once('exit', () => {
@@ -102,9 +117,9 @@ export async function startWhisperServer(bin: string, model: string): Promise<St
   while (!gone && performance.now() - began < SERVER_START_MS) {
     try {
       // Any answer at all means it is listening (its own page is at /).
-      const r = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(1_000), redirect: 'error' });
+      const r = await fetch(`http://${SERVER_HOST}:${port}/`, { signal: AbortSignal.timeout(1_000), redirect: 'error' });
       await r.body?.cancel().catch(() => {});
-      return { baseURL: `http://127.0.0.1:${port}/v1`, loadMs: performance.now() - began, stop };
+      return { baseURL: `http://${SERVER_HOST}:${port}/v1`, loadMs: performance.now() - began, stop };
     } catch {
       await new Promise((r) => setTimeout(r, 100));
     }
@@ -145,7 +160,7 @@ export async function main(argv: readonly string[], d: MainDeps): Promise<number
     return 0;
   }
   // The paid side first, before anything is made or sent: asked for and not allowed, the command stops here.
-  const paid = paidPlan(args, SENTENCES, { model: d.env.FLINT_TTS_MODEL?.trim() || 'tts-1', hasKey: !!d.env.OPENAI_API_KEY?.trim() });
+  const paid = paidPlan(args, SENTENCES, { model: openAiSpeech(readInferenceConfig(d.env, undefined, { home: d.home }).voice).model, hasKey: !!d.env.OPENAI_API_KEY?.trim() });
   if (paid.asked && !paid.run) {
     d.err(paid.sentence);
     return 2;
@@ -181,7 +196,7 @@ export async function main(argv: readonly string[], d: MainDeps): Promise<number
   } finally {
     stopAll();
   }
-  const out = args.out ?? join(d.home, '.flint', 'eval', 'voice-bench', result.when.replace(/[:.]/g, '-'));
+  const out = args.out ?? defaultOut(d.home, result.when, join);
   const page = renderBench(result);
   try {
     deps.mkdir(out);
@@ -196,6 +211,8 @@ export async function main(argv: readonly string[], d: MainDeps): Promise<number
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  // Everything this run and the programs it starts leave behind is this user's alone: folders 0700, files 0600.
+  process.umask(0o077);
   for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     process.once(sig, () => {
       stopAll();

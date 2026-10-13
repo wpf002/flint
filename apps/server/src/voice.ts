@@ -26,6 +26,11 @@
  * starts with a hyphen cannot become an option. A voice's name is checked
  * against a strict pattern before it is one.
  *
+ * `say` is a program started for each reply, so it is held to two at a time
+ * with a short line behind them (`sayLine`): past that a reply is refused with
+ * `SpeechBusy`, and the device speaks it itself. A client that hangs up takes
+ * its `say` with it: the program is stopped and its files are removed.
+ *
  * Kept free of index.ts so it is unit-testable (index.ts runs main() on import).
  */
 import { execFile } from 'node:child_process';
@@ -66,7 +71,8 @@ export interface TtsProvider {
    * The text as speech. `null`: this provider cannot speak right now for a
    * reason that is not an error (no key, or it is `off`), and the client uses
    * its own voice. `onFirstAudio` is called when the first audio arrives, for a
-   * caller that measures it.
+   * caller that measures it. Throws `SpeechBusy` when a provider on this Mac
+   * already has as many replies in hand as it takes.
    */
   synthesize(text: string, opts?: { signal?: AbortSignal; onFirstAudio?: () => void }): Promise<Speech | null>;
 }
@@ -80,13 +86,19 @@ export interface Voice {
 export const TTS_MAX_CHARS = 4000;
 
 /** The most audio a speech provider's answer may be. */
-const MAX_SPEECH_BYTES = 32 * 1024 * 1024;
+export const MAX_SPEECH_BYTES = 32 * 1024 * 1024;
+/** The most a transcription server's answer may be: a transcript is text, and a megabyte of it is hours of speech. */
+export const MAX_TRANSCRIPT_BYTES = 1024 * 1024;
 const STT_TIMEOUT_MS = 120_000;
 const TTS_TIMEOUT_MS = 60_000;
 const SAY_TIMEOUT_MS = 30_000;
 
-/** Run a program: its stdout. Rejects when it fails. Never a shell. */
-export type Run = (file: string, args: readonly string[], opts?: { maxBuffer?: number; timeout?: number; killSignal?: NodeJS.Signals; env?: Record<string, string> }) => Promise<{ stdout: string }>;
+/** Run a program: its stdout. Rejects when it fails, and when `signal` fires (the program is then stopped with `killSignal`). Never a shell. */
+export type Run = (
+  file: string,
+  args: readonly string[],
+  opts?: { maxBuffer?: number; timeout?: number; killSignal?: NodeJS.Signals; env?: Record<string, string>; signal?: AbortSignal },
+) => Promise<{ stdout: string }>;
 
 /** The real runner: `execFile` on the file as given, with the arguments as given. */
 export const runFile: Run = (file, args, opts = {}) =>
@@ -96,19 +108,83 @@ export const runFile: Run = (file, args, opts = {}) =>
 
 const AFCONVERT = '/usr/bin/afconvert';
 const SAY = '/usr/bin/say';
+
+/** A provider on this Mac already has as many replies in hand as it takes. `/speak` answers 429, and the device speaks this one itself. */
+export class SpeechBusy extends Error {
+  constructor() {
+    super('speech on this Mac is busy');
+    this.name = 'SpeechBusy';
+  }
+}
+
+/** How many `say` run at once, and how many more may wait behind them. */
+export const SAY_AT_ONCE = 2;
+export const SAY_WAITING = 8;
+
+const hungUp = (): Error => Object.assign(new Error('the caller hung up'), { name: 'AbortError' });
+
+/**
+ * A line: at most `atOnce` pieces of work at a time, at most `waiting` behind
+ * them, first come first served. One more than that is refused at once with
+ * `SpeechBusy`: nothing here grows without bound. A caller whose `signal`
+ * fires while it waits leaves the line.
+ */
+export function sayLine(atOnce: number = SAY_AT_ONCE, waiting: number = SAY_WAITING): <T>(work: () => Promise<T>, signal?: AbortSignal) => Promise<T> {
+  let running = 0;
+  const line: Array<() => void> = [];
+  return async (work, signal) => {
+    if (signal?.aborted) throw hungUp();
+    if (running < atOnce) running++;
+    else {
+      if (line.length >= waiting) throw new SpeechBusy();
+      // Its place is handed to it by whoever finishes (`go`): `running` does not change hands.
+      await new Promise<void>((resolve, reject) => {
+        const leave = (): void => {
+          const at = line.indexOf(go);
+          if (at >= 0) line.splice(at, 1);
+          reject(hungUp());
+        };
+        const go = (): void => {
+          signal?.removeEventListener('abort', leave);
+          resolve();
+        };
+        line.push(go);
+        signal?.addEventListener('abort', leave, { once: true });
+      });
+    }
+    try {
+      return await work();
+    } finally {
+      const next = line.shift();
+      if (next) next();
+      else running--;
+    }
+  };
+}
 /** What whisper.cpp reads: 16 kHz, mono, 16-bit WAV. (MediaRecorder gives mp4/m4a in WebKit.) */
 const TO_WHISPER_WAV = ['-f', 'WAVE', '-d', 'LEI16@16000', '-c', '1'] as const;
 
 // ---------------------------------------------------------------------------
 // hearing
 
-/** Where whisper.cpp and its model are, as the server has always read them (WHISPER_BIN, WHISPER_MODEL). */
-export function whisperPaths(env: Record<string, string | undefined>, home: string = homedir()): { bin: string; model: string } {
+/**
+ * Where whisper.cpp and its model are: WHISPER_BIN and WHISPER_MODEL as config
+ * took them (./inference-config: full paths, printable), or the usual ones.
+ */
+export function whisperPaths(v: Pick<InferenceConfig['voice'], 'whisperBin' | 'whisperModel'>, home: string = homedir()): { bin: string; model: string } {
   return {
-    bin: env.WHISPER_BIN?.trim() || '/opt/homebrew/bin/whisper-cli',
-    model: env.WHISPER_MODEL?.trim() || join(home, '.flint', 'models', 'ggml-base.en.bin'),
+    bin: v.whisperBin ?? '/opt/homebrew/bin/whisper-cli',
+    model: v.whisperModel ?? join(home, '.flint', 'models', 'ggml-base.en.bin'),
   };
 }
+
+/** OpenAI's speech model and voice: FLINT_TTS_MODEL and FLINT_TTS_VOICE as config took them, or the usual ones. */
+export function openAiSpeech(v: Pick<InferenceConfig['voice'], 'openaiModel' | 'openaiVoice'>): { model: string; voice: string } {
+  return { model: v.openaiModel ?? 'tts-1', voice: v.openaiVoice ?? 'onyx' };
+}
+
+/** A file's name, for a log or a status: never the folder it is in. */
+export const fileNameOf = (path: string): string => path.replace(/^.*[\\/]/, '');
 
 /** Speech-to-text with whisper.cpp, on this Mac (the same pipeline the CLI voice mode uses). */
 export function whisperCppStt(opts: { bin: string; model: string; run?: Run }): SttProvider {
@@ -116,7 +192,7 @@ export function whisperCppStt(opts: { bin: string; model: string; run?: Run }): 
   return {
     name: 'whisper-cpp',
     local: true,
-    model: opts.model.replace(/^.*[\\/]/, ''),
+    model: fileNameOf(opts.model),
     async transcribe(audio) {
       const dir = mkdtempSync(join(tmpdir(), 'flint-stt-'));
       try {
@@ -131,6 +207,31 @@ export function whisperCppStt(opts: { bin: string; model: string; run?: Run }): 
       }
     },
   };
+}
+
+/**
+ * An answer's body, read whole and never past `max` bytes: past it the read is
+ * dropped and this throws `tooMuch`. `onFirst` is called with the first bytes.
+ */
+async function readCapped(res: Response, max: number, tooMuch: string, onFirst?: () => void): Promise<Buffer> {
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  if (res.body) {
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.length === 0) continue;
+      if (size === 0) onFirst?.();
+      size += value.length;
+      if (size > max) {
+        await reader.cancel().catch(() => {});
+        throw new Error(tooMuch);
+      }
+      chunks.push(value);
+    }
+  }
+  return Buffer.concat(chunks);
 }
 
 /** Both deadlines on one signal: the caller's own, and the provider's clock. */
@@ -188,8 +289,15 @@ export function openAiCompatStt(opts: {
       });
       // The status only: a server's own words can carry what it was sent.
       if (!res.ok) throw new Error(`stt HTTP ${res.status}`);
-      const json = (await res.json().catch(() => undefined)) as { text?: unknown } | undefined;
-      if (!json || typeof json.text !== 'string') throw new Error('stt answered without text');
+      // Capped like a speech answer: a server that never stops answering is not read into memory.
+      const said = await readCapped(res, MAX_TRANSCRIPT_BYTES, 'stt answered with too much text');
+      let json: { text?: unknown } | undefined;
+      try {
+        json = JSON.parse(said.toString('utf8')) as { text?: unknown };
+      } catch {
+        json = undefined;
+      }
+      if (!json || typeof json !== 'object' || typeof json.text !== 'string') throw new Error('stt answered without text');
       return { text: json.text.replace(/\s+/g, ' ').trim() };
     },
   };
@@ -211,25 +319,9 @@ export function audioTypeOf(header: string | null | undefined, fallback: AudioTy
  * is (what the OpenAI path has always done) instead of being an error.
  */
 async function readSpeech(res: Response, fallback: AudioType, onFirstAudio?: () => void, allowEmpty = false): Promise<Speech> {
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  if (res.body) {
-    const reader = res.body.getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value || value.length === 0) continue;
-      if (size === 0) onFirstAudio?.();
-      size += value.length;
-      if (size > MAX_SPEECH_BYTES) {
-        await reader.cancel().catch(() => {});
-        throw new Error('tts answered with too much audio');
-      }
-      chunks.push(value);
-    }
-  }
-  if (size === 0 && !allowEmpty) throw new Error('tts answered with no audio');
-  return { audio: Buffer.concat(chunks), contentType: audioTypeOf(res.headers.get('content-type'), fallback) };
+  const audio = await readCapped(res, MAX_SPEECH_BYTES, 'tts answered with too much audio', onFirstAudio);
+  if (audio.length === 0 && !allowEmpty) throw new Error('tts answered with no audio');
+  return { audio, contentType: audioTypeOf(res.headers.get('content-type'), fallback) };
 }
 
 /** Neural text-to-speech for a human voice (OpenAI). With no key it cannot speak, and the client uses its own voice. */
@@ -251,7 +343,10 @@ export function openAiTts(opts: { apiKey?: string | undefined; model: string; vo
         ...(o.signal ? { signal: o.signal } : {}),
       });
       if (!r.ok) throw new Error(`tts HTTP ${r.status}`);
-      return readSpeech(r, 'audio/mpeg', o.onFirstAudio, true);
+      // mp3 was asked for, and a client is told mp3, as it always was: what OpenAI calls its answer is not passed on.
+      // An answer with no audio is handed on as it is, as it always was.
+      const { audio } = await readSpeech(r, 'audio/mpeg', o.onFirstAudio, true);
+      return { audio, contentType: 'audio/mpeg' };
     },
   };
 }
@@ -286,35 +381,45 @@ export function openAiCompatTts(opts: { baseURL: string; model: string; voice: s
  * SAY_VOICE_RE is ever one. The text and the audio live for the length of the
  * call in a directory only this user can read, in files only this user can
  * read, and the directory is removed whatever happens.
+ *
+ * Each reply is a program of its own, so they are held to a line (`sayLine`):
+ * two at a time, a few waiting, and past that `SpeechBusy`. When the caller's
+ * `signal` fires (the client hung up), a reply that is waiting leaves the
+ * line, and one that is being spoken has its `say` stopped; either way its
+ * files are gone when this returns.
  */
-export function macSayTts(opts: { voice?: string | undefined; run?: Run; timeoutMs?: number } = {}): TtsProvider {
+export function macSayTts(opts: { voice?: string | undefined; run?: Run; timeoutMs?: number; atOnce?: number; waiting?: number } = {}): TtsProvider {
   if (opts.voice !== undefined && !SAY_VOICE_RE.test(opts.voice)) throw new Error('the say voice is not a voice name');
   const run = opts.run ?? runFile;
   const voice = opts.voice;
+  const inLine = sayLine(opts.atOnce, opts.waiting);
   return {
     name: 'say',
     local: true,
     ...(voice ? { voice } : {}),
-    async synthesize(text, o = {}) {
-      const dir = mkdtempSync(join(tmpdir(), 'flint-say-'));
-      try {
-        const textFile = join(dir, 'text.txt');
-        const out = join(dir, 'speech.m4a');
-        writeFileSync(textFile, text.slice(0, TTS_MAX_CHARS), { mode: 0o600 });
-        // The audio file is made here, private, before `say` writes into it.
-        writeFileSync(out, '', { mode: 0o600 });
-        await run(SAY, ['-o', out, '--file-format=m4af', '--data-format=aac', '-f', textFile, ...(voice ? ['-v', voice] : [])], {
-          timeout: opts.timeoutMs ?? SAY_TIMEOUT_MS,
-          killSignal: 'SIGKILL',
-          env: {},
-        });
-        const audio = readFileSync(out);
-        if (audio.length === 0) throw new Error('say wrote no audio');
-        o.onFirstAudio?.();
-        return { audio, contentType: 'audio/mp4' };
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
-      }
+    synthesize(text, o = {}) {
+      return inLine(async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'flint-say-'));
+        try {
+          const textFile = join(dir, 'text.txt');
+          const out = join(dir, 'speech.m4a');
+          writeFileSync(textFile, text.slice(0, TTS_MAX_CHARS), { mode: 0o600 });
+          // The audio file is made here, private, before `say` writes into it.
+          writeFileSync(out, '', { mode: 0o600 });
+          await run(SAY, ['-o', out, '--file-format=m4af', '--data-format=aac', '-f', textFile, ...(voice ? ['-v', voice] : [])], {
+            timeout: opts.timeoutMs ?? SAY_TIMEOUT_MS,
+            killSignal: 'SIGKILL',
+            env: {},
+            ...(o.signal ? { signal: o.signal } : {}),
+          });
+          const audio = readFileSync(out);
+          if (audio.length === 0) throw new Error('say wrote no audio');
+          o.onFirstAudio?.();
+          return { audio, contentType: 'audio/mp4' as const };
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }, o.signal);
     },
   };
 }
@@ -345,6 +450,8 @@ export interface VoicePlan {
  *  - hearing on a local server with no address (unset, or refused: another machine's, a proxied one): whisper.cpp, on this Mac;
  *  - speaking on a local server with no address: OFF, never OpenAI in its place;
  *  - `say` on a machine that is not a Mac: OFF.
+ * Every setting comes from config, checked; `env` is read for one thing only,
+ * whether OpenAI has a key.
  */
 export function planVoice(cfg: Pick<InferenceConfig, 'voice' | 'problems'>, env: Record<string, string | undefined>, o: { platform?: NodeJS.Platform; home?: string } = {}): VoicePlan {
   const v = cfg.voice;
@@ -353,10 +460,10 @@ export function planVoice(cfg: Pick<InferenceConfig, 'voice' | 'problems'>, env:
   const stt: VoicePlan['stt'] =
     v.stt === 'local' && v.sttServer
       ? { name: 'local', local: true, server: v.sttServer, model: v.sttModel, ...(v.apiKey ? { apiKey: v.apiKey } : {}) }
-      : { name: 'whisper-cpp', local: true, ...whisperPaths(env, o.home) };
+      : { name: 'whisper-cpp', local: true, ...whisperPaths(v, o.home) };
   let tts: VoicePlan['tts'];
   if (v.tts === 'openai') {
-    tts = { name: 'openai', local: false, model: env.FLINT_TTS_MODEL?.trim() || 'tts-1', voice: env.FLINT_TTS_VOICE?.trim() || 'onyx', hasKey: !!env.OPENAI_API_KEY?.trim() };
+    tts = { name: 'openai', local: false, ...openAiSpeech(v), hasKey: !!env.OPENAI_API_KEY?.trim() };
   } else if (v.tts === 'local') {
     tts = v.ttsServer
       ? { name: 'local', local: true, server: v.ttsServer, model: v.ttsModel, voice: v.ttsVoice, ...(v.apiKey ? { apiKey: v.apiKey } : {}) }
@@ -411,16 +518,19 @@ export function buildVoice(plan: VoicePlan, deps: BuildVoiceDeps): Voice {
   return { stt, tts };
 }
 
+/** Where a local speech server is, as a line says it: never its address. (Config lets it be at this Mac, or at the model server Will allowed.) */
+export const whereOf = (at: Pick<LocalUrlOk, 'loopback'>): string => (at.loopback ? 'on this Mac' : 'on the allowed model server');
+
 /** One boot line: what hears and what speaks, by provider and model. Never a path, an address or a key. */
 export function voiceLine(plan: VoicePlan): string {
   const s = plan.stt;
   const t = plan.tts;
-  const hears = s.name === 'local' ? `local server ${s.server.host} (${s.model})` : `whisper-cpp (${s.model.replace(/^.*[\\/]/, '')})`;
+  const hears = s.name === 'local' ? `local server ${whereOf(s.server)} (${s.model})` : `whisper-cpp (${fileNameOf(s.model)})`;
   const speaks =
     t.name === 'openai'
       ? `openai (${t.model}, ${t.voice})${t.hasKey ? '' : ', no key'}`
       : t.name === 'local'
-        ? `local server ${t.server.host} (${t.model}, ${t.voice})`
+        ? `local server ${whereOf(t.server)} (${t.model}, ${t.voice})`
         : t.name === 'say'
           ? `say${t.voice ? ` (${t.voice})` : ''}`
           : `off (${t.why === 'set' ? 'set' : t.why === 'invalid' ? 'the setting was refused' : t.why === 'no_server' ? 'no local speech server' : 'say needs a Mac'})`;

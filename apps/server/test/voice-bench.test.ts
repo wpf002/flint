@@ -13,30 +13,35 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { main } from '../scripts/voice-bench';
+import { SERVER_HOST, main, serverArgs, startWhisperServer } from '../scripts/voice-bench';
 import {
   CLIP_RATES,
   CLIP_VOICES,
+  OUTSIDE_SPEND_RECORD,
   SENTENCES,
   USAGE,
   WHISPER_MODELS,
+  defaultOut,
   hintsFor,
   paidPlan,
+  paidSpent,
   parseBenchArgs,
   renderBench,
   runBench,
   sayToWav,
   sayVoices,
+  shellWord,
+  speakAll,
   spread,
   wavSeconds,
   type BenchArgs,
   type BenchDeps,
   type StartedServer,
 } from '../src/voice-bench';
-import type { Run } from '../src/voice';
+import type { Run, TtsProvider } from '../src/voice';
 
 let dir: string;
 const servers: Server[] = [];
@@ -103,7 +108,7 @@ const VOICE_LIST = [
 
 interface Rig {
   deps: BenchDeps;
-  ran: Array<{ file: string; args: string[] }>;
+  ran: Array<{ file: string; args: string[]; opts?: Record<string, unknown> | undefined }>;
   log: string[];
   clock: { ms: number };
   started: Array<{ bin: string; model: string; stopped: boolean }>;
@@ -137,8 +142,8 @@ function rig(over: { env?: Record<string, string>; models?: string[]; missing?: 
     const swap = mishear.get(model.replace(/^.*\//, ''));
     return swap ? said.replace(swap[0], swap[1]) : said;
   };
-  const run: Run = async (file, args) => {
-    ran.push({ file, args: [...args] });
+  const run: Run = async (file, args, opts) => {
+    ran.push({ file, args: [...args], opts: opts as Record<string, unknown> | undefined });
     if (file === SAY && args[0] === '-v' && args[1] === '?') return { stdout: VOICE_LIST };
     if (file === SAY) {
       clock.ms += 500;
@@ -251,11 +256,15 @@ describe('the arguments', () => {
       ['--out'],
       ['--out', '--json'],
       ['--models-dir', ''],
+      // A folder is printed in the results: one with a line break or an escape in it is no folder.
+      ['--models-dir', '/m\n## Not on this Mac'],
+      ['--out', '/tmp/x\u001b[2J'],
+      ['--clips', '/c\u202egnp'],
     ];
     for (const argv of bad) {
       const r = parseBenchArgs(argv);
       expect('error' in r, argv.join(' ')).toBe(true);
-      expect(JSON.stringify(r), argv.join(' ')).not.toMatch(/SECRET|passwd|elevenlabs|lots|1e3|;rm/);
+      expect(JSON.stringify(r), argv.join(' ')).not.toMatch(/SECRET|passwd|elevenlabs|lots|1e3|;rm|Not on this Mac|2J|gnp/);
     }
   });
 });
@@ -281,6 +290,12 @@ describe('the paid provider: an estimate first, and a cap', () => {
     const ok = paidPlan({ tts: ['openai'], budgetUsd: 1 }, SENTENCES, { model: 'tts-1', hasKey: true });
     expect(ok).toMatchObject({ asked: true, run: true, budgetUsd: 1 });
     expect(ok.asked && ok.sentence).toContain(`for about $${estimate.toFixed(4)}, within the $1.00 you allowed.`);
+    // L10: said before anything is sent. Flint's own budget knows nothing of this run.
+    expect(OUTSIDE_SPEND_RECORD).toBe("This is outside Flint's spend record: Flint's budget neither counts it nor stops it.");
+    expect(ok.asked && ok.sentence.endsWith(` ${OUTSIDE_SPEND_RECORD}`)).toBe(true);
+    // ...and afterwards, with what was really sent.
+    expect(paidSpent(10, 552, 0.00828).sentence).toBe(`OpenAI speech was sent 10 sentences, 552 characters, which costs about $0.0083. ${OUTSIDE_SPEND_RECORD}`);
+    expect(paidSpent(1, 54, 0.00081).sentence).toContain('was sent 1 sentence, 54 characters,');
     // A dearer model is a dearer estimate.
     const hd = paidPlan({ tts: ['openai'], budgetUsd: 1 }, SENTENCES, { model: 'tts-1-hd', hasKey: true });
     expect(hd.asked && hd.estimateUsd).toBeCloseTo(estimate * 2, 10);
@@ -310,11 +325,14 @@ describe('the small pieces', () => {
   });
 
   it('sayToWav: the text is in a file and never an argument, the arguments are fixed, and -o is always there', async () => {
-    const ran: Array<{ file: string; args: string[] }> = [];
+    const ran: Array<{ file: string; args: string[]; opts: unknown }> = [];
     const files = new Map<string, string>();
-    const d = { run: (async (file, a) => (ran.push({ file, args: [...a] }), { stdout: '' })) as Run, writeFile: (p: string, data: Buffer | string) => void files.set(p, String(data)) };
+    const d = { run: (async (file, a, opts) => (ran.push({ file, args: [...a], opts }), { stdout: '' })) as Run, writeFile: (p: string, data: Buffer | string) => void files.set(p, String(data)) };
     await sayToWav(d, { text: '-v Zarvox; say this $(reboot)', textFile: '/t/one.txt', out: '/t/one.wav', voice: 'Eddy (English (US))', rate: 220 });
-    expect(ran).toEqual([{ file: '/usr/bin/say', args: ['-o', '/t/one.wav', '--file-format=WAVE', '--data-format=LEI16@16000', '-r', '220', '-v', 'Eddy (English (US))', '-f', '/t/one.txt'] }]);
+    // The review's M31: `say` is handed NO environment (not this process's, with its keys and its tokens), and a time limit it cannot ignore.
+    expect(ran).toEqual([
+      { file: '/usr/bin/say', args: ['-o', '/t/one.wav', '--file-format=WAVE', '--data-format=LEI16@16000', '-r', '220', '-v', 'Eddy (English (US))', '-f', '/t/one.txt'], opts: { timeout: 60_000, killSignal: 'SIGKILL', env: {} } },
+    ]);
     expect(files.get('/t/one.txt')).toBe('-v Zarvox; say this $(reboot)');
     expect(ran[0]!.args.join(' ')).not.toContain('reboot');
     // A voice or a rate that is not one is refused before anything runs.
@@ -338,25 +356,40 @@ describe('the small pieces', () => {
 
 describe('what is not on this Mac: a command for each, and none of them run', () => {
   it('a model that is here is not offered; one that is not gets the exact line to fetch it, and where it goes', () => {
-    const h = hintsFor({ whisperCli: true, whisperServer: true, say: true, models: ['ggml-base.en.bin', 'ggml-small.en.bin'], localTtsSet: false });
+    const HERE = { modelsDir: '/Users/will/.flint/models', home: '/Users/will' };
+    const h = hintsFor({ whisperCli: true, whisperServer: true, say: true, models: ['ggml-base.en.bin', 'ggml-small.en.bin'], localTtsSet: false, ...HERE });
     expect(h.map((x) => x.what)).toEqual(['the speech model ggml-large-v3-turbo-q5_0.bin', 'the speech model ggml-large-v3-turbo.bin', 'a neural voice on this Mac']);
+    // The review's M2. The setting is the FULL path: neither the settings file nor a LaunchAgent expands `~`, and
+    // the line this printed before ("set WHISPER_MODEL=~/.flint/models/...") failed every recording when followed.
+    // The command is typed in Terminal, which does read `~`, so there the usual folder is written the short way.
     expect(h[0]).toMatchObject({
       command: 'curl -L --fail --create-dirs -o ~/.flint/models/ggml-large-v3-turbo-q5_0.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin',
       disk: 'about 574 MB',
-      then: 'To use it: set WHISPER_MODEL=~/.flint/models/ggml-large-v3-turbo-q5_0.bin and restart Flint.',
+      then: 'To use it: set WHISPER_MODEL=/Users/will/.flint/models/ggml-large-v3-turbo-q5_0.bin and restart Flint.',
     });
+    for (const x of h) expect(x.then ?? '', x.what).not.toMatch(/=~|= ~/);
+    // Models kept somewhere else: the line fetches into THAT folder (so the next run finds the model), quoted when
+    // the folder's name needs it, and the setting names it there.
+    const kept = hintsFor({ whisperCli: true, whisperServer: true, say: true, models: [], localTtsSet: true, modelsDir: "/Volumes/Big Disk/will's models", home: '/Users/will' });
+    expect(kept[0]).toMatchObject({
+      command: "curl -L --fail --create-dirs -o '/Volumes/Big Disk/will'\\''s models/ggml-base.en.bin' https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
+      then: "To use it: set WHISPER_MODEL=/Volumes/Big Disk/will's models/ggml-base.en.bin and restart Flint.",
+    });
+    expect(shellWord('/opt/models/ggml-base.en.bin')).toBe('/opt/models/ggml-base.en.bin');
+    expect(shellWord('/a b/$(reboot);x')).toBe("'/a b/$(reboot);x'");
     // Every one of them says it was not tried here: this file installs nothing.
     expect(h.every((x) => x.tried === false)).toBe(true);
     for (const m of WHISPER_MODELS) expect(m.file).toMatch(/^ggml-[a-z0-9._-]+\.bin$/);
   });
 
   it('no whisper.cpp: the one line that installs it; a local speech server already set: no line for one', () => {
-    const none = hintsFor({ whisperCli: false, whisperServer: false, say: true, models: [], localTtsSet: true });
+    const HERE = { modelsDir: '/Users/will/.flint/models', home: '/Users/will' };
+    const none = hintsFor({ whisperCli: false, whisperServer: false, say: true, models: [], localTtsSet: true, ...HERE });
     expect(none[0]).toMatchObject({ what: 'whisper.cpp', command: 'brew install whisper-cpp' });
     expect(none.map((x) => x.what)).not.toContain('a neural voice on this Mac');
     expect(none.filter((x) => x.what.startsWith('the speech model'))).toHaveLength(WHISPER_MODELS.length);
     // The speech server it suggests is published on this Mac alone.
-    const voice = hintsFor({ whisperCli: true, whisperServer: true, say: true, models: [], localTtsSet: false }).at(-1)!;
+    const voice = hintsFor({ whisperCli: true, whisperServer: true, say: true, models: [], localTtsSet: false, ...HERE }).at(-1)!;
     expect(voice.command).toContain('-p 127.0.0.1:8880:8880');
     expect(voice.then).toContain('FLINT_LOCAL_TTS_BASE_URL=http://127.0.0.1:8880/v1');
   });
@@ -391,8 +424,13 @@ describe('a whole run, on stand-ins', () => {
     // The server: the recording is made into WAV (10 ms) and posted (80 ms); it took 300 ms to start.
     expect(server).toMatchObject({ n: 20, medianMs: 90, realTimeFactor: 0.045, errors: 2, loadMs: 300, firstMs: 90 });
     expect(small).toMatchObject({ errors: 0, wordErrorRate: 0 });
-    // A model is named by its file, never by where it is.
-    expect(JSON.stringify(result)).not.toContain(dir);
+    // A model is named by its file, never by where it is. The one place a folder of this Mac is written is the
+    // setting a missing model would need, which has to be the full path (M2).
+    expect(JSON.stringify({ ...result, notInstalled: [] })).not.toContain(dir);
+    expect(result.notInstalled.filter((h) => JSON.stringify(h).includes(dir)).map((h) => h.then)).toEqual([
+      `To use it: set WHISPER_MODEL=${join(r.deps.home, '.flint', 'models', 'ggml-large-v3-turbo-q5_0.bin')} and restart Flint.`,
+      `To use it: set WHISPER_MODEL=${join(r.deps.home, '.flint', 'models', 'ggml-large-v3-turbo.bin')} and restart Flint.`,
+    ]);
 
     // Speaking: the Mac's usual voice, then each voice the clips were spoken in; whole files, heard back with the usual model.
     expect(result.tts.map((t) => [t.engine, t.voice, t.n])).toEqual([
@@ -425,6 +463,10 @@ describe('a whole run, on stand-ins', () => {
     }
     // The one say call with no file to write is the one that lists voices.
     expect(r.ran.filter((x) => x.file === SAY && !x.args.includes('-o')).map((x) => x.args)).toEqual([['-v', '?']]);
+    // M31: every `say` of the run, the listing too, is handed an empty environment.
+    const says = r.ran.filter((x) => x.file === SAY);
+    expect(says.length).toBeGreaterThan(20);
+    for (const call of says) expect(call.opts?.env, call.args.join(' ')).toEqual({});
     // Every request went to this Mac.
     expect(r.fetched.length).toBeGreaterThan(0);
     for (const url of r.fetched) expect(new URL(url).hostname).toBe('127.0.0.1');
@@ -463,7 +505,7 @@ describe('a whole run, on stand-ins', () => {
     const [base] = result.stt;
     // 15 words said (7 and 8); the airport clip was heard without "does it take" (3 missing).
     expect(base).toMatchObject({ engine: 'whisper-cpp', model: 'ggml-base.en.bin', n: 2, audioSeconds: 7, words: 15, errors: 3, byVoice: { 'your clips': 0.2 }, byRate: {} });
-    expect(result.notes).toEqual(['1 clips had no text file beside them saying what was said, so they were left out.', '1 clips could not be read and were left out.']);
+    expect(result.notes).toEqual(['1 clip had no text file beside it saying what was said, so it was left out.', '1 clip could not be read and was left out.']);
     // No synthetic clip was made, and his own were not copied: the WAV each was measured by is gone.
     expect(r.ran.filter((x) => x.file === SAY && x.args.includes('-o'))).toEqual([]);
     expect(readdirSync(join(r.out, 'clips'))).toEqual([]);
@@ -476,6 +518,13 @@ describe('a whole run, on stand-ins', () => {
     const empty = await runBench(args({ out: none.out, clips: join(dir, 'nowhere'), stt: ['whisper-cpp'], tts: [] }), none.deps);
     expect(empty.stt).toEqual([]);
     expect(empty.notes).toContain('No clip with a text file beside it was found in that folder, so nothing was heard.');
+    // More than one: said in the plural.
+    writeFileSync(join(mine, 'also-no-words.wav'), fakeWav('nothing beside this one either'));
+    writeFileSync(join(mine, 'also-broken.wav'), 'not audio');
+    writeFileSync(join(mine, 'also-broken.txt'), 'something');
+    const more = rig();
+    const two = await runBench(args({ out: more.out, clips: mine, stt: ['whisper-cpp'], tts: [] }), more.deps);
+    expect(two.notes).toEqual(['2 clips had no text file beside them saying what was said, so they were left out.', '2 clips could not be read and were left out.']);
   });
 
   it('the options choose what is measured, and voices this Mac does not have are said, not spoken', async () => {
@@ -563,10 +612,22 @@ describe('a whole run, on stand-ins', () => {
     // Named, with a cap that covers it: the estimate is the first thing said, then it is called.
     const r = rig({ env });
     const result = await runBench(args({ out: r.out, voices: ['Samantha'], rates: [175], stt: [], tts: ['openai'], budgetUsd: 1 }), { ...r.deps, fetch: openai });
-    expect(r.log[0]).toMatch(/^OpenAI speech is a paid service\. This run would send it 10 sentences, \d+ characters, for about \$0\.00\d+, within the \$1\.00 you allowed\.$/);
+    // L10. Said first, before anything is sent: what it would cost, and that Flint's own budget knows nothing of it.
+    expect(r.log[0]).toMatch(/^OpenAI speech is a paid service\. This run would send it 10 sentences, \d+ characters, for about \$0\.00\d+, within the \$1\.00 you allowed\. This is outside Flint's spend record: Flint's budget neither counts it nor stops it\.$/);
     expect(calls).toEqual([...SENTENCES]);
     expect(result.tts.map((t) => [t.engine, t.n])).toEqual([['openai', 10]]);
     expect(result.tts[0]!.estimateUsd).toBeGreaterThan(0);
+    // ...and said again when it is over, with what was really sent and what that costs.
+    const chars = SENTENCES.reduce((n, x) => n + x.length, 0);
+    const after = `OpenAI speech was sent 10 sentences, ${chars} characters, which costs about $${((chars * 15) / 1_000_000).toFixed(4)}. ${OUTSIDE_SPEND_RECORD}`;
+    expect(r.log.at(-1)).toBe(after);
+    expect(result.paidSpent).toMatchObject({ sentences: 10, chars, sentence: after });
+    expect(result.paidSpent!.usd).toBeCloseTo((chars * 15) / 1_000_000, 10);
+    expect(result.tts[0]!.sent).toMatchObject({ sentences: 10, chars });
+    const page = renderBench(result);
+    expect(page).toContain(`## The paid provider\n\n${r.log[0]}\n\n${after}\n`);
+    // A run that sends nothing says nothing of having sent.
+    expect(quiet.log.join('\n')).not.toContain('OpenAI');
     expect(JSON.stringify(result) + r.log.join('\n')).not.toContain('sk-test');
     // Named and not allowed (runBench alone, without the command's own stop): nothing is sent.
     calls.length = 0;
@@ -575,8 +636,44 @@ describe('a whole run, on stand-ins', () => {
       const out = await runBench(args({ out: no.out, voices: ['Samantha'], rates: [175], stt: [], tts: ['openai'], ...over }), { ...no.deps, fetch: openai });
       expect(out.tts).toEqual([]);
       expect(out.paid).toMatchObject({ asked: true, run: false });
+      expect(out.paidSpent).toBeUndefined();
+      expect(no.log.join('\n')).not.toContain('was sent');
     }
     expect(calls).toEqual([]);
+  });
+
+  // The review's M13: the stop inside the paid run was held by no test. The estimate is checked before the run
+  // starts; this is the second fence, sentence by sentence, for a run whose sentences cost more than was estimated.
+  it('a paid engine stops before the sentence that would pass the cap, and says what it sent: nothing after that is sent', async () => {
+    const r = rig();
+    const sent: string[] = [];
+    const paid: TtsProvider = {
+      name: 'openai',
+      local: false,
+      vendor: 'openai',
+      model: 'tts-1',
+      voice: 'onyx',
+      synthesize: async (text) => (sent.push(text), { audio: fakeWav(text), contentType: 'audio/wav' }),
+    };
+    const cost = (n: number): number => (SENTENCES.slice(0, n).reduce((a, x) => a + x.length, 0) * 15) / 1_000_000;
+    // A cap that covers three sentences and not the fourth.
+    const row = await speakAll(r.deps, paid, 'openai', join(r.out, 'speech'), { capUsd: (cost(3) + cost(4)) / 2, estimateUsd: cost(10) });
+    expect(sent).toEqual(SENTENCES.slice(0, 3));
+    expect(row.n).toBe(3);
+    expect(row.sent).toMatchObject({ sentences: 3, chars: SENTENCES.slice(0, 3).reduce((a, x) => a + x.length, 0) });
+    expect(row.sent!.usd).toBeCloseTo(cost(3), 10);
+    // A cap below the first sentence: nothing is sent at all.
+    sent.length = 0;
+    const none = await speakAll(r.deps, paid, 'openai', join(r.out, 'speech'), { capUsd: cost(1) / 2 });
+    expect(sent).toEqual([]);
+    expect(none.sent).toEqual({ sentences: 0, chars: 0, usd: 0 });
+    // A sentence that was sent and came back as nothing is still counted as sent: it is what is charged for.
+    const mute: TtsProvider = { ...paid, synthesize: async (text) => (sent.push(text), null) };
+    const lost = await speakAll(r.deps, mute, 'openai', join(r.out, 'speech'), { capUsd: 1 });
+    expect([lost.n, lost.failed, lost.sent!.sentences]).toEqual([0, 10, 10]);
+    // An engine with no cap (one on this Mac) is never stopped, and reports nothing sent.
+    const free = await speakAll(r.deps, { ...paid, name: 'say', local: true }, 'say', join(r.out, 'speech'));
+    expect([free.n, free.sent]).toEqual([10, undefined]);
   });
 });
 
@@ -596,8 +693,11 @@ describe('the report', () => {
     expect(page).toContain('Nothing below was run or downloaded.');
     expect(page).toContain('  curl -L --fail --create-dirs -o ~/.flint/models/ggml-large-v3-turbo.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin');
     expect(page.trimEnd().endsWith('No setting was changed by this run.')).toBe(true);
-    // No path of this machine is in it.
-    expect(page).not.toContain(dir);
+    // M2: the setting for a model that is not here is its full path, with no `~` for nothing to expand.
+    expect(page).toContain(`  To use it: set WHISPER_MODEL=${join(r.deps.home, '.flint', 'models', 'ggml-large-v3-turbo.bin')} and restart Flint.`);
+    expect(page).not.toMatch(/WHISPER_MODEL=~/);
+    // No other path of this machine is in it.
+    expect(page.replace(/To use it: set WHISPER_MODEL=[^\n]*/g, '')).not.toContain(dir);
   });
 });
 
@@ -651,13 +751,69 @@ describe('the command', () => {
     expect((JSON.parse(j.out[0]!) as { clips: { count: number } }).clips.count).toBe(10);
   });
 
-  it('with no folder named, the results go under the home folder Flint keeps, and nowhere in the repo', async () => {
+  // L8. The default was a folder under ~/.flint, which the nightly and the offsite backups carry: every clip of
+  // every run would have gone with them. It is the user's caches now, which no backup of Flint's takes.
+  it('with no folder named, everything goes under ~/Library/Caches/Flint/voice-bench, readable by this user alone, and nothing is written under ~/.flint', async () => {
     const r = rig();
     const o = io();
-    expect(await main(['--voices', 'Samantha', '--rates', '175', '--stt', 'whisper-cpp', '--tts', 'say'], { env: r.deps.env, home: r.deps.home, ...o.d, bench: r.deps })).toBe(0);
-    const made = join(r.deps.home, '.flint', 'eval', 'voice-bench', '2026-10-13T06-00-00-000Z');
-    expect(existsSync(join(made, 'results.md'))).toBe(true);
-    expect(dirname(made)).toBe(join(r.deps.home, '.flint', 'eval', 'voice-bench'));
+    const flint = join(r.deps.home, '.flint');
+    const before = readdirSync(flint, { recursive: true }).map(String).sort();
+    // The command's own way of making folders and files (everything else of the machine is the stand-ins').
+    const { mkdir: _mkdir, writeFile: _writeFile, ...standIns } = r.deps;
+    expect(await main(['--voices', 'Samantha', '--rates', '175', '--stt', 'whisper-cpp', '--tts', 'say'], { env: r.deps.env, home: r.deps.home, ...o.d, bench: standIns })).toBe(0);
+    const made = join(r.deps.home, 'Library', 'Caches', 'Flint', 'voice-bench', '2026-10-13T06-00-00-000Z');
+    expect(defaultOut(r.deps.home, '2026-10-13T06:00:00.000Z', join)).toBe(made);
+    expect(o.err.at(-1)).toBe(`The clips, the speech and the results are in ${made}.`);
+    expect(readdirSync(made).sort()).toEqual(['clips', 'results.json', 'results.md', 'speech']);
+    expect(readdirSync(join(made, 'clips')).filter((f) => f.endsWith('.wav'))).toHaveLength(10);
+    // The folders are this user's alone, and so is every file the command itself writes.
+    for (const folder of [join(r.deps.home, 'Library', 'Caches', 'Flint'), dirname(made), made, join(made, 'clips'), join(made, 'speech')]) expect(statSync(folder).mode & 0o777, folder).toBe(0o700);
+    for (const file of ['results.json', 'results.md', join('clips', 'samantha-175-01.txt')]) expect(statSync(join(made, file)).mode & 0o777, file).toBe(0o600);
+    // Not one file or folder was added under ~/.flint.
+    expect(readdirSync(flint, { recursive: true }).map(String).sort()).toEqual(before);
+    expect(USAGE).toContain('default: a dated folder under ~/Library/Caches/Flint/voice-bench');
+    expect(USAGE).not.toContain('.flint/eval');
+    // What the programs it runs leave behind (the audio `say` and afconvert write) is this user's alone too: the
+    // command sets its own file mask before anything else, and a program it starts keeps it.
+    const entry = readFileSync(join(__dirname, '..', 'scripts', 'voice-bench.ts'), 'utf8');
+    const start = entry.indexOf("if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {");
+    expect(start).toBeGreaterThan(-1);
+    expect(entry.slice(start).replace(/\s*\/\/[^\n]*/g, '')).toMatch(/^if \(import\.meta\.url === pathToFileURL\(process\.argv\[1\] \?\? ''\)\.href\) \{\n  process\.umask\(0o077\);/);
+  });
+
+  // The review's M32: nothing held where the transcription server it starts listens.
+  it('the transcription server it starts is given this Mac alone to listen on, and is asked there', async () => {
+    expect(SERVER_HOST).toBe('127.0.0.1');
+    expect(serverArgs('/m/ggml-base.en.bin', 8178)).toEqual(['-m', '/m/ggml-base.en.bin', '--host', '127.0.0.1', '--port', '8178', '--inference-path', '/v1/audio/transcriptions']);
+    // Started for real, with a stand-in for the program: a script that records what it was started with, and
+    // listens where it was told to. (Its interpreter is this one, by its full path: the server is handed no PATH of ours.)
+    const record = join(dir, 'started.json');
+    const bin = join(dir, 'whisper-server');
+    writeFileSync(
+      bin,
+      [
+        `#!${process.execPath}`,
+        "const http = require('node:http'); const fs = require('node:fs');",
+        'const a = process.argv.slice(2); const at = (f) => a[a.indexOf(f) + 1];',
+        `fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({ args: a, env: Object.keys(process.env).sort() }));`,
+        "http.createServer((q, s) => s.end('ok')).listen(Number(at('--port')), at('--host'));",
+        '',
+      ].join('\n'),
+    );
+    chmodSync(bin, 0o755);
+    const server = await startWhisperServer(bin, '/m/ggml-base.en.bin');
+    try {
+      expect(server).toBeDefined();
+      const port = Number(new URL(server!.baseURL).port);
+      expect(server!.baseURL).toBe(`http://127.0.0.1:${port}/v1`);
+      const was = JSON.parse(readFileSync(record, 'utf8')) as { args: string[]; env: string[] };
+      expect(was.args).toEqual(serverArgs('/m/ggml-base.en.bin', port));
+      expect(was.args[was.args.indexOf('--host') + 1]).toBe('127.0.0.1');
+      // It was handed three plain variables, and nothing of this process's environment: no key, no token.
+      expect(was.env.filter((k) => !k.startsWith('__'))).toEqual(['HOME', 'PATH', 'TMPDIR']);
+    } finally {
+      await server?.stop();
+    }
   });
 
   it('nothing could be measured: exit 1, and the page says why', async () => {

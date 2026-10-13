@@ -552,7 +552,10 @@ describe('what it shows', () => {
     expect([p.ids.spval!.textContent, p.ids.spsub!.textContent]).toEqual(['Off', 'Each device speaks with its own voice.']);
   });
 
-  it('nothing in the voice rows is a tag, a key, a path, an address or a bracket, whatever the settings', () => {
+  // One name is shown as it is set: a voice of the Mac's own, which the Mac itself names with brackets
+  // ("Eddy (English (US))"). Config takes one only as letters, spaces, brackets and hyphens, so it is a name and
+  // nothing else. Everything else in the two rows is words Flint wrote.
+  it('nothing in the voice rows is a tag, a key, a path or an address, whatever the settings; a voice of the Mac is shown as the Mac names it', () => {
     const p = page();
     const envs: Array<Record<string, string>> = [
       {},
@@ -567,7 +570,13 @@ describe('what it shows', () => {
       for (const mode of ['local', 'hybrid', 'cloud'] as const) {
         p.render(status({ env, mode }));
         const shown = [p.ids.spval!.textContent, p.ids.spsub!.textContent, p.ids.trval!.textContent, p.ids.trsub!.textContent];
+        const macVoice = env.FLINT_TTS_PROVIDER === 'say' ? env.FLINT_SAY_VOICE : undefined;
+        if (macVoice) expect(p.ids.spval!.textContent).toBe(macVoice);
         for (const text of shown) {
+          if (macVoice && text === macVoice) {
+            expect(text).toMatch(/^[A-Za-z][A-Za-z ()-]{0,39}$/);
+            continue;
+          }
           expect(text, JSON.stringify(env)).not.toMatch(/[/\\~()_:{}\[\]]|https?|FLINT_|127\.0\.0\.1|speech\.example|\.bin|tts-1|whisper-1|kokoro|ggml/);
         }
         for (const line of [p.ids.spsub!.textContent, p.ids.trsub!.textContent]) expect(line, JSON.stringify(env)).toMatch(/^[A-Z][^\n]*\.$/);

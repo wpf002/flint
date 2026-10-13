@@ -9,15 +9,15 @@
  * real `speechStaysHere` over a real conversation store.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SPEECH_STAYS_HERE, speechStaysHere } from '../src/goals-chat';
 import { GOALS_TURN } from '../src/goals-now';
 import { PRIVATE_TURN } from '../src/private-turns';
-import { SPEECH_OFF, speak, speechMadeHere, type SpeakDeps } from '../src/speech-route';
+import { SPEECH_BUSY, SPEECH_OFF, speak, speechMadeHere, type SpeakDeps } from '../src/speech-route';
 import { SpendGuard, SpendLedger } from '../src/spend';
-import { TTS_MAX_CHARS, offTts, type AudioType, type TtsProvider } from '../src/voice';
+import { SpeechBusy, TTS_MAX_CHARS, macSayTts, offTts, type AudioType, type Run, type TtsProvider } from '../src/voice';
 import { cleanup, storedTurn, tmpStore } from './goals-mini';
 
 let dir: string;
@@ -204,6 +204,60 @@ describe('/speak over a real conversation store: the rule main has, for each kin
       }
       expect(spoken, tts.name).toEqual(tts.local ? replies.map((r) => r.text) : ['Paris.']);
     }
+  });
+});
+
+// L2 and L9: this Mac's own voice is a program started for each reply.
+describe("/speak when this Mac's own voice is busy, and when the client hangs up", () => {
+  it('busy is a 429 with a sentence and the client’s own voice: not a 503, which a client reads as "stop asking for ten minutes"', async () => {
+    const busy: TtsProvider = { name: 'say', local: true, synthesize: async () => Promise.reject(new SpeechBusy()) };
+    const out = await speak(REPLY, deps(busy).d);
+    expect(out).toEqual({ status: 429, body: { error: SPEECH_BUSY, fallback: 'browser' } });
+    // A sentence a person can read, with no word of the reply in it.
+    expect(SPEECH_BUSY).toMatch(/^this Mac is already speaking .*own voice$/);
+    expect(SPEECH_BUSY).not.toContain('Dallas');
+  });
+
+  it('twenty replies at once through the real line: two are spoken at a time, eight wait, ten get the 429, and every one gets an answer', async () => {
+    let running = 0;
+    let most = 0;
+    const run: Run = async (_file, args) => {
+      running++;
+      most = Math.max(most, running);
+      await new Promise((r) => setTimeout(r, 15));
+      writeFileSync(args[args.indexOf('-o') + 1]!, 'aac');
+      running--;
+      return { stdout: '' };
+    };
+    const d = deps(macSayTts({ run })).d;
+    const all = await Promise.all(Array.from({ length: 20 }, (_, i) => speak({ text: `Sentence ${i}.` }, d)));
+    expect(all.map((r) => r.status)).toEqual([...Array.from({ length: 10 }, () => 200), ...Array.from({ length: 10 }, () => 429)]);
+    expect(most).toBe(2);
+    // The line empties: the next reply is spoken.
+    expect((await speak({ text: 'Again.' }, d)).status).toBe(200);
+  });
+
+  it('a provider on this Mac is handed the signal that fires when the client hangs up; a billed outside provider is not, as it never was', async () => {
+    const gone = new AbortController();
+    const got: Array<AbortSignal | undefined> = [];
+    const here: TtsProvider = { name: 'say', local: true, synthesize: async (_t, o) => (got.push(o?.signal), { audio: Buffer.from('a'), contentType: 'audio/mp4' }) };
+    await speak(REPLY, { ...deps(here).d, signal: gone.signal });
+    expect(got).toEqual([gone.signal]);
+    const seen: unknown[] = [];
+    const out: TtsProvider = { name: 'openai', local: false, vendor: 'openai', model: 'tts-1', synthesize: async (_t, o) => (seen.push(o), { audio: Buffer.from('a'), contentType: 'audio/mpeg' }) };
+    await speak(REPLY, { ...deps(out).d, signal: gone.signal });
+    expect(seen).toEqual([undefined]);
+    // With no signal, a provider is handed none.
+    got.length = 0;
+    await speak(REPLY, deps(here).d);
+    expect(got).toEqual([undefined]);
+  });
+
+  it('a reply dropped because its client left is the provider’s own error, for the route: it is not turned into "busy"', async () => {
+    const gone = new AbortController();
+    gone.abort();
+    const here = macSayTts({ run: async () => ({ stdout: '' }) });
+    await expect(speak(REPLY, { ...deps(here).d, signal: gone.signal })).rejects.toMatchObject({ name: 'AbortError' });
   });
 });
 

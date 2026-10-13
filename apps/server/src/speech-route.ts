@@ -10,6 +10,7 @@
  *   speech is off (`off`)                          503, the client's own voice
  *   the provider is on this Mac (`say`, a local speech server)
  *       every reply is spoken: the words go nowhere.
+ *       it has as many in hand as it takes         429, the client's own voice
  *   the provider is an outside service (OpenAI), and
  *     Flint is in Local mode                       503, the client's own voice
  *     the reply stays on this Mac                  409, the client's own voice
@@ -24,15 +25,23 @@
  * voice and the words are not sent.
  *
  * 409, not 503, for a reply that must stay here: a client reads a 503 as "the
- * neural voice is out" and stops asking for ten minutes.
+ * neural voice is out" and stops asking for ten minutes. 429 for the same
+ * reason when this Mac's own voice is busy: the next reply is asked for again.
+ *
+ * A client that hangs up takes its reply with it when the provider is on this
+ * Mac (`signal`): a `say` that was started for it is stopped. A billed
+ * provider is not told, as it never was: what it was sent is charged for.
  *
  * Kept free of index.ts so it is unit-testable (index.ts runs main() on import).
  */
 import { speakWithinBudget, type SpendGuard } from './spend';
-import { TTS_MAX_CHARS, type AudioType, type Speech, type TtsProvider } from './voice';
+import { SpeechBusy, TTS_MAX_CHARS, type AudioType, type Speech, type TtsProvider } from './voice';
 
 /** What `/speak` answers when no speech is made on the server at all. The client then speaks with its own voice. */
 export const SPEECH_OFF = 'speech is off on this server, so it is spoken with this device’s own voice';
+
+/** What `/speak` answers when this Mac's own voice has as many replies in hand as it takes. */
+export const SPEECH_BUSY = 'this Mac is already speaking as many replies as it can, so this one is spoken with this device’s own voice';
 
 /** Is this provider's speech made on this Mac, so that nothing it is given leaves? */
 export function speechMadeHere(tts: Pick<TtsProvider, 'name' | 'local'>): boolean {
@@ -48,11 +57,13 @@ export interface SpeakDeps {
   /** What a reply that stays here is refused with. */
   mustStaySentence: string;
   guard: SpendGuard;
+  /** Fires when the client hung up before its answer. Handed to a provider on this Mac only. */
+  signal?: AbortSignal;
 }
 
 export type SpeakResult =
   | { status: 200; audio: Buffer; contentType: AudioType }
-  | { status: 400 | 409 | 503; body: { error: string; fallback?: 'browser'; budget?: true } };
+  | { status: 400 | 409 | 429 | 503; body: { error: string; fallback?: 'browser'; budget?: true } };
 
 /**
  * Handle one `/speak` body. Every refusal is a result; it throws only what
@@ -88,7 +99,12 @@ export async function speak(body: Record<string, unknown>, deps: SpeakDeps): Pro
     if (spoken.status === 'budget') return { status: 503, body: { error: spoken.message, budget: true, fallback: 'browser' } };
     speech = made;
   } else {
-    speech = await tts.synthesize(text);
+    try {
+      speech = await tts.synthesize(text, deps.signal ? { signal: deps.signal } : {});
+    } catch (e) {
+      if (e instanceof SpeechBusy) return { status: 429, body: { error: SPEECH_BUSY, fallback: 'browser' } };
+      throw e;
+    }
   }
   if (!speech) return { status: 503, body: { error: SPEECH_OFF, fallback: 'browser' } };
   return { status: 200, audio: speech.audio, contentType: speech.contentType };

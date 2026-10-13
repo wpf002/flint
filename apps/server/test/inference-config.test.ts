@@ -469,7 +469,7 @@ describe('FLINT_EMBED_MODEL: the embedding model, in place of the tier table\'s'
     expect(readInferenceConfig({ FLINT_EMBED_MODEL: ' mxbai-embed-large ' }).local.embedModel).toBe('mxbai-embed-large');
     const bad = read({ FLINT_EMBED_MODEL: 'nomic; rm -rf ~' });
     expect(bad.cfg.local.embedModel).toBeUndefined();
-    expect(bad.cfg.problems).toEqual([{ key: 'FLINT_EMBED_MODEL', reason: 'has characters that are not allowed', kind: 'invalid' }]);
+    expect(bad.cfg.problems).toEqual([{ key: 'FLINT_EMBED_MODEL', reason: 'written with characters that are not allowed', kind: 'invalid' }]);
     expect(bad.warned.join('\n')).not.toContain('rm -rf');
   });
 
@@ -512,6 +512,11 @@ describe('every key has a schema', () => {
         'FLINT_LOCAL_TTS_VOICE',
         'FLINT_LOCAL_VOICE_API_KEY',
         'FLINT_SAY_VOICE',
+        // Older than this module, and read here now: OpenAI's speech model and voice, whisper.cpp and its model.
+        'FLINT_TTS_MODEL',
+        'FLINT_TTS_VOICE',
+        'WHISPER_BIN',
+        'WHISPER_MODEL',
         'FLINT_LOCAL_FALLBACK_MODEL',
         'FLINT_LOCAL_FALLBACK_NUM_CTX',
         'FLINT_LOCAL_FIRST_OUTPUT_TIMEOUT_MS',

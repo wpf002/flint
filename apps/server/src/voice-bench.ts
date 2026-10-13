@@ -24,6 +24,12 @@
  *  - A PAID provider (OpenAI's speech API) is run only when it is asked for by
  *    name AND a dollar cap is given. The estimate is printed first, before
  *    any request, and a run whose estimate is over the cap does not start.
+ *    Such a run is OUTSIDE Flint's spend record: the server's budget neither
+ *    counts it nor stops it. It says so before it sends anything, and again
+ *    afterwards with what was sent and what that costs.
+ *  - What it leaves behind (the clips, the speech, the results) goes in a
+ *    folder only this user can read, under ~/Library/Caches: never under
+ *    ~/.flint, which the nightly and the offsite backups carry.
  *  - Programs are run with `execFile` / `spawn`: an absolute path, fixed
  *    arguments, never a shell. Text is never an argument: `say` reads it from
  *    a file. A voice's name and a speaking rate are checked before they are
@@ -35,7 +41,7 @@
  */
 import { ttsCostOf } from '@flint/core';
 import { readInferenceConfig, SAY_VOICE_RE } from './inference-config';
-import { buildVoice, planVoice, whisperPaths, type Run, type SttProvider, type TtsProvider } from './voice';
+import { buildVoice, fileNameOf, openAiSpeech, planVoice, whisperPaths, type Run, type SttProvider, type TtsProvider } from './voice';
 import { wordErrorRate, wordErrors, type WordErrors } from './wer';
 
 /**
@@ -103,14 +109,14 @@ export interface BenchArgs {
 
 export const USAGE = [
   'pnpm --filter server voice-bench -- [options]',
-  '  --out <folder>         where the clips, the speech and results go (default: a dated folder under ~/.flint/eval/voice-bench)',
+  '  --out <folder>         where the clips, the speech and results go (default: a dated folder under ~/Library/Caches/Flint/voice-bench)',
   '  --clips <folder>       hear your own clips in place of the synthetic ones: name.wav (or m4a, mp3) beside name.txt, the words said',
   `  --models-dir <folder>  where ${ENGINE} models are (default: the folder of ${MODEL_SETTING}, or ~/.flint/models)`,
   `  --voices A,B           the say voices the clips are spoken in (default: the first three this Mac has of ${CLIP_VOICES.join(', ')})`,
   `  --rates 175,220        words a minute (default: ${CLIP_RATES.join(', ')})`,
   `  --stt a,b              what hears: ${STT_ENGINES.join(', ')} (default: both)`,
   `  --tts a,b              what speaks: ${TTS_ENGINES.join(', ')} (default: say, and local when a local speech server is set)`,
-  '  --budget-usd N         the most to spend on a paid provider; without it a paid provider is never called',
+  "  --budget-usd N         the most to spend on a paid provider; without it a paid provider is never called (and what it spends is outside Flint's spend record)",
   '  --json                 print the results as JSON',
 ].join('\n');
 
@@ -132,7 +138,8 @@ export function parseBenchArgs(argv: readonly string[]): BenchArgs | { error: st
     else if (a === '--help' || a === '-h') args.help = true;
     else if (a === '--out' || a === '--models-dir' || a === '--clips') {
       const v = argv[++i];
-      if (v === undefined || v === '' || v.startsWith('--') || v.includes('\0') || v.length > 1024) return { error: `${a} takes a folder` };
+      // (A folder's name is printed in the results: nothing in it may be a character a terminal acts on.)
+      if (v === undefined || v === '' || v.startsWith('--') || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(v) || v.length > 1024) return { error: `${a} takes a folder` };
       if (a === '--out') args.out = v;
       else if (a === '--clips') args.clips = v;
       else args.modelsDir = v;
@@ -172,6 +179,26 @@ export type PaidPlan =
 
 const usd = (n: number): string => `$${n < 0.01 && n > 0 ? n.toFixed(4) : n.toFixed(2)}`;
 
+/** Said before a paid run sends anything, and after it: Flint's own budget knows nothing of it. */
+export const OUTSIDE_SPEND_RECORD = "This is outside Flint's spend record: Flint's budget neither counts it nor stops it.";
+
+/** What a paid run really sent, and what that costs at the model's list price. */
+export interface PaidSpent {
+  sentences: number;
+  chars: number;
+  usd: number;
+  sentence: string;
+}
+
+export function paidSpent(sentences: number, chars: number, cost: number): PaidSpent {
+  return {
+    sentences,
+    chars,
+    usd: cost,
+    sentence: `OpenAI speech was sent ${sentences} ${sentences === 1 ? 'sentence' : 'sentences'}, ${chars.toLocaleString('en-US')} characters, which costs about ${usd(cost)}. ${OUTSIDE_SPEND_RECORD}`,
+  };
+}
+
 /**
  * May the paid speech provider be called in this run? Decided before anything
  * is sent, from the sentences that would be sent and the price of the model
@@ -187,7 +214,7 @@ export function paidPlan(args: Pick<BenchArgs, 'tts' | 'budgetUsd'>, sentences: 
   if (args.budgetUsd === undefined) return { ...base, run: false, why: 'no_budget', sentence: `${what}. It was not called: run this again with --budget-usd and the most you want to spend.` };
   if (estimateUsd > args.budgetUsd) return { ...base, run: false, why: 'over_budget', sentence: `${what}, which is over the ${usd(args.budgetUsd)} you allowed. It was not called.` };
   if (!o.hasKey) return { ...base, run: false, why: 'no_key', sentence: `${what}. It was not called: no OpenAI key is set.` };
-  return { ...base, run: true, budgetUsd: args.budgetUsd, sentence: `${what}, within the ${usd(args.budgetUsd)} you allowed.` };
+  return { ...base, run: true, budgetUsd: args.budgetUsd, sentence: `${what}, within the ${usd(args.budgetUsd)} you allowed. ${OUTSIDE_SPEND_RECORD}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +319,8 @@ export interface TtsRow {
   heardBy?: string;
   /** What a paid engine was estimated to cost, in dollars. */
   estimateUsd?: number;
+  /** What a paid engine was really sent: the sentences, their characters, and what those cost. */
+  sent?: { sentences: number; chars: number; usd: number };
   failed: number;
 }
 
@@ -317,6 +346,8 @@ export interface BenchResult {
   tts: TtsRow[];
   /** What the paid provider would cost and whether it was called. */
   paid: PaidPlan;
+  /** What the paid provider was sent and what that costs, when it was called. Outside Flint's spend record. */
+  paidSpent?: PaidSpent;
   notInstalled: Hint[];
   notes: string[];
 }
@@ -335,10 +366,27 @@ export const WHISPER_MODELS: ReadonlyArray<{ file: string; disk: string; note: s
   { file: 'ggml-large-v3-turbo.bin', disk: 'about 1.6 GB', note: 'the large model, as published' },
 ];
 
-const modelCommand = (file: string): string => `curl -L --fail --create-dirs -o ~/.flint/models/${file} https://huggingface.co/ggerganov/${ENGINE}/resolve/main/${file}`;
+/** A path as one word of a command typed in Terminal: as it is when it is plain, in single quotes otherwise. */
+export function shellWord(path: string): string {
+  return /^[A-Za-z0-9_@%+=:,./~-]+$/.test(path) ? path : `'${path.replace(/'/g, `'\\''`)}'`;
+}
 
-/** The commands for what this Mac does not have. None of them was run here: this file installs nothing. */
-export function hintsFor(found: { whisperCli: boolean; whisperServer: boolean; say: boolean; models: readonly string[]; localTtsSet: boolean }): Hint[] {
+/**
+ * The line that fetches a model into the folder the models are in. In a
+ * command, the usual folder is written with `~`, which Terminal reads as the
+ * home folder. A SETTING is never written that way: neither the settings file
+ * nor a LaunchAgent expands `~`, so the setting is the full path.
+ */
+const modelTarget = (file: string, folder: string, home: string): string => (folder === `${home}/.flint/models` ? `~/.flint/models/${file}` : shellWord(`${folder}/${file}`));
+const modelCommand = (file: string, folder: string, home: string): string => `curl -L --fail --create-dirs -o ${modelTarget(file, folder, home)} https://huggingface.co/ggerganov/${ENGINE}/resolve/main/${file}`;
+
+/**
+ * The commands for what this Mac does not have. None of them was run here:
+ * this file installs nothing. `modelsDir` is where the models are looked for,
+ * as a full path: a model's line fetches it there, and the setting named
+ * afterwards is that full path.
+ */
+export function hintsFor(found: { whisperCli: boolean; whisperServer: boolean; say: boolean; models: readonly string[]; localTtsSet: boolean; modelsDir: string; home: string }): Hint[] {
   const hints: Hint[] = [];
   if (!found.whisperCli) {
     hints.push({ what: ENGINE, why: 'Transcription on this Mac needs it, and it is not installed.', command: `brew install ${PROVIDER}`, disk: 'about 30 MB, plus a model', tried: false });
@@ -347,7 +395,14 @@ export function hintsFor(found: { whisperCli: boolean; whisperServer: boolean; s
   }
   for (const m of WHISPER_MODELS) {
     if (found.models.includes(m.file)) continue;
-    hints.push({ what: `the speech model ${m.file}`, why: `It is not on this Mac, so it was not measured (${m.note}).`, command: modelCommand(m.file), disk: m.disk, then: `To use it: set ${MODEL_SETTING}=~/.flint/models/${m.file} and restart Flint.`, tried: false });
+    hints.push({
+      what: `the speech model ${m.file}`,
+      why: `It is not on this Mac, so it was not measured (${m.note}).`,
+      command: modelCommand(m.file, found.modelsDir, found.home),
+      disk: m.disk,
+      then: `To use it: set ${MODEL_SETTING}=${found.modelsDir}/${m.file} and restart Flint.`,
+      tried: false,
+    });
   }
   if (!found.localTtsSet) {
     hints.push({
@@ -405,8 +460,6 @@ const SAY = '/usr/bin/say';
 const AFCONVERT = '/usr/bin/afconvert';
 const SAY_TIMEOUT_MS = 60_000;
 
-/** A model's file name, for a result: never the folder it is in. */
-const fileName = (path: string): string => path.replace(/^.*[\\/]/, '');
 const slug = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 
 /**
@@ -446,6 +499,14 @@ async function makeClips(deps: BenchDeps, dir: string, voices: readonly string[]
     }
   }
   return clips;
+}
+
+/** "1 clip" or "3 clips", and what follows a count of them. */
+const clipsOf = (n: number): string => `${n} ${n === 1 ? 'clip' : 'clips'}`;
+
+/** Where a run's files go when no folder is named: under this user's caches, never under ~/.flint (a backup would carry them). */
+export function defaultOut(home: string, when: string, join: (...parts: string[]) => string): string {
+  return join(home, 'Library', 'Caches', 'Flint', 'voice-bench', when.replace(/[:.]/g, '-'));
 }
 
 /** The voice a clip of Will's own is filed under, in the results. */
@@ -495,8 +556,8 @@ async function ownClips(deps: BenchDeps, dir: string, scratch: string, remarks: 
       }
     }
   }
-  if (untitled > 0) remarks.push(`${untitled} clips had no text file beside them saying what was said, so they were left out.`);
-  if (unread > 0) remarks.push(`${unread} clips could not be read and were left out.`);
+  if (untitled > 0) remarks.push(untitled === 1 ? '1 clip had no text file beside it saying what was said, so it was left out.' : `${untitled} clips had no text file beside them saying what was said, so they were left out.`);
+  if (unread > 0) remarks.push(`${clipsOf(unread)} could not be read and ${unread === 1 ? 'was' : 'were'} left out.`);
   return clips;
 }
 
@@ -554,7 +615,7 @@ async function hear(deps: BenchDeps, stt: SttProvider, engine: SttEngine, model:
 
 const EXT: Record<string, string> = { 'audio/mpeg': 'mp3', 'audio/mp4': 'm4a', 'audio/wav': 'wav', 'audio/aac': 'aac', 'audio/ogg': 'ogg', 'audio/flac': 'flac' };
 
-async function speakAll(
+export async function speakAll(
   deps: BenchDeps,
   tts: TtsProvider,
   engine: TtsEngine,
@@ -568,6 +629,8 @@ async function speakAll(
   let spoken = 0;
   let failed = 0;
   let spentUsd = 0;
+  let sentChars = 0;
+  let sentSentences = 0;
   const voice = tts.voice ?? 'the usual voice';
   deps.mkdir(dir);
   for (let i = 0; i < SENTENCES.length; i++) {
@@ -577,6 +640,9 @@ async function speakAll(
       const cost = ttsCostOf(tts.model ?? '', text.length);
       if (spentUsd + cost > o.capUsd) break;
       spentUsd += cost;
+      // Counted as sent whether or not it comes back as audio: what was sent is what is charged for.
+      sentChars += text.length;
+      sentSentences++;
     }
     const t = deps.now();
     let firstAt: number | undefined;
@@ -625,6 +691,7 @@ async function speakAll(
     realTimeFactor: audioSeconds > 0 ? Math.round((spoken / 1000 / audioSeconds) * 1000) / 1000 : 0,
     ...(back !== undefined && o.hearBack ? { heardBackWordErrorRate: back, heardBy: o.hearBack.label } : {}),
     ...(o.estimateUsd !== undefined ? { estimateUsd: o.estimateUsd } : {}),
+    ...(o.capUsd !== undefined ? { sent: { sentences: sentSentences, chars: sentChars, usd: spentUsd } } : {}),
     failed,
   };
 }
@@ -639,10 +706,10 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
   const env = deps.env;
   /** What this run has to say about itself, for the results: what was left out, and why. */
   const remarks: string[] = [];
-  const cfg = readInferenceConfig(env);
+  const cfg = readInferenceConfig(env, undefined, { home: deps.home });
   const plan = planVoice(cfg, env, { platform: deps.platform, home: deps.home });
-  // whisper.cpp and its model, where the server itself reads them (WHISPER_BIN, WHISPER_MODEL).
-  const { bin, model: usualModel } = whisperPaths(env, deps.home);
+  // whisper.cpp and its model, where the server itself reads them (WHISPER_BIN, WHISPER_MODEL, as config takes them).
+  const { bin, model: usualModel } = whisperPaths(cfg.voice, deps.home);
   const folderOf = (path: string): string => path.replace(/[\\/][^\\/]*$/, '');
   const serverBin = deps.join(folderOf(bin), SERVER_BIN);
   const modelsDir = args.modelsDir ?? folderOf(usualModel);
@@ -654,16 +721,16 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
     .list(modelsDir)
     .filter((n) => MODEL_FILE.test(n) && !/silero/i.test(n))
     .sort();
-  const usual = fileName(usualModel);
+  const usual = fileNameOf(usualModel);
   // The usual model first, so the numbers for what Flint runs today lead.
   models.sort((a, b) => Number(b === usual) - Number(a === usual));
 
   // The paid side is settled before anything else is done, and said first.
-  const openaiModel = env.FLINT_TTS_MODEL?.trim() || 'tts-1';
-  const paid = paidPlan(args, SENTENCES, { model: openaiModel, hasKey: !!env.OPENAI_API_KEY?.trim() });
+  const openai = openAiSpeech(cfg.voice);
+  const paid = paidPlan(args, SENTENCES, { model: openai.model, hasKey: !!env.OPENAI_API_KEY?.trim() });
   if (paid.asked) deps.log(paid.sentence);
 
-  const out = args.out ?? deps.join(deps.home, '.flint', 'eval', 'voice-bench', deps.when.replace(/[:.]/g, '-'));
+  const out = args.out ?? defaultOut(deps.home, deps.when, deps.join);
   deps.mkdir(out);
 
   // ---- the clips
@@ -691,7 +758,8 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
     for (const v of wanted) if (!voices.includes(v)) remarks.push(`The voice ${v} is not on this Mac, so no clip was spoken in it.`);
     deps.log(`Speaking ${voices.length * rates.length * SENTENCES.length} clips into files (nothing is played).`);
     clips = await makeClips(deps, deps.join(out, 'clips'), voices, rates);
-    if (clips.length < voices.length * rates.length * SENTENCES.length) remarks.push(`${voices.length * rates.length * SENTENCES.length - clips.length} clips could not be made and were left out.`);
+    const missing = voices.length * rates.length * SENTENCES.length - clips.length;
+    if (missing > 0) remarks.push(`${clipsOf(missing)} could not be made and ${missing === 1 ? 'was' : 'were'} left out.`);
   }
 
   // ---- hearing
@@ -717,7 +785,7 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
           // Through config and the guarded fetch, as Flint would reach it: FLINT_STT_PROVIDER=local at that address.
           // (The usual model name is sent: the server answers with the one model it was started with, whatever it is asked for.)
           const serverEnv = { ...env, FLINT_STT_PROVIDER: 'local', FLINT_LOCAL_STT_BASE_URL: server.baseURL, FLINT_LOCAL_STT_MODEL: undefined };
-          const local = planVoice(readInferenceConfig(serverEnv), serverEnv, { platform: deps.platform, home: deps.home });
+          const local = planVoice(readInferenceConfig(serverEnv, undefined, { home: deps.home }), serverEnv, { platform: deps.platform, home: deps.home });
           if (local.stt.name !== 'local') {
             remarks.push('The local transcription server could not be reached through Flint’s own settings, so it was not measured.');
             continue;
@@ -753,9 +821,14 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
     deps.log('Speaking with the local speech server that is set up, into files.');
     tts.push(await speakAll(deps, buildVoice(plan, { env, run: deps.run, ...(deps.fetch ? { fetch: deps.fetch } : {}) }).tts, 'local', speech, hearBack ? { hearBack } : {}));
   }
+  let spent: PaidSpent | undefined;
   if (paid.asked && paid.run) {
-    const provider = buildVoice({ stt: { name: PROVIDER, local: true, bin, model: usualModel }, tts: { name: 'openai', local: false, model: openaiModel, voice: env.FLINT_TTS_VOICE?.trim() || 'onyx', hasKey: true } }, { env, run: deps.run, ...(deps.fetch ? { fetch: deps.fetch } : {}) }).tts;
-    tts.push(await speakAll(deps, provider, 'openai', speech, { ...(hearBack ? { hearBack } : {}), capUsd: paid.budgetUsd, estimateUsd: paid.estimateUsd }));
+    const provider = buildVoice({ stt: { name: PROVIDER, local: true, bin, model: usualModel }, tts: { name: 'openai', local: false, ...openai, hasKey: true } }, { env, run: deps.run, ...(deps.fetch ? { fetch: deps.fetch } : {}) }).tts;
+    const row = await speakAll(deps, provider, 'openai', speech, { ...(hearBack ? { hearBack } : {}), capUsd: paid.budgetUsd, estimateUsd: paid.estimateUsd });
+    tts.push(row);
+    // Said again when it is over, with what was really sent: nothing else keeps a record of it.
+    spent = paidSpent(row.sent?.sentences ?? 0, row.sent?.chars ?? 0, row.sent?.usd ?? 0);
+    deps.log(spent.sentence);
   }
 
   return {
@@ -765,7 +838,8 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
     stt,
     tts,
     paid,
-    notInstalled: hintsFor({ whisperCli: haveCli, whisperServer: haveServer, say: haveSay, models, localTtsSet: plan.tts.name === 'local' }),
+    ...(spent ? { paidSpent: spent } : {}),
+    notInstalled: hintsFor({ whisperCli: haveCli, whisperServer: haveServer, say: haveSay, models, localTtsSet: plan.tts.name === 'local', modelsDir, home: deps.home }),
     notes: remarks,
   };
 }
@@ -812,7 +886,7 @@ export function renderBench(r: BenchResult): string {
       lines.push('Word error rate by voice and by speaking rate:', '');
       lines.push(...table(['Engine', 'Model', ...voices, ...rates.map((x) => `${x} wpm`)], r.stt.map((s) => [s.engine, s.model, ...voices.map((v) => pct(s.byVoice[v])), ...rates.map((x) => pct(s.byRate[x]))])), '');
     }
-    for (const s of r.stt) if (s.failed > 0) lines.push(`${s.engine} with ${s.model} failed on ${s.failed} clips, which are not in its numbers.`, '');
+    for (const s of r.stt) if (s.failed > 0) lines.push(`${s.engine} with ${s.model} failed on ${clipsOf(s.failed)}, which ${s.failed === 1 ? 'is' : 'are'} not in its numbers.`, '');
   }
   lines.push('## Speaking (text to speech)', '');
   if (r.tts.length === 0) lines.push('Nothing that speaks could be measured.', '');
@@ -838,7 +912,7 @@ export function renderBench(r: BenchResult): string {
     '- First call is the first use after a start, which reads the model from disk. It is not in the other numbers.',
     '',
   );
-  if (r.paid.asked) lines.push('## The paid provider', '', r.paid.sentence, '');
+  if (r.paid.asked) lines.push('## The paid provider', '', r.paid.sentence, '', ...(r.paidSpent ? [r.paidSpent.sentence, ''] : []));
   if (r.notes.length > 0) lines.push('## Notes', '', ...r.notes.map((n) => `- ${n}`), '');
   if (r.notInstalled.length > 0) {
     lines.push('## Not on this Mac, so not measured', '', 'Nothing below was run or downloaded. Each line is a command for you to run in Terminal if you want it.', '');

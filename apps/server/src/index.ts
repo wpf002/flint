@@ -1341,6 +1341,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
   if (req.method === 'POST' && url === '/speak') {
     const read = await readJsonLimited(req, SMALL_JSON_BYTES);
     if (read.tooLarge) return json(res, 413, { error: 'request too large' });
+    // A client that hangs up before its answer takes its reply with it: speech being made on this Mac is stopped.
+    const gone = new AbortController();
+    const hungUp = (): void => {
+      if (!res.writableEnded) gone.abort();
+    };
+    res.once('close', hungUp);
     try {
       const spoken = await speak(read.body, {
         tts: ctx.voice.tts,
@@ -1348,12 +1354,17 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         mustStay: (said) => ctx.goals.speechStaysHere(said),
         mustStaySentence: SPEECH_STAYS_HERE,
         guard: ctx.spend,
+        signal: gone.signal,
       });
       if (spoken.status !== 200) return json(res, spoken.status, spoken.body);
       res.writeHead(200, { 'Content-Type': spoken.contentType, 'Content-Length': spoken.audio.length });
       res.end(spoken.audio);
     } catch (e) {
+      // Speech on this Mac that was stopped because its client left: nobody is there to be told, and nothing failed.
+      if (gone.signal.aborted && speechMadeHere(ctx.voice.tts)) return;
       return json(res, 502, { error: 'tts failed', ref: errorRef('speak', e) });
+    } finally {
+      res.off('close', hungUp);
     }
     return;
   }

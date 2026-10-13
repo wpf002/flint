@@ -570,8 +570,16 @@ describe('index.ts wiring', () => {
   it('/speak hands the rule the provider, the mode and the stored turn, and decides nothing itself: no speech is made around it', () => {
     const speak = between("url === '/speak'", "url === '/generate'");
     expect(speak).toMatch(
-      /const spoken = await speak\(read\.body, \{\s*tts: ctx\.voice\.tts,\s*localMode: \(\) => ctx\.inference\.cloudRefused\('tts'\),\s*mustStay: \(said\) => ctx\.goals\.speechStaysHere\(said\),\s*mustStaySentence: SPEECH_STAYS_HERE,\s*guard: ctx\.spend,\s*\}\);/,
+      /const spoken = await speak\(read\.body, \{\s*tts: ctx\.voice\.tts,\s*localMode: \(\) => ctx\.inference\.cloudRefused\('tts'\),\s*mustStay: \(said\) => ctx\.goals\.speechStaysHere\(said\),\s*mustStaySentence: SPEECH_STAYS_HERE,\s*guard: ctx\.spend,\s*signal: gone\.signal,\s*\}\);/,
     );
+    // A client that hangs up before its answer: the rule is handed a signal that fires then, and only then (a
+    // response that ended is not a hang-up). What a provider does with it is the seam's (test/voice.test.ts).
+    expect(speak).toContain('const gone = new AbortController();');
+    expect(speak).toMatch(/const hungUp = \(\): void => \{\s*if \(!res\.writableEnded\) gone\.abort\(\);\s*\};\s*res\.once\('close', hungUp\);/);
+    expect(speak).toContain("res.off('close', hungUp);");
+    // Speech on this Mac that was stopped that way is not a failure, and nobody is there to be told. An outside
+    // provider's failure is answered and logged as it always was, whoever is still listening.
+    expect(speak).toContain('if (gone.signal.aborted && speechMadeHere(ctx.voice.tts)) return;');
     expect(speak).toContain('if (spoken.status !== 200) return json(res, spoken.status, spoken.body);');
     // The audio goes out as the kind the provider made (mp3 from OpenAI, as before; m4a from this Mac's own voice).
     expect(speak).toContain("res.writeHead(200, { 'Content-Type': spoken.contentType, 'Content-Length': spoken.audio.length });");
@@ -582,12 +590,34 @@ describe('index.ts wiring', () => {
     expect(speak).not.toContain('body.private');
     // ...and nowhere in index.ts is a speech or transcription engine named or run: the seam is the only way to one.
     expect(src).not.toMatch(/api\.openai\.com\/v1\/audio|afconvert|whisper-cli|WHISPER_BIN|WHISPER_MODEL|FLINT_TTS_|execFile/);
-    expect(src.match(/ctx\.voice\.(stt|tts)\b/g)).toEqual(['ctx.voice.stt', 'ctx.voice.tts', 'ctx.voice.tts']);
+    expect(src.match(/ctx\.voice\.(stt|tts)\b/g)).toEqual(['ctx.voice.stt', 'ctx.voice.tts', 'ctx.voice.tts', 'ctx.voice.tts']);
     expect(between("url === '/transcribe'", "url === '/speak'")).toContain('return json(res, 200, { text: (await ctx.voice.stt.transcribe(buf)).text });');
     // The providers are built once, at boot, from what config decided, and the boot line names them.
     expect(src).toContain('const voice = buildVoice(inference.voicePlan, { env: process.env, connectTimeoutMs: inference.cfg.local.connectTimeoutMs });');
     expect(src).toContain('console.error(voiceLine(inference.voicePlan));');
     expect(src.match(/buildVoice\(/g)).toHaveLength(1);
+  });
+
+  // The review's H1. main read WHISPER_BIN, WHISPER_MODEL, FLINT_TTS_MODEL and FLINT_TTS_VOICE into constants when
+  // the file loaded, which is BEFORE main() reads ~/.flint/secrets.env: a line for one of them in that file was
+  // silently ignored. They are read by config now, from the environment as it is after the settings file was read
+  // into it, so such a line applies. (What they come to is tested where it is decided: test/voice.test.ts; and
+  // on a real server with the four in its settings file: test/process.)
+  it('the four older voice settings are read after the saved settings are: nothing reads them when the file loads', () => {
+    const main = src.slice(src.indexOf('async function main()'));
+    const saved = main.indexOf('loadSecrets();');
+    const planned = main.indexOf('const inference = await buildInference({ env: process.env,');
+    const built = main.indexOf('const voice = buildVoice(inference.voicePlan,');
+    expect(saved).toBeGreaterThan(-1);
+    expect(planned).toBeGreaterThan(saved);
+    expect(built).toBeGreaterThan(planned);
+    // No constant of the file's own holds one of them: every one of the four is a name index.ts never writes.
+    expect(src).not.toMatch(/WHISPER_BIN|WHISPER_MODEL|FLINT_TTS_MODEL|FLINT_TTS_VOICE/);
+    // ...and the plan is made from what config read: ./inference hands config, and the same environment, to ./voice.
+    expect(readFileSync(join(__dirname, '..', 'src', 'inference.ts'), 'utf8')).toContain('voice: planVoice(cfg, deps.env)');
+    const voice = readFileSync(join(__dirname, '..', 'src', 'voice.ts'), 'utf8');
+    expect(voice).not.toMatch(/env\.(WHISPER_BIN|WHISPER_MODEL|FLINT_TTS_MODEL|FLINT_TTS_VOICE)/);
+    expect(voice.match(/env\.[A-Z_]+/g)).toEqual(['env.OPENAI_API_KEY', 'env.OPENAI_API_KEY']);
   });
 
   // A reply that stays here may be sent to /speak only when the speech is made on this Mac, and the server says

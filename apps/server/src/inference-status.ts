@@ -29,7 +29,7 @@ import type { ModeSource } from './inference-mode';
 import type { LocalBrains, ModelSource, NotConfined, Wire } from './local-brains';
 import type { ServerKind } from './local-backend';
 import { pullCommand, type LocalSnapshot, type LocalState, type ModelHealth, type UnavailableWhy } from './local-monitor';
-import type { VoicePlan } from './voice';
+import { fileNameOf, whereOf, type VoicePlan } from './voice';
 
 /** One local model, as a status shows it. */
 export interface ModelStatus {
@@ -491,7 +491,8 @@ export function speechRow(t: VoicePlan['tts'], mode: InferenceMode): VoiceRow {
             : 'It speaks replies. A reply that stays on this Mac is spoken by the device instead.',
       };
     case 'say':
-      return { provider: t.name, name: (t.voice && plainWords(t.voice)) || 'This Mac', here: true, sentence: 'Replies are spoken on this Mac, and nothing is sent out.' };
+      // A voice by the name the Mac itself gives it ("Eddy (English (US))"): config took it only as letters, spaces, brackets and hyphens.
+      return { provider: t.name, name: t.voice || 'This Mac', here: true, sentence: 'Replies are spoken on this Mac, and nothing is sent out.' };
     case 'local':
       return {
         provider: t.name,
@@ -518,11 +519,11 @@ export function transcriptionRow(s: VoicePlan['stt']): VoiceRow {
   return { provider: s.name, name: whisperName(s.model), here: true, sentence: 'Your voice is turned into text on this Mac.' };
 }
 
-/** The same two facts for the command line: providers by name, models and voices as they are set. Never a path or a key. */
+/** The same two facts for the command line: providers by name, models and voices as they are set. Never a path, an address or a key. */
 export function voiceLines(v: VoicePlan, mode: InferenceMode): string[] {
   const s = v.stt;
   const t = v.tts;
-  const hears = s.name === 'local' ? `Transcription uses the local speech server at ${s.server.host} (${s.model}).` : `Transcription uses whisper-cpp (${s.model.replace(/^.*[\\/]/, '')}), on this Mac.`;
+  const hears = s.name === 'local' ? `Transcription uses the local speech server ${whereOf(s.server)} (${s.model}).` : `Transcription uses whisper-cpp (${fileNameOf(s.model)}), on this Mac.`;
   let speaks: string;
   if (t.name === 'openai') {
     speaks = !t.hasKey
@@ -533,7 +534,7 @@ export function voiceLines(v: VoicePlan, mode: InferenceMode): string[] {
   } else if (t.name === 'say') {
     speaks = `Speech uses this Mac's own voice${t.voice ? ` (${t.voice})` : ''}. Nothing is sent out.`;
   } else if (t.name === 'local') {
-    speaks = `Speech uses the local speech server at ${t.server.host} (${t.model}, ${t.voice}).`;
+    speaks = `Speech uses the local speech server ${whereOf(t.server)} (${t.model}, ${t.voice}).`;
   } else {
     speaks = `Speech is off: ${OWN_VOICE}.`;
   }
@@ -618,6 +619,13 @@ export function problemSentence(p: ConfigProblem, o: { inUse: boolean; modeSourc
       return "A speech model or voice named in Flint's setup isn't a valid name, so Flint uses its usual one.";
     case 'FLINT_SAY_VOICE':
       return "The voice named in Flint's setup isn't a voice name, so this Mac's usual voice is used.";
+    case 'FLINT_TTS_MODEL':
+    case 'FLINT_TTS_VOICE':
+      return "The OpenAI speech model or voice named in Flint's setup isn't a valid name, so Flint uses its usual one.";
+    case 'WHISPER_BIN':
+      return "The transcription program named in Flint's setup isn't a path Flint can use, so Flint uses the usual one.";
+    case 'WHISPER_MODEL':
+      return "The transcription model named in Flint's setup isn't a path Flint can use, so Flint uses the usual one.";
     case 'FLINT_LOCAL_VOICE_API_KEY':
       return p.kind === 'in_the_clear' ? "The speech server's key isn't sent, because the server's address isn't encrypted." : "The speech server's key isn't valid, so no key is sent.";
     default:
