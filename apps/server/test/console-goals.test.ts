@@ -1726,7 +1726,18 @@ describe('the Suggested tab', () => {
       return c.url === '/goals?tab=suggested' ? { status: 200, body: { tab: 'suggested', goals: [], waiting: [], reviews: 'off', suggestions: left } } : undefined;
     });
     await openSuggested();
+    // It asks first, in the footer, naming the one it is about: a dismissed suggestion does not come back.
     rows()[0]!.button('Dismiss').onclick!();
+    await settle();
+    expect(posted()).toEqual([]);
+    expect(foot().shown()).toContain('Dismiss This SuggestionFlint won’t suggest “Run a half marathon” again.');
+    expect(foot().buttons()).toEqual(['Cancel', 'Dismiss']);
+    foot().button('Cancel').onclick!();
+    expect(foot().buttons()).toEqual([]);
+    expect(posted()).toEqual([]);
+    expect(rows()).toHaveLength(2);
+    rows()[0]!.button('Dismiss').onclick!();
+    foot().button('Dismiss').onclick!();
     await settle();
     expect(posted()).toEqual([{ url: '/goals/go0123456789abcdef0123456789abcdef/dismiss', method: 'POST', body: {} }]);
     expect(signed).toEqual([]);
@@ -1736,6 +1747,7 @@ describe('the Suggested tab', () => {
     // A refusal is said in the footer, and the row stays.
     suggested(left, (c) => (c.method === 'POST' ? { status: 409, body: { error: 'This goal is already active.', code: 'status.active' } } : undefined));
     rows()[0]!.button('Dismiss').onclick!();
+    foot().button('Dismiss').onclick!();
     await settle();
     expect(said()).toEqual(['This goal is already active.', 'res bad']);
     expect(rows()).toHaveLength(1);
@@ -1763,11 +1775,11 @@ describe('the Suggested tab', () => {
   });
 
   it('its own lines are plain sentences by the note rules, and its buttons Title Case', () => {
-    for (const line of ['You said this in a chat on Oct 8.', 'You said this in a chat.', 'You said this in a chat on Oct 8. Add how you’ll know it’s done, then make it a goal.', 'You dismissed it.', 'Goals Flint suggests from your chats show here.']) {
+    for (const line of ['You said this in a chat on Oct 8.', 'You said this in a chat.', 'You said this in a chat on Oct 8. Add how you’ll know it’s done, then make it a goal.', 'You dismissed it.', 'Goals Flint suggests from your chats show here.', 'Flint won’t suggest “Run a half marathon” again.']) {
       expect(noteProblems('Suggested', line), line).toEqual([]);
       expect(sentence(line), line).toBe(true);
     }
-    for (const title of ['Suggested', 'No Suggestions', 'Make It a Goal', 'Dismiss', 'More Suggestions']) {
+    for (const title of ['Suggested', 'No Suggestions', 'Make It a Goal', 'Dismiss', 'More Suggestions', 'Dismiss This Suggestion']) {
       expect(noteProblems(title, ''), title).toEqual([]);
       expect(titleCase(title), title).toBe(true);
     }

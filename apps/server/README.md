@@ -59,6 +59,7 @@ curl -s -X POST $URL/generate -H "Authorization: Bearer $FLINT_TOKEN" \
 | `FLINT_LOCAL_STYLE_VARIANT` | no | The same, for the local brain and the eval `localModel` override personas. Unset: `v1`, as before. |
 | `FLINT_HISTORY_TURNS` / `FLINT_HISTORY_MAX_AGE_HOURS` | no | How much of a `/chat` conversation each new message carries: the last `FLINT_HISTORY_TURNS` complete turns (default 12) that started within `FLINT_HISTORY_MAX_AGE_HOURS` (default 48), whichever leaves fewer. Every turn stays stored in `~/.flint/memory/conversations.json`, and the memory extractor still reads all of them, but it keeps only durable facts about Will: what was said or decided in an older turn doesn't come back. So when turns are left out, the turn's context says how many, and the persona tells Flint to say so rather than reconstruct them. The tier classifier's "deep thread" rule counts the turns sent (8 or more). `0` means no earlier turns; anything that isn't a number >= 0 is logged and ignored (the default). |
 | `FLINT_MEMORY_BRAIN` / `FLINT_MEMORY_MODEL` | no | Which model learns from Will's chats, and which local model it uses: see "Memory extraction". Unset: the local model, `OLLAMA_MODEL`. |
+| `FLINT_EXTRACT_CANDIDATES` | no | `1` lets the local model suggest the goals and commitments Will sets in chat, each resting on his own quoted words and waiting for his approval (see "Goals and commitments from chat"). Unset: off. |
 | `MCP_CONFIG` | no | Path to an `mcp.json` of integration servers (your apps as tools). |
 | `FLINT_TIER_LAST_RESORT` | no | `provider:model` (e.g. `openai:gpt-5`) tried after every frontier tier. A refused or empty frontier reply (no text, no tool call) moves down the tier chain like an error; the Claude tiers refuse the same prompts, so this is where a refusal can still get answered. Unset: no extra link, and a reply no tier answers becomes a short honest message instead of an empty one. Ignored with `FLINT_TIERS=off`. |
 | `FLINT_WORLD_NOW` | no | `1` adds the "World now" block to frontier chat turns (see "The runtime's lanes"); it costs tokens on every such turn. Unset: off. |
@@ -251,6 +252,55 @@ all apply. The pass is `src/memory-extract.ts`; the choice of model is
   said. The boot log names the model (`[memory-extract] on the local model ...`), and
   each pass logs one line of counts.
 
+### Goals and commitments from chat
+
+Off by default (P3 part 5). With `FLINT_EXTRACT_CANDIDATES=1`, the same pass also asks the
+local model for any goal Will set and anything he said he would do, each with his own words
+quoted. One that passes the check below becomes a card in Approvals ("Suggest a Goal from
+Chat", "Add a Commitment from Chat"); nothing happens until he approves it. An approved goal
+lands in the Goals panel's Suggested tab, never active.
+
+- **Only the local model is asked.** With `FLINT_MEMORY_BRAIN=frontier` the setting does
+  nothing and says so at boot: the frontier's prompt never changes, and a suggestion in its
+  reply is never read. With the setting off, the prompt and the request to Ollama are byte for
+  byte what they were (a test pins both by their sha256), and turning it on does not re-read
+  old chats.
+- **The quote check comes first, and no model takes part in it.** A suggestion is kept only
+  if its quote, 12 to 300 characters, is in Will's own message of the turn it names, as whole
+  words. Curly quotes and runs of whitespace are made alike on both sides; nothing else is.
+  It is never matched against Flint's answer, the earlier turn shown for context, or another
+  turn of the same call. A turn that read outside text is never sent to the model at all.
+- **The short text is held to his message too:** at least half of its words, and every
+  number in it, are in that same message. A day is kept only if it is a real one and not
+  before the turn; one that has passed since is left off. A turn over 30 days old is not
+  suggested from.
+- **It goes to the runtime on this Mac, and nowhere else** (`src/goal-candidates.ts`):
+  one request to the runtime's `/v1/goals/candidates`, with the server's own token, 5 seconds
+  at most. It is never written to disk and never retried: with the runtime down the
+  suggestion is dropped and counted, and the pass goes on. A runtime at any address but this
+  Mac's is sent nothing. A turn answered with Will's goals may be suggested from (everything
+  stays here); the server keeps nothing about a suggestion but a count.
+- **No tool reaches it.** No built-in tool and no tool of the runtime connector is named for
+  either action or calls that route, and a tool call that names `goal.propose` or
+  `world.commitment.from_chat` is refused at the gate: nothing is queued, spooled or sent.
+  The runtime refuses the two actions from anything but its own intake as well.
+- **Counts only.** Each pass's log line says how many were proposed, kept and filed. What was
+  dropped is counted by reason (`suggestion-quote`, `suggestion-text`, `suggestion-turn`,
+  `suggestion-date`, `suggestion-old`, `suggestion-known`, `suggestion-capped`,
+  `suggestion-unreachable`) in `extract-state.json`, never as text.
+
+Known limits:
+
+- *The short title is the model's.* The quote is Will's; the few words above it are the local
+  model's reading of them, held to his words by the rule above. He sees both on the card, and
+  the form lets him change the title before the goal starts.
+- *His own message can hold someone else's words.* A pasted email that says "I will send the
+  report by Friday" is in his message, so it can be quoted. The card shows the quote, and it
+  is his to reject.
+- *A suggestion can be lost.* With the runtime down when a pass runs, that turn's suggestions
+  are dropped: the pass has moved on and does not read the turn again.
+- *Only the first message of a turn is read,* up to 8,000 characters.
+
 | Var | Default | Purpose |
 | --- | --- | --- |
 | `FLINT_MEMORY_BRAIN` | `local` | `local`; `frontier`: the primary frontier tier, metered as `extract` and paused with other background work at 80% of its vendor's cap. Only when set, and never a fallback: with no frontier configured nothing runs, and a local model that is down is not replaced by the frontier. `off`: no extraction. Anything else is logged and read as `local`. |
@@ -260,6 +310,7 @@ all apply. The pass is `src/memory-extract.ts`; the choice of model is
 | `FLINT_EXTRACT_INTERVAL_MS` / `FLINT_EXTRACT_BACKLOG_INTERVAL_MS` | 6 hours / 15 minutes | Time between passes, and while a backlog remains. |
 | `FLINT_EXTRACT_MAX_TURNS` | 60 | Turns per pass. |
 | `FLINT_EXTRACT_SKIP_CONVERSATIONS` | `^(bulk\|grow\|seed)-` | Conversations never read: synthetic training traffic. |
+| `FLINT_EXTRACT_CANDIDATES` | off | `1`: the local model is also asked for goals and commitments Will sets in chat (see "Goals and commitments from chat"). Unset, blank or `0`: off. Anything else is logged and read as off. It does nothing with `FLINT_MEMORY_BRAIN=frontier`. |
 
 ## Spend caps
 
@@ -498,6 +549,14 @@ and its refusals are the fixed sentences too. After a yes the console reads the 
 again on its own until the review has finished (only the facts and LATEST REVIEW are redrawn,
 and never under an open Add Step). The proxy logs its own sentences as strings (`errorRef`),
 never an `Error` made up to carry one.
+
+The Suggested tab (P3 part 5) lists what Flint heard Will say in a chat: each suggestion's
+short title, "You said this in a chat on Oct 8.", and his own words in quotation marks,
+whole. **Make It a Goal** opens the New Goal form with those words in it (the title, why it
+matters, the day he named when it is still ahead); he adds how he will know it is done and
+signs once (`POST /goals/:id/start`). That one signature starts the goal and sets the
+suggestion's own waiting card aside. **Dismiss** asks first, in the footer: a dismissed
+suggestion is not suggested again.
 
 Approval cards now carry `kind`, `templateId` and `consequential`. The console never signs a
 consequential card (every goal card, and a plan change that is not a review's small one) under

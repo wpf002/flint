@@ -1980,8 +1980,13 @@ function goalSaidLine(x){return x&&x.saidAt?'You said this in a chat on '+gDay(x
 function goalSuggestion(x){var row=gEl('div','row two gwrap gsug');var l=gEl('span','lbl');l.appendChild(gEl('b',null,x.title));l.appendChild(gEl('span',null,goalSaidLine(x)));
   l.appendChild(gEl('span','gquote','“'+String(x.quote||'')+'”'));row.appendChild(l);
   var act=gEl('span','gsact');
-  act.appendChild(gBtn('btn','Dismiss',function(b){goalPlain('/goals/'+encodeURIComponent(x.goalId)+'/dismiss',{},b,function(){GOALS.note='You dismissed it.';goalList('suggested');});}));
+  act.appendChild(gBtn('btn','Dismiss',function(){goalDismissAsk(x);}));
   act.appendChild(gBtn('btn pri','Make It a Goal',function(){goalFromSuggestion(x);}));row.appendChild(act);return row;}
+/* Dismiss asks in place first, in the footer: a dismissed suggestion is not suggested again, and there is no undo. */
+function goalDismissAsk(x){if(GOALS.busy)return;var f=goalFoot();f.hidden=false;var t=gEl('span','note gconfirm');t.appendChild(gEl('b',null,'Dismiss This Suggestion'));
+  t.appendChild(gEl('span',null,'Flint won’t suggest '+gQuote(x.title)+' again.'));f.appendChild(t);
+  f.appendChild(gBtn('btn','Cancel',function(){goalFoot();}));
+  f.appendChild(gBtn('btn pri','Dismiss',function(b){goalPlain('/goals/'+encodeURIComponent(x.goalId)+'/dismiss',{},b,function(){GOALS.note='You dismissed it.';goalList('suggested');});}));}
 /* The New Goal form for a suggestion: its title, his words as why it matters, and the day he named when it is still ahead.
    It is a form of its own, never the kept New Goal draft. */
 function goalFromSuggestion(x){GOALS.form={mode:'new',suggestion:x,draftKey:null,title:String(x.title||''),why:String(x.quote||''),checks:[goalCheck()],
@@ -2163,7 +2168,7 @@ function goalSign(o){
 /* The open goal's buttons: change it, pause or resume it, finish it. */
 function goalActions(g){var f=goalFoot();
   if(g.status==='proposed'){f.hidden=false;f.appendChild(gEl('span','note'));
-    f.appendChild(gBtn('btn','Dismiss',function(b){goalPlain(gGoalPath(g,'/dismiss'),{},b,function(){GOALS.note='You dismissed it.';goalList('finished');});}));
+    f.appendChild(gBtn('btn','Dismiss',function(){goalDismissAsk({goalId:g.id,title:g.title});}));
     /* A goal needs a way to know it is done: Make It a Goal opens the form with what Will said already in it. */
     f.appendChild(gBtn('btn pri','Make It a Goal',function(){goalFromSuggestion({goalId:g.id,title:g.title,quote:g.description,saidAt:null,dueOn:g.horizonAt?gLocalDay(new Date(g.horizonAt)):null,waiting:false});}));return;}
   if(!goalLive(g))return;f.hidden=false;
