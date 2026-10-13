@@ -8,9 +8,17 @@ import {
   summarizeAttachments,
   textChars,
   readJsonLimited,
+  pdfBytesThatFit,
+  pdfTooBigFor,
+  sizeSentence,
+  startsAsPdf,
   LIMITS,
   MAX_BODY_BYTES,
 } from '../src/attachments';
+import { OllamaProvider, type Attachment } from '@flint/core';
+
+/** How @flint/core counts one file toward a prompt: what every adapter sizes a message with. */
+const estimateAttachmentTokens = (a: Attachment): number => new OllamaProvider().estimateTokens([{ id: 'u', role: 'user', content: '', timestamp: 0, attachments: [a] }], 'm');
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46]);
@@ -125,6 +133,86 @@ describe('parseAttachments', () => {
 
   it('sizes the body cap to fit the attachment total after base64', () => {
     expect(MAX_BODY_BYTES).toBeGreaterThan((LIMITS.totalBytes * 4) / 3);
+  });
+});
+
+// A text file that MENTIONS a PDF's header is a text file. It used to be taken for a PDF (the header was looked
+// for anywhere in the first kilobyte), and in Local mode was then told "This PDF has no text in it".
+describe('a text file that holds the characters %PDF- near its start', () => {
+  const NOTES = Buffer.from('my notes about the %PDF- header\nline two NOTPDFQ10\n');
+  const kindOf = (name: string, type: string, bytes: Buffer): string => {
+    const r = parseAttachments([file(name, type, bytes)]);
+    return r.ok ? `${r.attachments[0]!.kind} ${r.attachments[0]!.mediaType}` : `refused ${r.status}`;
+  };
+
+  it('sent as text, and reading as text, it is the text file it says it is', () => {
+    expect(kindOf('notes.txt', 'text/plain', NOTES)).toBe('text text/plain');
+    expect(kindOf('notes.md', '', NOTES)).toBe('text text/markdown');
+    expect(kindOf('make-pdf.py', 'application/octet-stream', Buffer.from('#!/usr/bin/env python3\nout.write(b"%PDF-1.4\\n")\n'))).toBe('text text/x-python');
+    const r = parseAttachments([file('notes.txt', 'text/plain', NOTES)]);
+    expect(r.ok && r.attachments[0]!.text).toContain('NOTPDFQ10');
+    expect(mediaNeeds(r.ok ? r.attachments : [])).toEqual({ image: false, pdf: false });
+  });
+
+  it('a PDF is still a PDF: at the start of the file whatever it is called, and after a little junk when it is not sent as text', () => {
+    expect(kindOf('plan.pdf', 'application/pdf', PDF)).toBe('document application/pdf');
+    // Called a text file, and it starts as a PDF: the bytes win, as ever.
+    expect(kindOf('plan.txt', 'text/plain', PDF)).toBe('document application/pdf');
+    expect(kindOf('plan.txt', 'text/plain', Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('\n  '), PDF]))).toBe('document application/pdf');
+    // A PDF with junk before its header, sent as a PDF or as nothing in particular: taken as one, as before.
+    const junk = Buffer.concat([Buffer.from('MIME-junk-before-the-header\n'), PDF]);
+    expect(kindOf('plan.pdf', 'application/pdf', junk)).toBe('document application/pdf');
+    expect(kindOf('plan.bin', 'application/octet-stream', junk)).toBe('document application/pdf');
+    // ...and one that is binary inside is not a text file, whatever it is called: it is the PDF its bytes say.
+    const binary = Buffer.concat([Buffer.from('junk\n'), PDF, Buffer.from([0x00, 0xff, 0xfe, 0x80])]);
+    expect(kindOf('plan.txt', 'text/plain', binary)).toBe('document application/pdf');
+  });
+
+  it('where a PDF starts: the header first, after at most a byte-order mark and blank space', () => {
+    expect(startsAsPdf(PDF)).toBe(true);
+    expect(startsAsPdf(Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), PDF]))).toBe(true);
+    expect(startsAsPdf(Buffer.concat([Buffer.from(' \r\n\t'), PDF]))).toBe(true);
+    expect(startsAsPdf(NOTES)).toBe(false);
+    expect(startsAsPdf(Buffer.concat([Buffer.from('x'), PDF]))).toBe(false);
+    expect(startsAsPdf(Buffer.alloc(0))).toBe(false);
+  });
+});
+
+// A PDF that no model that would be asked can take used to be sent on with no message at all: the one message
+// that carried it was dropped to make the prompt fit. It is refused at the door instead.
+describe('a PDF too large for the model that would answer', () => {
+  const pdfOf = (bytes: number, name = 'report.pdf'): Attachment => ({ kind: 'document', mediaType: 'application/pdf', name, data: 'A'.repeat(Math.ceil((bytes * 4) / 3)), bytes });
+  const SONNET = { maxContextTokens: 200_000, maxOutputTokens: 64_000 };
+  const OPUS = { maxContextTokens: 200_000, maxOutputTokens: 32_000 };
+
+  it('the most a model can take is its window, less the room for its reply, by the count every prompt is sized with', () => {
+    expect(pdfBytesThatFit(SONNET)).toBe(68 * 50_000);
+    expect(pdfBytesThatFit(OPUS)).toBe(84 * 50_000);
+    expect(pdfBytesThatFit({ maxContextTokens: 1000, maxOutputTokens: 4000 })).toBe(0);
+    // It agrees with the count itself: a PDF at the limit is counted as the whole budget, and one byte more as over it.
+    const at = pdfOf(pdfBytesThatFit(SONNET));
+    expect(estimateAttachmentTokens(at)).toBeLessThanOrEqual(SONNET.maxContextTokens - SONNET.maxOutputTokens);
+    expect(estimateAttachmentTokens(pdfOf(pdfBytesThatFit(SONNET) + 60_000))).toBeGreaterThan(SONNET.maxContextTokens - SONNET.maxOutputTokens);
+  });
+
+  it('a PDF is too large only when it fits NONE of the models that would be asked; the limit named is the most any of them takes', () => {
+    const tenMb = pdfOf(10 * 1024 * 1024, 'NAMEQ1.pdf');
+    expect(pdfTooBigFor([tenMb], [SONNET])).toEqual({ name: 'NAMEQ1.pdf', limit: 3_400_000 });
+    expect(pdfTooBigFor([tenMb], [SONNET, OPUS])).toEqual({ name: 'NAMEQ1.pdf', limit: 4_200_000 });
+    const fourMb = pdfOf(4_000_000);
+    expect(pdfTooBigFor([fourMb], [SONNET])).toEqual({ name: 'report.pdf', limit: 3_400_000 });
+    expect(pdfTooBigFor([fourMb], [SONNET, OPUS])).toBeUndefined();
+    expect(pdfTooBigFor([pdfOf(1_000_000)], [SONNET])).toBeUndefined();
+    // Pictures and text files are not PDFs, and no models means nothing to be too large for.
+    expect(pdfTooBigFor([{ kind: 'image', mediaType: 'image/png', name: 'a.png', data: 'A'.repeat(6_000_000), bytes: 4_500_000 }], [SONNET])).toBeUndefined();
+    expect(pdfTooBigFor([tenMb], [])).toBeUndefined();
+    expect(pdfTooBigFor([], [SONNET])).toBeUndefined();
+  });
+
+  it('the size sentence is the one the door has always said', () => {
+    expect(sizeSentence('NAMEQ1.pdf', 3_400_000)).toBe('NAMEQ1.pdf: larger than the 3 MB limit');
+    const r = parseAttachments([file('big.png', 'image/png', Buffer.concat([PNG, Buffer.alloc(LIMITS.imageBytes)]))]);
+    expect(!r.ok && r.error).toBe(sizeSentence('big.png', LIMITS.imageBytes));
   });
 });
 

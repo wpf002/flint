@@ -1,8 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { INSTALL_PDFTOTEXT, MAX_ANSWER_TOKENS, PDFS, PICTURES, USAGE, defaultOut, isRight, lookAtServer, parseVisionArgs, pickModel, renderVision, runVisionBench, textOf, type ServerLook, type VisionArgs, type VisionDeps } from '../src/vision-bench';
+import { join, resolve, sep } from 'node:path';
+import { INSTALL_PDFTOTEXT, MAX_ANSWER_TOKENS, OUT_UNDER_FLINT, PDFS, PICTURES, USAGE, defaultOut, isRight, lookAtServer, parseVisionArgs, pickModel, renderVision, runVisionBench, textOf, underFlint, type ServerLook, type VisionArgs, type VisionDeps } from '../src/vision-bench';
 import { main } from '../scripts/vision-bench';
 import { pdfChars } from '../src/local-media';
 import type { PdfReader, PdfText } from '../src/pdf-text';
@@ -30,7 +30,7 @@ interface Sent {
 }
 
 /** A model server as a function: Ollama's own routes, answering from `state`, and every request kept. */
-function modelServer(state: { loaded: Array<{ name: string; context_length: number }>; installed: Array<{ name: string; vision: boolean; remote_host?: string }>; answer?: (body: Record<string, unknown>) => string; down?: boolean; unloadAfterChat?: boolean }) {
+function modelServer(state: { loaded: Array<{ name: string; context_length: number }>; installed: Array<{ name: string; vision: boolean; remote_host?: string; remote_model?: string }>; answer?: (body: Record<string, unknown>) => string; down?: boolean; unloadAfterChat?: boolean }) {
   const sent: Sent[] = [];
   const json = (b: unknown, status = 200): Response => new Response(JSON.stringify(b), { status, headers: { 'content-type': 'application/json' } });
   const f = (async (input: unknown, init?: { method?: string; body?: unknown }) => {
@@ -40,7 +40,7 @@ function modelServer(state: { loaded: Array<{ name: string; context_length: numb
     if (state.down) throw new TypeError('fetch failed');
     if (url.pathname === '/api/version') return json({ version: '0.34.4' });
     if (url.pathname === '/api/ps') return json({ models: state.loaded });
-    if (url.pathname === '/api/tags') return json({ models: state.installed.map((m) => ({ name: m.name, ...(m.remote_host ? { remote_host: m.remote_host } : {}) })) });
+    if (url.pathname === '/api/tags') return json({ models: state.installed.map((m) => ({ name: m.name, ...(m.remote_host ? { remote_host: m.remote_host } : {}), ...(m.remote_model ? { remote_model: m.remote_model } : {}) })) });
     if (url.pathname === '/api/show') {
       const m = state.installed.find((x) => x.name === body?.model);
       return m ? json({ capabilities: ['completion', 'tools', ...(m.vision ? ['vision'] : [])] }) : json({ error: 'not found' }, 404);
@@ -194,6 +194,27 @@ describe('looking at the model server', () => {
     expect(s.sent.map((x) => `${x.method} ${x.path}`)).toEqual(['GET /api/version', 'GET /api/ps', 'GET /api/tags', 'POST /api/show', 'POST /api/show']);
     // The only bodies sent name a model and nothing else: nothing that loads one.
     expect(s.sent.filter((x) => x.body).map((x) => x.body)).toEqual([{ model: MAIN }, { model: SMALL }]);
+  });
+
+  // Where a listed model runs is decided by the one rule the server itself uses (@flint/policy listedModels): a row
+  // that says anything of a remote host OR a remote model runs elsewhere. A review found the benchmark reading the
+  // host alone, so a row with only `remote_model` passed for a model on this Mac.
+  it('a model its server says runs somewhere else is not a model on this Mac: it is not listed, not in memory, and never asked', async () => {
+    for (const row of [{ remote_host: 'https://ollama.com:443' }, { remote_model: 'cloud-model:120b' }, { remote_host: 'https://ollama.com:443', remote_model: 'cloud-model:120b' }]) {
+      const s = modelServer({ loaded: [{ name: 'cloudy:9b', context_length: 16384 }], installed: [{ name: 'cloudy:9b', vision: true, ...row }], answer: RIGHT });
+      const look = await lookAtServer(s.fetch, 'http://127.0.0.1:11434');
+      expect(look, JSON.stringify(row)).toMatchObject({ loaded: [], installed: [], sees: [] });
+      // It is not even asked what it can do.
+      expect(s.sent.some((x) => x.path === '/api/show')).toBe(false);
+      const r = await runVisionBench(ARGS, deps(s));
+      expect(s.chats(), JSON.stringify(row)).toEqual([]);
+      expect(r.model).toBeUndefined();
+      expect(r.notAsked).toBe('The model server has no model that it says can see, so none was asked.');
+      // Named outright, it is still not asked.
+      const named = await runVisionBench({ ...ARGS, model: 'cloudy:9b' }, deps(s));
+      expect(named.notAsked).toBe('The model named is not on this model server, so no model was asked.');
+      expect(s.chats()).toEqual([]);
+    }
   });
 
   it('a server that does not answer is said to be unreachable, and a name that is not a model name is dropped', async () => {
@@ -437,6 +458,56 @@ describe('the command', () => {
     expect(r.code).toBe(0);
     expect(JSON.parse(r.out.join('\n'))).toMatchObject({ model: { name: MAIN } });
     expect(r.err.join('\n')).toContain('The results could not be saved to the output folder. They are printed below.');
+  });
+
+  // ~/.flint is what the nightly and the offsite backups carry. A review ran the command with --out under it, and
+  // the run's pictures and PDFs were written there.
+  it('an output folder that is Flint’s own folder, or inside it, is refused: exit 2, nothing written, nothing asked', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'flint-vision-home-'));
+    dirs.push(home);
+    mkdirSync(join(home, '.flint'));
+    for (const out of [join(home, '.flint'), join(home, '.flint', 'bench'), join(home, '.flint', 'a', 'b', 'c'), `${join(home, '.flint')}${sep}..${sep}.flint${sep}x`]) {
+      const lines = { out: [] as string[], err: [] as string[] };
+      const server = healthy();
+      const code = await main(['--out', out], { env: {}, home, out: (l) => lines.out.push(l), err: (l) => lines.err.push(l), bench: { fetch: server.fetch, exists: (p) => p === '/usr/bin/mdimport', reader: (which) => goodReader(which.reader), machine: { chip: 'x', memoryGb: 1, os: '1' } } });
+      expect(code, out).toBe(2);
+      expect(lines.err).toEqual([OUT_UNDER_FLINT]);
+      expect(lines.out).toEqual([]);
+      expect(server.sent).toEqual([]);
+    }
+    expect(readdirSync(join(home, '.flint'))).toEqual([]);
+    // A link that leads into it is it.
+    const link = join(home, 'elsewhere');
+    symlinkSync(join(home, '.flint'), link);
+    const lines: string[] = [];
+    expect(await main(['--out', join(link, 'bench')], { env: {}, home, out: () => {}, err: (l) => lines.push(l), bench: { fetch: healthy().fetch, exists: () => false, machine: { chip: 'x', memoryGb: 1, os: '1' } } })).toBe(2);
+    expect(lines).toEqual([OUT_UNDER_FLINT]);
+    expect(existsSync(join(home, '.flint', 'bench'))).toBe(false);
+    // A folder that only looks like it is not it.
+    const near = join(home, '.flint-bench');
+    expect(await main(['--out', near], { env: {}, home, out: () => {}, err: () => {}, bench: { fetch: healthy().fetch, exists: () => false, machine: { chip: 'x', memoryGb: 1, os: '1' } } })).toBe(0);
+    expect(existsSync(join(near, 'results.md'))).toBe(true);
+  });
+
+  it('the rule itself: by the path as written, and by where the nearest folder that exists really is', () => {
+    const o = { resolve, sep };
+    expect(underFlint('/Users/w/.flint', '/Users/w', o)).toBe(true);
+    expect(underFlint('/Users/w/.flint/bench/run', '/Users/w', o)).toBe(true);
+    expect(underFlint('/Users/w/.flint/../.flint/x', '/Users/w', o)).toBe(true);
+    expect(underFlint('/Users/w/.flintstones', '/Users/w', o)).toBe(false);
+    expect(underFlint('/Users/w/Library/Caches/Flint/vision-bench/x', '/Users/w', o)).toBe(false);
+    expect(underFlint('/Users/other/.flint', '/Users/w', o)).toBe(false);
+    // The default folder is never under it.
+    expect(underFlint(defaultOut('/Users/w', '2026-10-13T12:00:00.000Z', join), '/Users/w', o)).toBe(false);
+    const real = (path: string): string | undefined => {
+      try {
+        return realpathSync(path);
+      } catch {
+        return undefined;
+      }
+    };
+    expect(underFlint('/nonexistent-root/a/b', '/nonexistent-home', { ...o, real })).toBe(false);
+    expect(OUT_UNDER_FLINT).toMatch(/^vision-bench: .*\.$/);
   });
 
   it('nothing to measure at all: exit 1', async () => {

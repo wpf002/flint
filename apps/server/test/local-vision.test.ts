@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { EMBEDDING_MODEL, Flint, OllamaProvider, type Attachment, type Message } from '@flint/core';
+import { EMBEDDING_MODEL, Flint, OllamaProvider, isFlintError, type Attachment, type Message } from '@flint/core';
 import { buildInference, type Inference, type RouteAsk } from '../src/inference';
 import type { Hardware } from '../src/hardware';
 import { liveOllamaOptions } from '../src/local-model';
@@ -10,6 +10,7 @@ import type { ModeRoute, OpenRoute } from '../src/mode-route';
 import { LOCALITY } from '../src/ollama-locality';
 import type { PdfReader, PdfText } from '../src/pdf-text';
 import { setPlaceRules } from '../src/policy';
+import { asLocalTurn } from '../src/turn-taint';
 import { Sheet, textPdf } from '../src/synthetic-files';
 import { mediaNeeds } from '../src/attachments';
 import { startMockLocalServer, type MockLocalServer, type MockModel } from './mock-local-server';
@@ -63,12 +64,22 @@ function standInReader(table: Record<string, PdfText>): PdfReader & { reads: str
   };
 }
 
-async function boot(models: Record<string, MockModel>, env: Record<string, string> = {}, opts: { reader?: PdfReader; kind?: MockLocalServer['kind']; programs?: string[] } = {}) {
+/** An address that stands for a model server on another machine: every request for it is carried to the stand-in here. */
+const ELSEWHERE = 'gpu-box.example:11434';
+
+async function boot(models: Record<string, MockModel>, env: Record<string, string> = {}, opts: { reader?: PdfReader; kind?: MockLocalServer['kind']; programs?: string[]; noWait?: boolean; elsewhere?: 'http' | 'https' } = {}) {
   server = await startMockLocalServer({ kind: opts.kind ?? 'ollama', models });
+  const mock = server;
+  // (The server is told its model server is at another machine's address; the test's fetch carries it to the stand-in.)
+  const carried = (async (input: unknown, init?: RequestInit) => fetch(String(input).replace(new RegExp(`^https?://${ELSEWHERE.replace('.', '\\.')}`), mock.origin), init)) as unknown as typeof fetch;
   const dir = mkdtempSync(join(tmpdir(), 'flint-local-vision-'));
   dirs.push(dir);
   const lines: string[] = [];
-  const address = opts.kind === 'llamacpp' || env.FLINT_LOCAL_PROVIDER === 'openai' ? { FLINT_LOCAL_BASE_URL: server.baseURL, OLLAMA_HOST: server.origin } : { OLLAMA_HOST: server.origin };
+  const address = opts.elsewhere
+    ? { OLLAMA_HOST: `${opts.elsewhere}://${ELSEWHERE}` }
+    : opts.kind === 'llamacpp' || env.FLINT_LOCAL_PROVIDER === 'openai'
+      ? { FLINT_LOCAL_BASE_URL: server.baseURL, OLLAMA_HOST: server.origin }
+      : { OLLAMA_HOST: server.origin };
   const inference = await buildInference({
     env: { ...address, OLLAMA_MODEL: MAIN, OLLAMA_NUM_CTX: '16384', OLLAMA_THINK: 'false', ...env },
     modeFile: join(dir, 'inference.json'),
@@ -78,9 +89,10 @@ async function boot(models: Record<string, MockModel>, env: Record<string, strin
     pick: { capMs: 500 },
     fileExists: (path) => (opts.programs ?? ['/usr/bin/mdimport']).includes(path),
     ...(opts.reader ? { pdfReader: opts.reader } : {}),
+    ...(opts.elsewhere ? { fetch: carried } : {}),
   });
   built.push(inference);
-  await inference.ready;
+  if (!opts.noWait) await inference.ready;
   return { inference, lines, s: server };
 }
 
@@ -193,15 +205,33 @@ describe('a turn the standby would answer', () => {
     expect(names(inference.planLocal(route({ mode: 'hybrid', reason: 'default', cloudFallback: true }), { ...who, needs: { image: true } }))).toEqual(['cloud']);
   });
 
-  it('a turn that is a cloud model’s alone is planned exactly as it always was: the standby stays in a plan nobody will run', async () => {
-    const { inference } = await boot(models(false), { FLINT_INFERENCE_MODE: 'hybrid', FLINT_LOCAL_FALLBACK_MODEL: SMALL });
-    // What Hybrid makes of a picture turn with nothing turned on: the cloud's, with no falling back here.
+  // The rule is behind the settings. With neither on, a plan is main's, row for row: a review found one place
+  // where it was not (the OpenAI-compatible wire, Hybrid, an ordinary picture turn whose main model fails: main
+  // answered on this Mac with the standby, and the branch sent the picture to the cloud).
+  it('with NOTHING turned on the standby is planned exactly as it always was, whatever the turn carries, on either wire', async () => {
+    for (const wire of [{}, { FLINT_LOCAL_PROVIDER: 'openai' }] as Array<Record<string, string>>) {
+      const { inference } = await boot(models(false), { ...wire, FLINT_INFERENCE_MODE: 'hybrid', FLINT_LOCAL_FALLBACK_MODEL: SMALL });
+      for (const r of [
+        route({ brain: 'frontier', localFallback: false, cloudFallback: false, reason: 'media', mode: 'hybrid' }),
+        route({ brain: 'frontier', localFallback: true, cloudFallback: false, reason: 'tools', mode: 'hybrid' }),
+        route({ brain: 'local', localFallback: true, cloudFallback: true, reason: 'default', mode: 'hybrid' }),
+        route({}),
+      ]) {
+        const without = inference.planLocal(r, who);
+        for (const needs of [{ image: true }, { pdf: true }, { image: true, pdf: true }]) expect(inference.planLocal(r, { ...who, needs }), JSON.stringify([wire, r.reason, needs])).toEqual(without);
+        expect(names(without)).toContain('standby');
+      }
+      built.splice(0).forEach((i) => i.stop());
+      await server?.close();
+    }
+  });
+
+  it('with pictures on: a turn that is a cloud model’s alone keeps its plan, and one that may be answered here leaves out a standby that cannot see', async () => {
+    const { inference } = await boot(models(false), { FLINT_LOCAL_VISION: 'on', FLINT_INFERENCE_MODE: 'hybrid', FLINT_LOCAL_FALLBACK_MODEL: SMALL });
     const cloudOnly = route({ brain: 'frontier', localFallback: false, cloudFallback: false, reason: 'media', mode: 'hybrid' });
     const withNeeds = inference.planLocal(cloudOnly, { ...who, needs: { image: true } });
-    const without = inference.planLocal(cloudOnly, who);
-    expect(withNeeds).toEqual(without);
+    expect(withNeeds).toEqual(inference.planLocal(cloudOnly, who));
     expect(names(withNeeds)).toEqual(['standby']);
-    // (No sentence, so the plan sets off no extra look at the model server either: that follows a plan with nothing local in it.)
     expect(withNeeds.refusal).toBeUndefined();
     // The same turn once it MAY fall back here (the local model reads it): the standby that cannot see is left out.
     expect(inference.planLocal({ ...cloudOnly, localFallback: true }, { ...who, needs: { image: true } }).steps).toEqual([]);
@@ -218,8 +248,9 @@ describe('a turn the standby would answer', () => {
     expect(on.inference.planLocal(route({}), { ...who, needs: { image: true, pdf: true } }).steps).toEqual([]);
     on.inference.stop();
     await server?.close();
-    const off = await boot(models(false), { FLINT_INFERENCE_MODE: 'local', FLINT_LOCAL_FALLBACK_MODEL: SMALL });
-    expect(off.inference.planLocal(route({}), { ...who, needs: { pdf: true } }).steps).toEqual([]);
+    // With pictures on and no PDF reader, a standby is not planned for a PDF it cannot read either.
+    const visionOnly = await boot(models(false), { FLINT_LOCAL_VISION: 'on', FLINT_INFERENCE_MODE: 'local', FLINT_LOCAL_FALLBACK_MODEL: SMALL });
+    expect(visionOnly.inference.planLocal(route({}), { ...who, needs: { pdf: true } }).steps).toEqual([]);
   });
 });
 
@@ -337,7 +368,7 @@ describe('routing a turn with a picture or a PDF', () => {
     const reader = standInReader(READS);
     const { inference, s } = await boot({ [MAIN]: { loaded: true, contextLength: 16384, capabilities: BLIND }, [EMBED]: {} }, { FLINT_LOCAL_PDF: 'spotlight', FLINT_INFERENCE_MODE: 'local' }, { reader });
     expect(await inference.routeFirst(ask({ files: [SCAN] }))).toEqual({ error: 'This PDF has no text in it that Flint can read on this Mac, and Local mode never uses the cloud. Send it as text instead.', status: 422 });
-    expect(await inference.routeFirst(ask({ files: [FLAKY] }))).toEqual({ error: "Flint couldn't read this PDF on this Mac just now, and Local mode never uses the cloud. Send it as text instead.", status: 422 });
+    expect(await inference.routeFirst(ask({ files: [FLAKY] }))).toEqual({ error: "Flint couldn't read this PDF on this Mac just now, and Local mode never uses the cloud. Try again in a moment.", status: 422 });
     // One good PDF beside one that cannot be read: the turn is not answered on half of what was sent.
     expect(await inference.routeFirst(ask({ files: [INVOICE, SCAN] }))).toMatchObject({ error: expect.stringContaining('This PDF has no text in it'), status: 422 });
     inference.mode.set('cloud', 'console');
@@ -431,6 +462,226 @@ describe('routing a turn with a picture or a PDF', () => {
     expect(await inference.routeFirst(ask({ files: [PNG], localOnly: true }))).toEqual({ error: "Local-only is on, and the on-device brain can't read images. Turn Local-only off to send the file to the frontier brain, or remove the attachment.", status: 422 });
     inference.mode.set('local', 'console');
     expect(await inference.routeFirst(ask({ files: [PNG] }))).toMatchObject({ brain: 'local', reason: 'mode_local' });
+  });
+});
+
+describe('each reason a PDF was not read reaches Will as its own sentence', () => {
+  it('too big, too many pages, and a reader that is busy: never "send it as text" for the last', async () => {
+    const reader = standInReader({ big: { ok: false, why: 'too_big' }, long: { ok: false, why: 'too_long' }, busy: { ok: false, why: 'busy' } });
+    const { inference } = await boot({ [MAIN]: { loaded: true, contextLength: 16384, capabilities: BLIND }, [EMBED]: {} }, { FLINT_LOCAL_PDF: 'spotlight', FLINT_INFERENCE_MODE: 'local' }, { reader });
+    expect(await inference.routeFirst(ask({ files: [pdf('b.pdf', 'big')] }))).toEqual({ error: 'This PDF is larger than the 10 MB Flint reads on this Mac, and Local mode never uses the cloud. Send a smaller part of it, or its text.', status: 422 });
+    expect(await inference.routeFirst(ask({ files: [pdf('l.pdf', 'long')] }))).toEqual({ error: 'This PDF has more than the 1,000 pages Flint reads on this Mac, and Local mode never uses the cloud. Send a smaller part of it, or its text.', status: 422 });
+    expect(await inference.routeFirst(ask({ files: [pdf('z.pdf', 'busy')] }))).toEqual({ error: "Flint's PDF reader on this Mac is busy right now, and Local mode never uses the cloud. Try again in a moment.", status: 422 });
+    inference.mode.set('cloud', 'console');
+    expect(await inference.routeFirst(ask({ files: [pdf('z.pdf', 'busy')], localOnly: true }))).toEqual({ error: "Local-only is on, and Flint's PDF reader on this Mac is busy right now. Try again in a moment.", status: 422 });
+    // In Hybrid a turn that is not private goes to a cloud model that reads PDFs, whatever the reason.
+    inference.mode.set('hybrid', 'console');
+    for (const word of ['big', 'long', 'busy']) expect(await inference.routeFirst(ask({ files: [pdf('x.pdf', word)] }))).toMatchObject({ open: true, mediaLocalCannotRead: true });
+  });
+});
+
+// A file's content goes to a model server only when it is this Mac, or the one Will vouched for. A review found
+// one place it went elsewhere: OLLAMA_HOST on another machine that was not vouched for, Cloud mode, no cloud model,
+// an ordinary turn. The picture and the PDF's text were sent there.
+describe('a model server that is not this Mac is sent no file, on any turn', () => {
+  const sees = (): Record<string, MockModel> => ({ [MAIN]: { loaded: true, contextLength: 16384, capabilities: SEES }, [EMBED]: {} });
+  const ON = { FLINT_LOCAL_VISION: 'on', FLINT_LOCAL_PDF: 'spotlight' };
+
+  it('on another machine and not vouched for: nothing says the local model reads a file, no PDF is read, and no request carries one', async () => {
+    const reader = standInReader(READS);
+    const { inference, s } = await boot(sees(), ON, { reader, elsewhere: 'http' });
+    expect(inference.confined).toEqual({ ok: false, why: 'remote_host' });
+    expect(inference.localCan()).toEqual({ image: false, pdf: false });
+    expect(inference.readsForConsole()).toEqual({ images: false, pdfs: false });
+    expect((await inference.localReads(ask({ files: [PNG], hasFrontier: false }))).keptCan).toBeUndefined();
+    // The review's case: Cloud mode, no cloud model, an ordinary turn. Refused in the words it always was.
+    expect(await inference.routeFirst(ask({ files: [PNG], hasFrontier: false }))).toEqual({ error: "The local brain can't read images, and no frontier brain is configured. Send it as text instead.", status: 422 });
+    expect(await inference.routeFirst(ask({ files: [INVOICE], hasFrontier: false }))).toEqual({ error: "The local brain can't read PDFs, and no frontier brain is configured. Send it as text instead.", status: 422 });
+    expect(reader.reads).toEqual([]);
+    // And whatever a caller does with the adapter itself, the file's content does not go: a note, as before.
+    s.requests.length = 0;
+    await inference.primary.provider.generate({ model: MAIN, messages: [user('what is this?', [PNG, INVOICE])] });
+    const sent = sentUser(s);
+    expect(sent.images).toBeUndefined();
+    expect(sent.content).toContain('this model cannot read images');
+    expect(sent.content).toContain('this model cannot read this file type');
+    expect(JSON.stringify(s.chats().at(-1)!.body)).not.toContain(PNG.data);
+    expect(sent.content).not.toContain('1,284.50');
+    expect(reader.reads).toEqual([]);
+  });
+
+  it('the status says why, and the console is told the local model reads neither', async () => {
+    const { inference } = await boot(sees(), ON, { reader: standInReader(READS), elsewhere: 'http' });
+    const st = await inference.status();
+    expect(st.lines).toContain('Pictures for the local model are turned on, and the local model is not on this Mac, so none is sent to it.');
+    expect(st.lines).toContain("PDF reading for the local model is turned on, and the local model is not on this Mac, so no PDF's text is sent to it.");
+    expect(st.lines).not.toContain('Pictures are sent to the local model, which its server says can see.');
+    expect(st.local.pictures).toBe(false);
+  });
+
+  it('the one server Will vouched for is held as this Mac is, for a file as for a private message', async () => {
+    const reader = standInReader(READS);
+    const { inference, s } = await boot(sees(), { ...ON, FLINT_LOCAL_ALLOW_REMOTE: '1' }, { reader, elsewhere: 'https' });
+    expect(inference.confined).toEqual({ ok: true });
+    expect(inference.allowedRemote()).toBe(true);
+    expect(inference.localCan()).toEqual({ image: true, pdf: true });
+    await inference.primary.provider.generate({ model: MAIN, messages: [user('what is this?', [PNG, INVOICE])] });
+    expect(sentUser(s).images).toEqual([PNG.data]);
+    expect(sentUser(s).content).toContain('The total due is 1,284.50 dollars.');
+  });
+
+  it('a main model that turns out to run on Ollama’s servers, whatever it is called, is sent no file from then on', async () => {
+    const reader = standInReader(READS);
+    const { inference, s } = await boot(sees(), ON, { reader });
+    expect(inference.localCan()).toEqual({ image: true, pdf: true });
+    // The name is pointed at a cloud model while Flint runs, and the model server is looked at again.
+    s.models.get(MAIN)!.remoteHost = 'https://ollama.com:443';
+    await inference.local.monitor.check();
+    expect(inference.confined).toEqual({ ok: false, why: 'cloud_model' });
+    expect(inference.localCan()).toEqual({ image: false, pdf: false });
+    s.requests.length = 0;
+    await inference.primary.provider.generate({ model: MAIN, messages: [user('what is this?', [PNG, INVOICE])] });
+    expect(sentUser(s).images).toBeUndefined();
+    expect(sentUser(s).content).not.toContain('1,284.50');
+  });
+});
+
+// The look at the model server is the last thing before a request that stays here. A review found a gap: a PDF
+// from an earlier turn was read inside the request, after the look, and with a slow read the model was re-pointed
+// at a cloud model in between; the private message and the PDF's text were still sent (the look was 11.7 s old).
+describe('the look at the model server and the reads of a turn’s PDFs', () => {
+  // (Made anew for each start: a test here points the model somewhere else.)
+  const models = (): Record<string, MockModel> => ({ [MAIN]: { loaded: true, contextLength: 16384, capabilities: BLIND }, [EMBED]: {} });
+
+  it('the PDFs of the conversation’s earlier turns are read before the route’s look, so the request waits for no read', async () => {
+    const reader = standInReader(READS);
+    const { inference, s } = await boot(models(), { FLINT_LOCAL_PDF: 'spotlight', FLINT_INFERENCE_MODE: 'local' }, { reader });
+    s.requests.length = 0;
+    const readsAtLook: number[] = [];
+    const check = inference.local.monitor.check.bind(inference.local.monitor);
+    inference.local.monitor.check = async () => (readsAtLook.push(reader.reads.length), check());
+    // A turn with no file of its own, in a conversation whose last turn carried a PDF.
+    expect(await inference.routeFirst(ask({ earlier: [INVOICE, PNG] }))).toMatchObject({ brain: 'local' });
+    expect(reader.reads).toEqual(['invoice']);
+    expect(readsAtLook[0]).toBe(1); // read first, then the look
+    await inference.primary.provider.generate({ model: MAIN, messages: [user('what is the total?', [INVOICE]), { id: 'a1', role: 'assistant', content: 'It is 1,284.50.', timestamp: 0 }, user('and when is it due?', [])] });
+    expect(reader.reads).toEqual(['invoice']);
+    expect(JSON.stringify(s.chats().at(-1)!.body)).toContain('The total due is 1,284.50 dollars.');
+  });
+
+  it('for a turn a cloud model is first to answer, nothing of the history is read here', async () => {
+    const reader = standInReader(READS);
+    const { inference } = await boot(models(), { FLINT_LOCAL_PDF: 'spotlight' }, { reader });
+    expect(await inference.routeFirst(ask({ earlier: [INVOICE] }))).toMatchObject({ brain: 'frontier' });
+    expect(reader.reads).toEqual([]);
+    // ...and a turn that Cloud mode keeps here reads it, before its look.
+    expect(await inference.routeFirst(ask({ earlier: [INVOICE], localOnly: true }))).toMatchObject({ brain: 'local', private: true });
+    expect(reader.reads).toEqual(['invoice']);
+  });
+
+  it('looking again: a turn that stays here is NOT sent to a model that has been pointed elsewhere since the look', async () => {
+    const reader = standInReader(READS);
+    const { inference, s } = await boot(models(), { FLINT_LOCAL_PDF: 'spotlight' }, { reader });
+    const provider = inference.primary.provider;
+    // Still here: the look finds nothing changed, and a kept turn goes on.
+    await expect(asLocalTurn(() => inference.lookAgain(provider, MAIN), { private: true, staysHere: true })).resolves.toBeUndefined();
+    // The review's flip: the name is pointed at a cloud model after the turn's look.
+    s.models.get(MAIN)!.remoteHost = 'https://ollama.com:443';
+    const kept = await asLocalTurn(() => inference.lookAgain(provider, MAIN), { private: true, staysHere: true }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(isFlintError(kept)).toBe(true);
+    expect(isFlintError(kept) && kept.error).toEqual({ kind: 'provider_unavailable', message: 'Flint cannot confirm right now that its local model runs on this Mac, so nothing was sent to it.', retryable: false });
+    // A turn of Local mode is held the same way.
+    await expect(asLocalTurn(() => inference.lookAgain(provider, MAIN), { staysHere: true })).rejects.toThrow('nothing was sent');
+    // An ordinary turn is not refused by the look; it is simply handed no file from here on.
+    await expect(inference.lookAgain(provider, MAIN)).resolves.toBeUndefined();
+    expect(inference.confined.ok).toBe(false);
+  });
+
+  it('the whole of it, through the adapter: a slow read of a history PDF, the model re-pointed meanwhile, and nothing is sent', async () => {
+    let release: (v: PdfText) => void = () => {};
+    const slow: PdfReader = { kind: 'spotlight', read: () => new Promise<PdfText>((r) => (release = r)) };
+    const { inference, s } = await boot(models(), { FLINT_LOCAL_PDF: 'spotlight' }, { reader: slow });
+    s.requests.length = 0;
+    // The clock the wrapper reads is the real one: the read is held for longer than the server's word is good for.
+    const held = asLocalTurn(() => inference.primary.provider.generate({ model: MAIN, messages: [user('STALEQ11 what did page one say?', [INVOICE])] }), { private: true, staysHere: true });
+    held.catch(() => {});
+    await new Promise((r) => setTimeout(r, 2100));
+    s.models.get(MAIN)!.remoteHost = 'https://ollama.com:443';
+    release({ ok: true, text: 'The secret word is SLOWPDF.', cut: false });
+    await expect(held).rejects.toThrow('nothing was sent');
+    expect(s.chats()).toEqual([]);
+    for (const r of s.requests) expect(JSON.stringify(r.body ?? {})).not.toMatch(/STALEQ11|SLOWPDF/);
+  });
+});
+
+describe('right after a start', () => {
+  it('the first turn with a picture waits for the model server’s first word about its model, and is answered, not refused', async () => {
+    const { inference } = await boot({ [MAIN]: { loaded: true, contextLength: 16384, capabilities: SEES }, [EMBED]: {} }, { FLINT_LOCAL_VISION: 'on', FLINT_INFERENCE_MODE: 'local' }, { noWait: true });
+    // Nothing has been heard from the model server yet: "not known" is "no".
+    expect(inference.localCan().image).toBe(false);
+    expect(await inference.routeFirst(ask({ files: [PNG] }))).toMatchObject({ brain: 'local', reason: 'mode_local' });
+    expect(inference.localCan().image).toBe(true);
+  });
+
+  it('a turn with no file waits for nothing, and with nothing turned on neither does one with a file', async () => {
+    const quiet = await boot({ [MAIN]: { loaded: true, contextLength: 16384, capabilities: SEES }, [EMBED]: {} }, { FLINT_INFERENCE_MODE: 'local' }, { noWait: true });
+    expect(await quiet.inference.routeFirst(ask({ files: [PNG] }))).toEqual({ error: "The local model can't read images, and Local mode never uses the cloud. Send it as text instead.", status: 422 });
+    await quiet.inference.ready;
+  });
+
+  it('a model server that does not answer is not waited for past its own look: the turn is refused in the usual words', async () => {
+    const { inference, s } = await boot({ [MAIN]: { loaded: true, contextLength: 16384, capabilities: SEES }, [EMBED]: {} }, { FLINT_LOCAL_VISION: 'on', FLINT_INFERENCE_MODE: 'local' });
+    await s.close();
+    inference.local.monitor.facts = () => undefined; // as if it had never been heard
+    const began = Date.now();
+    expect(await inference.routeFirst(ask({ files: [PNG] }))).toMatchObject({ error: expect.stringContaining("can't read images") });
+    expect(Date.now() - began).toBeLessThan(30_000);
+  });
+});
+
+describe('what a local model server says when it fails', () => {
+  const ECHO = 'decode failed for image ECHOBYTES ECHOMSG4';
+  const failing = (): Record<string, MockModel> => ({ [MAIN]: { loaded: true, contextLength: 16384, capabilities: SEES, replies: [{ status: 500, message: ECHO }] }, [EMBED]: {} });
+  const failure = async (i: Inference): Promise<string> => {
+    const e = await i.primary.provider.generate({ model: MAIN, messages: [user('what is this?', [PNG])] }).then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+    return isFlintError(e) ? e.error.message : String(e);
+  };
+
+  it('with pictures or PDFs turned on it is not repeated: a class and a fixed sentence', async () => {
+    for (const env of [{ FLINT_LOCAL_VISION: 'on' }, { FLINT_LOCAL_PDF: 'spotlight' }] as Array<Record<string, string>>) {
+      const { inference } = await boot(failing(), env, { reader: standInReader(READS) });
+      expect(await failure(inference)).toBe('The local model server could not answer.');
+      built.splice(0).forEach((i) => i.stop());
+      await server?.close();
+    }
+  });
+
+  it('with nothing turned on an error is what it always was', async () => {
+    const { inference } = await boot(failing(), {});
+    expect(await failure(inference)).toContain(ECHO);
+  });
+});
+
+describe('the boot log', () => {
+  const sees: Record<string, MockModel> = { [MAIN]: { loaded: true, contextLength: 16384, capabilities: SEES }, [EMBED]: {} };
+
+  it('one line says which of the two are on, by name; nothing when neither is', async () => {
+    const both = await boot(sees, { FLINT_LOCAL_VISION: 'on', FLINT_LOCAL_PDF: 'spotlight' }, { reader: standInReader(READS) });
+    expect(both.lines.filter((l) => l.includes('on for the local model'))).toEqual(['[local] on for the local model: pictures (FLINT_LOCAL_VISION), PDF text by spotlight (FLINT_LOCAL_PDF)']);
+    built.splice(0).forEach((i) => i.stop());
+    await server?.close();
+    const one = await boot(sees, { FLINT_LOCAL_VISION: 'on' });
+    expect(one.lines.filter((l) => l.includes('on for the local model'))).toEqual(['[local] on for the local model: pictures (FLINT_LOCAL_VISION)']);
+    built.splice(0).forEach((i) => i.stop());
+    await server?.close();
+    const none = await boot(sees, { FLINT_LOCAL_VISION: 'off' });
+    expect(none.lines.filter((l) => /for the local model|picture|PDF/i.test(l))).toEqual([]);
   });
 });
 

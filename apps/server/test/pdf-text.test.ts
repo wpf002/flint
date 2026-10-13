@@ -698,6 +698,35 @@ describe('a folder a crash left behind', () => {
   });
 });
 
+// The tests that read a PDF with the Mac's own importer are in test/process/local-media.test.ts, and
+// `pnpm --filter server test` is what the deploy gate runs on the live Mac: a busy moment there must not fail a
+// deploy, so the gate can never be opted in to them.
+describe('the tests that run the real importer are opt-in, and the deploy gate never runs them', () => {
+  const file = (path: string): string => readFileSync(join(__dirname, '..', path), 'utf8');
+
+  it('they run only when FLINT_TEST_REAL_PDF=1 says so, on a Mac; no other test names the importer as a program to run', () => {
+    const tests = file('test/process/local-media.test.ts');
+    expect(tests).toContain("const REAL_PDF = ON_A_MAC && process.env.FLINT_TEST_REAL_PDF === '1';");
+    expect(tests.match(/describe\.runIf\(REAL_PDF\)\(/g)!.length).toBeGreaterThanOrEqual(2);
+    // The one server started with a PDF reader is behind that name.
+    expect(tests.match(/FLINT_LOCAL_PDF: 'spotlight'/g)).toHaveLength(1);
+    expect(tests).toMatch(/pdfTmp \? boot\(runs\.pdf\.dir, \{ FLINT_LOCAL_PDF: 'spotlight'/);
+    expect(tests).toContain('const pdfTmp = REAL_PDF ? ');
+    // How to run them is said where they are.
+    expect(tests).toContain('FLINT_TEST_REAL_PDF=1 pnpm --filter server test:process');
+  });
+
+  it('install-server.sh clears the name before the gate runs the server tests, and nothing in the repo sets it', () => {
+    const gate = file('install-server.sh');
+    const cleared = gate.indexOf('\n  unset FLINT_TEST_REAL_PDF\n');
+    const run = gate.indexOf('pnpm --filter server test ||');
+    expect(cleared).toBeGreaterThan(-1);
+    expect(run).toBeGreaterThan(cleared);
+    expect(gate).not.toMatch(/FLINT_TEST_REAL_PDF=/);
+    for (const path of ['package.json', 'vitest.config.ts', 'vitest.process.config.ts', 'auto_deploy.sh']) expect(file(path), path).not.toContain('FLINT_TEST_REAL_PDF');
+  });
+});
+
 describe('running a program', () => {
   // Three small programs every Mac and Linux has. None reads a PDF.
   it('by its path with its arguments as a list: nothing is a shell’s to read', async () => {

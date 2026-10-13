@@ -513,7 +513,7 @@ describe('index.ts wiring', () => {
   it('both routes are routed by the mode: routeFirst before anything else, finishRoute once the tier is known, and no routeTurn left here', () => {
     expect(src).not.toMatch(/\brouteTurn\(/);
     for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
-      expect(route, name).toMatch(/const pre = await ctx\.inference\.routeFirst\(\{ message(: prompt)?, localOnly, deep: body\.deep === true, evalMode(: false)?, hasFrontier: !!ctx\.frontier, needs: mediaNeeds\(attachments\), frontierCan: ctx\.frontier\?\.media \?\? \{\}, attachments(, ownLocalModel: lm\.model !== undefined)? \}\);/);
+      expect(route, name).toMatch(/const pre = await ctx\.inference\.routeFirst\(\{ message(: prompt)?, localOnly, deep: body\.deep === true, evalMode(: false)?, hasFrontier: !!ctx\.frontier, needs: mediaNeeds\(attachments\), frontierCan: ctx\.frontier\?\.media \?\? \{\}, attachments(, ownLocalModel: lm\.model !== undefined|, earlier: ctx\.memory\.windowAttachments\(conversationId\))? \}\);/);
       // (The turn's files go with it: a PDF is read on this Mac before the route is decided, when that is turned on.)
       expect(route, name).toContain("if ('error' in pre) return json(res, pre.status, { error: pre.error });");
       expect(route.indexOf('const tier = classifyMessage('), name).toBeLessThan(route.indexOf('const route = ctx.inference.finishRoute(pre, { tier, toolsLikely,'));
@@ -533,6 +533,37 @@ describe('index.ts wiring', () => {
     // An eval replay that names its own local model is asked through a client of its own: nothing is said to be readable by it.
     expect(generate).toContain('frontierCan: ctx.frontier?.media ?? {}, attachments, ownLocalModel: lm.model !== undefined });');
     expect(chat).not.toContain('ownLocalModel');
+    // /chat hands the route the files the conversation's earlier turns still carry: a PDF among them is read before
+    // the route's look at the model server, so the request that follows waits for no read. (/generate has no history.)
+    expect(chat).toContain('frontierCan: ctx.frontier?.media ?? {}, attachments, earlier: ctx.memory.windowAttachments(conversationId) });');
+    expect(generate).not.toContain('windowAttachments');
+  });
+
+  // What a file says is outside text (a review's obedient stand-in ran web.fetch_url, web.web_search and
+  // trident.gmail_search on the say-so of a PDF, and of a .txt, with no approval). Both routes mark the turn at the
+  // door, before it is routed, for every kind of file and whichever brain answers.
+  it('a turn that carries a file is tainted from the start, on both routes, before it is routed', () => {
+    expect(src).toContain("const ATTACHMENT_TAINT = 'attachment';");
+    for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
+      const marked = route.indexOf('if (attachments.length > 0) markTainted(ATTACHMENT_TAINT);');
+      expect(marked, name).toBeGreaterThan(-1);
+      expect(marked, name).toBeGreaterThan(route.indexOf('const attachments = att.attachments;'));
+      expect(marked, name).toBeLessThan(route.indexOf('ctx.inference.routeFirst('));
+      expect(route.match(/markTainted\(/g), name).toHaveLength(1);
+    }
+    // No condition on the mode, the brain or the kind of file stands between the files and the mark.
+    expect(src.match(/if \(attachments\.length > 0\) markTainted\(ATTACHMENT_TAINT\);/g)).toHaveLength(2);
+  });
+
+  // A PDF too large for every model that would be asked used to be sent on with no message at all.
+  it('a PDF too large for every cloud model that would be asked is refused with the size sentence, on both routes, before any call', () => {
+    for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
+      const check = route.indexOf("const tooBig = budget.brain === 'frontier' && plan && !toLocal ? pdfTooBigFor(attachments, plan.chain.map((b) => b.provider.getCapabilities(b.model))) : undefined;");
+      expect(check, name).toBeGreaterThan(-1);
+      expect(route.slice(check), name).toMatch(/^[^\n]*\n\s*if \(tooBig\) return json\(res, 413, \{ error: sizeSentence\(tooBig\.name, tooBig\.limit\) \}\);/);
+      expect(check, name).toBeLessThan(route.indexOf('const gate = gateTurn('));
+      expect(check, name).toBeGreaterThan(route.indexOf('const toLocal = '));
+    }
   });
 
   it('a turn that must be local with no local model to answer it gets a 503 with a sentence, before any call and before anything streams', () => {

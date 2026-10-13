@@ -50,6 +50,29 @@ describe('PersistentStore attachment retention', () => {
     expect(users[0]!.attachments?.[0]?.name).toBe('a.png');
   });
 
+  // For reading a PDF ahead of the request that will carry it (../src/inference routeFirst).
+  it('windowAttachments: the files the next message carries that still hold their bytes, with no history check set off', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'flint-store-'));
+    const store = new PersistentStore(join(dir, 'c.json'), { history: null });
+    let checks = 0;
+    store.onHistory = () => void checks++;
+    expect(store.windowAttachments('c')).toEqual([]);
+    const n = ATTACHMENT_RETAIN_TURNS + 2;
+    for (let i = 0; i < n; i++) await turn(store, i);
+    await turn(store, n, false);
+    const held = store.windowAttachments('c');
+    // Only the turns whose bodies are still in RAM count, and a turn with no file adds nothing.
+    expect(held.length).toBeGreaterThan(0);
+    expect(held.length).toBeLessThanOrEqual(ATTACHMENT_RETAIN_TURNS);
+    for (const a of held) expect(a).toEqual(IMG);
+    expect(checks).toBe(0);
+    expect(store.windowAttachments('another')).toEqual([]);
+    // A failed turn's file is not history: it is not handed to the next message.
+    await store.beginTurn({ conversationId: 'f', turnId: 't1', userMessage: userMsg(1, true), createdAt: 1 });
+    await store.failTurn({ conversationId: 'f', turnId: 't1', error: { kind: 'internal', message: 'x', retryable: false }, updatedAt: 2 });
+    expect(store.windowAttachments('f')).toEqual([]);
+  });
+
   it('never writes attachment bodies to disk', async () => {
     vi.useFakeTimers();
     dir = mkdtempSync(join(tmpdir(), 'flint-store-'));
