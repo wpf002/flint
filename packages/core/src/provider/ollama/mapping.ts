@@ -27,8 +27,13 @@ export interface OllamaMedia {
   images?: boolean;
 }
 
-/** The kinds of picture Ollama's own decoder takes. Any other kind is said to be unreadable, not sent. */
-const OLLAMA_IMAGE_TYPES: ReadonlySet<string> = new Set(['image/png', 'image/jpeg']);
+/**
+ * The kinds of picture Ollama's own decoder takes: the four Flint accepts as a
+ * picture at all. (Each was checked against Ollama 0.34 with a model that
+ * sees: a PNG, a JPEG, a GIF and a WebP of the same words were all read
+ * back.) Any other kind is said to be unreadable, not sent.
+ */
+const OLLAMA_IMAGE_TYPES: ReadonlySet<string> = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
 /** Is this attachment a picture that can be sent to a model that sees? */
 function sendable(a: Attachment, media: OllamaMedia): boolean {
@@ -89,8 +94,8 @@ export function mapMessages(messages: Message[], systemPrefix?: string, media: O
  * A user turn as text. A text file is inlined. A picture that is being sent
  * with the message (`media.images`, see `sendable`) needs no words here: the
  * model has the picture. Anything else that cannot be delivered becomes a note
- * saying so, never silently dropped: a PDF, a picture of a kind Ollama does not
- * decode, any picture at all for a model that cannot see (the default, and what
+ * saying so, never silently dropped: a PDF, a picture of a kind that is not one
+ * of the four above, any picture at all for a model that cannot see (the default, and what
  * this did for every picture before). No attachments: the content string,
  * unchanged.
  */

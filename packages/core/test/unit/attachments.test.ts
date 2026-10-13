@@ -167,9 +167,9 @@ describe('ollama mapping', () => {
     const GIF: Attachment = { kind: 'image', mediaType: 'image/gif', name: 'anim.gif', data: 'R0lGODlh', bytes: 6 };
     const WEBP: Attachment = { kind: 'image', mediaType: 'image/webp', name: 'pic.webp', data: 'UklGRg==', bytes: 4 };
 
-    it('a PNG or a JPEG goes in the message’s `images`, base64 as it came, and no note says it cannot be seen', () => {
-      const [m] = mapOllama([user('what is this?', [PNG, JPG])], undefined, { images: true });
-      expect(m).toEqual({ role: 'user', content: 'what is this?', images: ['iVBORw0KGgo=', '/9j/4AAQSkZJRg=='] });
+    it('a PNG, a JPEG, a GIF or a WebP goes in the message’s `images`, base64 as it came, in order, and no note says it cannot be seen', () => {
+      const [m] = mapOllama([user('what is this?', [PNG, JPG, GIF, WEBP])], undefined, { images: true });
+      expect(m).toEqual({ role: 'user', content: 'what is this?', images: ['iVBORw0KGgo=', '/9j/4AAQSkZJRg==', 'R0lGODlh', 'UklGRg=='] });
     });
 
     it('a picture with no words is still a message: the text is empty and the picture is there', () => {
@@ -185,11 +185,11 @@ describe('ollama mapping', () => {
       expect(m!.content.endsWith('q')).toBe(true);
     });
 
-    it('a kind of picture Ollama does not decode is not sent, and the model is told it is there', () => {
-      const [m] = mapOllama([user('q', [GIF, WEBP, PNG])], undefined, { images: true });
+    it('a picture of any other kind is not sent, and the model is told it is there', () => {
+      const TIFF: Attachment = { kind: 'image', mediaType: 'image/tiff', name: 'scan.tiff', data: 'SUkqAA==', bytes: 4 };
+      const [m] = mapOllama([user('q', [TIFF, PNG])], undefined, { images: true });
       expect(m!.images).toEqual(['iVBORw0KGgo=']);
-      expect(m!.content).toMatch(/anim\.gif.*cannot read images/);
-      expect(m!.content).toMatch(/pic\.webp.*cannot read images/);
+      expect(m!.content).toMatch(/scan\.tiff.*cannot read images/);
     });
 
     it('a picture whose body was shed from history is a note, never an empty picture', () => {
