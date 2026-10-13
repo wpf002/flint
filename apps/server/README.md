@@ -295,7 +295,9 @@ saved and survives restarts.
   it is local: a listing means an Ollama, held to that listing model by model; "no such thing
   here" (llama.cpp, LM Studio) means a server that runs only its own models, local by its address.
   "Not known yet" is never "so, yes": a model server that was not up when Flint booted is asked
-  by the first turn that needs it. A tier named `local:<model>` is held to the same rule, and its
+  by the first turn that needs it. (What Flint cannot tell apart is a program at a loopback
+  address that passes requests on to a cloud service: it answers like any server that is no
+  Ollama. Point the local wire only at a server that runs its models on this Mac.) A tier named `local:<model>` is held to the same rule, and its
   server is asked every minute like any local brain's. A turn that stays
   here is planned only on a model that is KNOWN to run here (an eval replay too): one the server
   has not been heard on yet gets "Flint has not confirmed yet that its local model runs on this
