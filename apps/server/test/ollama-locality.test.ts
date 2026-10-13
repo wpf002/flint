@@ -643,6 +643,10 @@ describe('OllamaLocality', () => {
     now += 1_000;
     await waited;
     expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(true);
+    // Told directly, as of when a look began: what was said before that goes, what was said since stays.
+    const heardAt = now;
+    l.silent(HERE, heardAt - 2_000); // (the word above was learned one second ago: after that look began)
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(true);
     // Told directly (a look by the monitor that came back without a listing): dropped as of now.
     l.silent(HERE);
     expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(false);

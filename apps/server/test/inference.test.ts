@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -466,7 +466,18 @@ describe('a cloud model under a plain name: the model server says where it runs,
     s.models.get(MAIN)!.remoteHost = 'https://ollama.com:443';
     s.listingFails = true;
     expect(inference.brainIsLocal(inference.primary.provider, MAIN)).toBe(true); // what was known, a moment old
+    const dropped = vi.spyOn(LOCALITY, 'silent');
+    const lookBegan = Date.now();
+    const tagsBefore = s.requests.filter((q) => q.path === '/api/tags').length;
     expect(await askFirst(inference)).toMatchObject({ brain: 'local', private: true }); // routed here; the plan decides
+    // The look asked for the listing twice (one bad answer is not yet silence), then told the record, with when
+    // the look BEGAN: a word the server gave someone else during the look would be newer than that, and is kept.
+    expect(s.requests.filter((q) => q.path === '/api/tags').length).toBe(tagsBefore + 2);
+    expect(dropped).toHaveBeenCalledTimes(1);
+    expect(dropped.mock.calls[0]![0]).toBe(s.origin);
+    expect(dropped.mock.calls[0]![1]).toBeGreaterThanOrEqual(lookBegan);
+    expect(dropped.mock.calls[0]![1]).toBeLessThanOrEqual(Date.now());
+    dropped.mockRestore();
     expect(inference.local.monitor.snapshot()).toMatchObject({ reachable: true, primary: { state: 'loaded' } });
     expect(inference.brainIsLocal(inference.primary.provider, MAIN)).toBe(false);
     expect(inference.planLocal(kept, who)).toMatchObject({ steps: [], refusal: 'Flint cannot confirm right now that its local model runs on this Mac, and a private message never leaves this Mac.' });

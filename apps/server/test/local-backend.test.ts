@@ -261,6 +261,19 @@ describe('ollamaBackend', () => {
         expect(silent[0], label).toBeGreaterThanOrEqual(before);
         expect(silent[0], label).toBeLessThanOrEqual(Date.now());
       }
+      // Silence is told with when the look BEGAN, not when it was given up on: a word the server gave another
+      // asker while this look was out is then newer than the look, and is kept (../src/ollama-locality silent).
+      const failedAt: number[] = [];
+      const slowToFail = ((url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        if (!String(url).endsWith(path)) return real(url, init);
+        return new Promise<Response>((resolve) => setTimeout(() => (failedAt.push(Date.now()), resolve(new Response('{"error":"x"}', { status: 500 }))), 25));
+      }) as typeof fetch;
+      const told: number[] = [];
+      const start = Date.now();
+      await ollamaBackend(server.origin, slowToFail, undefined, (since) => void told.push(since)).probe(['main-model:30b'], signal());
+      expect(told, path).toHaveLength(1);
+      expect(told[0], path).toBeGreaterThanOrEqual(start);
+      expect(told[0], path).toBeLessThan(failedAt[0]!);
       // Not answered in time: asked once. The look has one deadline, and it has passed.
       let asked = 0;
       const hangs = ((url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
@@ -450,10 +463,13 @@ describe('askPlace / withPlace: every look asks the server what it is', () => {
     expect([looks, told, since]).toEqual([2, ['other'], []]);
     looks = 0;
     const began = Date.now();
-    await withPlace(inner, async () => (looks++, undefined), () => {}, (at) => void since.push(at)).probe(['only-model'], signal());
+    let gaveUpAt = 0;
+    await withPlace(inner, async () => (looks++, await new Promise((r) => setTimeout(r, 15)), (gaveUpAt = Date.now()), undefined), () => {}, (at) => void since.push(at)).probe(['only-model'], signal());
     expect(looks).toBe(2);
     expect(since).toHaveLength(1);
+    // (When the look began, not when it was given up on.)
     expect(since[0]).toBeGreaterThanOrEqual(began);
+    expect(since[0]).toBeLessThan(gaveUpAt);
     looks = 0;
     const hung = withPlace(inner, (sig) => (looks++, new Promise<undefined>((resolve) => sig.addEventListener('abort', () => resolve(undefined)))), () => {}, (at) => void since.push(at));
     await hung.probe(['only-model'], AbortSignal.timeout(60));
