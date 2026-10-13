@@ -289,17 +289,22 @@ beforeEach(async () => {
     },
   };
   createContext(ctx);
-  // As the page loads them: Approvals (the cards' words), Goals and Predictions (the helpers), then Tasks.
+  await boot();
+  calls = [];
+});
+
+/** The scripts, as the page loads them: Approvals (the cards' words), Goals and Predictions (the helpers), then Tasks. `early`: the answers to what the first three asked come back before the Tasks script is read. */
+async function boot(early = false): Promise<void> {
   runInContext(apprJs, ctx);
   runInContext(goalsJs, ctx);
   runInContext('openApprovals=function(){OPENED_APPROVALS=true;showPanel("approvals",true);};var OPENED_APPROVALS=false;', ctx);
   runInContext(predJs, ctx);
+  if (early) await settle();
   runInContext(tasksJs, ctx);
   runInContext('taskNow=function(){return CLOCK();};', ctx);
   ctx.CLOCK = () => clock;
   await settle();
-  calls = [];
-});
+}
 
 const open = async (tab?: string) => {
   run(tab ? `TASKS.tab='${tab}';openTasks()` : 'openTasks()');
@@ -416,6 +421,17 @@ describe('the header button', () => {
     // One that is approved and waiting to run, or a card of another kind, does not light it.
     run(`tasksDot(${JSON.stringify([{ ...CARDS.dispatch, status: 'approved' }, { id: 'pr9', fullName: 'goal.activate', status: 'pending', args: {} }, { id: 'pr8', fullName: 'tasks.other', status: 'pending', args: {} }])})`);
     expect(dot()).toBe(true);
+  });
+
+  it('the dot is lit from the start, even when the page’s first look at what waits came back before this script was read', async () => {
+    // The page as loaded (beforeEach): a task card waits, and the dot says so.
+    expect(ids.tasksdot!.hidden).toBe(false);
+    // The same page, with the first answers back early: the Approvals script had no one to tell, so this script asks again.
+    ids.tasksdot!.hidden = true;
+    calls = [];
+    await boot(true);
+    expect(calls.filter((c) => c.url === '/proposals').length).toBeGreaterThanOrEqual(2);
+    expect(ids.tasksdot!.hidden).toBe(false);
   });
 
   it('the page has the button, the panel and the Assets section, and Settings loads its assets whenever it opens', () => {

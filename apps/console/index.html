@@ -3495,6 +3495,9 @@ if(typeof PANELS!=='undefined'&&PANELS.indexOf('tasks')<0)PANELS.push('tasks');
 if(typeof document.addEventListener==='function')document.addEventListener('keydown',function(e){if(e&&e.key==='Escape'&&tasksOpen())closeTasks();});
 tasksProbe();
 if(typeof setInterval==='function')setInterval(tasksProbe,300000);
+/* The page's first look at what waits for Will may have come back before this script was read: it is asked again, so
+   the dot is lit from the start and not a minute later. */
+if(typeof pollApprovals==='function')pollApprovals();
 </script>
 <script id="update-js">
 /* Flint updates itself. A deploy replaces this page (and the Mac app's build). The

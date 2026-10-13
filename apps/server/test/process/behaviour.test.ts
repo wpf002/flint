@@ -436,6 +436,26 @@ describe('the real server, as a process: Cloud mode, then Local mode', () => {
     expect(srv.read('inference.json')).toBe(''); // nothing was saved by any of it
   });
 
+  // P5: tasks and assets are the console's alone. In the real process a voice or an eval token (what a model's
+  // client holds) reaches none of their routes, read or write, and the full token reaches the proxy and no further.
+  it('a scoped token reaches no task or asset route; no token and a wrong one are refused too; the full token is answered by the proxy', async () => {
+    const TASK = 'tkk7Hq2LmN9pQr3sTv';
+    const routes: Array<['GET' | 'POST', string, unknown?]> = [
+      ['GET', '/assets'], ['POST', '/assets/as-ci-watcher-v1/on', {}], ['POST', '/assets/as-ci-watcher-v1/off', {}],
+      ['GET', '/tasks'], ['GET', '/tasks?tab=finished'], ['GET', '/tasks/form'], ['GET', `/tasks/${TASK}`],
+      ['POST', '/tasks', { draftKey: 'k7Hq2LmN9pQr3sTv', template: 'watch_ci', params: { item: 'en1' } }],
+      ['POST', `/tasks/${TASK}/cancel`, {}], ['POST', `/tasks/${TASK}/accept`, {}], ['POST', `/tasks/${TASK}/reject`, {}], ['POST', `/tasks/${TASK}/again`, { draftKey: 'n8Jr3MnP0qRs4tUw' }],
+    ];
+    const ask = (method: 'GET' | 'POST', path: string, body: unknown, token?: string | null) => (method === 'GET' ? srv.get(path, token) : srv.post(path, body, token));
+    for (const [method, path, body] of routes) {
+      for (const client of ['voice', 'evolve', 'parity']) expect((await ask(method, path, body, srv.scoped(client))).status, `${client} ${method} ${path}`).toBe(403);
+      expect((await ask(method, path, body, null)).status, `${method} ${path}`).toBe(401);
+      expect((await ask(method, path, body, 'f'.repeat(64))).status, `${method} ${path}`).toBe(401);
+      // This run has no runtime: the proxy says so in its one sentence, and nothing else handles the route.
+      expect(await ask(method, path, body), `${method} ${path}`).toMatchObject({ status: 501, json: { error: 'Tasks need the runtime.' } });
+    }
+  });
+
   it('an ordinary turn in Cloud mode goes to the outside brain, with every tool, paid ones included', async () => {
     const before = cloud.requests.length;
     const r = await srv.post('/chat', { conversationId: 'open', message: 'An ordinary synthetic question about email and the web.' });
