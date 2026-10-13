@@ -366,13 +366,14 @@
   #predbody{font-variant-numeric:tabular-nums;}
   #predfoot{flex-wrap:wrap;}
   #predfoot #predmsg{flex-basis:100%;margin:0;}
-  .plead{color:var(--t2);margin:4px 4px 0;}
+  #predlist>.gsh:first-child{margin-top:8px;}
+  .plead{color:var(--t2);margin:4px 4px 0;} .plead+.plead{margin-top:8px;}
   .pacts{display:flex;align-items:center;gap:4px;flex:none;}
   .pmany .lbl span+span{margin-top:4px;}
   .ppick{cursor:pointer;}
   @media (max-width:600px){
-    .row.gwrap>.pacts{flex:1 1 100%;justify-content:flex-end;} .pacts .ghost{min-width:72px;justify-content:center;}
-    #predfoot .btn{flex:1;justify-content:center;}
+    .row.gwrap>.pacts{flex:1 1 100%;justify-content:flex-end;} .pacts .btn,.pacts .ghost{min-width:72px;justify-content:center;}
+    #predfoot .btn{flex:1;justify-content:center;} #predfoot .note:not(:empty){flex-basis:100%;}
   }
 </style>
 </head>
@@ -2490,7 +2491,7 @@ function predTab(tab,say,kind){predNav('list');PRED.tab=PRED_PATHS[tab]?tab:'for
   if(say)predMsg(say,kind||'ok');
   gCall(PRED_PATHS[PRED.tab]).then(function(d){if(seq!==PRED.seq)return;predShown(true);list.textContent='';
     if(PRED.tab==='questions')predQuestions(list,d);else if(PRED.tab==='accuracy')predAccuracy(list,d);else predForecasts(list,d);
-  },function(e){if(seq!==PRED.seq)return;if(e.status===501)predShown(false);list.textContent='';list.appendChild(predFailed(e,function(){predTab(PRED.tab);}));});}
+  },function(e){if(seq!==PRED.seq)return;if(e.status===501)predShown(false);if(e.status===401)predCount(0);list.textContent='';list.appendChild(predFailed(e,function(){predTab(PRED.tab);}));});}
 
 /* ---------- Forecasts ---------- */
 function predWaitingRow(w){var n=w&&w.numbers>0?w.numbers:0;
@@ -2554,18 +2555,19 @@ function predFile(buttons){var args=predArgs();if(!args.series.length){predMsg(P
     function(e){PRED.busy=false;buttons.forEach(function(b){b.disabled=false;});if(here())predMsg(gSay(e));});}
 /* "Approve it with Touch ID to start.": the method this device will ask for, as Approve buttons name it. */
 function predStartSays(){var l=typeof approveLabel==='function'?approveLabel():'Approve';var i=l.indexOf(' with ');return 'Approve it'+(i>0?l.slice(i):'')+' to start.';}
-/* The card, in the Approvals panel's own words for it: what it does, each number by name (spending and calendar
-   numbers marked), and what turning predictions on also does. Nothing is turned on until Will approves it. */
+/* The card, in the Approvals panel's own words for it: what it does, what turning predictions on also does (said
+   before the list, so it is never below the fold), and each number by name, spending and calendar numbers marked.
+   Nothing is turned on until Will approves it. */
 function predCard(id,args){predNav('card');predHead('Turn On Predictions',true);var body=predBody(),foot=predFoot();
   var p={id:id,fullName:typeof APPR_PREDICT==='string'?APPR_PREDICT:'forecast.series.enable',args:args,origin:'console',consequential:true};
   var list=typeof apprPredictList==='function'?apprPredictList(p):{named:[],unknown:0,total:args.series.length};
   body.appendChild(gEl('p','plead',typeof apprSub==='function'?apprSub(p):''));
+  if(typeof APPR_PREDICT_ALSO==='string')body.appendChild(gEl('p','plead',APPR_PREDICT_ALSO));
   body.appendChild(gEl('div','gsh','Numbers'));var g=gEl('div','group');
   list.named.forEach(function(x){var row=gEl('div','row');var l=gEl('span','lbl');l.appendChild(gEl('b',null,x.name));row.appendChild(l);
     if(x.kind==='money'||x.kind==='calendar')row.appendChild(gEl('span','val',x.kind==='money'?'Spending':'Calendar'));g.appendChild(row);});
   if(list.unknown&&typeof apprUnknownNumbers==='function')g.appendChild(predLine(apprUnknownNumbers(list.unknown)));
   body.appendChild(g);
-  if(typeof APPR_PREDICT_ALSO==='string')body.appendChild(gEl('p','gnote',APPR_PREDICT_ALSO));
   foot.hidden=false;foot.appendChild(gEl('span','note',predStartSays()));
   var later=gBtn('btn','Not Now',function(){predTab('forecasts',PRED_SAY.cancelled);});
   var ok=gBtn('btn pri',typeof approveLabel==='function'?approveLabel():'Approve',function(){predApprove(p,[later,ok]);});
@@ -2591,7 +2593,7 @@ function predQuestions(list,d){var waiting=d.waiting||[],answered=d.answered||[]
     answered.forEach(function(q){a.appendChild(predRow(q.title,[q.says],PRED_ANSWERS[q.answer]||''));});list.appendChild(a);}}
 /* One question: the prediction (text only), what Flint said and when, and one clear choice. */
 function predQuestion(q){var row=predRow(q.title,[q.says],'');var acts=gEl('span','pacts'),buttons=[];
-  [['yes','Yes'],['no','No'],['skip','Skip']].forEach(function(a){var b=gBtn('ghost',a[1],function(){predAnswer(q,a[0],row,buttons);});buttons.push(b);acts.appendChild(b);});
+  [['yes','Yes'],['no','No'],['skip','Skip']].forEach(function(a){var b=gBtn(a[0]==='skip'?'ghost':'btn',a[1],function(){predAnswer(q,a[0],row,buttons);});buttons.push(b);acts.appendChild(b);});
   row.appendChild(acts);return row;}
 /* His answer, recorded once. The row then says so, with what he answered; nothing else on the tab moves. */
 function predAnswer(q,answer,row,buttons){if(PRED.busy)return;PRED.busy=true;buttons.forEach(function(b){b.disabled=true;});var here=predHere();

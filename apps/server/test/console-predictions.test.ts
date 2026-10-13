@@ -580,12 +580,17 @@ describe('turning predictions on', () => {
     expect(signed).toEqual([]);
     // The card: what it does, each number by name with its kind, and what turning predictions on also does.
     expect(title()).toBe('Turn On Predictions');
-    expect(body().with('plead').map((e) => e.textContent)).toEqual(['Flint forecasts 3 of its own numbers each night, on this Mac.']);
+    expect(body().with('plead').map((e) => e.textContent)).toEqual([
+      'Flint forecasts 3 of its own numbers each night, on this Mac.',
+      'Turning this on also checks the predictions Flint has already made, and those results can’t be undone.',
+    ]);
     expect(headers()).toEqual(['Numbers']);
     expect(rows()).toEqual([['Anthropic Spend', [], 'Spending'], ['Deploys', [], ''], ['Calendar Hours', [], 'Calendar']]);
-    expect(body().with('gnote').map((e) => e.textContent)).toEqual(['Turning this on also checks the predictions Flint has already made, and those results can’t be undone.']);
-    expect(body().with('gnote')[0]!.textContent).toBe(run('APPR_PREDICT_ALSO'));
     expect(body().with('plead')[0]!.textContent).toBe(run(`apprSub({fullName:APPR_PREDICT,args:{series:${JSON.stringify(sorted)},reason:[]}})`));
+    expect(body().with('plead')[1]!.textContent).toBe(run('APPR_PREDICT_ALSO'));
+    // What it also does is said before the list of numbers: never below the fold of a long card.
+    const order = body().visible().filter((e) => ['plead', 'gsh', 'group'].includes(e.className)).map((e) => e.className);
+    expect(order).toEqual(['plead', 'plead', 'gsh', 'group']);
     expect(foot().with('note').map((e) => e.textContent)).toEqual(['Approve it with Touch ID to start.']);
     expect(foot().buttons()).toEqual(['Not Now', 'Approve with Touch ID']);
     plainScreen();
@@ -688,7 +693,7 @@ describe('turning predictions on', () => {
     foot().button('Continue').onclick!();
     await settle();
     expect(calls.at(-1)).toEqual({ url: '/predictions/turn-on', method: 'POST', body: { series: [KEYS.nexus] } });
-    expect(body().with('plead').map((e) => e.textContent)).toEqual(['Flint forecasts 1 of its own numbers each night, on this Mac.']);
+    expect(body().with('plead')[0]!.textContent).toBe('Flint forecasts 1 of its own numbers each night, on this Mac.');
   });
 });
 
@@ -705,7 +710,8 @@ describe('Questions', () => {
     expect(body().visible().find((e) => e.id === 'predtab-questions')!.getAttribute('aria-selected')).toBe('true');
     expect(headers()).toEqual(['For You']);
     expect(rows()).toEqual([['The <b>deploy</b> lands by Friday', ['Flint said likely, around 70%, on Oct 3.'], ''], ['Deploys is above 4.', ['Flint said unlikely, around 20%, on Oct 5.'], '']]);
-    for (const q of [question(), second]) expect(acts(q.title).children.map((b) => [b.tagName, b.textContent])).toEqual([['button', 'Yes'], ['button', 'No'], ['button', 'Skip']]);
+    // Yes and No are outlined buttons; Skip is the quiet one.
+    for (const q of [question(), second]) expect(acts(q.title).children.map((b) => [b.tagName, b.className, b.textContent])).toEqual([['button', 'btn', 'Yes'], ['button', 'btn', 'No'], ['button', 'ghost', 'Skip']]);
     expect(body().with('gnote').map((e) => e.textContent)).toEqual(['Yes means it happened. Skip leaves it unscored.']);
     // The tab says how many wait.
     expect(body().visible().find((e) => e.id === 'predqn')!.textContent).toBe('2');
@@ -842,6 +848,8 @@ describe('when it cannot load', () => {
     await open('forecasts');
     expect(body().with('empty').map((e) => e.children.map((c) => c.textContent))).toEqual([['You’re Signed Out', 'Enter your access token in Settings to see predictions.', 'Open Settings']]);
     expect(screen()).not.toContain('unauthorized');
+    // Nothing stale is left beside the tabs: no count of questions he can't see.
+    expect(body().visible().find((e) => e.id === 'predqn')).toBeUndefined();
     body().button('Open Settings').onclick!();
     expect(panels).toMatchObject({ predictions: false, settings: true });
     ownWords(['You’re Signed Out', 'Open Settings'], ['Enter your access token in Settings to see predictions.']);
@@ -878,7 +886,7 @@ describe('the script itself', () => {
 
   it('its numbers are in tabular figures, and on a phone a row\'s choices take a full-height line of their own', () => {
     expect(html).toContain('#predbody{font-variant-numeric:tabular-nums;}');
-    expect(html).toMatch(/@media \(max-width:600px\)\{\s*\.row\.gwrap>\.pacts\{flex:1 1 100%;justify-content:flex-end;\} \.pacts \.ghost\{min-width:72px;justify-content:center;\}/);
+    expect(html).toMatch(/@media \(max-width:600px\)\{\s*\.row\.gwrap>\.pacts\{flex:1 1 100%;justify-content:flex-end;\} \.pacts \.btn,\.pacts \.ghost\{min-width:72px;justify-content:center;\}/);
     // The phone's buttons are 44 points tall, and a row at least 48 (the page's own rules, which the panel's rows use).
     expect(html).toContain('.row{min-height:48px;font-size:17px;} .btn,.ghost{height:44px;}');
     expect(html).toMatch(/:focus-visible\{outline:none;box-shadow:0 0 0 2px var\(--bg\),0 0 0 4px var\(--gold-hi\)/);
