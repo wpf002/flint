@@ -7,7 +7,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from helpers import LONG, corpus_row, eval_pool_cid, eval_set, sample_row, small_profile, temp_dir, train_pool_cid, write_jsonl
 
 import build_data
-from build_data import Row, build, load_corpus, load_samples, render, repeat_factor
+from build_data import Row, build, load_corpus, load_samples, prompts_for_outside, render, repeat_factor
 from contamination import ContaminationGuard
 from parity_text import is_near_duplicate, prompt_id, word_set
 
@@ -66,6 +66,34 @@ class Filters(BuildBase):
         self.assertEqual([r.prompt for r in rows], [TOPICS[0], TOPICS[1]])
         res = self.run_build([], corpus=rows)
         self.assertEqual(len(res.sampling_prompts), 2)
+
+    def test_a_prompt_that_stayed_on_this_mac_carries_its_mark_into_the_sampling_file_and_never_goes_outside(self):
+        # The privacy review's N8: prompts_for_sampling.jsonl held a private turn's prompt with nothing to say so,
+        # for "a compliant teacher to answer". A teacher that is not on this Mac must never be handed it.
+        marked = dict(corpus_row(TOPICS[0], cid=next(self.cids), ts=1), staysHere=True)
+        plain = corpus_row(TOPICS[1], cid=next(self.cids), ts=2)
+        # The same words asked twice, once on a turn that stayed here: the copy that is kept carries the mark,
+        # whichever copy the dedupe keeps (here the older, unmarked one).
+        twice_open = corpus_row(TOPICS[2], cid=next(self.cids), ts=3)
+        twice_kept = dict(corpus_row(TOPICS[2], cid=next(self.cids), ts=4), staysHere=True)
+        path = write_jsonl(os.path.join(self.dir, "corpus.jsonl"), [marked, plain, twice_open, twice_kept])
+        res = self.run_build([], corpus=load_corpus(path))
+        by_prompt = {x["prompt"]: x for x in res.sampling_prompts}
+        self.assertEqual(sorted(by_prompt), sorted(TOPICS[:3]))
+        self.assertIs(by_prompt[TOPICS[0]].get("staysHere"), True)
+        self.assertNotIn("staysHere", by_prompt[TOPICS[1]])
+        self.assertIs(by_prompt[TOPICS[2]].get("staysHere"), True)
+        self.assertEqual(res.manifest["counts"]["samplingPrompts"], 3)
+        self.assertEqual(res.manifest["counts"]["samplingStaysHere"], 2)
+        # The one way to read the file for anything that is not on this Mac: no marked row is in it.
+        self.assertEqual([x["prompt"] for x in prompts_for_outside(res.sampling_prompts)], [TOPICS[1]])
+        # ...and it fails closed on whatever a row says of the mark.
+        odd = [{"prompt": "a", "staysHere": 1}, {"prompt": "b", "staysHere": "yes"}, {"prompt": "c", "staysHere": False}, {"prompt": "d"}, {"prompt": "e", "staysHere": None}]
+        self.assertEqual([x["prompt"] for x in prompts_for_outside(odd)], ["c", "d", "e"])
+        # A sample batch made from a marked prompt keeps the mark the same way.
+        sample = self._rows([dict(sample_row(TOPICS[3], kind="human", model="claude-opus-5-5", cid=next(self.cids), ts=5), staysHere=True)])
+        res2 = self.run_build(sample)
+        self.assertEqual([(x["prompt"], x.get("staysHere")) for x in res2.sampling_prompts], [(TOPICS[3], True)])
 
     def test_a_vendor_answer_labelled_human_is_still_a_vendor_answer(self):
         # e.g. a correction flow that records "Will edited Claude's reply" as kind human.
