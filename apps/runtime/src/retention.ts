@@ -9,10 +9,14 @@
  *  | Escalation text, TriageDecision.reasoning, Recommendation text | 90 d | 7 d |
  *  | HealthCheck, MetricPoint (raw) | daily rollup, then deleted after 30 whole days | same |
  *  | EntityText (a calendar title, P2.5; always tainted) | n/a | deleted 7 d after it was last seen |
+ *  | A task's spec, bar, result summary and check evidence (P5) | NULL 30 d after it ended | 7 d |
+ *  | A task's raw output (P5; always outside text) | n/a | deleted 7 d after it ended |
  *
  *  - A proposal ages from when it ended (executed, or its expiry: the latest
  *    a rejected one can have ended), never from when it was made.
  *  - A purged escalation keeps its template's field-free title.
+ *  - A task's title stays: it is its template's fixed words. Its dispatch card's
+ *    args (which hold the same spec) go with the other proposals' args.
  *  - Before raw points go, each day is rolled up into a daily (`D`) series:
  *    latencies averaged, running totals taken at the day's last point, and a
  *    component's health as the share of its checks that were ok.
@@ -29,6 +33,7 @@ import { TEMPLATE_IDS, fieldFreeTitle } from './templates/escalations.js';
 const DAY = 86_400_000;
 const ago = (days: number, now: Date) => new Date(now.getTime() - days * DAY);
 const TERMINAL = ['executed', 'failed', 'rejected', 'expired'];
+const TASK_ENDED = ['accepted', 'rejected', 'failed', 'cancelled'];
 
 export async function runRetention(db: Db, tz: string, now = new Date(), correlationId?: string): Promise<Record<string, number>> {
   const n: Record<string, number> = {};
@@ -77,6 +82,15 @@ async function steps(db: Db, tz: string, now: Date, n: Record<string, number>): 
     UPDATE "Recommendation" SET text = NULL, rationale = NULL, "expectedEffect" = NULL
     WHERE (text IS NOT NULL OR rationale IS NOT NULL OR "expectedEffect" IS NOT NULL)
       AND ("createdAt" < ${ago(90, now)} OR ("createdAt" < ${ago(7, now)} AND tainted))`);
+
+  // Tasks (P5): the database lets a task's words be cleared, and its output deleted, only once it has ended.
+  n.taskText = await exec(Prisma.sql`
+    UPDATE "Task" SET spec = NULL, acceptance = NULL, "outputSummary" = NULL, "barEvidence" = NULL, "textPurgedAt" = ${now}
+    WHERE "textPurgedAt" IS NULL AND status IN (${Prisma.join(TASK_ENDED)}) AND (
+      "completedAt" < ${ago(30, now)} OR ("completedAt" < ${ago(7, now)} AND (tainted OR sensitivity IN ('personal', 'financial'))))`);
+  n.taskOutputs = await exec(Prisma.sql`
+    DELETE FROM "TaskOutput" o USING "Task" t
+    WHERE t.id = o."taskId" AND t.status IN (${Prisma.join(TASK_ENDED)}) AND t."completedAt" < ${ago(7, now)}`);
 
   // Whole local days only: a day is rolled up once, never in two halves on two nights.
   const cutoff = localDayBounds(tz, localDay(tz, ago(30, now))).start;

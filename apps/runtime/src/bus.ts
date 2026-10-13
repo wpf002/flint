@@ -30,15 +30,15 @@ export const QUEUES = {
   predict: ['forecast.reason'],
   /**
    * P5: one task's run on its asset and its bar check (stately, singletonKey = the task id), and one review
-   * (stately, singletonKey = the id of the card or task it reviews). Made by its migration; nothing sends to
-   * them yet.
+   * (stately, singletonKey = the id of the card or task it reviews). Made by its migration; nothing sends a
+   * review yet.
    */
   assets: ['tasks.run', 'tasks.check', 'reviews.run'],
   /**
    * Housekeeping on a schedule, one run at a time (goals.tick finds the goal reviews that are due). P4's five
    * (forecast.series, forecast.run, ledger.sweep, ledger.snapshot, ledger.ask) are made by its migration;
-   * nothing schedules them until predictions are on. P5's tasks.tick is made by its migration; nothing
-   * schedules it yet.
+   * nothing schedules them until predictions are on. P5's tasks.tick keeps tasks moving and ends the ones
+   * whose time is up.
    */
   scheduled: [
     'health', 'digest', 'retention', 'rollup', 'reconcile', 'drill.check', 'expire.escalations', 'goals.tick',

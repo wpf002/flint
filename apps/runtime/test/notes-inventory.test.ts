@@ -19,7 +19,9 @@
  * goals Flint reviewed, what Goal Reviews says in Settings > Health, and the
  * sentences a goal route or a goal card is refused with. The checks of Flint's
  * own predictions (P4 part 2) post none either: what Prediction Checks says in
- * Settings > Health is held to the same rules.
+ * Settings > Health is held to the same rules. So are tasks and assets (P5):
+ * what Tasks says in Settings > Health, an asset's line in Settings, and the
+ * sentences a card is refused with when it is filed.
  *
  * The server's own notes and the shell scripts' banners have theirs:
  * apps/server/test/notes-inventory.test.ts.
@@ -32,9 +34,13 @@ import { ACTION, nextAfterFailure } from '../src/backup/nightly';
 import { digestBody, digestTitle, goalsSentence, questionsSentence } from '../src/digest';
 import { DEFERRAL_SAYS } from '../src/goals/batch';
 import { REVIEWS_STOPPED } from '../src/goals/late';
-import { BACKUP_HEALTH, DATABASE_HEALTH, FORECAST_HEALTH, GOAL_HEALTH, LEDGER_HEALTH, UPKEEP_HEALTH } from '../src/health/checks';
+import { BACKUP_HEALTH, DATABASE_HEALTH, FORECAST_HEALTH, GOAL_HEALTH, LEDGER_HEALTH, TASK_HEALTH, UPKEEP_HEALTH } from '../src/health/checks';
 import { MODEL_HEALTH, REMOTE_HEALTH, diskCheck, remoteAccessCheck } from '../src/health/machine';
 import { pruneLines } from '../src/backup/prune-job';
+import { ASSETS } from '../src/assets/registry';
+import { WAITING } from '../src/assets/view';
+import { SPEND_NEEDS_ESTIMATE, WHOLE_NUMBERS_ONLY } from '../src/governance/proposals';
+import { TASK_TITLES } from '../src/tasks/service';
 import { noteOf } from '../src/surface/deliver';
 import { TEMPLATES, TEMPLATE_IDS, fieldFreeBody, fieldFreeTitle, phrase, render } from '../src/templates/escalations';
 import { EDGES } from './surface/template-edges';
@@ -260,6 +266,28 @@ describe('the runtime’s notes to Will', () => {
     expect(fn.match(/detail: LEDGER_HEALTH\.\w+(\([^)]*\)+)?/g)).toHaveLength(10);
     // The digest names the component as Health does when it needs a look.
     expect(digestBody({ relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 }, ['ledger'])).toContain('Prediction Checks');
+  });
+
+  it('tasks and assets (P5): what Tasks says in Settings > Health, an asset’s line, and the sentences a card is refused with are plain, from counts', () => {
+    const said = (line: string) => {
+      expect(noteProblems(HEALTH_NAMES.tasks!, line), line).toEqual([]);
+      for (const re of NEVER) expect(`${HEALTH_NAMES.tasks}\n${line}`, line).not.toMatch(re);
+      expect(line, line).toMatch(/^[A-Z0-9].*\.$/);
+    };
+    const health = [TASK_HEALTH.none, TASK_HEALTH.stopped, ...[1, 2, 14].map((n) => TASK_HEALTH.stuck(n))];
+    for (const line of [...health, WAITING, SPEND_NEEDS_ESTIMATE, WHOLE_NUMBERS_ONLY, ...ASSETS.map((a) => a.line)]) said(line);
+    expect(HEALTH_NAMES.tasks).toBe('Tasks');
+    expect([TASK_HEALTH.stuck(1), TASK_HEALTH.stuck(14)]).toEqual(['A task is past its time and hasn’t been ended.', '14 tasks are past their time and haven’t been ended.']);
+    // An asset's name and a task's title are labels: Title Case, plain words.
+    for (const label of [...ASSETS.map((a) => a.name), ...Object.values(TASK_TITLES)]) expect(noteProblems(label, ''), label).toEqual([]);
+    // Every sentence checks.ts can give for the component is one of these: none is put together where it is returned.
+    const checks = readFileSync(join(SRC, 'health', 'checks.ts'), 'utf8');
+    const fn = checks.slice(checks.indexOf('async function tasks('), checks.indexOf('/** Last night\'s run is this old: it was missed'));
+    expect(fn.length).toBeGreaterThan(300);
+    expect(fn.match(/\bdetail: /g)).toHaveLength(3);
+    expect(fn.match(/detail: TASK_HEALTH\.\w+(\([^)]*\))?/g)).toHaveLength(3);
+    // The digest names the component as Health does when it needs a look.
+    expect(digestBody({ relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 }, ['tasks'])).toContain('Tasks');
   });
 
   it('forecasts (P4): what Forecasts says in Settings > Health is plain sentences, from counts, and nothing else', () => {

@@ -29,14 +29,18 @@
  *    ran in 26 hours;
  *  - forecasts (P4): disabled while predictions are off or no number is on;
  *    degraded when last night's forecasts or numbers did not run, when one
- *    failed, or when a rule forbids forecasting; down after two nights.
+ *    failed, or when a rule forbids forecasting; down after two nights;
+ *  - tasks (P5): disabled while they are switched off or no asset that runs
+ *    tasks is on; degraded when a task is still out well past the day the task
+ *    tick gives it (the tick is not running), or when a rule stops Flint from
+ *    checking results.
  *
  * A detail is redacted and clipped to 300 characters: names and counts, never
  * a stranger's words. One audit entry per run carries the counts.
  */
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { localDay, redact, resolveTier, runsInShadow, HEALTH_STATUS, REVIEW_DOWN_MS, REVIEW_LATE_MS, type HealthReport } from '@flint/policy';
+import { localDay, redact, resolveTier, runsInShadow, HEALTH_STATUS, REVIEW_DOWN_MS, REVIEW_LATE_MS, TASK_ASSET_KINDS, type HealthReport } from '@flint/policy';
 import type { z } from 'zod';
 import type { Config } from '../config.js';
 import type { Db } from '../db.js';
@@ -51,6 +55,8 @@ import { activePolicies } from '../governance/proposals.js';
 import { SNAPSHOT_ACTION } from '../ledger/calibration.js';
 import { LEDGER_ACTOR, SWEEP_ACTION } from '../ledger/sweep.js';
 import { FORECAST_ACTOR, RUN_ACTION, SERIES_ACTION } from '../predict/run.js';
+import { checkStanding } from '../tasks/check.js';
+import { STALE_MS } from '../tasks/tick.js';
 
 export type Status = (typeof HEALTH_STATUS)[number];
 export interface ComponentCheck {
@@ -65,7 +71,7 @@ export const DEPLOY_WINDOW_MS = 10 * 60_000;
 
 export interface CheckDeps {
   db: Db;
-  config: Pick<Config, 'home' | 'triage' | 'tz'> & Partial<Pick<Config, 'planner' | 'ollama' | 'predict' | 'standbyModel'>>;
+  config: Pick<Config, 'home' | 'triage' | 'tz'> & Partial<Pick<Config, 'planner' | 'ollama' | 'predict' | 'standbyModel' | 'assets'>>;
   now: Date;
   sources: ReadonlyArray<{ name: string; cadenceMs: number }>;
   /**
@@ -464,7 +470,37 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
   out.push(await goalReviews(d));
   out.push(await predictionChecks(d));
   out.push(await forecasts(d));
+  out.push(await tasks(d));
   return out;
+}
+
+/** What Tasks says in Settings > Health: sentences from counts, never a task's words. */
+export const TASK_HEALTH = {
+  none: 'No task has run yet.',
+  stuck: (n: number) => (n === 1 ? 'A task is past its time and hasn’t been ended.' : `${n} tasks are past their time and haven’t been ended.`),
+  stopped: 'A rule stops Flint from checking results, so finished tasks wait.',
+} as const;
+/** How long past the tick's own limit a task may sit before Health says so. */
+const TASK_STUCK_SLACK_MS = 3_600_000;
+
+/**
+ * Tasks (P5): are they moving? Counts only: a detail never names a task.
+ * Nothing can run while they are switched off (the default: then nothing is
+ * read either) or no asset that runs tasks is on, so the row is shown and left
+ * out. The tick ends a task that has not moved for a day; one still out an hour
+ * past that means the tick is not running. (A result waiting for Will's accept
+ * card is not stuck: it waits as long as its card does.)
+ */
+async function tasks(d: CheckDeps): Promise<ComponentCheck> {
+  const { db, now } = d;
+  const component = 'tasks';
+  if (!d.config.assets) return { component, status: 'disabled' };
+  if (!(await db.asset.count({ where: { enabled: true, kind: { in: [...TASK_ASSET_KINDS] } } }))) return { component, status: 'disabled' };
+  const stuck = await db.task.count({ where: { status: { in: ['queued', 'dispatched', 'running', 'submitted'] }, updatedAt: { lt: new Date(now.getTime() - STALE_MS - TASK_STUCK_SLACK_MS) } } });
+  if (stuck) return { component, status: 'degraded', detail: TASK_HEALTH.stuck(stuck) };
+  if ((await checkStanding(db, now)) === 'stopped') return { component, status: 'degraded', detail: TASK_HEALTH.stopped };
+  const ran = await db.task.count({ where: { dispatchedAt: { not: null } } });
+  return { component, status: 'ok', ...(ran ? {} : { detail: TASK_HEALTH.none }) };
 }
 
 /** Last night's run is this old: it was missed (the jobs run once a night). */

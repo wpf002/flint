@@ -111,6 +111,15 @@ const Env = z.object({
    * signs the Turn On Predictions card, which the database enforces.
    */
   FLINT_PREDICT: z.string().optional(),
+  /**
+   * Assets and tasks (P5): `on` to run them; anything else, blank included, is
+   * off, and then the task jobs are not scheduled, no task or asset is read,
+   * and every task or asset route and card is refused with a sentence. Off by
+   * default: it is turned on, in runtime.override.env, with Will's OK. Turning
+   * it off is its rollback. On is not enough: an asset does nothing until Will
+   * signs the card that turns it on.
+   */
+  FLINT_ASSETS: z.string().optional(),
   /** The local model triage and goal reviews ask (Ollama), on loopback only. */
   OLLAMA_URL: z.string().regex(/^http:\/\/(\[::1\]|127\.0\.0\.1|localhost):\d+$/).optional(),
   FLINT_TRIAGE_MODEL: z.string().regex(/^[A-Za-z0-9._:/-]{1,80}$/).optional(),
@@ -162,6 +171,8 @@ export interface Config {
   planner: boolean;
   /** P4's prediction jobs may run (FLINT_PREDICT=on). The signed card is still what turns a number on. */
   predict: boolean;
+  /** P5's tasks and assets may run (FLINT_ASSETS=on). The signed card is still what turns an asset on. */
+  assets: boolean;
   /** The local model triage and goal reviews ask; absent, triage is rules only and a review suggests no plan changes. */
   ollama?: { url: string; model: string; numCtx?: number };
   /** Where Ollama is asked which models it has (this Mac's own address), for Settings > Health. */
@@ -243,6 +254,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     triage: e.FLINT_RUNTIME_TRIAGE?.trim().toLowerCase() === 'on',
     planner: e.FLINT_PLANNER?.trim().toLowerCase() === 'on',
     predict: e.FLINT_PREDICT?.trim().toLowerCase() === 'on',
+    assets: e.FLINT_ASSETS?.trim().toLowerCase() === 'on',
     ...(e.FLINT_TRIAGE_MODEL
       ? { ollama: { url: e.OLLAMA_URL ?? 'http://127.0.0.1:11434', model: e.FLINT_TRIAGE_MODEL, ...(e.OLLAMA_NUM_CTX ? { numCtx: e.OLLAMA_NUM_CTX } : {}) } }
       : {}),

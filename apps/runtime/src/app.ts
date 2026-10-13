@@ -8,7 +8,7 @@
  */
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z, ZodError } from 'zod';
-import { GOAL_SAYS, safeName, type WebAuthnRelyingParty } from '@flint/policy';
+import { GOAL_SAYS, TASKS_WRITER, TASK_SAYS, safeName, taskNamed, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Config, RuntimeScope } from './config.js';
 import type { Db } from './db.js';
 import { callerFor, type Caller } from './auth.js';
@@ -34,6 +34,7 @@ import { isChatCommitmentKey } from './world/kinds.js';
 import { registerP2Routes } from './routes/p2.js';
 import { registerGoalRoutes } from './routes/goals.js';
 import { registerPredictionRoutes } from './routes/predictions.js';
+import { registerTaskRoutes } from './routes/tasks.js';
 import { registerAppleCalendarRoutes } from './routes/apple-calendar.js';
 import type { CalendarInbox } from './sources/apple/inbox.js';
 import type { Bus } from './bus.js';
@@ -69,7 +70,7 @@ export const HEALTH_RUN_STALE_MS = 10 * 60_000;
 
 export interface AppDeps {
   db: Db;
-  config: Pick<Config, 'tokens' | 'rp' | 'tz'> & Partial<Pick<Config, 'triage' | 'home' | 'planner' | 'predict'>>;
+  config: Pick<Config, 'tokens' | 'rp' | 'tz'> & Partial<Pick<Config, 'triage' | 'home' | 'planner' | 'predict' | 'assets'>>;
   logger?: boolean;
   /** Where the log lines go (tests read them); stdout by default. */
   logStream?: { write(line: string): void };
@@ -79,6 +80,8 @@ export interface AppDeps {
 }
 
 const Id = z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/) }).strict();
+/** What a caller reads when it asks to carry out, or report done, a task card that nothing carries out. */
+const NOT_CARRIED_OUT = 'Flint can’t carry this out yet.';
 /** The ledger's areas whose series are financial or personal (predict/series.ts: spend, calendar): chat is given no value scaled by one of them. */
 export const SENSITIVE_AREAS: ReadonlySet<string> = new Set(['spend', 'calendar']);
 
@@ -91,6 +94,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
   const { db, config } = deps;
   const rp: WebAuthnRelyingParty | undefined = config.rp;
+  // P5: tasks and assets work only while they are switched on (FLINT_ASSETS=on).
+  const assetsOn = config.assets ?? false;
   // BigInt columns (AuditEntry.seq, BackupRun.bytes) have no JSON form of their own.
   app.setReplySerializer((payload) => JSON.stringify(payload, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v)));
 
@@ -205,6 +210,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     // A job's cards are filed by the job, in this process. Over the wire an origin is only a claim, and a
     // `runtime:` one would file under a job's templates and its standing: refused, whoever holds the token.
     if (body.origin.startsWith('runtime:')) throw new Refused(400, GOAL_SAYS.runtimeOrigin);
+    // Switched off: no task or asset card is filed.
+    if (!assetsOn && taskNamed(body.action)) throw new Refused(409, TASK_SAYS.off);
     const created = await createProposal(db, body, actor(req));
     return reply.code(201).send(created);
   });
@@ -241,16 +248,23 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     const { id } = Id.parse(req.params);
     const p = await db.proposal.findUnique({ where: { id }, select: { action: true } });
     if (p && INTERNAL_ACTIONS.has(p.action)) throw new Refused(409, `${p.action} is carried out by the runtime: use /run`);
+    // No card about a task, an asset or a review is a caller's to claim, whatever its name (P5): the seven are the
+    // runtime's own (above), and nothing carries the others out (a paid dispatch, a review, the Hive's dispatch).
+    // Claimed here, one could be reported done with any result while its task never moved.
+    if (p && taskNamed(p.action)) throw new Refused(409, NOT_CARRIED_OUT);
     return claimProposal(db, id, rp, config.tz, actor(req));
   });
   // Approved actions the runtime carries out itself (turning a source on, a signed policy change).
   app.post('/v1/proposals/:id/run', { preHandler: need('proposals') }, async (req) => {
     const { id } = Id.parse(req.params);
-    return runInternal(db, id, rp, config.tz, actor(req));
+    return runInternal(db, id, rp, config.tz, actor(req), INTERNAL_ACTIONS, { assets: assetsOn, bus: deps.status?.bus });
   });
   // A tool's result can be large (a fetched page): this route takes up to 1 MB and truncates what it stores.
   app.post('/v1/proposals/:id/complete', { preHandler: need('proposals'), bodyLimit: 1024 * 1024 }, async (req) => {
     const { id } = Id.parse(req.params);
+    // Nor is one a caller's to report done (the runtime completes its own in the transaction that carries them out).
+    const p = await db.proposal.findUnique({ where: { id }, select: { action: true } });
+    if (p && taskNamed(p.action)) throw new Refused(409, INTERNAL_ACTIONS.has(p.action) ? `${p.action} is carried out by the runtime: use /run` : NOT_CARRIED_OUT);
     await completeProposal(db, id, CompleteProposal.parse(req.body), actor(req));
     return { ok: true };
   });
@@ -311,10 +325,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     // is ever listed here. A forecast's row is left out by every mark it has, not by one: its series, its run,
     // its unit, its writer (the database makes each forecast writer's row name its run and series, so this is
     // belt and braces), and a range of any kind. The console gets its own routes for them, behind the
-    // proposals scope.
+    // proposals scope. Nor is a task's forecast (P5): its row names its task by id, and no model is handed a task.
     return {
       predictions: await db.prediction.findMany({
-        where: { status: 'open', kind: 'binary', seriesKey: null, forecastRunId: null, unit: null, createdBy: { notIn: [FORECAST_WRITER, REASON_WRITER] } },
+        where: { status: 'open', kind: 'binary', seriesKey: null, forecastRunId: null, unit: null, createdBy: { notIn: [FORECAST_WRITER, REASON_WRITER, TASKS_WRITER] } },
         orderBy: { resolveBy: 'asc' },
         take: q.limit,
       }),
@@ -345,6 +359,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // P4 part 4: the Predictions panel (scope proposals: the runtime connector's token can never read a forecast's
   // numbers or a question's words, nor answer one for Will).
   registerPredictionRoutes(app, { db, need, tz: config.tz, predict: config.predict ?? false });
+  // P5: assets and tasks (scope proposals: no model reads a task's words, and chat has no tool that files or runs one).
+  registerTaskRoutes(app, { db, need, tz: config.tz, on: assetsOn });
   // P2.6: Flint Calendar's push (scope calendar:push only; up to the wire's byte budget, 2 MiB, this route alone).
   registerAppleCalendarRoutes(app, {
     db, need, bus: () => deps.status?.bus, log: (msg) => app.log.warn(msg),

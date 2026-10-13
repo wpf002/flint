@@ -1606,13 +1606,18 @@ Claude runs a `down.sql` only with your OK, after the dump.
 
 ## Assets, tasks and reviews (P5)
 
-This arrives in parts. The first part is only the store and what the database
-guarantees about it. Nothing writes to it yet, and it changes nothing you see.
+This arrives in parts. The first part is the store and what the database
+guarantees about it. The second adds the runtime's side for work that needs no
+model: one asset (the CI Watcher), tasks, and the cards that run them. It
+ships switched off. The one thing you'll see is a Tasks row in Settings >
+Health, shown as off. Nothing else changes until tasks are switched on and you
+turn an asset on, and the Tasks panel that lets you do that comes in a later
+part.
 
-Three things will live here:
+Three things live here:
 
-- **Assets** are what Flint may hand work to. The first will be the local model
-  on this Mac.
+- **Assets** are what Flint may hand work to. The first is the CI Watcher,
+  which only reads CI runs Flint already tracks. The local model comes next.
 - **Tasks** are single pieces of work handed to an asset. Each has a written
   bar and ends with a record of whether it met it.
 - **Reviews** are an argued verdict on a card, written before you approve it.
@@ -1685,6 +1690,121 @@ What the database now holds to, whatever the runtime's code does:
   the rule, never a title, a spec or a model's words. History keeps only how
   long the text was.
 
+### Tasks without a model (part 2)
+
+Part 2 ships switched off (see "Switching tasks on" below). What the runtime
+does once tasks are switched on and an asset is on:
+
+- **The CI Watcher** is the one asset so far. It watches a CI run that the
+  GitHub source already tracks and reports how it ended. It calls nothing and
+  costs nothing. Turning it on needs the GitHub source on first.
+- **A task's life.** You ask for a task. Flint writes it down and files its
+  card. You approve the card, and the task goes out with a forecast that it
+  will meet its bar. The asset hands in a result. Flint checks the result
+  against the bar. A result that fails is rejected. A result that passes waits
+  for your accept card.
+- **Accepting on its own.** Flint accepts a passing result without a card only
+  once you sign a rule that names that check exactly (`task.check_bar`). A rule
+  over all task actions doesn't cover it. Even then Flint accepts at most 20 a
+  day on its own, and a result past that comes to you on a card. The database's
+  own check is coarser: once such a rule exists it lets Flint accept for every
+  asset alike, with no limit. The by-name rule and the daily limit are held by
+  the code.
+- **Seven cards**, each carried out in one step with the database's own checks:
+  turn an asset on, require reviews or stop requiring them, run a task on the
+  local model, watch a CI run, accept a result, cancel a task that has gone
+  out, and overrule a check.
+- **Your latest signature counts.** If you approve a card and then sign
+  something newer about the same task or asset, the earlier card fails with
+  "You signed something newer about this, so this card didn’t run." That holds
+  even when the newer signature lands while the earlier card is running.
+- **Only your own no ends a result that passed.** An accept card that fails,
+  for any reason, is offered to you again. Turning one down, or letting it
+  lapse, ends the task. Its line then reads "You didn’t accept its result."
+- **Ending a task sets its other cards aside.** When your cancellation or your
+  override runs, the task's other waiting cards, a review of it among them, are
+  turned away with "You ended this task another way, so this card wasn’t
+  needed."
+- **Accept Anyway needs the result.** A task's raw output is deleted a week
+  after it ended. After that the result can't be accepted any more, and the
+  panel won't offer it.
+- **A task's time.** A task with a due time is watched until then, however far
+  off, and then ends with "It wasn’t finished by its due date." A task with no
+  due time ends after a day without moving, with "It ran out of time."
+- **The day's limits.** 50 watches and 20 local tasks can go out a day. A card
+  that is refused doesn't use one of them.
+- **A result that isn't one ends the task.** Whatever an asset hands back that
+  isn't a result, a wait or a known failure ends the task with "Its result
+  wasn’t usable." Nothing of it is kept.
+- **A forgotten item stops its cards.** A card about something you had Flint
+  forget doesn't run. It ends with a sentence and no result.
+- **The forecast is scored a day after the task ended**, by the task tick,
+  true if it was accepted and false if it was rejected or failed. It runs the
+  way Flint's other prediction checks do, and a rule that forbids those stops
+  it. A cancelled task's forecast is never scored. It's marked as run out once
+  its date has passed.
+- **Cleanup.** A task's spec, bar, summary and evidence are cleared 30 days
+  after it ended, or 7 days for one that is personal, financial or read outside
+  text. Its raw output is deleted 7 days after it ended. Its title stays, and
+  its line then says its checks are no longer kept.
+- **Health** has a Tasks row, under THIS MAC. It's shown as off while tasks
+  are switched off or no asset that runs tasks is on. Otherwise it says when a
+  task is stuck or a rule stops Flint from checking results.
+
+There is no panel yet. The routes the panel will use exist, behind the same
+token scope as approvals, so no model can read a task or start one:
+
+| Route | What it does |
+|---|---|
+| `GET /v1/assets` | The assets, whether each is on, and whether reviews are required |
+| `POST /v1/assets/:id/on` | Files the card that turns it on |
+| `POST /v1/assets/:id/off` | Turns it off. No signature needed |
+| `GET /v1/tasks?tab=active\|finished` | A tab of tasks |
+| `GET /v1/tasks/:id` | One task |
+| `POST /v1/tasks` | A new task and its card |
+| `POST /v1/tasks/:id/cancel` | Cancels it, or files the card to cancel one that has gone out |
+| `POST /v1/tasks/:id/accept` and `/reject` | Files the card that overrules its check |
+
+While tasks are switched off, every one of these answers "Tasks are turned off
+on this Mac." and reads nothing.
+
+Two things filed over `POST /v1/proposals` now get a sentence back instead of
+an error: a spend card that says no cost, and a task or spend card whose
+details hold a number that isn't whole.
+
+Three more things hold whether or not Flint knows the card's name:
+
+- From chat, no card about a task, an asset or a review is filed.
+- No caller can claim such a card or report it done. The runtime carries out
+  its own seven, and nothing carries out the others yet.
+- The list of open predictions that chat reads leaves task forecasts out.
+
+**Switching tasks on.** Part 2 ships off. No task job is scheduled, nothing
+reads a task or an asset, the routes above say tasks are turned off, and Health
+shows Tasks as off. To switch tasks on, set `FLINT_ASSETS=on`. Claude does that
+once you say OK, with the lines below, which keep the override file `0600`, add
+the setting only once and start it on a line of its own:
+
+```bash
+touch ~/.flint/runtime.override.env && chmod 600 ~/.flint/runtime.override.env
+grep -q '^FLINT_ASSETS=' ~/.flint/runtime.override.env || printf '\nFLINT_ASSETS=on\n' >> ~/.flint/runtime.override.env
+launchctl kickstart -k gui/$(id -u)/com.flint.runtime
+```
+
+Only `on` switches them on (any case, spaces around it ignored); anything else
+is off. On is not enough for anything to run: each asset stays off until you
+sign the card that turns it on.
+
+**Switching tasks off** is the rollback. Remove the `FLINT_ASSETS` line from
+`~/.flint/runtime.override.env` and run the `launchctl` line again. The task
+jobs are no longer scheduled, no task or asset card is filed or run, and the
+routes and Health say tasks are off. Nothing else is changed. An asset you
+turned on is still on when tasks come back. A card you already approved stays
+approved until then, or until it expires. A task that was out waits where it
+was: the first tick after tasks are back on sends it again, or ends it if its
+time is up. The nightly cleanup above still runs, so what has ended is still
+cleared on time. Part 2 has no database update of its own.
+
 ### What changed on deploy
 
 Nothing you use. Every card filed from now on records whether it needs a
@@ -1716,6 +1836,9 @@ with its id and the rule. Before, only goal, plan and task cards were. The
 rules themselves are the same.
 
 ### What the next parts must do
+
+Part 2 does each of these for tasks and assets. The parts that add the local
+model, reviews and the panel must hold to them too.
 
 - **Cards.** A card that turns an asset on (`asset.enable`) or changes the
   review requirement (`review.enforce`) acts only if it's a `policy` card filed
@@ -1778,6 +1901,40 @@ rules themselves are the same.
 - **Promotion.** The database lets Flint accept on its own only while a live,
   unscoped policy row promotes `task.check_bar` (or `task.*`) and no live row
   holds it back. See the limit below: the runtime can switch such a row off.
+  That check is all or nothing: it knows no asset and no limit. The code is
+  stricter, and a later part must keep it so: only a row that names
+  `task.check_bar` exactly promotes it, and each acceptance Flint makes alone
+  takes one of 20 places a day in the transaction that accepts.
+- **Adapters.** The run reads what an adapter returns strictly: a result with
+  its summary, a wait, or one of the failure classes above, and a result that
+  is plain data. Anything else ends the task as `invalid`. Keep every file
+  under `tasks/adapters` to type-only imports: the test reads each one, in any
+  sub-directory, and its list of files is closed.
+- **Money.** A dispatch that spends asks `reserve.take(cardId, micros)` before
+  it writes anything. Make `take` idempotent by the card's id, and `release`
+  of a key that holds nothing a no-op. A key is kept only for the card whose
+  dispatch happened. The runtime calls `release(cardId)` whenever a run of the
+  card ends and the card is known not to have sent its task out; for a task's
+  other dispatch cards once it has gone out on one; and for all of a task's
+  dispatch cards when it is withdrawn before it went out (its card lapsed, or
+  you cancelled it). Pass `reserve` to the tick and to `cancelTask` as well as
+  to the executor. When a run ends and it can't be told whether the card ran,
+  nothing is released then, and the next of those three gives it back. One
+  case is the keeper's own: a card whose item was forgotten and that never
+  runs again. Let a key lapse once its card's expiry has passed.
+- **Lock order.** A forget locks a task's cards by id, then the task. A card
+  that writes to the task's other cards (a cancellation, an override) locks
+  them with its own, by id, before the task (`lockCards`). Keep that order in
+  anything else that sets a card aside.
+- **Whose card counts.** Anything that asks whether a task or an asset has a
+  card waiting, or had one turned down, reads only cards the executor would
+  run: the check's own accept card, and cards filed from the console or the
+  CLI (`ACCEPT_CARD`, `WILL_ORIGINS`). A card written under another origin
+  never holds a real one back and is never your answer.
+- **The Hive.** A Hive dispatch card names one pool, as a plain name, at the
+  top of its args. Give its args a contract before anything carries one out.
+- **Caps.** A dispatch takes its place under the day's cap after its writes,
+  in the same transaction. Keep it last, so a refused card uses none.
 - **Outputs** are written while the task is `dispatched` or `running`, and are
   always tainted. An output's digest is the database's own count over the body
   as it stores it: `encode(sha256(convert_to(body::text, 'UTF8')), 'hex')`.
@@ -1897,7 +2054,16 @@ approved. Any later deploy of P5 code applies the migration again. Claude runs
   backup had them. An asset you turned off since would be on again, and reviews
   you required since would no longer be required. The restore carries forward
   keys, promotions and triage rules you took away, and doesn't know these two
-  yet. Nothing is on today, so nothing is exposed until an asset exists.
+  yet. It should carry both forward the same way, since both only take power
+  away: an asset that is off in the database being replaced stays off in the
+  restored copy, and reviews that are required there stay required. It already
+  fails every approved or running card, so no task or asset card acts twice.
+  A task that was out when the backup was taken comes back still out, and the
+  task tick ends it within a day. Until the restore learns the two switches,
+  check Settings after a restore. Only the CI Watcher exists today.
+- A card you approve is refused if you've signed something newer about the same
+  task or asset. For a card you asked for, the sentence tells you to ask again.
+  The panel should offer that in one click.
 - A policy row that holds an action back can be switched off by the runtime
   (see Known limits). Closing that needs a rule on who may switch a row off.
 - The runtime can create a large object, and one it owns makes the backup's

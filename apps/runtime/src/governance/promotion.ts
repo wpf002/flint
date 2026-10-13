@@ -32,7 +32,7 @@
  * afternoon, and no more is claimed for it. What stands between a table and
  * its rule is Will's signature over the rows on the card.
  */
-import { CODE_TABLE, FORECAST_SIGNED_ACTIONS, GOAL_SIGNED_ACTIONS, PROPHET_ACTIONS, localDay, localDayBounds, previousDay } from '@flint/policy';
+import { CODE_TABLE, FORECAST_SIGNED_ACTIONS, GOAL_SIGNED_ACTIONS, HIVE_DISPATCH, PAID_DISPATCH, PROPHET_ACTIONS, localDay, localDayBounds, previousDay } from '@flint/policy';
 import type { Db } from '../db.js';
 import { createProposal, Refused } from './proposals.js';
 import { PolicyArgs } from './internal.js';
@@ -121,12 +121,15 @@ export const P3C_SHADOW_DAYS = 14;
 /**
  * Never in a table, whatever is asked: P3's six passkey actions and the Nexus
  * write among them; P4's signed card (turning predictions on) and the outside
- * forecaster's names, which are FORBIDDEN outright. Their code entries are not
- * promotable either; this is belt and braces.
+ * forecaster's names, which are FORBIDDEN outright; P5's turning an asset on,
+ * requiring reviews, overruling a check, and everything that would spend or
+ * leave this Mac (a paid dispatch, the outside panel, the Hive's dispatch).
+ * Their code entries are not promotable either; this is belt and braces.
  */
 export const NEVER_PROMOTED: ReadonlySet<string> = new Set([
   'runtime.frontier.complete', 'triage.rule.create', 'world.commitment.from_mail', ...GOAL_SIGNED_ACTIONS, 'nexus.remember_goal_decision',
   ...FORECAST_SIGNED_ACTIONS, ...PROPHET_ACTIONS,
+  'asset.enable', 'review.enforce', 'task.cancel', 'task.bar_override', PAID_DISPATCH, 'review.trident_panel', HIVE_DISPATCH,
 ]);
 
 export const PHASES_LIST = ['p1', 'p2', 'p25', 'p26', 'p3', 'p3c'] as const;

@@ -17,7 +17,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { GOAL_SAYS, REFUSAL, digestOf, isChatSuggestion, isForecastSignedAction, isGoalSignedAction, redact, refusalFix, resolveTier, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
+import { GOAL_SAYS, HIVE_DISPATCH, REFUSAL, TASK_SAYS, digestOf, isChatSuggestion, isForecastSignedAction, isGoalSignedAction, isTaskCard, redact, refusalFix, resolveTier, taskNamed, type Cap, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 import { appendAudit } from './audit.js';
 import { jsonbBytes } from '../jsonsize.js';
@@ -118,15 +118,65 @@ interface ProposalFacts {
   tainted: boolean;
   sensitivity: string;
   destructive: boolean;
+  /** The card's args: the tier engine reads the pool a dispatch names from them, and nothing else. */
+  args?: unknown;
+}
+
+/** What Will reads when a spend card says no cost, and when a task or spend card's details hold a number that is not whole. */
+export const SPEND_NEEDS_ESTIMATE = 'A card that spends has to say what it will cost.';
+export const WHOLE_NUMBERS_ONLY = 'A task or spend card can hold whole numbers only.';
+/** Does a JSON value hold a number that is not a safe whole number, at any depth? */
+export function hasFraction(v: unknown): boolean {
+  if (typeof v === 'number') return !Number.isSafeInteger(v);
+  if (Array.isArray(v)) return v.some(hasFraction);
+  if (v !== null && typeof v === 'object') return Object.values(v).some(hasFraction);
+  return false;
+}
+
+/**
+ * The pool a card's args name, for the tier engine's trading-pool rule (step 1).
+ * As it is written when it is shaped like a name; otherwise only whether it
+ * trades, so that no other text from a card's args reaches a refusal or the
+ * audit trail.
+ */
+export function poolOf(args: unknown): string | undefined {
+  const pool = args !== null && typeof args === 'object' && !Array.isArray(args) ? (args as Record<string, unknown>).pool : undefined;
+  if (typeof pool !== 'string' || !pool) return undefined;
+  if (/^[A-Za-z0-9_.:-]{1,80}$/.test(pool)) return pool;
+  return /trad|broker|exchange/i.test(pool) ? 'trading' : undefined;
+}
+
+/**
+ * Does a Hive dispatch card name its pool so that the trading-pool rule can
+ * read it? The pool is one name (letters, digits, `.`, `_`, `-`), said once, at
+ * the top of the args. A list, an object, a look-alike letter, or a pool said
+ * anywhere else (another key with "pool" in its name, at any depth) is not
+ * that: the rule would read nothing, so such a card is never filed. (Its args
+ * have no contract of their own yet: nothing carries one out.)
+ */
+export function hivePoolNamed(args: unknown): boolean {
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) return false;
+  const pool = Object.prototype.hasOwnProperty.call(args, 'pool') ? (args as Record<string, unknown>).pool : undefined;
+  if (typeof pool !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(pool)) return false;
+  // Bounded: a card's args are small (the database holds them to a size), and nothing nests deeper than this.
+  const elsewhere = (v: unknown, depth: number, top: boolean): boolean => {
+    if (v === null || typeof v !== 'object') return false;
+    if (depth > 12) return true;
+    if (Array.isArray(v)) return v.some((x) => elsewhere(x, depth + 1, false));
+    return Object.entries(v).some(([k, x]) => ((!top || k !== 'pool') && /pool/i.test(k)) || elsewhere(x, depth + 1, false));
+  };
+  return !elsewhere(args, 0, true);
 }
 
 async function tierOf(db: Db | Tx, p: ProposalFacts, now: Date, readOnlyHint?: boolean): Promise<TierDecision> {
   const mcp = mcpOf(p.action, { destructive: p.destructive, ...(readOnlyHint ? { readOnlyHint } : {}) });
+  const pool = poolOf(p.args);
   return resolveTier(p.action, {
     context: contextOf(p.origin),
     tainted: p.tainted,
     sensitivity: p.sensitivity as TierContext['sensitivity'] & string,
     ...(mcp ? { mcp } : {}),
+    ...(pool ? { pool } : {}),
     policies: await activePolicies(db, now),
     now,
   });
@@ -178,6 +228,24 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
     const { checkForecastCard } = await import('../predict/enable.js');
     input = await checkForecastCard(db, input);
   }
+  // From chat, nothing named as a task, an asset or a review is filed, whether Flint knows the name or not (P5).
+  // The database reads what a signature is for from such a name, so a look-alike card from chat could draw a
+  // signature that stands in a real card's way. The tier engine forbids these too (step 1); said here first, as
+  // a sentence.
+  if (taskNamed(input.action) && contextOf(input.origin) === 'chat') throw new Refused(409, TASK_SAYS.fromConsole);
+  // A Hive dispatch names its one pool where the trading-pool rule reads it, or it is not filed.
+  if (input.action === HIVE_DISPATCH && !hivePoolNamed(input.args)) throw new Refused(400, TASK_SAYS.pool);
+  // A task or asset card (P5) is checked against the task and the asset as they stand, and filed with its
+  // args normalized and a fixed reason; one from chat, and one that could not apply, are never filed.
+  if (isTaskCard(input.action)) {
+    const { checkTaskCard } = await import('../tasks/card.js');
+    input = await checkTaskCard(db, input);
+  }
+  // Money and digests, said here so that Will reads a sentence (the database refuses each as the card is filed):
+  // a card that spends says an estimate above nothing, and a task or spend card's args hold whole numbers only
+  // (their digest is computed again by the database, where a fraction has no single form).
+  if (input.kind === 'spend' && !(input.estCostUsd !== undefined && input.estCostUsd > 0)) throw new Refused(400, SPEND_NEEDS_ESTIMATE);
+  if ((input.kind === 'spend' || input.kind === 'task') && hasFraction(input.args)) throw new Refused(400, WHOLE_NUMBERS_ONLY);
   // A policy change is checked against the database's rules before Will is asked to sign it.
   if (input.action === 'policy.change') {
     const { PolicyArgs } = await import('./internal.js');
@@ -224,11 +292,17 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
     // and never takes its place (the job claims only a card of its own origin, so a look-alike that stood in for
     // it would be approved and never run). Neither is the job's card ever handed back for a filing from elsewhere.
     const fromJob = input.origin.startsWith('runtime:');
+    // Nor does a card about a task, an asset or a review (P5) take the place of one filed from anywhere else, or
+    // under another template: a card the executor would never run (one planted as chat's, or as the job's under a
+    // template that is not its own) would hold the real filing back for as long as it waits.
+    const taskCard = taskNamed(input.action);
+    const ownOrigin = goalCard || fromJob || taskCard;
     const same = await tx.proposal.findFirst({
       // A goal card from Will and the same one from a review are two cards: their reasons and their marks differ.
       where: {
         action: input.action, argsDigest, tainted: input.tainted, status: 'pending', expiresAt: { gt: now },
-        ...(goalCard || fromJob ? { origin: input.origin } : { NOT: { origin: { startsWith: 'runtime:' } } }),
+        ...(ownOrigin ? { origin: input.origin } : { NOT: { origin: { startsWith: 'runtime:' } } }),
+        ...(taskCard ? { templateId: input.templateId ?? null } : {}),
       },
       orderBy: { createdAt: 'asc' },
       select: { id: true, expiresAt: true },
@@ -368,9 +442,11 @@ export async function claimProposal(db: Db, id: string, rp: WebAuthnRelyingParty
  * claimProposal's work inside the caller's transaction (P3 claims, applies and
  * completes a goal card in one). A refusal that fails the card is returned, to
  * be committed and then thrown; one that changes nothing (gone, not approved, a
- * cap reached) is thrown, and rolls back with the caller's transaction.
+ * cap reached) is thrown, and rolls back with the caller's transaction. A
+ * caller that may still refuse the card after this asks for `deferCap` and
+ * takes the cap itself (claimCap) once it has not.
  */
-export async function claimIn(tx: Tx, id: string, rp: WebAuthnRelyingParty | undefined, tz: string, actor: string, now = new Date()) {
+export async function claimIn(tx: Tx, id: string, rp: WebAuthnRelyingParty | undefined, tz: string, actor: string, now = new Date(), opts: { deferCap?: boolean } = {}) {
   const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Proposal" WHERE id = ${id} FOR UPDATE`;
   if (locked.length === 0) throw new Refused(404, GONE);
   const p = await tx.proposal.findUniqueOrThrow({ where: { id } });
@@ -399,17 +475,33 @@ export async function claimIn(tx: Tx, id: string, rp: WebAuthnRelyingParty | und
   if (args === null || digestOf(args) !== p.argsDigest) return fail('Flint didn’t run it because it changed after you approved it.', 409, 'the args do not match their digest');
   const decision = await tierOf(tx, p, now);
   if (decision.tier === 'forbidden') return fail('Flint didn’t run it because it isn’t allowed now.', 409, `forbidden: ${decision.reason}`);
-  if (decision.cap) {
-    const n = await claim(tx, decision.key, decision.cap, tz, now);
-    // Nothing changed yet, so throwing (and rolling back) is right; it stays approved.
-    if (n === null) throw new Refused(429, `${CAP_PERIOD[decision.cap.period] ?? 'Its'} limit of ${decision.cap.limit} is reached.`);
-  }
+  // With `deferCap` the cap is the caller's to take, once its own checks have passed (claimCap): a card it
+  // then refuses has used none of the day's slots.
+  const held = decision.cap ? { key: decision.key, cap: decision.cap } : undefined;
+  // Nothing changed yet, so throwing (and rolling back) is right; it stays approved.
+  if (held && !opts.deferCap) await claimCap(tx, held, tz, now);
   await tx.proposal.update({ where: { id }, data: { status: 'executing' } });
   await appendAudit(tx, [{
     actor, context: contextOf(p.origin), kind: 'intent', action: p.action, tier: decision.tier, decision: 'act', outcome: 'pending',
     inputs: auditInputs(p), correlationId: id, tainted: p.tainted,
   }], now);
-  return { claimed: { id, action: p.action, args, argsDigest: p.argsDigest } } as const;
+  return { claimed: { id, action: p.action, args, argsDigest: p.argsDigest }, ...(held && opts.deferCap ? { cap: held } : {}) } as const;
+}
+
+/** A claimed card's cap, by the counter it is counted under. */
+export interface HeldCap {
+  key: string;
+  cap: Cap;
+}
+
+/**
+ * Take one slot under a claimed card's cap, in the caller's transaction. With
+ * the cap reached it throws the sentence Will reads, and the transaction rolls
+ * back: nothing changed, and the card stays approved.
+ */
+export async function claimCap(tx: Tx, held: HeldCap, tz: string, now = new Date()): Promise<void> {
+  const n = await claim(tx, held.key, held.cap, tz, now);
+  if (n === null) throw new Refused(429, `${CAP_PERIOD[held.cap.period] ?? 'Its'} limit of ${held.cap.limit} is reached.`);
 }
 
 export const CompleteProposal = z
