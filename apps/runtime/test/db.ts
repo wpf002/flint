@@ -248,6 +248,23 @@ export async function withoutChatGoalFloor<T>(owner: string, fn: () => Promise<T
   }
 }
 
+/** The migration that keeps the runtime's role from switching off a policy row that holds an action back. */
+export const POLICY_OFF_GUARD = '20261015000200_policy_off_guard';
+
+/**
+ * A database without that guard for the length of `fn`: its own down.sql (the
+ * documented rollback), then a deploy puts it back, whatever `fn` did. What the
+ * rows made before the guard were made under.
+ */
+export async function withoutPolicyOffGuard<T>(owner: string, fn: () => Promise<T>): Promise<T> {
+  await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, POLICY_OFF_GUARD, 'down.sql'), 'utf8')));
+  try {
+    return await fn();
+  } finally {
+    await migrateUp(owner);
+  }
+}
+
 /**
  * Health checks dated as a test needs them (hours ago, a day last August). The
  * database dates the runtime's own rows itself (HealthCheck_clock, P3 part 4),
