@@ -2287,6 +2287,15 @@ policy card), whatever the runtime does:
   carried out, after it expires and after its key is revoked. And a card's
   rules land together or not at all, checked as the change is committed: the
   rule that lets go never lands without the brake you signed beside it.
+- **A rule's end is written one way.** Each rule a card adds ends at a time
+  written in full, with its zone (`2026-11-12T09:47:57.000Z`). A time with no
+  zone, or a date that reads two ways (`03/04/2027`), is a different moment
+  under each database session's own settings, and the runtime sets those for
+  itself. The second review showed a card that listed one rule make it eight
+  times that way, and a rule end a month later than its card showed. The
+  runtime files no such card, the database files none, and one filed before
+  this update makes no rule. Days are 24 hours for every session: a rule ends
+  within 180 of them, and a card outlives your approval by 7 at most.
 - **Only under a card that still stands.** For making a rule and for
   switching one off alike: your own card, from the console or the command
   line, with nothing untrusted in it, marked for your own touch, signed under
@@ -2305,9 +2314,11 @@ policy card), whatever the runtime does:
   policy changes. Those always take your signature."), and the database
   refuses the row. One from before can still be signed away: the card that
   switches rules off is judged by the code alone, never by your rules.
-- **A rule's history names your approval.** When a card switches a rule off,
-  the rule's history says which approval did it, whatever the runtime says of
-  itself. No switch-off without a card is recorded under an approval's name.
+- **Who switched a rule off is the database's to say.** When a card switches
+  a rule off, the rule's history names that approval. With no card it names
+  the database role that wrote the change. What the runtime calls itself is
+  never recorded there. The name is for that one rule: whatever the runtime
+  writes next in the same transaction goes down under its own name again.
 
 Why the runtime's own rule is that narrow: this is how the tier engine reads
 the rows (`@flint/policy`, `resolveTier`). Of the rules that match an action,
@@ -2347,19 +2358,25 @@ What the next parts must know:
   revoked, a rule the card has since made. So the database refuses there, as
   the goal and task guards refuse their writes.
 - **`policy.change` takes `rows` or `off`, never both, and nothing else.**
-  `off` is a list of `{ id, pattern, tier }`. A switch-off is filed only as
-  your own untainted policy card (the `rules` command files it), and only for
-  rules that are there, on, and as written. A card holds whole numbers and
-  plain names only, a few levels deep: the database must be able to compute
-  its digest again.
+  `off` is a list of `{ id, pattern, tier }`. Either kind is filed only as
+  your own untainted policy card, from the console or the command line: the
+  database carries out no other, so no other is offered for signing ("A card
+  that adds rules is your own: a policy card from the console or the CLI,
+  with nothing untrusted in it."). A switch-off (the `rules` command files
+  it) names only rules that are there, on, and as written. Each rule a card
+  adds gives its `expiresAt` in full with its zone, as `toISOString()` writes
+  it. A card holds whole numbers and plain names only, a few levels deep: the
+  database must be able to compute its digest again.
 - **Write a table's rules in one transaction.** One at a time, the first is
   refused when it commits. A rule's id is letters, digits, `_` and `-`, at
   most 64.
 - **A refusal is one sentence, once.** If the database refuses a signed
   switch-off (the key was revoked or the card expired while it ran), the card
   fails with "The database refused to switch it off, so it's still on. File
-  it again and sign it." The failure is in the audit trail, every rule the
-  card named is as it was, and nothing tries again.
+  it again and sign it." If it refuses to make a card's rules, the card fails
+  with "The database refused to add the rules, so none was added. File the
+  card again and sign it." The failure is in the audit trail, every rule is
+  as it was, and nothing tries again.
 - **The guard doesn't read a rule's own end.** A brake that has ended still
   goes off only on your card, so the rule holds whatever the clock says.
 - **Errors name a rule's or a card's id only**, and only one shaped as an id.
@@ -2367,8 +2384,8 @@ What the next parts must know:
 
 ### What changed on deploy
 
-- One database update, `20261015000200_policy_off_guard`: four triggers and
-  three functions on the policy table and the card table, and P1's check on
+- One database update, `20261015000200_policy_off_guard`: five triggers and
+  four functions on the policy table and the card table, and P1's check on
   how a rule is made, replaced by a stricter one. No table, no column, no
   grant, and no row is touched. Rules that are on stay on, rules that were
   switched off stay off, and every rule and card is held to the guards from
@@ -2399,6 +2416,13 @@ What the next parts must know:
   which limits are in force. Read it, and sign again what is missing. A
   restore that never switches a brake off, and carries a newer brake into
   the copy, is the next change.
+- **A card filed by a clock that runs ahead can't be carried out.** A card
+  may outlive your approval by 7 days at most, so one filed by a clock more
+  than five minutes ahead of the clock that records your signature is
+  refused when it runs. File it again.
+- **A table carried out in part before this update stays in part.** The
+  database holds a card's rules together as they are made, and neither
+  completes nor undoes what an earlier run left: `rules` lists what is on.
 - **Ended rules stay listed** until you switch them off. They hold nothing.
 - **A rule from before with no usable id** is listed without one, and the
   command can't name it on a card. Claude can switch it off as the migration
@@ -2409,14 +2433,14 @@ What the next parts must know:
 
 ### Rolling it back
 
-The migration's `down.sql` takes the four triggers and three functions away,
+The migration's `down.sql` takes the five triggers and four functions away,
 puts P1's own check on how a rule is made back to the letter, and loses
 nothing: no table, no row. It needs no older runtime, and a switch-off card
 still works. After it the runtime can again switch off any rule by itself,
-make a card's rules more than once and in part, and file a card that says
-two things, so a brake is only as good as the runtime, as before. Any later
-deploy applies the migration again. Claude runs `down.sql` only with your
-OK, after the dump.
+make a card's rules more than once and in part, file a card that says two
+things, and have a rule's end read under its own session's settings, so a
+brake is only as good as the runtime, as before. Any later deploy applies the
+migration again. Claude runs `down.sql` only with your OK, after the dump.
 
 ## Health sees the whole machine (P7)
 
