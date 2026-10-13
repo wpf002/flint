@@ -2320,11 +2320,11 @@ function apprFacts(p){p=apprAs(p);var a=p.args||{},f=[];
    Flint may do alone is never signed in a batch, even one a server sent without the mark. So are the cards that change
    what Flint reads and how it sorts it (APPR_ASKS), by their names, with P5's two that the runtime marks (turning an
    asset on, and ending a task against its checks) and any task whose cost does not read as exactly nothing (it costs
-   money, or its cost cannot be read); so is a tool's card that carries one of Flint's own names (apprAs); and so is
-   any card that does not show all of itself (apprWithheld: a secret's value, or more than it can list): what cannot
-   all be read is never signed in a batch. */
+   money, or its cost cannot be read) or that is filed as a spend; so is a tool's card that carries one of Flint's own
+   names (apprAs); and so is any card that does not show all of itself (apprWithheld: a secret's value, or more than
+   it can list): what cannot all be read is never signed in a batch. */
 var APPR_ASKS={'world.source.enable':1,'triage.rule.create':1,'asset.enable':1,'task.bar_override':1};
-function apprAlone(p){p=apprAs(p);return !!p.tool||!!p.consequential||!!apprGet(APPR_GOAL,p.fullName)||!!apprGet(APPR_ASKS,p.fullName)||(apprDispatchCard(p)&&apprCost(p)!==0)||p.fullName===APPR_PREDICT||apprWithheld(p)||(p.fullName==='plan.change'&&!apprSmallPlan(p))||!!p.tainted||!!p.destructive||p.sensitivity==='financial'||/spend|pay|purchase|transfer|invoice|charge|money|send|delete|remove/i.test(String(p.fullName||''))||
+function apprAlone(p){p=apprAs(p);return !!p.tool||!!p.consequential||!!apprGet(APPR_GOAL,p.fullName)||!!apprGet(APPR_ASKS,p.fullName)||(apprDispatchCard(p)&&apprCost(p)!==0)||p.fullName===APPR_PREDICT||apprWithheld(p)||(p.fullName==='plan.change'&&!apprSmallPlan(p))||!!p.tainted||!!p.destructive||p.sensitivity==='financial'||p.kind==='spend'||/spend|pay|purchase|transfer|invoice|charge|money|send|delete|remove/i.test(String(p.fullName||''))||
   (p.fullName==='policy.change'&&((p.args&&Array.isArray(p.args.rows)&&p.args.rows)||[]).some(function(r){return !!r&&(r.tier==='alone'||r.pattern==='world.person.create');}))||
   /* ...and every rule card that is not purely rows: one that switches rules off (ending a rule that holds an action
      back widens what Flint may do alone), and one that is neither one thing nor the other. */

@@ -1106,6 +1106,9 @@ describe('the console Approvals panel', () => {
       expect(alone({ ...P5.dispatch, cost: { micros: 100 }, args: watch({ estCostMicros: 100 }) })).toBe(true);
       expect(alone({ ...P5.dispatch, cost: undefined, args: watch({ estCostMicros: 250_000 }) })).toBe(true);
       expect(alone({ ...P5.dispatch, tainted: true })).toBe(true);
+      // A card filed as a spend is money, whatever its estimate reads and whatever marks it came without.
+      expect(alone({ ...P5.dispatch, fullName: 'task.dispatch.local_worker', kind: 'spend' })).toBe(true);
+      expect(alone({ ...plain(), kind: 'spend' })).toBe(true);
       // Ending a task against its checks says so in the prompt: it never reads as the plain acceptance of a result that passed.
       expect([P5.enable, P5.dispatch, P5.accept, P5.cancel, P5.acceptAnyway, P5.rejectAnyway].map(reason)).toEqual([
         'turn on the CI watcher', 'run this task', 'accept this result', 'cancel this task', 'accept this result against its checks', 'reject this result against its checks',
