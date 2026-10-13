@@ -867,8 +867,12 @@ export class MemoryExtractor {
           let detail: string | undefined;
           try {
             const send = (): Promise<BrainReply> => this.brain.generate({ system: EXTRACT_SYSTEM, prompt: ask.text, ...(asked ? { suggestions: asked } : {}) });
-            // (A call's turns all carry the same marks: it stays here, or none of it does.)
-            reply = await (toSend.some((it) => it.goals || it.private) ? this.kept(send) : send());
+            // (A call's turns all carry the same marks: it stays here, or none of it does.) A call that ASKS for
+            // goals is sent the same way, whatever its turns are: whether this pass asks was decided when it began,
+            // on what the model's server had last said, and that can be a minute old. Sent as kept text, the
+            // request goes only to a model its server, asked a moment ago, lists as its own (./inference
+            // helperFetch): a memory model pointed at a cloud model since then is not asked for Will's goals.
+            reply = await (asked || toSend.some((it) => it.goals || it.private) ? this.kept(send) : send());
           } catch (err) {
             why = err instanceof MemoryBrainError ? err.why : 'unavailable';
             detail = err instanceof MemoryBrainError ? err.detail : errorKind(err);

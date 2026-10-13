@@ -724,6 +724,15 @@ describe('goals and commitments from chat, in the extractor', () => {
     const opts: ExtractorOptions = { now: () => NOW, carriedGoals: (cid) => cid === 'c-goals', keptPrivate: (cid) => cid === 'c-kept', kept };
     await new MemoryExtractor(source(convs), new KnowledgeStore(join(dir, 'k-kept.json'), downEmbedder), brain, join(dir, 's-kept.json'), opts).run();
     expect(sentAs.sort()).toEqual([['Mac Studio', true], ['half marathon', false], ['spare key', true]]);
+    // The follow-up review's F3. A call that ASKS for goals is sent that way too, whatever its turns are: whether the
+    // pass asks was decided on what the model's server last said, and the request is where that is asked again.
+    sentAs.length = 0;
+    await new MemoryExtractor(source(convs), new KnowledgeStore(join(dir, 'k-kept3.json'), downEmbedder), brain, join(dir, 's-kept3.json'), { ...opts, candidates: true, onCandidate: async () => 'filed' as SuggestionOutcome }).run();
+    expect(sentAs.sort()).toEqual([['Mac Studio', true], ['half marathon', true], ['spare key', true]]);
+    // ...and only a call that asks: with the question answered "no" for this pass, an ordinary turn's call is as it was.
+    sentAs.length = 0;
+    await new MemoryExtractor(source(convs), new KnowledgeStore(join(dir, 'k-kept4.json'), downEmbedder), brain, join(dir, 's-kept4.json'), { ...opts, candidates: () => false, onCandidate: async () => 'filed' as SuggestionOutcome }).run();
+    expect(sentAs.sort()).toEqual([['Mac Studio', true], ['half marathon', false], ['spare key', true]]);
     // The request is refused where it is sent (the model was pointed at a cloud model since the pass began): no
     // reply, no strike against the turns, and the watermark does not move past them.
     const refusing = new MemoryExtractor(source({ 'c-kept': convs['c-kept'] }), new KnowledgeStore(join(dir, 'k-kept2.json'), downEmbedder), brain, join(dir, 's-kept2.json'), {
