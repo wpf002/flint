@@ -9,6 +9,12 @@
  *    something run on its own: the reviewed attack, step by step, is here.
  *    Each guard refuses a card that carries the other key, so one filed before
  *    this serves neither.
+ *  - A rule ends at a time written ONE way, in full and with its zone. A time
+ *    with no zone, or a date that reads two ways, is another moment under each
+ *    session's TimeZone or DateStyle, which the runtime's role sets for
+ *    itself: one listed row was made eight times (the reviewed cards are
+ *    here). Such a card is never filed, and one filed before makes no row.
+ *    Days are counted in UTC whatever zone the session is in.
  *  - A row is made once: a card makes one row for each time it lists one,
  *    ever. Left executing, past its expiry, under a revoked key, it makes
  *    nothing again, so a rule that was switched off stays off.
@@ -25,7 +31,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { digestOf, resolveTier, type PolicyRow } from '@flint/policy';
 import { NO_DB, freshDb, withoutPolicyOffGuard, pgError, id, HEX, type TestUrls } from './db';
 import { sleep, type CardOptions, type Q } from './p5';
-import { LEVELS, MADE_ALREADY, MADE_LEVEL, NOT_EXECUTING, NOT_LISTED, NOT_STANDING, NOT_WHOLE, REFUSED, policyKit, type Listed, type PolicyKit, type RowSpec } from './policy';
+import { LEVELS, MADE_ALREADY, MADE_LEVEL, NOT_EXECUTING, NOT_LISTED, NOT_READ, NOT_STANDING, NOT_TIMED, NOT_WHOLE, REFUSED, SESSIONS, ZONES, policyKit, type Listed, type PolicyKit, type RowSpec } from './policy';
 
 describe.skipIf(NO_DB)('how a policy row is made (flint_test)', () => {
   let urls: TestUrls;
@@ -122,6 +128,249 @@ describe.skipIf(NO_DB)('how a policy row is made (flint_test)', () => {
       expect(resolveTier(`mcp:${f}.write_anything`, { context: 'chat', tainted: false, mcp: { server: f, tool: 'write_anything' }, policies: live }).tier).toBe('approval');
       await k.finish(signed.pid);
       await k.finish(mixedSigned.pid);
+    });
+  });
+
+  describe('a rule ends at a time written one way', () => {
+    const MS = 86_400_000;
+    /** A time 30 days out as a card must write it, and the same moment written with no zone (as a session in UTC would read it). */
+    const iso = () => pk.inDays(30);
+    const bare = (t: string) => t.slice(0, 19).replace('T', ' ');
+    /**
+     * A date written as numbers that is a different day read month-first than read day-first, both within the 180
+     * days a rule may last (so that a guard which read it at all would make a row either way): the first of a month.
+     */
+    const twoWays = (): string => {
+      for (let d = 20; d < 150; d++) {
+        const t = new Date(Date.now() + d * MS);
+        const [mm, dd] = [t.getUTCMonth() + 1, t.getUTCDate()];
+        if (dd === 1 && mm > 1) return `${String(mm).padStart(2, '0')}/01/${t.getUTCFullYear()} 00:00:00+00`;
+      }
+      throw new Error('no first of a month in the next 150 days');
+    };
+    const rowsBy2 = async (aid: string) => (await owner(`SELECT count(*)::int AS n, count(DISTINCT "expiresAt")::int AS ends FROM "ActionPolicy" WHERE "approvalId" = $1`, [aid])).rows[0] as { n: number; ends: number };
+    /** A card filed before the database held a rule's end to its one shape (the shape trigger set aside), signed and being carried out. */
+    const filedBefore = async (rows: unknown[]) => {
+      const k = kit();
+      return k.sign(await k.without('Proposal_policy_shape', (q) => k.file('policy.change', { rows }, { kind: 'policy', origin: 'cli' }, q)), 'policy.change');
+    };
+
+    it('in full, with its zone, is filed; no zone, a date that reads two ways, a zone by name, a word, or no moment at all is refused by the database, whoever files it', async () => {
+      const k = kit();
+      const f = fam();
+      const row = (expiresAt: unknown) => ({ pattern: `${f}.sync`, tier: 'alone', ...(expiresAt === undefined ? {} : { expiresAt }) });
+      for (const good of ['2027-01-02T03:04:05Z', '2027-01-02T03:04:05.6Z', '2027-01-02T03:04:05.678Z', '2027-01-02T03:04:05+05:30', '2027-01-02T03:04:05.000-06:00', '2027-01-02T24:00:00Z']) {
+        await k.file('policy.change', { rows: [row(good)] }, { kind: 'policy', origin: 'cli' });
+      }
+      const bad: Array<[string, unknown]> = [
+        ['no zone (the reviewed card)', bare(iso())],
+        ['a date that reads two ways (the reviewed card)', twoWays()],
+        ['no zone, with its T', '2027-01-02T03:04:05'],
+        ['a space for the T', '2027-01-02 03:04:05Z'],
+        ['a zone by name', '2027-01-02T03:04:05 America/Chicago'],
+        ['a zone by its letters', '2027-01-02T03:04:05 CST'],
+        ['a zone with no colon', '2027-01-02T03:04:05+0000'],
+        ['a zone in hours alone', '2027-01-02T03:04:05+00'],
+        ['a small z', '2027-01-02T03:04:05z'],
+        ['no seconds', '2027-01-02T03:04Z'],
+        ['finer than a millisecond', '2027-01-02T03:04:05.6789Z'],
+        ['a comma for the point', '2027-01-02T03:04:05,6Z'],
+        ['a date alone', '2027-01-02'],
+        ['a year of two digits', '27-01-02T03:04:05Z'],
+        ['words the database reads as a time', 'now'],
+        ['tomorrow', 'tomorrow'],
+        ['for ever', 'infinity'],
+        ['the epoch', 'epoch'],
+        ['seconds as text', '1798859045'],
+        ['a space in front', ' 2027-01-02T03:04:05Z'],
+        ['a line after', '2027-01-02T03:04:05Z\n'],
+        ['two times', '2027-01-02T03:04:05Z 2027-01-02T03:04:05Z'],
+        ['nothing', ''],
+        ['null', null],
+        ['no end at all', undefined],
+        ['a number', 1798859045],
+        ['a list', ['2027-01-02T03:04:05Z']],
+        ['an object', { at: '2027-01-02T03:04:05Z' }],
+        // Written the one way, and no moment: read as one only once it is written that way, and refused the same.
+        ['a thirteenth month', '2027-13-02T03:04:05Z'],
+        ['the 30th of February', '2027-02-30T03:04:05Z'],
+        ['the 25th hour', '2027-01-02T25:04:05Z'],
+        ['a zone 99 hours off', '2027-01-02T03:04:05+99:00'],
+        ['the year nought', '0000-01-02T03:04:05Z'],
+      ];
+      for (const [name, end] of bad) {
+        const pid = id('prop');
+        for (const q of [app, owner]) {
+          expect(await failure(k.file('policy.change', { rows: [row(end)] }, { kind: 'policy', origin: 'cli', id: pid }, q)), name).toEqual(['23514', NOT_TIMED(pid), null]);
+        }
+      }
+      // One such end among good ones, a row that is no object, and the session's own settings make no difference.
+      const pid = id('prop');
+      expect(await failure(k.file('policy.change', { rows: [row(iso()), row(bare(iso())), row(iso())] }, { kind: 'policy', origin: 'cli', id: pid }))).toEqual(['23514', NOT_TIMED(pid), null]);
+      expect(await failure(k.file('policy.change', { rows: [row(iso()), 'alone'] }, { kind: 'policy', origin: 'cli', id: pid }))).toEqual(['23514', NOT_TIMED(pid), null]);
+      for (const settings of SESSIONS) {
+        await pk.session(settings, async (q) => {
+          for (const end of [bare(iso()), twoWays()]) expect(await failure(k.file('policy.change', { rows: [row(end)] }, { kind: 'policy', origin: 'cli', id: pid }, q)), JSON.stringify(settings)).toEqual(['23514', NOT_TIMED(pid), null]);
+        });
+      }
+      // A card that switches rules off lists no ends, and is filed as before; an error repeats a card's id only when it is shaped as one.
+      await k.file('policy.change', { off: [{ id: 'ap1', pattern: 'x.y', tier: 'approval' }] }, { kind: 'policy', origin: 'cli' });
+      expect(await failure(k.file('policy.change', { rows: [row('now')] }, { kind: 'policy', id: 'Synthetic CANARY words' }))).toEqual(['23514', NOT_TIMED('?'), null]);
+    });
+
+    it('the reviewed cards, filed before the database held the shape: neither makes a row, under eight time zones and both ways of reading a date', async () => {
+      const f = fam();
+      // 1. One listed row whose end has no zone: read under the session's own zone it was a different moment in each,
+      // and the card made its row once for every one of them (eight rows from a card listing one).
+      const noZone = { pattern: `mcp:${f}.*`, tier: 'alone' as const, expiresAt: bare(iso()) };
+      // 2. One whose end is a date that reads two ways: two rows, ending on different days.
+      const twice = { pattern: `mcp:${f}two.*`, tier: 'alone' as const, expiresAt: twoWays() };
+      for (const listed of [noZone, twice]) {
+        const card = await filedBefore([listed]);
+        for (const settings of SESSIONS) {
+          const rid = id('pol');
+          // The row's own end is sent as the card writes it, for the session to read as it will (as the reviewed runs did).
+          expect(await failure(pk.session(settings, (q) => pk.make(q, card.aid, listed, rid))), `${listed.expiresAt} under ${JSON.stringify(settings)}`).toEqual(['42501', NOT_STANDING(rid), null]);
+        }
+        // ...nor sent as any one moment it could be read as.
+        const rid = id('pol');
+        expect(await failure(pk.make(app, card.aid, { ...listed, expiresAt: iso() }, rid))).toEqual(['42501', NOT_STANDING(rid), null]);
+        expect(await rowsBy2(card.aid)).toEqual({ n: 0, ends: 0 });
+        await kit().finish(card.pid);
+      }
+      // (That the two readings of the second card do differ, and would each have made a row within a rule's 180 days.)
+      const [mdy, dmy] = await Promise.all(['ISO, MDY', 'ISO, DMY'].map(async (DateStyle) => (await pk.session({ DateStyle, TimeZone: 'UTC' }, (q) => q(`SELECT $1::timestamptz AS t`, [twice.expiresAt]))).rows[0].t as Date));
+      expect(mdy!.getTime()).not.toBe(dmy!.getTime());
+      for (const t of [mdy!, dmy!]) expect(t.getTime()).toBeLessThan(Date.now() + 180 * MS);
+    });
+
+    it('a card from before whose end is written any other way makes no row either: each way a looser reading would let through', async () => {
+      const f = fam();
+      const t0 = iso();
+      const ends: Array<[string, unknown]> = [
+        ['no zone, with its T', t0.slice(0, 23)],
+        ['a space for the T', t0.replace('T', ' ')],
+        ['a zone with no colon', t0.replace('Z', '+0000')],
+        ['finer than a millisecond', t0.replace('.000Z', '.0000Z')],
+        ['a space in front', ` ${t0}`],
+        ['a line after', `${t0}\n`],
+        ['a word the database reads as a time', 'tomorrow'],
+        ['null', null],
+        ['no end at all', undefined],
+        ['a number', Date.parse(t0) / 1000],
+      ];
+      for (const [name, end] of ends) {
+        const listed = { pattern: `${f}.sync`, tier: 'alone' as const, ...(end === undefined ? {} : { expiresAt: end }) };
+        const card = await filedBefore([listed]);
+        // The row sent ending at the moment the card meant, and ending as the card wrote it (where that is text at all).
+        for (const expiresAt of [t0, ...(typeof end === 'string' ? [end] : [])]) {
+          const rid = id('pol');
+          expect(await failure(pk.make(app, card.aid, { pattern: listed.pattern, tier: 'alone', expiresAt }, rid)), `${name}, sent as ${JSON.stringify(expiresAt)}`).toEqual(['42501', NOT_STANDING(rid), null]);
+        }
+        expect(await rowsBy2(card.aid)).toEqual({ n: 0, ends: 0 });
+        await kit().finish(card.pid);
+      }
+      // The same beside a good row: a card is read whole, so one such end and no row of the card is made.
+      const good = pk.listed([{ pattern: `${f}.good`, tier: 'alone' }])[0]!;
+      const mixed = await filedBefore([good, { pattern: `${f}.sync`, tier: 'alone' }]);
+      const rid = id('pol');
+      expect(await failure(pk.make(app, mixed.aid, good, rid))).toEqual(['42501', NOT_STANDING(rid), null]);
+      await kit().finish(mixed.pid);
+    });
+
+    it('the honest card’s row lands once, whatever the session’s zone or way of reading a date: one moment, written one way', async () => {
+      const f = fam();
+      const [listed] = pk.listed([{ pattern: `${f}.sync`, tier: 'alone', expiresAt: iso() }]) as [Listed];
+      const card = await pk.rowsCard([listed]);
+      // The same moment as a session far from UTC would write it: still that one row.
+      const elsewhere = `${new Date(Date.parse(listed.expiresAt) + 5.5 * 3_600_000).toISOString().slice(0, 23)}+05:30`;
+      expect(Date.parse(elsewhere)).toBe(Date.parse(listed.expiresAt));
+      await pk.session(SESSIONS[9]!, (q) => pk.make(q, card.aid, { ...listed, expiresAt: elsewhere }));
+      for (const settings of SESSIONS) {
+        for (const expiresAt of [listed.expiresAt, elsewhere]) {
+          const rid = id('pol');
+          expect(await failure(pk.session(settings, (q) => pk.make(q, card.aid, { ...listed, expiresAt }, rid))), JSON.stringify(settings)).toEqual(['42501', MADE_ALREADY(rid), null]);
+        }
+      }
+      expect(await rowsBy2(card.aid)).toEqual({ n: 1, ends: 1 });
+      await kit().finish(card.pid);
+      // A card may write its ends in any zone, so long as it writes one: its row lands once too.
+      const [abroad] = pk.listed([{ pattern: `${f}.abroad`, tier: 'alone', expiresAt: elsewhere }]) as [Listed];
+      const second = await pk.rowsCard([abroad]);
+      await pk.session(SESSIONS[4]!, (q) => pk.make(q, second.aid, { ...abroad, expiresAt: listed.expiresAt }));
+      const rid = id('pol');
+      expect(await failure(pk.session(SESSIONS[11]!, (q) => pk.make(q, second.aid, abroad, rid)))).toEqual(['42501', MADE_ALREADY(rid), null]);
+      expect(await rowsBy2(second.aid)).toEqual({ n: 1, ends: 1 });
+      await kit().finish(second.pid);
+    });
+
+    it('an end that is written the one way and is no moment (a card from before): no row, as a refusal by the row’s id and never a fault', async () => {
+      const f = fam();
+      for (const end of ['2027-13-02T03:04:05Z', '2027-02-30T03:04:05Z', '2027-01-02T03:04:05+99:00']) {
+        const good = pk.listed([{ pattern: `${f}.sync`, tier: 'alone' }])[0]!;
+        const card = await filedBefore([good, { pattern: `${f}.never`, tier: 'alone', expiresAt: end }]);
+        const rid = id('pol');
+        expect(await failure(pk.make(app, card.aid, good, rid)), end).toEqual(['42501', NOT_STANDING(rid), null]);
+        expect(await rowsBy2(card.aid)).toEqual({ n: 0, ends: 0 });
+        await kit().finish(card.pid);
+      }
+    });
+
+    it('at the commit too: a card’s rows are read as moments only as a card writes them, so one rewritten with no zone in the same transaction makes none', async () => {
+      const f = fam();
+      // As the owner, who alone can rewrite a card (the card table's own rules set aside for the statement): the row
+      // lands under the honest card, and the card is then made to list that end with no zone, or as no moment.
+      for (const [name, rewrite] of [['no zone', (t: string) => t.slice(0, 23)], ['no moment', () => '2027-13-02T03:04:05Z']] as Array<[string, (t: string) => string]>) {
+        const [listed] = pk.listed([{ pattern: `${f}.sync`, tier: 'alone' }]) as [Listed];
+        const card = await pk.rowsCard([listed]);
+        const rid = id('pol');
+        expect(await failure(pk.session({ TimeZone: 'UTC' }, async (q) => {
+          await q('BEGIN');
+          await pk.make(q, card.aid, listed, rid);
+          await q('ALTER TABLE "Proposal" DISABLE TRIGGER USER');
+          await q(`UPDATE "Proposal" SET args = $2::jsonb WHERE id = $1`, [card.pid, JSON.stringify({ rows: [{ ...listed, expiresAt: rewrite(listed.expiresAt) }] })]);
+          await q('ALTER TABLE "Proposal" ENABLE TRIGGER USER');
+          await q('COMMIT');
+        }, urls.owner)), name).toEqual(['42501', NOT_READ(rid), null]);
+        expect(await rowsBy2(card.aid)).toEqual({ n: 0, ends: 0 });
+        // Nothing of that transaction stayed: the card is as Will signed it, its rules on again, and its row is made.
+        expect((await owner(`SELECT args->'rows'->0->>'expiresAt' AS t FROM "Proposal" WHERE id = $1`, [card.pid])).rows[0].t).toBe(listed.expiresAt);
+        expect((await owner(`SELECT count(*)::int AS off FROM pg_trigger WHERE tgrelid = '"Proposal"'::regclass AND NOT tgisinternal AND tgenabled <> 'O'`)).rows[0].off).toBe(0);
+        await makeAlone(card.aid, listed, rid);
+        await kit().finish(card.pid);
+      }
+    });
+
+    it('days are 24 hours whatever zone the session is in: a rule ends within 181 of them, and a card outlives Will’s approval by 7 of them, counted the same for every session', async () => {
+      const k = kit();
+      const f = fam();
+      // 181 days from now is another moment by the wall clock of a zone whose clocks change in between (an hour
+      // more or less). Half an hour inside 181 days of 24 hours is made in every zone; half an hour past is refused in every zone.
+      const at = (ms: number) => new Date(Math.floor((Date.now() + ms) / 1000) * 1000).toISOString();
+      for (const zone of [...ZONES, 'America/New_York', 'Europe/Berlin', 'America/Santiago', 'Pacific/Auckland']) {
+        const [inside, past] = pk.listed([{ pattern: `${f}.in`, tier: 'alone', expiresAt: at(181 * MS - 1_800_000) }, { pattern: `${f}.past`, tier: 'alone', expiresAt: at(181 * MS + 1_800_000) }]) as [Listed, Listed];
+        const [a, b] = [await pk.rowsCard([inside]), await pk.rowsCard([past])];
+        const rid = id('pol');
+        await pk.session({ TimeZone: zone }, (q) => pk.make(q, a.aid, inside));
+        expect(await failure(pk.session({ TimeZone: zone }, (q) => pk.make(q, b.aid, past, rid))), zone).toEqual(['P0001', `policy row ${rid}: expires more than 180 days out`, null]);
+        expect([(await rowsBy2(a.aid)).n, (await rowsBy2(b.aid)).n], zone).toEqual([1, 0]);
+        await k.finish(a.pid);
+        await k.finish(b.pid);
+      }
+      // A card that outlives his approval by 7 days and half an hour makes no row, even where the clocks go back
+      // inside those days (7 days by that zone's wall clock are 7 days and an hour); half an hour inside, it does.
+      const [listed] = pk.listed([{ pattern: `${f}.sync`, tier: 'alone' }]) as [Listed];
+      const over = await pk.acrossClocksBack({ rows: [listed] }, '30 minutes');
+      for (const zone of [over.zone, ...ZONES]) {
+        const rid = id('pol');
+        expect(await failure(pk.session({ TimeZone: zone }, (q) => pk.make(q, over.aid, listed, rid))), zone).toEqual(['42501', NOT_STANDING(rid), null]);
+      }
+      expect(await rowsBy2(over.aid)).toEqual({ n: 0, ends: 0 });
+      await k.finish(over.pid);
+      const within = await pk.acrossClocksBack({ rows: [listed] }, '-30 minutes');
+      await pk.session({ TimeZone: within.zone }, (q) => pk.make(q, within.aid, listed));
+      expect(await rowsBy2(within.aid)).toEqual({ n: 1, ends: 1 });
+      await k.finish(within.pid);
     });
   });
 

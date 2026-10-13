@@ -18,10 +18,11 @@
  *     exactly the rows the rule allows.
  *  3. Raw SQL as flint_app: a row at alone with no cap goes off; any other does
  *     not, by any statement, at any isolation level; the signed card switches
- *     it off, and only a card that is all a card must be; the row's history
- *     names that card's approval whatever the writer says; the two floors that
- *     stand on a holding row (goals from chat, P5's acceptance) now stand; rows
- *     from before the migration behave the same.
+ *     it off, and only a card that is all a card must be; who switched a row
+ *     off is the guard's to say (the card's approval, or else the database
+ *     role), for that row only; the two floors that stand on a holding row
+ *     (goals from chat, P5's acceptance) now stand; rows from before the
+ *     migration behave the same.
  * How a row is made is policy-rows-guard-db.test.ts; the runtime's own path and
  * the rules command are policy-rules-db.test.ts. Synthetic text only.
  */
@@ -31,7 +32,7 @@ import pg from 'pg';
 import { actionKey, digestOf, patternMatches, resolveTier, suggestionGoalId, type McpFacts, type PolicyRow, type Tier, type TierContext, type TierDecision } from '@flint/policy';
 import { NO_DB, freshDb, withClient, withoutPolicyOffGuard, pgConfig, pgError, id, HEX, type TestUrls } from './db';
 import { sleep, type CardOptions, type Q } from './p5';
-import { LEVEL, LEVELS, REFUSED, policyKit, type PolicyKit, type RowSpec } from './policy';
+import { LEVEL, LEVELS, REFUSED, ZONES, policyKit, type PolicyKit, type RowSpec } from './policy';
 
 // ---- The rule, and what "looser" means -------------------------------------------------------------------------
 
@@ -404,13 +405,14 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
   });
 
   describe('a row at alone with no cap', () => {
-    it('goes off for the runtime’s role, and the action is back to a card; the row’s history says who', async () => {
+    it('goes off for the runtime’s role, and the action is back to a card; the row’s history says the role did it', async () => {
       const [rid] = await rule([{ pattern: `${fam()}.sync`, tier: 'alone' }]);
       await kit().inTx(async (q) => {
         await switchOff(rid!, q);
       }, { actor: 'runtime:test' });
       expect(await isOn(rid!)).toBe(false);
-      expect(await history(rid!)).toEqual([{ actor: 'runtime:test', changed: { active: [true, false] } }]);
+      // By the database role that wrote it, whatever name the writer gave itself (no card let this one through).
+      expect(await history(rid!)).toEqual([{ actor: 'flint_app', changed: { active: [true, false] } }]);
       // Off is for good, as before; switching it off again changes nothing and writes no history.
       expect(await failure(app(`UPDATE "ActionPolicy" SET active = true WHERE id = $1`, [rid]))).toEqual(['42501', `policy row ${rid}: it can only be switched off`, null]);
       await switchOff(rid!);
@@ -454,6 +456,9 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       // A cap is a brake too, whatever else is there: it may be the lowest in force, now or once a wider row arrives.
       ['a row at alone with a cap, standing alone', (f) => [{ pattern: `${f}.propose`, tier: 'alone', dailyCap: 3 }]],
       ['a row at alone with a cap of none at all', (f) => [{ pattern: `${f}.propose`, tier: 'alone', dailyCap: 0 }]],
+      // However high: a cap of any size is a limit Will set, and none is "as good as no cap".
+      ['a row at alone with a cap of 1001', (f) => [{ pattern: `${f}.propose`, tier: 'alone', dailyCap: 1001 }]],
+      ['a row at alone with the highest cap there is', (f) => [{ pattern: `${f}.propose`, tier: 'alone', dailyCap: 2_147_483_647 }]],
       ['a capped row at alone that has ended', (f) => [{ pattern: `${f}.propose`, tier: 'alone', dailyCap: 3, expiresAt: pk.past() }]],
       ['a capped row beside the same rule under a lower cap', (f) => [{ pattern: `${f}.propose`, tier: 'alone', dailyCap: 3 }, { pattern: `${f}.propose`, tier: 'alone', dailyCap: 1 }]],
       ['a capped row beside the same rule with no cap', (f) => [{ pattern: `${f}.propose`, tier: 'alone', dailyCap: 3 }, { pattern: `${f}.propose`, tier: 'alone' }]],
@@ -565,6 +570,8 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       for (const sql of [
         'SET ROLE flint_owner', 'SET SESSION AUTHORIZATION flint_owner', `SET session_replication_role = 'replica'`,
         'ALTER TABLE "ActionPolicy" DISABLE TRIGGER "ActionPolicy_off_guard"', 'ALTER TABLE "ActionPolicy" DISABLE TRIGGER "ActionPolicy_card_actor"',
+        'ALTER TABLE "ActionPolicy" DISABLE TRIGGER "ActionPolicy_history_actor_back"', 'DROP TRIGGER "ActionPolicy_history_actor_back" ON "ActionPolicy"',
+        'ALTER FUNCTION action_policy_off_guard() RESET TimeZone', 'ALTER FUNCTION action_policy_matches_approval() SET TimeZone = \'Australia/Sydney\'',
         'ALTER TABLE "ActionPolicy" DISABLE TRIGGER "ActionPolicy_whole_card"', 'ALTER TABLE "ActionPolicy" DISABLE TRIGGER USER', 'ALTER TABLE "Proposal" DISABLE TRIGGER "Proposal_policy_shape"',
         'DROP TRIGGER "ActionPolicy_off_guard" ON "ActionPolicy"', 'DROP TRIGGER "ActionPolicy_whole_card" ON "ActionPolicy"', 'DROP TRIGGER "Proposal_policy_shape" ON "Proposal"',
         'DROP FUNCTION action_policy_off_guard() CASCADE', 'ALTER FUNCTION action_policy_off_guard() SECURITY DEFINER',
@@ -572,7 +579,7 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
         `CREATE OR REPLACE FUNCTION action_policy_matches_approval() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$`,
         `CREATE FUNCTION pog_as_owner() RETURNS void LANGUAGE sql SECURITY DEFINER AS $$ UPDATE "ActionPolicy" SET active = false $$`,
         'CREATE TEMP TABLE "Approval" (id text)', 'CREATE RULE pog_rule AS ON UPDATE TO "ActionPolicy" DO INSTEAD NOTHING',
-        'SELECT action_policy_off_guard()', 'SELECT action_policy_whole_card()', 'SELECT proposal_policy_shape()', 'SELECT action_policy_matches_approval()',
+        'SELECT action_policy_off_guard()', 'SELECT action_policy_whole_card()', 'SELECT proposal_policy_shape()', 'SELECT action_policy_matches_approval()', 'SELECT action_policy_actor_back()',
       ]) {
         expect((await pgError(app(sql))).code, sql).toBe('42501');
       }
@@ -583,25 +590,30 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
          WHERE n.nspname IN ('public', 'pgboss') AND p.prosecdef`)).rows as Array<{ proname: string; names_it: boolean; runs: boolean }>;
       expect(definers.filter((d) => d.names_it)).toEqual([]);
       expect(definers.filter((d) => d.runs).length).toBeGreaterThan(3);
-      // The guards themselves: the owner's, each with its search path pinned, each running as whoever fires it, and none anyone may call.
+      // The guards themselves: the owner's, each with its search path pinned, each running as whoever fires it, and none
+      // anyone may call. The two that add days to a moment count them in UTC, whatever zone the session is in.
+      const UTC_DAYS = ['action_policy_matches_approval', 'action_policy_off_guard'];
       expect((await owner(
         `SELECT p.proname, pg_get_userbyid(p.proowner) AS owner, p.prosecdef, array_to_string(p.proconfig, ';') AS config, coalesce(array_to_string(p.proacl, ','), '') AS acl
-         FROM pg_proc p WHERE p.proname IN ('action_policy_off_guard', 'action_policy_whole_card', 'action_policy_matches_approval', 'proposal_policy_shape') ORDER BY 1`)).rows).toEqual(
-        ['action_policy_matches_approval', 'action_policy_off_guard', 'action_policy_whole_card', 'proposal_policy_shape'].map((proname) => (
-          { proname, owner: 'flint_owner', prosecdef: false, config: 'search_path=public, pg_temp', acl: 'flint_owner=X/flint_owner' })));
+         FROM pg_proc p WHERE p.proname IN ('action_policy_off_guard', 'action_policy_actor_back', 'action_policy_whole_card', 'action_policy_matches_approval', 'proposal_policy_shape') ORDER BY 1`)).rows).toEqual(
+        ['action_policy_actor_back', 'action_policy_matches_approval', 'action_policy_off_guard', 'action_policy_whole_card', 'proposal_policy_shape'].map((proname) => (
+          { proname, owner: 'flint_owner', prosecdef: false, config: `search_path=public, pg_temp${UTC_DAYS.includes(proname) ? ';TimeZone=UTC' : ''}`, acl: 'flint_owner=X/flint_owner' })));
       // Each trigger, whole, as the catalog has it: switched on, on every UPDATE (never `UPDATE OF "active"` alone,
       // which a statement that names another column too would slip past), and the row check deferred to the commit.
       expect((await owner(
         `SELECT t.tgname, t.tgenabled, pg_get_triggerdef(t.oid) AS def FROM pg_trigger t
-         WHERE NOT t.tgisinternal AND t.tgname IN ('ActionPolicy_off_guard', 'ActionPolicy_card_actor', 'ActionPolicy_whole_card', 'ActionPolicy_matches_approval', 'Proposal_policy_shape') ORDER BY 1`)).rows).toEqual([
+         WHERE NOT t.tgisinternal AND t.tgname IN ('ActionPolicy_off_guard', 'ActionPolicy_card_actor', 'ActionPolicy_history_actor_back', 'ActionPolicy_whole_card', 'ActionPolicy_matches_approval', 'Proposal_policy_shape') ORDER BY 1`)).rows).toEqual([
         { tgname: 'ActionPolicy_card_actor', tgenabled: 'O', def: 'CREATE TRIGGER "ActionPolicy_card_actor" AFTER UPDATE ON public."ActionPolicy" FOR EACH ROW WHEN ((old.active AND (NOT new.active))) EXECUTE FUNCTION action_policy_off_guard()' },
+        { tgname: 'ActionPolicy_history_actor_back', tgenabled: 'O', def: 'CREATE TRIGGER "ActionPolicy_history_actor_back" AFTER UPDATE ON public."ActionPolicy" FOR EACH ROW WHEN ((old.active AND (NOT new.active))) EXECUTE FUNCTION action_policy_actor_back()' },
         { tgname: 'ActionPolicy_matches_approval', tgenabled: 'O', def: 'CREATE TRIGGER "ActionPolicy_matches_approval" BEFORE INSERT ON public."ActionPolicy" FOR EACH ROW EXECUTE FUNCTION action_policy_matches_approval()' },
         { tgname: 'ActionPolicy_off_guard', tgenabled: 'O', def: 'CREATE TRIGGER "ActionPolicy_off_guard" BEFORE UPDATE ON public."ActionPolicy" FOR EACH ROW WHEN ((old.active AND (NOT new.active))) EXECUTE FUNCTION action_policy_off_guard()' },
         { tgname: 'ActionPolicy_whole_card', tgenabled: 'O', def: 'CREATE CONSTRAINT TRIGGER "ActionPolicy_whole_card" AFTER INSERT ON public."ActionPolicy" DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION action_policy_whole_card()' },
         { tgname: 'Proposal_policy_shape', tgenabled: 'O', def: `CREATE TRIGGER "Proposal_policy_shape" BEFORE INSERT ON public."Proposal" FOR EACH ROW WHEN ((new.action = 'policy.change'::text)) EXECUTE FUNCTION proposal_policy_shape()` },
       ]);
-      // The actor trigger fires before the history trigger, row by row (AFTER triggers fire in name order).
-      expect('ActionPolicy_card_actor' < 'ActionPolicy_history').toBe(true);
+      // The three that fire after a switch-off, in the order the database fires them (by name, row by row): the name is
+      // set, the row's history written, the name put back. No other trigger of the table fires after an UPDATE.
+      expect((await owner(`SELECT tgname FROM pg_trigger WHERE tgrelid = '"ActionPolicy"'::regclass AND NOT tgisinternal AND tgtype & 16 = 16 AND tgtype & 2 = 0 ORDER BY tgname COLLATE "C"`)).rows.map((r) => r.tgname))
+        .toEqual(['ActionPolicy_card_actor', 'ActionPolicy_history', 'ActionPolicy_history_actor_back']);
       await untouched();
     });
 
@@ -649,7 +661,7 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       await kit().finish(again.pid);
     });
 
-    it('the row’s history names the approval of the card that let it through, whatever the writer says of itself', async () => {
+    it('who switched a row off is the guard’s to say, never the writer’s: the approval of the card that let it through, or else the database role', async () => {
       const f = fam();
       const [brake, capped, named1, free, later] = (await rule([
         { pattern: `${f}.propose`, tier: 'approval' }, { pattern: `${f}.capped`, tier: 'alone', dailyCap: 3 }, { pattern: `${f}.named`, tier: 'alone' },
@@ -664,18 +676,58 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       expect((await history(capped))[0]!.actor).toBe(says);
       // One statement over a row the card names and one it does not, the writer setting its own name again for every
       // row as the statement runs: each row's history is its own. The named row is the card's; the other, which no
-      // card names, is never an approval's.
+      // card names, is the role's.
       const spoof = (name: string) => kit().inTx((q) => q(`UPDATE "ActionPolicy" SET active = (set_config('flint.actor', $2, true) IS NULL) WHERE id = ANY ($1)`, [[named1, free], name]));
       await spoof('will:approval:made-up');
       expect((await history(named1))[0]!.actor).toBe(says);
       expect((await history(free))[0]!.actor).toBe('flint_app');
       await kit().finish(card.pid);
-      // With no card at all: the writer's own word for itself stands, but never an approval's name.
+      // With no card at all, nothing the writer calls itself is recorded: not a real approval's name, not one that
+      // only looks like an approval's (another case, a space in front, the name cut short), not Will's, not a job's.
       await kit().inTx((q) => switchOff(later, q), { actor: `will:approval:${card.aid}` });
       expect((await history(later))[0]!.actor).toBe('flint_app');
-      const [plain] = await rule([{ pattern: `${f}.plain`, tier: 'alone' }]);
-      await kit().inTx((q) => switchOff(plain!, q), { actor: 'runtime:step-down' });
-      expect((await history(plain!))[0]!.actor).toBe('runtime:step-down');
+      for (const name of ['Will:approval:x', ' will:approval:x', 'will:approval', 'WILL:APPROVAL:X', 'will:console', 'will', 'runtime:step-down', 'flint_owner', 'Synthetic CANARY-off name']) {
+        const [plain] = await rule([{ pattern: `${f}.plain`, tier: 'alone' }]);
+        await kit().inTx((q) => switchOff(plain!, q), { actor: name });
+        expect(await history(plain!), JSON.stringify(name)).toEqual([{ actor: 'flint_app', changed: { active: [true, false] } }]);
+      }
+    });
+
+    it('the name the guard gives is for that row alone: once its history is written, the writer’s own name is back for whatever it does next', async () => {
+      const f = fam();
+      const [brake, free, other, capped] = (await rule([
+        { pattern: `${f}.propose`, tier: 'approval' }, { pattern: `${f}.free`, tier: 'alone' }, { pattern: `${f}.other`, tier: 'alone' }, { pattern: `${f}.capped`, tier: 'alone', dailyCap: 3 },
+      ])) as [string, string, string, string];
+      const card = await offCard([brake]);
+      const actor = (q: Q) => q(`SELECT current_setting('flint.actor', true) AS actor`).then((r) => r.rows[0].actor as string | null);
+      // A card's row, then a row no card names, in one transaction under the writer's own name: after each statement
+      // the name is the writer's again, so nothing it writes next goes down under Will's approval.
+      const after = await kit().inTx(async (q) => {
+        const seen: Array<string | null> = [];
+        await switchOff(brake, q);
+        seen.push(await actor(q));
+        await switchOff(free, q);
+        seen.push(await actor(q));
+        return seen;
+      }, { actor: 'runtime:its-own-name' });
+      expect(after).toEqual(['runtime:its-own-name', 'runtime:its-own-name']);
+      expect([(await history(brake))[0]!.actor, (await history(free))[0]!.actor]).toEqual([`will:approval:${card.aid}`, 'flint_app']);
+      await kit().finish(card.pid);
+      // A writer that had said nothing of itself is left saying nothing; and what it had put where the guard keeps
+      // the name aside is never what comes back.
+      expect(await kit().inTx(async (q) => {
+        await q(`SELECT set_config('flint.actor_was', 'will:approval:made-up', true)`);
+        await switchOff(other, q);
+        return actor(q);
+      })).toBe('');
+      expect((await history(other))[0]!.actor).toBe('flint_app');
+      // The owner's own name for itself is never taken away, nor changed by what an earlier writer left aside.
+      expect(await kit().inTx(async (q) => {
+        await q(`SELECT set_config('flint.actor_was', 'will:approval:made-up', true)`);
+        await switchOff(capped, q);
+        return actor(q);
+      }, { url: urls.owner, actor: 'restore' })).toBe('restore');
+      expect((await history(capped))[0]!.actor).toBe('restore');
     });
 
     it('names the row by its id, its pattern and its tier: a card that gets one of them wrong switches nothing off', async () => {
@@ -691,7 +743,7 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
         ['no tier', { off: [{ id: me.id, pattern: me.pattern }] }],
         ['the id alone, as text', { off: [me.id] }],
         ['a list inside a list', { off: [[me]] }],
-        ['under rows, not off', { rows: [me] }],
+        ['under rows, not off', { rows: [{ ...me, expiresAt: pk.inDays(30) }] }],
       ];
       for (const [name, args] of wrong) {
         const card = await kit().card('policy.change', args, { kind: 'policy', origin: 'cli' });
@@ -754,6 +806,27 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       expect(await failure(switchOff(hold))).toEqual(['42501', REFUSED(hold), null]);
       expect(await isOn(hold)).toBe(true);
       await kit().finish(card.pid);
+    });
+
+    it('7 days are 7 times 24 hours whatever zone the session is in: a card that outlives Will’s approval by 7 days and half an hour switches nothing off, even where the clocks go back inside those days', async () => {
+      const f = fam();
+      const [hold, goes] = (await rule([{ pattern: `${f}.propose`, tier: 'approval' }, { pattern: `${f}.other`, tier: 'approval' }])) as [string, string];
+      const over = await pk.acrossClocksBack({ off: [await named(hold)] }, '30 minutes');
+      // The fixture is what it says: counted by that zone's own wall clock, 7 days from his approval's end are 7 days
+      // and an hour, and the card ends half an hour past the 7 days.
+      expect((await pk.session({ TimeZone: over.zone }, (q) => q(
+        `SELECT extract(epoch FROM (a."expiresAt" + interval '7 days') - a."expiresAt")::int / 60 AS wall, extract(epoch FROM p."expiresAt" - a."expiresAt")::int / 60 AS card
+         FROM "Proposal" p JOIN "Approval" a ON a.id = p."approvalId" WHERE p.id = $1`, [over.pid]), urls.owner)).rows[0]).toEqual({ wall: 7 * 24 * 60 + 60, card: 7 * 24 * 60 + 30 });
+      for (const zone of [over.zone, ...ZONES]) {
+        expect(await failure(pk.session({ TimeZone: zone }, (q) => switchOff(hold, q))), zone).toEqual(['42501', REFUSED(hold), null]);
+      }
+      expect(await isOn(hold)).toBe(true);
+      await kit().finish(over.pid);
+      // Half an hour inside the 7 days, it goes, in that zone as in any.
+      const inside = await pk.acrossClocksBack({ off: [await named(goes)] }, '-30 minutes');
+      await pk.session({ TimeZone: inside.zone }, (q) => switchOff(goes, q));
+      expect(await isOn(goes)).toBe(false);
+      await kit().finish(inside.pid);
     });
 
     it('a card that also adds rows (one from before the database held a card to one thing) switches nothing off', async () => {

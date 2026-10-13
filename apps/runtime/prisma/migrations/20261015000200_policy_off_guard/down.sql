@@ -4,16 +4,19 @@
 -- lost, and nothing else of the schema changes. Afterwards, as before it: the
 -- runtime's role can switch off any policy row, one that holds an action back
 -- included; a card left executing can make its rows again; a signed table can
--- be applied in part; and a policy change may be filed with any args. P1's
--- other rules stay (a row is made only as an executing card lists it, only
--- ever goes off, and is never deleted). A row switched off while the guard was
--- there stays off. It also removes its own row from _prisma_migrations, so the
--- next deploy re-applies it. Every statement tolerates a half-applied state.
+-- be applied in part; a policy change may be filed with any args; and a row's
+-- end is read under the session's own settings again. P1's other rules stay
+-- (a row is made only as an executing card lists it, only ever goes off, and
+-- is never deleted). A row switched off while the guard was there stays off.
+-- It also removes its own row from _prisma_migrations, so the next deploy
+-- re-applies it. Every statement tolerates a half-applied state.
 DROP TRIGGER IF EXISTS "ActionPolicy_off_guard" ON "ActionPolicy";
 DROP TRIGGER IF EXISTS "ActionPolicy_card_actor" ON "ActionPolicy";
+DROP TRIGGER IF EXISTS "ActionPolicy_history_actor_back" ON "ActionPolicy";
 DROP TRIGGER IF EXISTS "ActionPolicy_whole_card" ON "ActionPolicy";
 DROP TRIGGER IF EXISTS "Proposal_policy_shape" ON "Proposal";
 DROP FUNCTION IF EXISTS action_policy_off_guard();
+DROP FUNCTION IF EXISTS action_policy_actor_back();
 DROP FUNCTION IF EXISTS action_policy_whole_card();
 DROP FUNCTION IF EXISTS proposal_policy_shape();
 
