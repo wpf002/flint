@@ -13,6 +13,8 @@
  *    spend card only Will files; refused while nothing sets the money aside
  *    ("Paid tasks are off."); and a task that went out ends with what it cost.
  */
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PAID_DISPATCH, TASK_FAILURES, TASK_OUTPUTS, TASK_REASONS, TASK_SAYS, TaskSpec, digestOf, noteProblems } from '@flint/policy';
 import { NO_DB, freshDb, id, withClient, type TestUrls } from '../db';
@@ -96,6 +98,23 @@ describe('the adapter contract', () => {
       expect(c.adapter.kind).toMatch(/^[a-z_]+$/);
     });
   }
+
+  it('nothing under tasks/adapters reaches a file, a process, the network, the environment or the database: an adapter works only on what it is handed', () => {
+    const dir = join(__dirname, '..', '..', 'src', 'tasks', 'adapters');
+    const files = readdirSync(dir).filter((f) => f.endsWith('.ts'));
+    expect(files.sort()).toEqual(['ci-watch.ts', 'types.ts']);
+    for (const f of files) {
+      // The file without its comments: what it does, not what it says about itself.
+      const src = readFileSync(join(dir, f), 'utf8').replace(/\/\*[\s\S]*?\*\/|(^|[^:'"`])\/\/.*$/gm, '$1');
+      // Its only imports are types from the shared contracts, and its own neighbours here.
+      const imports = [...src.matchAll(/^import\s+(type\s+)?[^;]*?from\s+'([^']+)';/gm)].map((m) => ({ typeOnly: m[1] !== undefined, from: m[2]! }));
+      expect(imports.length, f).toBeGreaterThan(0);
+      for (const i of imports) expect(i.from === '@flint/policy' ? i.typeOnly : /^\.\/[a-z-]+\.js$/.test(i.from) && i.typeOnly, `${f}: ${i.from}`).toBe(true);
+      expect(src, f).not.toMatch(/\bfetch\s*\(|scopedFetch|XMLHttpRequest|WebSocket|EventSource/);
+      expect(src, f).not.toMatch(/from 'node:|require\(|\bimport\s*\(/);
+      expect(src, f).not.toMatch(/\bprocess\b|globalThis|\beval\b|new Function|Prisma|\$queryRaw|\$executeRaw/);
+    }
+  });
 
   it('the watcher hands in what it saw as structural fields only: an unknown ending is none, a commit that is not hex is none', async () => {
     const seen = await ciWatch.run({ taskId: 'tk1', spec: watch, items: [ci({ status: 'completed', conclusion: 'made-up', sha: 'not a commit' })], now: new Date() });

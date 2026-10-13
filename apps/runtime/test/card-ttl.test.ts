@@ -1,21 +1,22 @@
 /**
  * How long a card may wait for Will, everywhere one is filed.
  *
- * The database acts on a signed goal, plan or forecast card only if the card
- * expires within 7 days of the approval that signed it (p3_signed_proposal and
- * p4_signed_proposal: a card cannot be signed now and kept for months). A card
+ * The database acts on a signed goal, plan, forecast, asset or task card only if
+ * the card expires within 7 days of the approval that signed it
+ * (p3_signed_proposal, p4_signed_proposal and p5_signed_proposal: a card cannot
+ * be signed now and kept for months). A card
  * filed for 7 days or less always meets that bound, whenever Will signs it. So
  * every place that files a card is listed here with its life, and a new one, or
  * a longer life, fails this test until someone has looked at the bound.
  *
- * The bound covers seven actions (COVERED, below). One card lives longer than a
- * week: the weekly restore test's, at 7 days and 2 hours. Its action is not one
- * of the seven, and nothing in the database holds it to the bound.
+ * The bound covers fourteen actions (COVERED, below). One card lives longer than
+ * a week: the weekly restore test's, at 7 days and 2 hours. Its action is not
+ * one of them, and nothing in the database holds it to the bound.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { FORECAST_SIGNED_ACTIONS, GOAL_SIGNED_ACTIONS } from '@flint/policy';
+import { FORECAST_SIGNED_ACTIONS, GOAL_SIGNED_ACTIONS, TASK_SIGNED_ACTIONS } from '@flint/policy';
 import { ACTION } from '../src/backup/nightly';
 import { CreateProposal } from '../src/governance/proposals';
 
@@ -23,7 +24,7 @@ const REPO = join(__dirname, '..', '..', '..');
 const WEEK = 7 * 24 * 60;
 
 /** The actions whose signed card the database holds to the 7-day bound. */
-const COVERED = [...GOAL_SIGNED_ACTIONS, ...FORECAST_SIGNED_ACTIONS];
+const COVERED = [...GOAL_SIGNED_ACTIONS, ...FORECAST_SIGNED_ACTIONS, ...TASK_SIGNED_ACTIONS];
 
 /**
  * Every source file that sets a card's life, the minutes it sets, and what it
@@ -40,6 +41,10 @@ const FILERS: Record<string, { minutes: number[]; files: string }> = {
   'apps/runtime/src/surface/act.ts': { minutes: [WEEK], files: 'a recommendation\'s action' },
   'apps/runtime/src/world/person-create.ts': { minutes: [24 * 60], files: 'world.person.create' },
   'apps/runtime/src/predict/enable.ts': { minutes: [WEEK], files: 'forecast.series.enable, from the command line (predictions-on)' },
+  // P5: the seven asset and task cards.
+  'apps/runtime/src/assets/service.ts': { minutes: [WEEK], files: 'asset.enable' },
+  'apps/runtime/src/tasks/service.ts': { minutes: [WEEK, WEEK, WEEK], files: 'a task\'s dispatch card, task.cancel and task.bar_override' },
+  'apps/runtime/src/tasks/check.ts': { minutes: [WEEK], files: 'task.check_bar (the accept card)' },
   // The exception: restore.drill's card, a week and two hours (the restore test runs on Sundays only).
   'apps/runtime/src/backup/nightly.ts': { minutes: [WEEK + 120, 26 * 60], files: 'backup.local, backup.offsite, restore.drill, maintenance.retention' },
 };
@@ -103,8 +108,15 @@ describe('how long a card may wait', () => {
     for (const action of nightly) expect(COVERED as readonly string[], action).not.toContain(action);
   });
 
-  it('the bound covers the six goal and plan actions and turning predictions on, and each of them is filed for a week at most', () => {
-    expect([...COVERED].sort()).toEqual(['forecast.series.enable', 'goal.abandon', 'goal.activate', 'goal.criteria_change', 'goal.done', 'goal.horizon_change', 'plan.change']);
+  it('the bound covers the six goal and plan actions, turning predictions on and the seven asset and task cards, and each of them is filed for a week at most', () => {
+    expect([...COVERED].sort()).toEqual([
+      'asset.enable', 'forecast.series.enable', 'goal.abandon', 'goal.activate', 'goal.criteria_change', 'goal.done', 'goal.horizon_change', 'plan.change',
+      'review.enforce', 'task.bar_override', 'task.cancel', 'task.check_bar', 'task.dispatch.ci_runner', 'task.dispatch.local_worker',
+    ]);
+    // Asset and task cards: assets/service.ts, tasks/service.ts and tasks/check.ts (review.enforce has no filer yet: over HTTP, held to the schema).
+    for (const file of ['apps/runtime/src/assets/service.ts', 'apps/runtime/src/tasks/service.ts', 'apps/runtime/src/tasks/check.ts']) expect(Math.max(...found.get(file)!), file).toBeLessThanOrEqual(WEEK);
+    const p5 = readFileSync(join(__dirname, '..', 'prisma', 'migrations', '20261014000100_p5_assets', 'migration.sql'), 'utf8');
+    expect(new RegExp(`FUNCTION p5_signed_proposal\\([^]*?\\n\\$\\$;`).exec(p5)?.[0] ?? '').toContain(`p."expiresAt" <= a."expiresAt" + interval '7 days'`);
     // Goal and plan cards: goals/service.ts and goals/batch.ts. The predictions card: from the command line
     // (predict/enable.ts), and over HTTP, held to the schema.
     for (const file of ['apps/runtime/src/goals/service.ts', 'apps/runtime/src/goals/batch.ts', 'apps/runtime/src/predict/enable.ts']) expect(Math.max(...found.get(file)!), file).toBeLessThanOrEqual(WEEK);

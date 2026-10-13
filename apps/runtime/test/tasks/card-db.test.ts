@@ -13,19 +13,30 @@
  *  - Chat can never file or run any of them; a job files only the accept card.
  *  - A dispatch that names a trading pool is refused at filing and at claim.
  *  - Switched off, no card is filed or run, and a card that waits stays so.
+ *  - Of two cards Will signed about one task, only the later acts: the earlier
+ *    fails with a sentence, and an accept card that failed that way is asked
+ *    for again.
+ *  - A card whose subject he had Flint forget does not run, and ends with a
+ *    sentence and no result.
+ *  - A spend card says what it will cost, and a task or spend card holds whole
+ *    numbers only: each said as a sentence when the card is filed.
+ *  - A result is cleaned of what cannot be stored and kept under the digest
+ *    the database computes for it.
  * Audit entries, results and logs carry ids, classes and counts only.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { ACCEPT_TEMPLATE, PAID_DISPATCH, TASKS_ORIGIN, TASK_REASONS, TASK_SAYS, TASK_SIGNED_ACTIONS, TASK_STATUS_SAYS, digestOf } from '@flint/policy';
 import { NO_DB, freshDb, id, withClient, type TestUrls } from '../db';
 import { createDb, type Db } from '../../src/db';
-import { Refused, claimProposal, createProposal } from '../../src/governance/proposals';
+import { Refused, SPEND_NEEDS_ESTIMATE, WHOLE_NUMBERS_ONLY, claimProposal, createProposal, hasFraction, rejectProposal } from '../../src/governance/proposals';
 import { INTERNAL_ACTIONS, runInternal } from '../../src/governance/internal';
 import { NEVER_PROMOTED } from '../../src/governance/promotion';
 import { ASSETS, CI_WATCHER, assetOf, type AssetDef, enableArgsOf } from '../../src/assets/registry';
 import { fileEnable, syncAssets, turnOff } from '../../src/assets/service';
 import { checkTaskCard, runTask, runTaskCard } from '../../src/tasks/card';
-import { checkTaskJob } from '../../src/tasks/check';
+import { acceptDeclined, checkTaskJob } from '../../src/tasks/check';
+import { taskTick } from '../../src/tasks/tick';
+import { taskView } from '../../src/tasks/view';
 import { runTaskJob } from '../../src/tasks/run';
 import type { TaskAdapter } from '../../src/tasks/adapters/types';
 import { createTask } from '../../src/tasks/service';
@@ -376,6 +387,84 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     expect(denied.reasoning).toContain('forbidden: pool crypto-trading trades');
   });
 
+  it('of two cards Will signed about the same task, only the later acts: the earlier fails with a sentence, and an accept card that failed that way is asked for again', async () => {
+    await fx.watcherOn();
+    const card = (pid: string) => db.proposal.findUniqueOrThrow({ where: { id: pid } });
+    // A dispatch card he approved, kept; then he signs against a second card to run the same task.
+    const kept = await fx.newTask(await fx.ciRun('wpf002/superseded'));
+    await fx.approve(kept.proposalId);
+    const again = await planted('task.dispatch.ci_runner', (await card(kept.proposalId)).args as Record<string, unknown>, { origin: 'console' });
+    await rejectProposal(db, again, { approvalId: await fx.sign(again, 'reject') }, undefined, 'test');
+    expect(await refusal(runInternal(db, kept.proposalId, undefined, 'UTC', 'test', undefined, { bus }))).toMatchObject({ status: 409, message: TASK_SAYS.superseded });
+    expect(await card(kept.proposalId)).toMatchObject({ status: 'failed', error: TASK_SAYS.superseded, result: null });
+    expect(await fx.task(kept.id)).toMatchObject({ status: 'proposed', dispatchApprovalId: null, predictionId: null });
+    expect(bus.of('tasks.run').some((j) => j.data.taskId === kept.id)).toBe(false);
+
+    // An accept card he approved, kept; then he turns down a card to stop the same task. The accept card no longer acts...
+    const taskId = await fx.checked('wpf002/superseded-accept');
+    const accept = (await fx.cardFor('task.check_bar', taskId))!;
+    await fx.approve(accept.id);
+    const stop = await fx.file('task.cancel', { taskId });
+    await rejectProposal(db, stop.id, { approvalId: await fx.sign(stop.id, 'reject') }, undefined, 'test');
+    expect(await refusal(runInternal(db, accept.id, undefined, 'UTC', 'test', undefined, { bus }))).toMatchObject({ status: 409, message: TASK_SAYS.superseded });
+    expect(await card(accept.id)).toMatchObject({ status: 'failed', error: TASK_SAYS.superseded, result: null });
+    expect(await fx.task(taskId)).toMatchObject({ status: 'checking', acceptedAuditId: null });
+    // ...and that is no answer about the result: the tick sends its check, which asks him again, and his new signature accepts it.
+    expect(await acceptDeclined(db, taskId)).toBe(false);
+    bus.clear();
+    expect(await taskTick({ db, bus })).toMatchObject({ failed: 0 });
+    expect(bus.of('tasks.check').some((j) => j.data.taskId === taskId)).toBe(true);
+    expect(await checkTaskJob({ db }, { taskId })).toBe('filed');
+    const asked = (await fx.cardFor('task.check_bar', taskId))!;
+    expect(asked.id).not.toBe(accept.id);
+    expect(await fx.signRun(asked.id)).toEqual({ taskId, accepted: true });
+    expect(await fx.task(taskId)).toMatchObject({ status: 'accepted' });
+
+    // Turning the accept card itself down is his answer: none is filed again, the task ends, and its line says why.
+    const declined = await fx.checked('wpf002/declined');
+    const offered = (await fx.cardFor('task.check_bar', declined))!;
+    await rejectProposal(db, offered.id, { approvalId: await fx.sign(offered.id, 'reject') }, undefined, 'test');
+    expect(await acceptDeclined(db, declined)).toBe(true);
+    expect(await checkTaskJob({ db }, { taskId: declined })).toBe('waiting');
+    expect(await taskTick({ db, bus })).toMatchObject({ failed: 1 });
+    expect(await fx.task(declined)).toMatchObject({ status: 'failed', failure: 'expired', metBar: true });
+    expect((await taskView(db, declined, 'UTC'))!.line).toBe('You didn’t accept its result.');
+  });
+
+  it('a card whose subject Will had Flint forget does not run: it ends with a sentence and no result', async () => {
+    await fx.watcherOn();
+    const item = await fx.ciRun('wpf002/forgotten');
+    const t = await fx.newTask(item);
+    await fx.approve(t.proposalId);
+    await fx.forget(item);
+    // The forget cleared the task's words and its card's args; the card is still approved.
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } })).toMatchObject({ status: 'approved', args: null });
+    expect(await fx.task(t.id)).toMatchObject({ status: 'proposed', spec: null });
+    expect(await refusal(runInternal(db, t.proposalId, undefined, 'UTC', 'test', undefined, { bus }))).toMatchObject({ status: 409, message: TASK_SAYS.forgotten });
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } })).toMatchObject({ status: 'failed', error: TASK_SAYS.forgotten, result: null, args: null });
+    expect(await fx.task(t.id)).toMatchObject({ status: 'proposed', dispatchApprovalId: null, predictionId: null });
+    const entry = await db.auditEntry.findFirstOrThrow({ where: { correlationId: t.proposalId, outcome: 'denied' }, orderBy: { seq: 'desc' } });
+    expect(entry).toMatchObject({ kind: 'action', action: 'task.dispatch.ci_runner', decision: 'deny' });
+    expect(entry.inputs).toMatchObject({ proposalId: t.proposalId, why: 'forgotten' });
+    // Run again (a retry): it has ended, and says so.
+    expect((await refusal(runInternal(db, t.proposalId, undefined, 'UTC', 'test', undefined, { bus }))).status).toBe(409);
+  });
+
+  it('a spend card says what it will cost, and a task or spend card holds whole numbers only: each is a sentence when the card is filed, not the database’s refusal', async () => {
+    for (const estCostUsd of [undefined, 0]) {
+      expect(await refusal(fx.file('pay.vendor', { vendor: 'synthetic' }, { kind: 'spend', ...(estCostUsd === undefined ? {} : { estCostUsd }) })), String(estCostUsd)).toMatchObject({ status: 400, message: SPEND_NEEDS_ESTIMATE });
+    }
+    for (const kind of ['spend', 'task']) {
+      expect(await refusal(fx.file('pay.vendor', { vendor: 'synthetic', share: 0.5 }, { kind, estCostUsd: 1 })), kind).toMatchObject({ status: 400, message: WHOLE_NUMBERS_ONLY });
+      expect(await refusal(fx.file('pay.vendor', { vendor: 'synthetic', parts: [{ n: 2 ** 60 }] }, { kind, estCostUsd: 1 })), kind).toMatchObject({ status: 400, message: WHOLE_NUMBERS_ONLY });
+    }
+    expect([hasFraction({ a: [1, { b: 2 }] }), hasFraction({ a: [1, { b: 2.5 }] }), hasFraction('1.5'), hasFraction(null)]).toEqual([false, true, false, false]);
+    // A card of another kind may hold a fraction, as before (its digest is not computed again by the database).
+    const other = await fx.file('mcp:web.fetch_url', { url: 'https://example.com/', ratio: 0.5 }, { kind: 'tool_call' });
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: other.id } })).toMatchObject({ status: 'pending' });
+    expect(await db.proposal.count({ where: { action: 'pay.vendor' } })).toBe(0);
+  });
+
   it('switched off for a rollback, no card runs: it stays approved, and runs once tasks are back', async () => {
     const t = await fx.newTask(await fx.ciRun('wpf002/off'));
     await fx.approve(t.proposalId);
@@ -389,7 +478,8 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     const worker: AssetDef = assetOf({ id: 'as-test-worker-v1', kind: 'local_worker', externalRef: 'ollama:worker:test', name: 'Local Tasks', capabilities: ['draft_note'], spends: false, line: 'The local model runs tasks on this Mac.' });
     const registry = [...ASSETS, worker];
     // A stand-in for the local model: it writes what it was asked to, with a canary in every field.
-    const fake: TaskAdapter = { kind: 'local_worker', estimate: () => 0, run: async () => ({ output: { title: `${CANARY} title`, body: `${CANARY} body` }, summary: `${CANARY} summary` }) };
+    // Its words carry what the database cannot store (a NUL, half of a surrogate pair), as a model's may.
+    const fake: TaskAdapter = { kind: 'local_worker', estimate: () => 0, run: async () => ({ output: { title: `${CANARY} ti\u0000tle`, body: `${CANARY} body \uD83D` }, summary: `${CANARY} sum\u0000mary` }) };
     await syncAssets(db, registry);
     const args = enableArgsOf(worker);
     const enable = await planted('asset.enable', args, { kind: 'policy', origin: 'console', consequential: true });
@@ -404,6 +494,13 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     const logs: string[] = [];
     await fx.signRun(t.proposalId);
     expect(await runTaskJob({ db, bus, adapters: { local_worker: fake }, log: (m) => logs.push(m) }, { taskId: t.id })).toBe('submitted');
+    // Cleaned before it is kept, under the digest the database computes over the body as it stores it; the task is handed in under that reference.
+    const out = await db.taskOutput.findUniqueOrThrow({ where: { taskId: t.id } });
+    expect(out.body).toEqual({ title: `${CANARY} title`, body: `${CANARY} body \uFFFD` });
+    const [own] = await db.$queryRaw<Array<{ d: string }>>`SELECT encode(sha256(convert_to(body::text, 'UTF8')), 'hex') AS d FROM "TaskOutput" WHERE "taskId" = ${t.id}`;
+    expect(out.sha256).toBe(own!.d);
+    expect(out.sha256).not.toBe(digestOf(out.body));
+    expect((await fx.task(t.id)).outputRef).toBe(`out:${out.sha256.slice(0, 16)}`);
     expect(await checkTaskJob({ db, log: (m) => logs.push(m) }, { taskId: t.id })).toBe('filed');
     expect(await fx.task(t.id)).toMatchObject({ status: 'checking', metBar: true, outputSummary: `${CANARY} summary` });
     const accept = (await fx.cardFor('task.check_bar', t.id))!;

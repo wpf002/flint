@@ -19,6 +19,7 @@ import { AssetsPage, GOAL_SAYS, PAID_DISPATCH, TASK_SAYS, TASK_SIGNED_ACTIONS, T
 import { buildApp, type RuntimeStatus } from '../src/app';
 import type { RuntimeScope } from '../src/config';
 import { createDb, type Db } from '../src/db';
+import { SPEND_NEEDS_ESTIMATE, WHOLE_NUMBERS_ONLY } from '../src/governance/proposals';
 import { CI_WATCHER } from '../src/assets/registry';
 import { checkTaskJob } from '../src/tasks/check';
 import { runTaskJob } from '../src/tasks/run';
@@ -200,6 +201,18 @@ describe.skipIf(NO_DB)('the task routes on flint_test', () => {
     await say('POST', '/v1/tasks', { draftKey: draft(), template: 'draft_note', params: { about: 'A note' } }, 409, TASK_SAYS.cantRun, 'cantRun');
     await say('POST', `/v1/assets/${CI_WATCHER.id}/on`, {}, 400, TASK_SAYS.nothing, 'nothing');
     await say('POST', '/v1/assets/as-unknown-v1/on', {}, 404, TASK_SAYS.noAsset, 'noAsset');
+    // The card route itself: a spend card that says no cost, and a task or spend card whose details hold a number
+    // that is not whole, are each answered with a sentence (the database would refuse them, which is a 500).
+    const filed = (body: Record<string, unknown>) => h.call('POST', '/v1/proposals', { origin: 'console', action: 'pay.vendor', argsProvenance: {}, ...body });
+    for (const body of [{ kind: 'spend', args: { vendor: 'synthetic' } }, { kind: 'spend', args: { vendor: 'synthetic' }, estCostUsd: 0 }]) {
+      const r = await filed(body);
+      expect([r.statusCode, r.json()], JSON.stringify(body)).toEqual([400, { error: SPEND_NEEDS_ESTIMATE }]);
+    }
+    for (const body of [{ kind: 'spend', args: { vendor: 'synthetic', share: 0.5 }, estCostUsd: 1 }, { kind: 'task', args: { share: 0.5 } }]) {
+      const r = await filed(body);
+      expect([r.statusCode, r.json()], JSON.stringify(body)).toEqual([400, { error: WHOLE_NUMBERS_ONLY }]);
+    }
+    expect(await db.proposal.count({ where: { action: 'pay.vendor' } })).toBe(0);
 
     // Not gone out: cancelled there and then. Gone out: a card. A failed check: Accept Anyway is a card too.
     const item = await fx.ciRun('wpf002/http-two', { status: 'completed', conclusion: 'failure' });

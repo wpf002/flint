@@ -474,6 +474,34 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
   return out;
 }
 
+/** What Tasks says in Settings > Health: sentences from counts, never a task's words. */
+export const TASK_HEALTH = {
+  none: 'No task has run yet.',
+  stuck: (n: number) => (n === 1 ? 'A task is past its time and hasn’t been ended.' : `${n} tasks are past their time and haven’t been ended.`),
+  stopped: 'A rule stops Flint from checking results, so finished tasks wait.',
+} as const;
+/** How long past the tick's own limit a task may sit before Health says so. */
+const TASK_STUCK_SLACK_MS = 3_600_000;
+
+/**
+ * Tasks (P5): are they moving? Counts only: a detail never names a task.
+ * Nothing can run while they are switched off or no asset that runs tasks is
+ * on, so the row is shown and left out. The tick ends a task that has not moved
+ * for a day; one still out an hour past that means the tick is not running. (A
+ * result waiting for Will's accept card is not stuck: it waits as long as its
+ * card does.)
+ */
+async function tasks(d: CheckDeps): Promise<ComponentCheck> {
+  const { db, now } = d;
+  const component = 'tasks';
+  if (d.config.assets === false || !(await db.asset.count({ where: { enabled: true, kind: { in: [...TASK_ASSET_KINDS] } } }))) return { component, status: 'disabled' };
+  const stuck = await db.task.count({ where: { status: { in: ['queued', 'dispatched', 'running', 'submitted'] }, updatedAt: { lt: new Date(now.getTime() - STALE_MS - TASK_STUCK_SLACK_MS) } } });
+  if (stuck) return { component, status: 'degraded', detail: TASK_HEALTH.stuck(stuck) };
+  if ((await checkStanding(db, now)) === 'stopped') return { component, status: 'degraded', detail: TASK_HEALTH.stopped };
+  const ran = await db.task.count({ where: { dispatchedAt: { not: null } } });
+  return { component, status: 'ok', ...(ran ? {} : { detail: TASK_HEALTH.none }) };
+}
+
 /** Last night's run is this old: it was missed (the jobs run once a night). */
 export const FORECASTS_LATE_MS = 26 * 3_600_000;
 /** Two nights were missed: down. */
@@ -657,34 +685,6 @@ async function predictionChecks(d: CheckDeps): Promise<ComponentCheck> {
   const sum = (key: string) => recent.reduce((t, s) => t + n(s.inputs, key), 0);
   // Run out is not checked: it is counted beside.
   return { component, status: 'ok', detail: LEDGER_HEALTH.checked(sum('resolved') + sum('conditionUnmet'), sum('expired')) };
-}
-
-/** What Tasks says in Settings > Health: sentences from counts, never a task's words. */
-export const TASK_HEALTH = {
-  none: 'No task has run yet.',
-  stuck: (n: number) => (n === 1 ? 'A task is past its time and hasn’t been ended.' : `${n} tasks are past their time and haven’t been ended.`),
-  stopped: 'A rule stops Flint from checking results, so finished tasks wait.',
-} as const;
-/** How long past the tick's own limit a task may sit before Health says so. */
-const TASK_STUCK_SLACK_MS = 3_600_000;
-
-/**
- * Tasks (P5): are they moving? Counts only: a detail never names a task.
- * Nothing can run while they are switched off or no asset that runs tasks is
- * on, so the row is shown and left out. The tick ends a task that has not moved
- * for a day; one still out an hour past that means the tick is not running. (A
- * result waiting for Will's accept card is not stuck: it waits as long as its
- * card does.)
- */
-async function tasks(d: CheckDeps): Promise<ComponentCheck> {
-  const { db, now } = d;
-  const component = 'tasks';
-  if (d.config.assets === false || !(await db.asset.count({ where: { enabled: true, kind: { in: [...TASK_ASSET_KINDS] } } }))) return { component, status: 'disabled' };
-  const stuck = await db.task.count({ where: { status: { in: ['queued', 'dispatched', 'running', 'submitted'] }, updatedAt: { lt: new Date(now.getTime() - STALE_MS - TASK_STUCK_SLACK_MS) } } });
-  if (stuck) return { component, status: 'degraded', detail: TASK_HEALTH.stuck(stuck) };
-  if ((await checkStanding(db, now)) === 'stopped') return { component, status: 'degraded', detail: TASK_HEALTH.stopped };
-  const ran = await db.task.count({ where: { dispatchedAt: { not: null } } });
-  return { component, status: 'ok', ...(ran ? {} : { detail: TASK_HEALTH.none }) };
 }
 
 /** How many of the latest plan stages Health looks at. */
