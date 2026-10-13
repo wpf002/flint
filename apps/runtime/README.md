@@ -1249,22 +1249,23 @@ action so named.
 ### Rolling P4 back
 
 P4 has two database updates, and each has a `down.sql` that belongs to a
-rollback. Updates are undone newest first, and one from goals sits between
-P4's two:
+rollback. Updates are undone newest first, and two others sit between P4's
+two:
 
 1. `20261014000000_p4_forecast_inputs` (P4's third part): two columns, how
    many days of each forecast were filled in and where each number was read
    to. Its `down.sql` drops them and loses nothing else. Undone alone, it
    needs a runtime from before that part.
-2. `20261013000100_p3_policy_floor` (goals, part 4). See "Rolling P3 back".
-3. `20261013000000_p4_forecasts` (the store). Undoing this one is the real
+2. `20261013000150_public_schema_floor` (who may reach the database at all).
+3. `20261013000100_p3_policy_floor` (goals, part 4). See "Rolling P3 back".
+4. `20261013000000_p4_forecasts` (the store). Undoing this one is the real
    rollback of P4.
 
 To roll the store back:
 
 1. First deploy a runtime from before P4, with `FLINT_PREDICT` off. P4's job bus
    expects the six prediction queues that the store's `down.sql` drops.
-2. Then take a dump and run the three `down.sql` files by hand, in the order
+2. Then take a dump and run the four `down.sql` files by hand, in the order
    above. Forecast runs, which numbers were on, and your questions and
    answers go with the store. So do the scores only P4 keeps (range scores
    and the finer measures), which a later snapshot recomputes. Every
