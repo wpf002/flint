@@ -15,7 +15,7 @@ import { isSafeTool } from '../src/policy';
 import { gateBuiltins } from '../src/tier-gate';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { approvalRoutes, type ApprovalDeps } from '../src/approval-routes';
+import { approvalRoutes, cardCost, type ApprovalDeps } from '../src/approval-routes';
 import { markTainted, withTurnTaint } from '../src/turn-taint';
 
 function fakeRuntime() {
@@ -132,6 +132,56 @@ describe('the cards the console lists (P3)', () => {
         ['pr3', 'tool_call', null, false],
       ]);
       expect(r.proposals[0]).toMatchObject({ fullName: 'goal.activate', reason: 'Approving starts this goal.', sensitivity: 'personal' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a task’s dispatch card carries its cost estimate, zero included, read from the args Will signs; no other card has one, and a number that is no estimate is not shown as one (P5)', async () => {
+    const at = '2026-10-13T15:00:00.000Z';
+    const card = (id: string, action: string, args: Record<string, unknown> | null, over: Record<string, unknown> = {}) => ({
+      id, origin: 'console', action, args, argsDigest: 'd'.repeat(64), argsProvenance: {}, tainted: false, sensitivity: 'ops', destructive: false, kind: 'task', status: 'pending', reason: 'Approving runs this task.', createdAt: at, expiresAt: at, ...over,
+    });
+    const listed = [
+      card('ci', 'task.dispatch.ci_runner', { taskId: 'tkabcdefgh12345678', estCostMicros: 0 }),
+      card('paid', 'task.dispatch.nexus_participant', { taskId: 'tkabcdefgh12345679', estCostMicros: 250_000 }, { kind: 'spend', estCostUsd: '0.2500' }),
+      card('most', 'task.dispatch.local_worker', { taskId: 'tkabcdefgh1234567a', estCostMicros: 1_000_000_000 }),
+      // Not an estimate: negative, a fraction, text, past the card's own limit, finer than a card keeps, missing, or args that were cleared.
+      card('neg', 'task.dispatch.ci_runner', { estCostMicros: -100 }),
+      card('part', 'task.dispatch.ci_runner', { estCostMicros: 0.5 }),
+      card('text', 'task.dispatch.ci_runner', { estCostMicros: '0' }),
+      card('over', 'task.dispatch.ci_runner', { estCostMicros: 1_000_000_100 }),
+      card('fine', 'task.dispatch.ci_runner', { estCostMicros: 250_050 }),
+      card('none', 'task.dispatch.ci_runner', { taskId: 'tkabcdefgh1234567b' }),
+      card('gone', 'task.dispatch.ci_runner', null),
+      // Not a dispatch: whatever its args or its row say of money, it is given no Cost.
+      card('accept', 'task.check_bar', { taskId: 'tkabcdefgh12345678', estCostMicros: 0 }),
+      card('cancel', 'task.cancel', { taskId: 'tkabcdefgh12345678' }),
+      card('asset', 'asset.enable', { assetId: 'as-ci-watcher-v1', spends: false, estCostMicros: 0 }, { kind: 'policy' }),
+      card('tool', 'mcp:shop.buy', { estCostMicros: 0 }, { kind: 'tool_call', estCostUsd: '4.0000' }),
+    ];
+    expect(cardCost({ action: 'task.dispatch.ci_runner', args: { estCostMicros: 0 } })).toEqual({ micros: 0 });
+    expect(cardCost({ action: 'task.dispatch', args: { estCostMicros: 0 } })).toBeUndefined();
+    expect(cardCost({ action: 'mcp:task.dispatch.ci_runner', args: { estCostMicros: 0 } })).toBeUndefined();
+    const fetchImpl = (async (url: string) => Response.json({ proposals: new URL(url).searchParams.get('status') === 'pending' ? listed : [] })) as typeof fetch;
+    const proposals = new RuntimeProposals({ runtime: () => ({ url: 'http://[::1]:8090', token: 't'.repeat(64) }), spoolDir: mkdtempSync(join(tmpdir(), 'flint-rp-')), fetchImpl });
+    const deps = { actions: new ActionQueue(isSafeTool), tools: [], audit: { record: () => {} }, notes: { push: () => {} }, approvals: undefined, proposals, errorRef: () => 'ref' } as unknown as ApprovalDeps;
+    const server = createServer((req, res) => void approvalRoutes(req, res, req.url ?? '/', deps));
+    await new Promise<void>((r) => server.listen(0, '::1', r));
+    try {
+      const r = (await (await fetch(`http://[::1]:${(server.address() as AddressInfo).port}/proposals`)).json()) as { proposals: Array<Record<string, unknown>> };
+      expect(r.proposals.map((p) => [p.id, p.cost ?? null])).toEqual([
+        ['ci', { micros: 0 }], ['paid', { micros: 250_000 }], ['most', { micros: 1_000_000_000 }],
+        ['neg', null], ['part', null], ['text', null], ['over', null], ['fine', null], ['none', null], ['gone', null],
+        ['accept', null], ['cancel', null], ['asset', null], ['tool', null],
+      ]);
+      // Every card says whether it is a tool's on a connected server, yes or no: the console keeps its own cards' words
+      // for a card the server says is not one, and for no other.
+      for (const p of r.proposals) expect(typeof p.mcp, String(p.id)).toBe('boolean');
+      expect(r.proposals.filter((p) => p.mcp === true).map((p) => p.id)).toEqual(['tool']);
+      // The card is otherwise as it was: its args whole (what he signs is what the console shows), and nothing of the row's own estimate.
+      expect(r.proposals[0]).toMatchObject({ fullName: 'task.dispatch.ci_runner', kind: 'task', mcp: false, args: { taskId: 'tkabcdefgh12345678', estCostMicros: 0 }, reason: 'Approving runs this task.' });
+      expect(JSON.stringify(r.proposals)).not.toContain('estCostUsd');
     } finally {
       server.close();
     }

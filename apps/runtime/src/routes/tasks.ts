@@ -12,25 +12,28 @@
  *   POST /v1/tasks {draftKey, template, params, ...}   a new task and its dispatch card
  *   POST /v1/tasks/:id/cancel             unsigned while it has not gone out; else its card
  *   POST /v1/tasks/:id/accept|reject      Accept Anyway, Reject Anyway: that card
+ *   POST /v1/tasks/:id/again {draftKey}   Run Again: a new task like an ended one, and its dispatch card
+ *   GET  /v1/task-form                    what New Task can offer now (TaskForm)
  *
  * Input is checked with the shared contracts (@flint/policy); a refusal is one
- * of TASK_SAYS's sentences with its code, and a zod failure is logged by field
- * paths and codes only. Answers are checked against their contracts on the way
+ * of TASK_SAYS's sentences with its code (a card the tier engine forbids
+ * included: a rule of Will's is said as that), and a zod failure is logged by
+ * field paths and codes only. Answers are checked against their contracts on the way
  * out. Nothing here logs a task's words. While tasks are switched off (the
  * default; FLINT_ASSETS=on turns them on) every route here answers with one
  * sentence saying so, before it reads its input or the database.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { AssetId, AssetsPage, EmptyBody, NewTaskBody, TASK_TABS, TaskAnswer, TaskCardFiled, TaskDone, TaskFiled, TaskId, TasksPage, taskCodeOf } from '@flint/policy';
+import { AssetId, AssetsPage, EmptyBody, NewTaskBody, TASK_TABS, TaskAgainBody, TaskAnswer, TaskCardFiled, TaskDone, TaskFiled, TaskForm, TaskId, TasksPage, taskCodeOf } from '@flint/policy';
 import type { RuntimeScope } from '../config.js';
 import type { Db } from '../db.js';
-import { Refused } from '../governance/proposals.js';
+import { Forbidden, Refused } from '../governance/proposals.js';
 import { fileEnable, turnOff } from '../assets/service.js';
 import { assetsPage } from '../assets/view.js';
 import { SAY } from '../tasks/errors.js';
-import { cancelTask, createTask, overrideTask } from '../tasks/service.js';
-import { taskView, tasksPage } from '../tasks/view.js';
+import { cancelTask, createTask, overrideTask, runAgain } from '../tasks/service.js';
+import { taskForm, taskView, tasksPage } from '../tasks/view.js';
 
 export interface TaskRouteDeps {
   db: Db;
@@ -58,7 +61,7 @@ function parse<T extends z.ZodTypeAny>(schema: T, value: unknown): z.infer<T> {
 
 const Tab = z.object({ tab: z.enum(TASK_TABS).default('active') }).strict();
 const Task = z.object({ id: TaskId }).strict();
-const TaskVerb = z.object({ id: TaskId, verb: z.enum(['cancel', 'accept', 'reject']) }).strict();
+const TaskVerb = z.object({ id: TaskId, verb: z.enum(['cancel', 'accept', 'reject', 'again']) }).strict();
 const AssetVerb = z.object({ id: AssetId, verb: z.enum(['on', 'off']) }).strict();
 
 export function registerTaskRoutes(app: FastifyInstance, d: TaskRouteDeps): void {
@@ -74,6 +77,11 @@ export function registerTaskRoutes(app: FastifyInstance, d: TaskRouteDeps): void
       return await fn(req);
     } catch (err) {
       if (!(err instanceof Refused)) throw err;
+      // The tier engine forbade the card (already on record, by ids): said as a sentence, never in the engine's words.
+      if (err instanceof Forbidden) {
+        const say = err.rule === 'policy' ? SAY.ruleForbids : SAY.notAllowed;
+        return reply.code(409).send({ error: say, code: taskCodeOf(say) });
+      }
       const code = taskCodeOf(err.message);
       if (err.why) {
         const ref = `ref${Date.now().toString(36)}`;
@@ -110,8 +118,15 @@ export function registerTaskRoutes(app: FastifyInstance, d: TaskRouteDeps): void
 
   app.post('/v1/tasks', pre, guarded(async (req) => out(TaskFiled, await createTask(db, parse(NewTaskBody, req.body)))));
 
+  // Its own path, not one under /v1/tasks/: a runtime from before the form answers a plain 404, which the server reads as "older".
+  app.get('/v1/task-form', pre, guarded(async (req) => {
+    parse(EmptyBody, req.query ?? {});
+    return out(TaskForm, await taskForm(db, tz));
+  }));
+
   app.post('/v1/tasks/:id/:verb', pre, guarded(async (req) => {
     const { id, verb } = parse(TaskVerb, req.params);
+    if (verb === 'again') return out(TaskFiled, await runAgain(db, id, parse(TaskAgainBody, req.body).draftKey));
     parse(EmptyBody, req.body ?? {});
     if (verb === 'cancel') {
       const r = await cancelTask(db, id);

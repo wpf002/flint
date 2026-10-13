@@ -819,7 +819,7 @@ describe('changing the mode', () => {
   });
 
   it('Settings loads it whenever it opens', () => {
-    expect(html).toContain("function openSettings(){showPanel('settings',true);loadCreds();loadHealth();if(typeof loadBrain==='function')loadBrain();refresh();syncAccess();}");
+    expect(html).toContain("function openSettings(){showPanel('settings',true);loadCreds();loadHealth();if(typeof loadBrain==='function')loadBrain();if(typeof loadAssets==='function')loadAssets();refresh();syncAccess();}");
   });
 });
 

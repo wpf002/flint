@@ -8,10 +8,15 @@
  * Nothing here reaches a model: the routes need the `proposals` scope.
  */
 import type { z } from 'zod';
-import { Acceptance, CHECK_NAMES, TASK_ENDED, TaskSpec, likelihoodOf, specItems, taskLine, type AssetKind, type TaskFailure, type TaskRow, type TaskStatus, type TaskTab, type TaskView, type TasksPage } from '@flint/policy';
+import {
+  Acceptance, CHECK_NAMES, GoalTitle, TASK_ENDED, TASK_FORM_ITEMS_MAX, TASK_TEMPLATE_IDS, TaskSpec, likelihoodOf, specItems, taskLine,
+  type AssetKind, type TaskFailure, type TaskForm, type TaskRow, type TaskStatus, type TaskTab, type TaskView, type TasksPage,
+} from '@flint/policy';
 import type { Db } from '../db.js';
 import { labelFor } from '../goals/items.js';
 import { ACCEPT_CARD, WILL_ORIGINS, countsOf, microsOf, overrideProblem } from './card.js';
+import { FORM_ITEM_KIND, OFFERED_STATUS, runnerOf, type OfferDeps } from './offer.js';
+import { TASK_TITLES, againProblem } from './service.js';
 
 const PAGE = 100;
 type Row = z.infer<typeof TaskRow>;
@@ -93,6 +98,7 @@ export async function taskView(db: Db, id: string, tz: string, now = new Date())
     orderBy: { createdAt: 'desc' }, select: { id: true },
   });
   const can = async (to: 'accepted' | 'rejected') => !(await overrideProblem(db, t, to));
+  const ended = (TASK_ENDED as readonly string[]).includes(t.status);
   return {
     ...(await rowOf(db, t, waiting, tz, now)),
     result: t.outputSummary,
@@ -106,6 +112,36 @@ export async function taskView(db: Db, id: string, tz: string, now = new Date())
     chance: forecast?.probability != null ? { likelihood: likelihoodOf(forecast.probability), percent: Math.round(forecast.probability * 100) } : null,
     cost: t.costUsd === null ? null : { micros: microsOf(t.costUsd), estimate: t.costIsEstimate },
     card: card?.id ?? null,
-    can: { cancel: !(TASK_ENDED as readonly string[]).includes(t.status), accept: await can('accepted'), reject: await can('rejected') },
+    can: {
+      cancel: !ended, accept: await can('accepted'), reject: await can('rejected'),
+      // Run Again: by the same answer its route gives (ended, Will's own, its details kept, and still what New Task would offer).
+      again: !(await againProblem(db, t)),
+    },
   };
+}
+
+const FORM_GOALS_MAX = 50;
+
+/**
+ * What New Task can offer now: each template an asset that is on can run (the
+ * asset createTask would hand it to), with the items it can be about, the
+ * latest seen first, each by its label; and Will's active goals for the form's
+ * Goal field. With no asset on, there is no template.
+ */
+export async function taskForm(db: Db, tz: string, deps: OfferDeps = {}, now = new Date()): Promise<z.infer<typeof TaskForm>> {
+  const templates: z.infer<typeof TaskForm>['templates'] = [];
+  for (const template of TASK_TEMPLATE_IDS) {
+    const kind = FORM_ITEM_KIND[template];
+    if (!kind) continue;
+    const runner = await runnerOf(db, template, deps);
+    if ('why' in runner) continue;
+    const found = await db.entity.findMany({
+      where: { kind, status: OFFERED_STATUS }, orderBy: [{ lastObservedAt: 'desc' }, { id: 'asc' }], take: TASK_FORM_ITEMS_MAX + 1,
+      select: { id: true, kind: true, key: true, name: true, taintedPaths: true, firstSeenAt: true },
+    });
+    const items = await Promise.all(found.slice(0, TASK_FORM_ITEMS_MAX).map(async (e) => ({ entityId: e.id, label: await labelFor(db, e, tz, now) })));
+    templates.push({ template, title: TASK_TITLES[template], runsOn: runner.def.name, items, more: found.length > TASK_FORM_ITEMS_MAX });
+  }
+  const goals = await db.goal.findMany({ where: { status: OFFERED_STATUS }, orderBy: [{ createdAt: 'desc' }, { id: 'asc' }], take: FORM_GOALS_MAX, select: { id: true, title: true } });
+  return { templates, goals: goals.filter((g) => GoalTitle.safeParse(g.title).success) };
 }

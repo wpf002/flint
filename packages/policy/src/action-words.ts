@@ -29,7 +29,7 @@ export const ACTION_WORDS: Readonly<Record<string, string>> = {
   'review.local': 'Review a Card',
   'review.trident_panel': 'Review a Card with an Outside Panel',
   'task.check_bar': 'Accept a Task Result',
-  'task.cancel': 'Stop a Task',
+  'task.cancel': 'Cancel a Task',
   'task.bar_override': 'Overrule a Task’s Checks',
 };
 

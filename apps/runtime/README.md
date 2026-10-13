@@ -1926,8 +1926,9 @@ does once tasks are switched on and an asset is on:
   are switched off or no asset that runs tasks is on. Otherwise it says when a
   task is stuck or a rule stops Flint from checking results.
 
-There is no panel yet. The routes the panel will use exist, behind the same
-token scope as approvals, so no model can read a task or start one:
+The console's Tasks panel and Settings > Assets use these routes, through the
+server's checked proxy. They sit behind the same token scope as approvals, so
+no model can read a task or start one:
 
 | Route | What it does |
 |---|---|
@@ -1939,6 +1940,36 @@ token scope as approvals, so no model can read a task or start one:
 | `POST /v1/tasks` | A new task and its card |
 | `POST /v1/tasks/:id/cancel` | Cancels it, or files the card to cancel one that has gone out |
 | `POST /v1/tasks/:id/accept` and `/reject` | Files the card that overrules its check |
+| `POST /v1/tasks/:id/again` | Run Again: a new task like one that has ended, and its card |
+| `GET /v1/task-form` | What New Task can offer now |
+
+Run Again takes the new task's key and nothing else. The new task has the same
+kind, the same items and the same goal as the ended one, and no due date. It
+goes through every check a new task goes through, as things are now, and it
+waits for its own card. It is held to what the New Task form would offer
+today. A task can't be run again, and the open task's view says so
+(`can.again`), when any of these is true:
+
+- it has not ended, or its details are no longer kept;
+- Flint asked for it (only a task you asked for is yours to run again);
+- no asset that is on can run its kind of task;
+- one of its items is gone, is no longer active, or is the wrong kind;
+- its goal is no longer active.
+
+A new task is held to the same rules for its items and its goal, however it is
+sent: `POST /v1/tasks` about an item that is no longer active, or under a goal
+that is not, answers "One of its items is no longer active." or "Its goal is no
+longer active." The form sent twice at once is still one task and one card.
+
+A new task and its card are written together or not at all. A card that can't
+be filed leaves no task behind. When a rule of yours forbids the card, the
+answer is "A rule you set doesn’t allow this." When Flint's own rules do, it is
+"Flint may not do this." The refusal is on record either way.
+
+The form's answer lists each kind of task an asset that is on can run, with the
+items it can be about (up to 50, the latest seen first, each by its label and
+never by a title), and your active goals. With no asset on it lists no kind of
+task.
 
 While tasks are switched off, every one of these answers "Tasks are turned off
 on this Mac." and reads nothing.
@@ -2243,6 +2274,11 @@ approved. Any later deploy of P5 code applies the migration again. Claude runs
   The panel should offer that in one click.
 - The runtime can create a large object, and one it owns makes the backup's
   dump fail. That predates P5 and needs its own fix.
+- The cards that cancel a task, accept its result, and end it against its
+  checks sign only the task's id. The console names the task on those cards
+  from a read of the task, on a row marked Looked Up. A later part should put
+  the task's title in their signed details, so the card names its task in
+  words you sign.
 
 ## Your rules, and switching one off
 

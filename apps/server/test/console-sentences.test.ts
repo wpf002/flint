@@ -12,8 +12,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
 import { PAID_VENDORS } from '@flint/core';
-import { ACTION_DONE, jobFailedNote, noteProblems, type NightlyJob } from '@flint/policy';
+import { ACTION_DONE, CHECK_NAMES, TASK_FAILURE_SAYS, TASK_REASONS, TASK_SAYS, TASK_STATUS_SAYS, jobFailedNote, noteProblems, type NightlyJob } from '@flint/policy';
 import { actionDoneNote } from '../src/approval-routes';
+import { TASKS_SAY } from '../src/tasks-routes';
 import { breakerNote } from '../src/frontier-breaker';
 import { localDefaultNote } from '../src/local-model';
 import { PHONE_PING } from '../src/notifications';
@@ -66,6 +67,67 @@ describe('errText', () => {
     expect(say(new Error('not confirmed'))).toBe('Cancelled.');
     expect(say(undefined)).toBe('It stopped.');
     expect(say('(only an aside)')).toBe('It stopped.');
+  });
+});
+
+describe('a card’s approval that did not go through', () => {
+  const apprJs = /<script id="approvals-js">([\s\S]*?)<\/script>/.exec(html)![1]!;
+  /** The two lines of the Approvals script that say a prompt was dismissed. */
+  const dismissed = /\nvar PROMPT_DISMISSED=[^\n]*\nfunction promptDismissed\([^\n]*/.exec(apprJs)![0];
+  const SAYS = 'You dismissed the prompt. The card is waiting in Approvals.';
+  const page = (withApprovals: boolean) => {
+    const c: Record<string, unknown> = {};
+    createContext(c);
+    for (const name of ['errText', 'resText', 'failed']) runInContext(fn(name), c);
+    if (withApprovals) runInContext(dismissed, c);
+    return (e: unknown) => {
+      const r = new El();
+      const row = new El();
+      row.style.opacity = '.5';
+      (c.failed as (e: unknown, r: El, row: El) => void)(e, r, row);
+      return [r.textContent, (r as unknown as { className: string }).className, r.style.display, String(row.style.opacity)];
+    };
+  };
+
+  it('a prompt Will dismissed says so, and where the card is: the same sentence wherever a card is signed, never "Cancelled."', () => {
+    const failed = page(true);
+    expect(failed(new Error('not confirmed'))).toEqual([SAYS, 'res bad', 'block', '1']);
+    expect(failed(new Error('Not Confirmed'))[0]).toBe(SAYS);
+    // A passkey's own prompt, dismissed or timed out.
+    expect(failed(Object.assign(new Error('The operation either timed out or was not allowed.'), { name: 'NotAllowedError' }))[0]).toBe(SAYS);
+    // Anything else is the sentence it came with.
+    expect(failed(new Error('Flint didn’t answer. Try again.'))).toEqual(['Flint didn’t answer. Try again.', 'res bad', 'block', '1']);
+    expect(failed(new Error('the approval was refused (signature)'))[0]).toBe('The approval was refused.');
+    expect(failed(undefined)[0]).toBe('It stopped.');
+    // Each of its two sentences is one.
+    for (const sentence of SAYS.split(/(?<=\.) /)) expect(sentence).toMatch(/^[A-Z][^.]*\.$/);
+    expect(SAYS.split(/(?<=\.) /)).toHaveLength(2);
+  });
+
+  it('every script that signs a card says that sentence: Approvals (one card, and Approve All), the chat’s card, Goals, Predictions and Tasks', () => {
+    const c: Record<string, unknown> = {};
+    createContext(c);
+    runInContext(dismissed, c);
+    expect(c.PROMPT_DISMISSED).toBe(SAYS);
+    const block = (id: string) => new RegExp(`<script id="${id}">([\\s\\S]*?)</script>`).exec(html)![1]!;
+    // The one place the words are written out again is the Goals script's own copy, for a page with no Approvals script.
+    expect(html.split(`'${SAYS}'`).length - 1).toBe(2);
+    expect(block('goals-js')).toContain(`function gDismissed(){return typeof PROMPT_DISMISSED==='string'?PROMPT_DISMISSED:'${SAYS}';}`);
+    // (Approve All is about several cards: it says the prompt was dismissed in the same words, then how many still wait.)
+    expect(block('approvals-js')).toContain("function apprLeftSays(n){return 'You dismissed the prompt. '+(n===1?'1 card is still waiting.':n+' cards are still waiting.');}");
+    expect(SAYS.startsWith('You dismissed the prompt. ')).toBe(true);
+    expect(block('approvals-js')).toContain("(unanswered||(e&&promptDismissed(e))?' '+apprLeftSays(queue.length-done):");
+    // A card's own prompt that never answers says the sentence too, once the wait for it has run out.
+    expect(block('approvals-js')).toContain("res.textContent=PROMPT_DISMISSED;res.className='res bad';");
+    expect(fn('failed')).toContain('promptDismissed(e)?PROMPT_DISMISSED:errText(e)');
+    for (const [id, n] of [['goals-js', 1], ['predictions-js', 1], ['tasks-js', 1]] as const) expect(block(id).split('goalCancelled(e)?gDismissed():').length - 1, id).toBe(n);
+    // No panel that signs a card says a dismissed prompt as a cancellation. (The Goals script names the word once, to tell one from any other failure.)
+    const code = (id: string) => block(id).replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(code('goals-js').match(/'Cancelled\.[^']*'/g)).toEqual(["'Cancelled.'"]);
+    expect(code('goals-js')).toContain("function goalCancelled(e){return gSay(e)==='Cancelled.'||(e&&e.name==='NotAllowedError');}");
+    expect(code('tasks-js')).not.toMatch(/'Cancelled\./);
+    // Without the Approvals script (an older page): the main script's own word, as before.
+    expect(page(false)(new Error('not confirmed'))[0]).toBe('Cancelled.');
   });
 });
 
@@ -299,5 +361,121 @@ describe('the line under a notification', () => {
     for (const line of said) for (const sentence of line.split(/(?<=\.) /)) expect(sentence).toMatch(SENTENCES);
     // Once is not a streak.
     expect(again(row({ count: 1 }))).toBe('');
+  });
+});
+
+describe('P5: tasks and assets', () => {
+  const block = (id: string) => new RegExp(`<script id="${id}">([\\s\\S]*?)</script>`).exec(html)![1]!;
+  const noComments = (js: string) => js.replace(/\/\*[\s\S]*?\*\//g, '');
+  const tasksJs = noComments(block('tasks-js'));
+  const apprJs = block('approvals-js');
+  /** The part of the Approvals script that holds P5's card words. */
+  const cardsJs = noComments(apprJs.slice(apprJs.indexOf('/* ---------- P5: the cards for assets and tasks'), apprJs.indexOf('\nfunction apprEl(')));
+  const literals = (js: string) => [...js.matchAll(/'((?:[^'\\\n]|\\.)*)'/g)].map((m) => m[1]!);
+  const SMALL = new Set(['a', 'an', 'the', 'and', 'but', 'or', 'nor', 'for', 'so', 'yet', 'as', 'at', 'by', 'from', 'in', 'into', 'of', 'off', 'on', 'onto', 'out', 'over', 'to', 'up', 'with']);
+  const titleCase = (t: string) => t.split(' ').every((w, i, all) => !w || /^[^a-z]/.test(w) || (i > 0 && i < all.length - 1 && SMALL.has(w)));
+  const SENTENCE = /^[\p{Lu}\p{N}“][^\n]*[.!?…]$/u;
+  /** A whole sentence written out in the script: it starts with a capital and ends with a stop. (A piece of one, joined to a name, starts with a space or a small letter.) */
+  const whole = (l: string) => /^[A-Z]/.test(l) && /[.!?…]$/.test(l) && l.includes(' ');
+  /** What a call site puts on screen: the text argument of each kind of element. */
+  const at = (js: string, re: RegExp) => [...js.matchAll(re)].map((m) => m[1]!);
+
+  it('every secondary line the panel and Settings can show is a complete sentence, by the notes’ own standard', () => {
+    const lines = literals(tasksJs).filter(whole);
+    // The script holds its sentences: the table, the empty states, the confirmations, what a failed read says.
+    expect(lines.length).toBeGreaterThan(30);
+    for (const l of lines) {
+      expect(l, l).toMatch(SENTENCE);
+      expect(noteProblems('Tasks', l), l).toEqual([]);
+    }
+    // Each place a second line is drawn is given a sentence, a name the runtime sent, or one of the table's.
+    const second = [
+      ...at(tasksJs, /goalEmpty\('[^']*','([^']+)'/g), ...at(tasksJs, /predLine\('([^']+)'\)/g), ...at(tasksJs, /gEl\('span',null,'([^']+)'\)/g),
+      ...at(tasksJs, /gEl\('span','note','([^']+)'\)/g), ...at(tasksJs, /gEl\('p','(?:gnote|plead)','([^']+)'\)/g),
+    ];
+    // (What is no sentence there: the Show Details button's label, held to Title Case below, and the start of a sentence
+    // that goes on with an asset's name, read whole just below.)
+    expect(second.filter((x) => x.endsWith(' '))).toEqual(['Turn on ']);
+    for (const l of second.filter((x) => x !== 'Show Details' && !x.endsWith(' '))) expect(l, l).toMatch(SENTENCE);
+    // The sentences made from a piece and a name read whole.
+    for (const made of ['Turn on the CI Watcher in Settings to start.', 'Turn on Local Tasks in Settings to run a new task.', 'Turn on an asset in Settings to start.']) expect(noteProblems('Tasks', made), made).toEqual([]);
+    expect(literals(tasksJs).filter((l) => /^ in Settings to /.test(l)).sort()).toEqual([' in Settings to run a new task.', ' in Settings to start.']);
+    // Three states, three titles: tasks switched off, no asset on, and nothing a new task could be. None borrows another's.
+    const empties = [...tasksJs.matchAll(/goalEmpty\('([^']+)'/g)].map((m) => m[1]!);
+    for (const title of ['Tasks Are Off', 'No Asset Is On', 'Nothing to Run Yet']) expect(empties.filter((t) => t === title), title).toHaveLength(1);
+    expect(tasksJs).toMatch(/goalEmpty\('Tasks Are Off',gSay\(e\)\)/);
+    expect(tasksJs).toMatch(/goalEmpty\('No Asset Is On','Turn on '\+taskNeeds\(\)\+' in Settings to start\.'/);
+    expect(tasksJs).toMatch(/goalEmpty\('Nothing to Run Yet',TASK_SAY\.nothing,/);
+    // And everything the runtime and the server may say there is a sentence too.
+    for (const l of [...Object.values(TASK_SAYS), ...Object.values(TASK_STATUS_SAYS), ...Object.values(TASK_FAILURE_SAYS), ...Object.values(TASK_REASONS), ...Object.values(TASKS_SAY)]) {
+      expect(l, l).toMatch(SENTENCE);
+      expect(noteProblems('Tasks', l), l).toEqual([]);
+    }
+  });
+
+  it('every title, button, label, tab, tag and value of its own is in Title Case, and section headers go through .gsh', () => {
+    const labels = [
+      ...at(tasksJs, /gBtn\('[^']*','([^']+)'/g), ...at(tasksJs, /taskFact\('([^']+)'/g), ...at(tasksJs, /taskFact\('[^']+',[^)]*\?'[^']*':'([^']+)'\)/g), ...at(tasksJs, /goalEmpty\('([^']+)'/g),
+      ...at(tasksJs, /gEl\('b',null,'([^']+)'\)/g), ...at(tasksJs, /gTag\('([^']+)'/g), ...at(tasksJs, /goalSelect\('([^']+)'/g), ...at(tasksJs, /goalField\('([^']+)'/g), ...at(tasksJs, /taskHead\('([^']+)'/g),
+      ...at(tasksJs, /gEl\('div','gsh','([^']+)'\)/g), ...at(tasksJs, /TASK_TABS=\[\['[a-z]+','([^']+)'\],\['[a-z]+','([^']+)'\]\]/g), ...at(tasksJs, /createTextNode\(a\.on\?'([^']+)'/g),
+      'Show Details', 'Hide Details', 'On', 'Off', 'Waiting', 'Passed', 'Failed', 'No Cost', 'Not Known Yet', 'No Goal', 'No Due Date', 'Choose a CI Run',
+    ];
+    expect(labels.length).toBeGreaterThan(45);
+    for (const want of ['Tasks', 'New Task', 'Cancel Task', 'Keep Task', 'Accept Anyway', 'Reject Anyway', 'Run Again', 'Review Card', 'Not Now', 'Create Task', 'Turn On', 'Turn Off', 'Open Settings', 'Open Approvals', 'Try Again',
+      'Tasks Are Off', 'No Asset Is On', 'Nothing to Run Yet', 'No Tasks Yet', 'Nothing Finished Yet', 'Cancel This Task', 'Outside Text', 'Costs Money', 'What to Do', 'Goal', 'Due', 'About', 'Runs On', 'Asked By', 'Chance It Passes', 'Cost', 'Result', 'Checks', 'Details', 'Assets']) {
+      expect(labels, want).toContain(want);
+    }
+    for (const l of labels) {
+      expect(titleCase(l), l).toBe(true);
+      expect(l, l).not.toMatch(/[.!?]$/);
+    }
+    // No label is written in capitals: a header's capitals are the style's.
+    for (const l of labels) expect(l === l.toUpperCase() && l.length > 3, l).toBe(false);
+    expect(html).toMatch(/\.gsh\{[^}]*text-transform:uppercase/);
+    // A check's name is the runtime's, and each one is a Title Case title too.
+    for (const n of Object.values(CHECK_NAMES)) expect(titleCase(n), n).toBe(true);
+  });
+
+  it('P5’s card words: each title in Title Case, each sentence whole, each label behind Show Details a Title Case label', () => {
+    const lines = literals(cardsJs).filter(whole);
+    expect(lines.length).toBeGreaterThan(12);
+    for (const l of lines) {
+      expect(l, l).toMatch(SENTENCE);
+      expect(noteProblems('Approvals', l), l).toEqual([]);
+    }
+    const titles = [
+      ...at(cardsJs, /APPR_ASSETS=\{ci_runner:\['([^']+)'/g), ...at(cardsJs, /APPR_ASSET_OTHER=\['([^']+)'/g), ...at(cardsJs, /APPR_DISPATCH=\{ci_runner:\['([^']+)'/g), ...at(cardsJs, /APPR_DISPATCH_OTHER=\['([^']+)'/g),
+      ...at(cardsJs, /return '((?:Accept|Cancel) a [^']+)'/g), ...at(cardsJs, /\?'((?:Accept|Reject) a Result Anyway)'/g), ...at(cardsJs, /:'(Overrule[^']+)'/g),
+    ];
+    expect(titles.sort()).toEqual(['Accept a Result Anyway', 'Accept a Task Result', 'Cancel a Task', 'Overrule a Task’s Checks', 'Reject a Result Anyway', 'Run a Task', 'Turn On an Asset', 'Turn On the CI Watcher', 'Watch a CI Run']);
+    for (const t of titles) expect(titleCase(t), t).toBe(true);
+    // The labels: a fact's on the card's face, and a stored key's own word behind Show Details.
+    const keys = /var APPR_KEYS_TASK=\{([\s\S]*?)\};/.exec(cardsJs)![1]!;
+    // (A looked-up row's label is the key of the sentence that says it was looked up.)
+    const looked = [.../var APPR_LOOKED_SAYS=\{([\s\S]*?)\};/.exec(cardsJs)![1]!.matchAll(/'([^']+)':'/g)].map((m) => m[1]!);
+    expect(looked.sort()).toEqual(['About', 'CI Run', 'Task']);
+    const labels = [...at(cardsJs, /\[\'([A-Z][A-Za-z ]+)\',/g), ...looked, ...[...keys.matchAll(/:'([^']*)'/g)].map((m) => m[1]!).filter(Boolean), ...Object.values({ a: 'Item ID', b: 'Item IDs' })];
+    expect(labels).toEqual(expect.arrayContaining(['Asset', 'Can Do', 'Cost', 'Task', 'Checked By', 'CI Run', 'About', 'Due', 'Expires', 'Filed By', 'Template', 'Check', 'Runs On', 'Outside Text', 'Passed Its Checks']));
+    for (const l of labels) expect(titleCase(l), l).toBe(true);
+    // The mark beside a looked-up value is a Title Case label of two words; what the card says when its cost cannot be read is a sentence.
+    expect(apprJs).toMatch(/apprEl\('span','looked','Looked Up'\)/);
+    expect(lines).toContain('Flint couldn’t read the cost.');
+    // What a prompt says Flint is doing is lower case, as the others are, with names their own way.
+    const prompts = [...at(cardsJs, /'((?:accept|reject|cancel|run|end) this [a-z ]+)'/g), ...at(cardsJs, /'(turn on [^']+)'/g)];
+    expect(prompts).toEqual(expect.arrayContaining(['accept this result', 'cancel this task', 'run this task', 'accept this result against its checks', 'reject this result against its checks', 'end this task against its checks']));
+    for (const r of prompts) expect(r, r).toMatch(/^[a-z][A-Za-z ]+$/);
+  });
+
+  it('no <pre> for a P5 card: neither script makes one, and neither writes HTML or the args as they are stored', () => {
+    for (const js of [tasksJs, cardsJs]) {
+      expect(js).not.toMatch(/['"]pre['"]|['"]code['"]|<pre|innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
+      // A card is never shown as its stored args: nothing here turns them into text.
+      expect(js).not.toMatch(/JSON\.stringify\((?!\{draftKey)[^)]*args/);
+    }
+    expect(tasksJs).not.toMatch(/JSON\.stringify/);
+    // The Approvals panel's own renderer, which both use for a card's details, makes paragraphs, headers and label lists only.
+    const details = /function apprDetailsInto\([\s\S]*?\n(?=\/\*)/.exec(apprJs)![0] + /function apprGroupInto\([\s\S]*?\n(?=function )/.exec(apprJs)![0];
+    // (Three kinds of paragraph: a sentence, the one that says a row above was looked up, and a note that something was left out.)
+    expect([...details.matchAll(/apprEl\('([a-z0-9]+)'/g)].map((m) => m[1]).sort()).toEqual(['dd', 'dl', 'dt', 'h4', 'p', 'p', 'p']);
   });
 });

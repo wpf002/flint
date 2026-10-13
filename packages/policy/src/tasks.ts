@@ -24,7 +24,7 @@
  */
 import { z } from 'zod';
 import { ClaimRef } from './claims.js';
-import { DraftKey, GoalId, IsoMs, LIKELIHOODS, StepKey, checkFits, jsonbSize } from './goals.js';
+import { DraftKey, GoalId, GoalTitle, IsoMs, LIKELIHOODS, StepKey, checkFits, jsonbSize } from './goals.js';
 
 export const ASSET_KINDS = ['local_worker', 'local_reviewer', 'ci_runner', 'nexus_participant', 'trident_panel', 'hive_bot'] as const;
 export type AssetKind = (typeof ASSET_KINDS)[number];
@@ -465,6 +465,12 @@ export const TASK_SAYS = {
   noGoal: 'This goal no longer exists.',
   scored: 'Its result is already scored.',
   outputGone: 'Its result is no longer kept, so it can’t be accepted.',
+  detailsGone: 'Its details are no longer kept, so it can’t be run again.',
+  flintAsked: 'Flint asked for this task, so it can’t be run again from here.',
+  itemEnded: 'One of its items is no longer active.',
+  goalEnded: 'Its goal is no longer active.',
+  ruleForbids: 'A rule you set doesn’t allow this.',
+  notAllowed: 'Flint may not do this.',
   notChecked: 'Flint hasn’t checked its result yet.',
   notOverride: 'That is already how it ended.',
   decided: 'You already decided this result.',
@@ -578,6 +584,12 @@ export const NewTaskBody = z
   })
   .strict();
 export type NewTaskBody = z.infer<typeof NewTaskBody>;
+/**
+ * POST /tasks/:id/again: Run Again, as an open task's button sends it. The new
+ * task's id is made from this key, so the button pressed twice is one task.
+ */
+export const TaskAgainBody = z.object({ draftKey: DraftKey }).strict();
+export type TaskAgainBody = z.infer<typeof TaskAgainBody>;
 
 const ProposalRef = z.string().regex(/^[A-Za-z0-9_-]{1,40}$/);
 const Sentence = z.string().min(1).max(200);
@@ -601,6 +613,8 @@ export const TaskRow = z
 export type TaskRow = z.infer<typeof TaskRow>;
 export const TasksPage = z.object({ tasks: z.array(TaskRow).max(200), more: z.boolean() }).strict();
 
+/** The most a task's cost can read, in millionths of a dollar: what its row can hold ($999,999.9999). */
+export const TASK_COST_MAX_MICROS = 999_999_999_900;
 /** One task, open. `result` is built by template code from its output, never by a second model call. */
 export const TaskView = TaskRow.extend({
   /** Its result in a sentence or two, always shown as outside text; null until there is one, and once it is cleared. */
@@ -612,12 +626,15 @@ export const TaskView = TaskRow.extend({
   dueAt: IsoMs.nullable(),
   /** Its forecast, from its Prediction row: never a model's words. */
   chance: z.object({ likelihood: z.enum(LIKELIHOODS), percent: z.number().int().min(0).max(100) }).strict().nullable(),
-  /** What it cost, in millionths of a dollar; null until it ends, and for a task that costs nothing. */
-  cost: z.object({ micros: z.number().int().min(0), estimate: z.boolean() }).strict().nullable(),
+  /** What it cost, in millionths of a dollar (at most what a task's row can hold); null until it ends, and for a task that costs nothing. */
+  cost: z.object({ micros: z.number().int().min(0).max(TASK_COST_MAX_MICROS), estimate: z.boolean() }).strict().nullable(),
   /** Its card that is waiting for Will, if one is. */
   card: ProposalRef.nullable(),
-  /** What Will can do with it now. */
-  can: z.object({ cancel: z.boolean(), accept: z.boolean(), reject: z.boolean() }).strict(),
+  /**
+   * What Will can do with it now. `again` (Run Again) is optional: a runtime
+   * from before the button does not say, and the console reads that as no.
+   */
+  can: z.object({ cancel: z.boolean(), accept: z.boolean(), reject: z.boolean(), again: z.boolean().optional() }).strict(),
 }).strict();
 export type TaskView = z.infer<typeof TaskView>;
 export const TaskAnswer = z.object({ task: TaskView }).strict();
@@ -639,6 +656,35 @@ export const AssetRow = z
   .strict();
 export type AssetRow = z.infer<typeof AssetRow>;
 export const AssetsPage = z.object({ assets: z.array(AssetRow).max(50), reviewsRequired: z.boolean() }).strict();
+
+/** How many items a template's list in the New Task form holds. */
+export const TASK_FORM_ITEMS_MAX = 50;
+/**
+ * GET /tasks/form: what New Task can offer now. Each template an asset that is
+ * on can run, with the items it can be about (each by its label, made from its
+ * key: never a title), and Will's active goals for the form's Goal field.
+ */
+export const TaskForm = z
+  .object({
+    templates: z
+      .array(
+        z
+          .object({
+            template: z.enum(TASK_TEMPLATE_IDS),
+            title: TaskTitle,
+            runsOn: z.string().min(1).max(80),
+            items: z.array(z.object({ entityId: EntityId, label: z.string().min(1).max(120) }).strict()).max(TASK_FORM_ITEMS_MAX),
+            /** There are more items than the list holds. */
+            more: z.boolean(),
+          })
+          .strict(),
+      )
+      .max(TASK_TEMPLATE_IDS.length)
+      .refine((ts) => new Set(ts.map((t) => t.template)).size === ts.length, 'a kind of task is offered once'),
+    goals: z.array(z.object({ id: GoalId, title: GoalTitle }).strict()).max(50),
+  })
+  .strict();
+export type TaskForm = z.infer<typeof TaskForm>;
 
 /** A task made and its dispatch card filed; a card filed for an existing task or asset; an unsigned write done. */
 export const TaskFiled = z.object({ id: TaskId, proposalId: ProposalRef, deduped: z.boolean() }).strict();

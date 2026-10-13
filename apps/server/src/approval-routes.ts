@@ -7,7 +7,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Tool } from '@flint/core';
-import { ACTION_DONE, POLICY_CHANGE_SHAPE, digestOf, policyChangeKind } from '@flint/policy';
+import { ACTION_DONE, POLICY_CHANGE_SHAPE, digestOf, isTaskDispatch, policyChangeKind } from '@flint/policy';
 import { readJsonLimited } from './attachments';
 import { keyOf, outcomeOf, type ActionQueue, type PendingAction } from './actions';
 import type { AuditSink } from './audit-sink';
@@ -66,6 +66,38 @@ const NOT_WAITING = 'It’s no longer waiting.';
 export const doneNote = (fullName: string): string => ACTION_DONE[fullName] ?? 'An approved action is done.';
 /** The note for an approved action that ran: its title, and what Flint did. */
 export const actionDoneNote = (fullName: string): { title: string; body: string } => ({ title: 'Action Done', body: doneNote(fullName) });
+/**
+ * The name a call that ran here is worded by, or none. Whoever runs a connected server chooses its tools' names, so a
+ * tool can be called "task.check_bar": its note must not say Flint did what its own task.check_bar does. The words
+ * kept under `runtime.…` are for the runtime's own chat tools, which are a connected server's tools; every other name
+ * with words is an action of Flint's own, and never a tool's. A name on the wrong side of that gets no words.
+ */
+export const notedName = (fullName: string, tool: boolean): string => (fullName.startsWith('runtime.') === tool ? fullName : '');
+
+/** The most a task's estimate can be, in millionths of a dollar (the dispatch card's own limit: $1,000). */
+const COST_MAX_MICROS = 1_000_000_000;
+
+/**
+ * What a task's dispatch card says the task will cost, in millionths of a
+ * dollar: the estimate in the card's own args, which is what Will signs and
+ * what the database compares with the task's row. Zero is an estimate too (a
+ * task that costs nothing), so the console can say so in words. Any other card,
+ * and one whose estimate is not an amount the card could hold (whole, in
+ * hundreds, in range), has none: the console then says nothing about cost,
+ * never a guess or a rounded number.
+ */
+export function cardCost(p: Pick<RuntimeProposal, 'action' | 'args'>): { micros: number } | undefined {
+  if (!isTaskDispatch(p.action)) return undefined;
+  const micros = p.args?.estCostMicros;
+  // (A multiple of 100 in range is a whole number: a fraction, NaN and an infinity are each refused by one of these.)
+  return typeof micros === 'number' && micros >= 0 && micros <= COST_MAX_MICROS && micros % 100 === 0 ? { micros } : undefined;
+}
+
+/** The card's `cost` field, when it has an estimate to show. */
+function costField(p: Pick<RuntimeProposal, 'action' | 'args'>): { cost?: { micros: number } } {
+  const cost = cardCost(p);
+  return cost ? { cost } : {};
+}
 
 /**
  * When the restore test runs next, in this Mac's local time (the LaunchAgent's):
@@ -113,8 +145,14 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
           sensitivity: p.sensitivity, destructive: p.destructive === true, consequential: p.consequential === true,
           // What kind of card it is, and the runtime template it came from (P3: a review's minor or material plan change).
           ...(p.kind ? { kind: p.kind } : {}), ...(p.templateId ? { templateId: p.templateId } : {}),
+          // Is it a tool's card on a connected server? Its action is then the server's and the tool's names, which
+          // anyone who runs a server can choose. Said for every card, yes or no: the console gives a card the words
+          // it keeps for one of Flint's own (a goal, a rule, a nightly backup) only when this says it is not a tool's.
+          mcp: p.action.startsWith('mcp:'),
           // What the card says about itself (the promotion table's week, a source's name), and when it lapses.
           ...(p.reason ? { reason: p.reason } : {}), expiresAt: p.expiresAt,
+          // P5: what a task's dispatch card says the task will cost (zero included), for the card's Cost fact.
+          ...costField(p),
         });
         return reply(res, 200, { proposals: [...pending.map(card), ...approved.map(card)], unsynced: ctx.proposals.unsynced(), signed: true });
       } catch {
@@ -314,7 +352,7 @@ export async function runRamApproval(
   });
   // In the app only: Will just approved it, so a banner or a ping would tell him nothing new.
   if (ok) {
-    const done = actionDoneNote(result.fullName);
+    const done = actionDoneNote(notedName(result.fullName, true));
     ctx.notes.push(done.title, done.body, 'action', `act:${result.id}`, { channels: ['inapp'] });
   }
   return { action: result };
@@ -396,7 +434,7 @@ export async function executeApproved(ctx: Ctx, id: string): Promise<Executed> {
   const where = await p.completeDurably(id, outcome);
   // In the app only: Will just approved it, so a banner or a ping would tell him nothing new.
   if (outcome.ok) {
-    const done = actionDoneNote(fullName);
+    const done = actionDoneNote(notedName(fullName, !!m));
     ctx.notes.push(done.title, done.body, 'action', `act:${id}`, { channels: ['inapp'] });
   }
   const note =

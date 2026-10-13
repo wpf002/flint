@@ -198,6 +198,20 @@ describe('index.ts wiring', () => {
     expect(src).not.toMatch(/from '\.\.\/\.\.\/runtime|predict\/view|predict\/phrasing/);
   });
 
+  it('the tasks proxy (P5) runs after the predictions proxy, behind the bearer check and its scope, with the runtime link and nothing else', () => {
+    const tasks = src.indexOf('if (await tasksRoutes(req, res, url, { runtime: ctx.runtime, errorRef })) return;');
+    const predictions = src.indexOf('if (await predictionsRoutes(req, res, url, { runtime: ctx.runtime, errorRef })) return;');
+    expect(predictions).toBeGreaterThan(0);
+    expect(tasks).toBeGreaterThan(predictions);
+    expect(src.indexOf('if (!scopeAllows(scope, req.method')).toBeLessThan(tasks);
+    expect(src.match(/tasksRoutes\(/g)).toHaveLength(1);
+    expect(src).toContain("import { tasksRoutes } from './tasks-routes';");
+    // A task's words and its result pass through the proxy and go nowhere else in the server: index.ts reads no task or
+    // asset route of the runtime's itself (no chat block, no tool, no note is made from one), and imports nothing of its code.
+    expect(src).not.toMatch(/\/v1\/(tasks|assets|task-form)/);
+    expect(src).not.toMatch(/tasks\/view|tasks\/service|assets\/view/);
+  });
+
   it('memory extraction is chosen by FLINT_MEMORY_BRAIN: on the local model it waits for chat, on the frontier it is spend-gated', () => {
     const block = between('const memoryPlan = chooseMemoryBrain(', 'const servers = registry?.connectedServers()');
     // It is told the local model as main() settled it (OLLAMA_MODEL, or what Ollama had, at its loaded window).

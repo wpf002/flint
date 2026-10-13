@@ -207,7 +207,7 @@ export async function overrideProblem(db: Db | Tx, t: TaskRow, to: 'accepted' | 
  * engine's closed list is returned as it is: the engine refuses it (FORBIDDEN,
  * autonomous) and audits that.
  */
-export async function checkTaskCard(db: Db, input: CreateProposal, registry: readonly AssetDef[] = ASSETS): Promise<CreateProposal> {
+export async function checkTaskCard(db: Db | Tx, input: CreateProposal, registry: readonly AssetDef[] = ASSETS): Promise<CreateProposal> {
   const { action } = input;
   if (!isTaskCard(action)) return input;
   const context = contextOf(input.origin);
