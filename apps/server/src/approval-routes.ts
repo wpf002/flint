@@ -82,7 +82,8 @@ const COST_MAX_MICROS = 1_000_000_000;
 export function cardCost(p: Pick<RuntimeProposal, 'action' | 'args'>): { micros: number } | undefined {
   if (!isTaskDispatch(p.action)) return undefined;
   const micros = p.args?.estCostMicros;
-  return typeof micros === 'number' && Number.isSafeInteger(micros) && micros >= 0 && micros <= COST_MAX_MICROS && micros % 100 === 0 ? { micros } : undefined;
+  // (A multiple of 100 in range is a whole number: a fraction, NaN and an infinity are each refused by one of these.)
+  return typeof micros === 'number' && micros >= 0 && micros <= COST_MAX_MICROS && micros % 100 === 0 ? { micros } : undefined;
 }
 
 /** The card's `cost` field, when it has an estimate to show. */
