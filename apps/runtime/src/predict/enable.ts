@@ -175,8 +175,9 @@ export async function applyEnable(tx: Tx, raw: unknown, ctx: ApplyContext): Prom
  * same numbers is the one returned.
  *
  * From the console the newer card wins: his other Turn On cards still waiting
- * (from the console or the command line) are rejected, unsigned, with a fixed
- * sentence. A card left waiting after a cancelled prompt can then never be
+ * (from the console or the command line) that name any of the same numbers
+ * are rejected, unsigned, with a fixed sentence. A card for other numbers
+ * altogether is left waiting. A card left waiting after a cancelled prompt can then never be
  * approved later in place of the one that replaced it. Only cards filed
  * before this one are rejected, and in the transaction that files it: Turn On
  * filings run one at a time (createProposal's `serial`), so each sees every
@@ -199,8 +200,16 @@ export async function proposeForecasts(db: Db, keys: readonly string[] = FORECAS
     serial: action,
     ...(from === 'console' ? {
       filed: async (tx: Tx, id: string) => {
-        const older = await tx.proposal.findMany({ where: { status: 'pending', action, origin: { in: ['console', 'cli'] }, id: { not: id } }, select: { id: true, action: true, argsDigest: true, tainted: true, origin: true } });
-        for (const o of older) await rejectPendingIn(tx, o, SAY.replaced, actor);
+        const older = await tx.proposal.findMany({ where: { status: 'pending', action, origin: { in: ['console', 'cli'] }, id: { not: id } }, select: { id: true, action: true, argsDigest: true, tainted: true, origin: true, args: true } });
+        const mine = new Set(series);
+        for (const { args, ...o } of older) {
+          // Only a card that names one of these numbers is replaced. A card for OTHER numbers still waits: the
+          // one-number Second Opinion card must not throw away the Turn On card Will has yet to sign for the rest.
+          // (A waiting card this cannot read names nothing it could turn on: it goes too.)
+          const theirs = ForecastEnableArgs.safeParse(args);
+          if (theirs.success && !theirs.data.series.some((k) => mine.has(k))) continue;
+          await rejectPendingIn(tx, o, SAY.replaced, actor);
+        }
       },
     } : {}),
   });

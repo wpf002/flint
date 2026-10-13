@@ -25,6 +25,9 @@
  *    number there). A stored 0 beside n = 0 means "none yet", so the route
  *    that hands these rows to chat gives null for it (app.ts).
  *
+ * The local model's second opinions (written by runtime:reason) are not
+ * scored here at all: see the query below.
+ *
  * The window is by when a prediction was made. Rows are rewritten, never
  * added, when the same window is scored again.
  */
@@ -33,6 +36,7 @@ import { addLocalDays, localDay, localDayBounds } from '@flint/policy';
 import type { Db } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
 import { clusterBootstrapMean, seedFrom } from './bootstrap.js';
+import { REASON_WRITER } from './emit.js';
 import { score, scoreRanges, type Scored, type ScoredRange } from './scoring.js';
 import { LEDGER_ACTOR, SUPERSEDED_RETRY_MS } from './sweep.js';
 
@@ -69,7 +73,11 @@ export async function snapshotCalibration(db: Db, windowStart: Date, windowEnd: 
   /** A superseded prediction's date before this, with no result: the sweep reads it no more. */
   const givenUpBefore = now.getTime() - SUPERSEDED_RETRY_MS;
   const preds = await db.prediction.findMany({
-    where: { createdAt: { gte: windowStart, lt: windowEnd } },
+    // The local model's second opinions are left out (P4 part 5). Each is a second answer to a question the
+    // forecaster already answered: scored here, the question would count twice in its area, and chat's own
+    // calibration (which reads these rows) would move with a number's Second Opinion switch. They are compared
+    // with the forecaster's answers on their own, question by question (predict/view.ts).
+    where: { createdAt: { gte: windowStart, lt: windowEnd }, createdBy: { not: REASON_WRITER } },
     // In a fixed order, so the same rows give the same sums and the same interval on every run.
     orderBy: { id: 'asc' },
     select: {

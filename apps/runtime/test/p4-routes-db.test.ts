@@ -7,7 +7,8 @@
  *    that, and nothing can be turned on from the console.
  *  - Turn On Predictions files the same card the command files, once: Will's
  *    own, marked for his own touch, as sensitive as its most sensitive number.
- *    A newer one replaces an older one still waiting. Filing turns nothing on.
+ *    A newer one replaces an older one still waiting that names one of its
+ *    numbers. Filing turns nothing on.
  *    Signed, it turns on exactly the numbers it lists.
  *  - Each number says where it stands in a sentence made from its own run: a
  *    range, no reliable trend, too early to tell, steady (with the count of
@@ -187,7 +188,7 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     expect((await series(DEPLOYS)).waiting).toBe(true);
     expect((await series(TAVILY)).waiting).toBe(false);
 
-    // A newer card (other numbers) replaces the one still waiting: that one can no longer be approved.
+    // A newer card that names its numbers (and more) replaces the one still waiting: that one can no longer be approved.
     const second = await call('POST', '/v1/predictions/turn-on', { series: ON });
     expect(second.body).toMatchObject({ deduped: false });
     expect(second.body.id).not.toBe(first.body.id);
@@ -225,30 +226,47 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     for (const n of here.numbers) expect(n).toMatchObject({ on: false, state: 'off' });
   });
 
-  it('Turn On cards filed at the same moment never reject each other: the last one filed is the one left, and only earlier ones are replaced', async () => {
+  it('Turn On cards filed at the same moment never reject each other: no number is left on two waiting cards, and only an earlier card that shares a number is replaced', async () => {
     const sets = [[NEXUS], [HELM], [NEXUS, HELM]];
     const filed = await Promise.all(sets.map((series) => call('POST', '/v1/predictions/turn-on', { series })));
     expect(filed.map((r) => r.status)).toEqual([200, 200, 200]);
     const ids = filed.map((r) => r.body.id as string);
     expect(new Set(ids).size).toBe(3);
     const mine = (await cards()).filter((c) => ids.includes(c.id as string));
-    // Exactly one is still waiting; the other two were replaced by one filed after them, and say so.
-    expect(mine.map((c) => c.status).sort()).toEqual(['pending', 'rejected', 'rejected']);
-    for (const c of mine.filter((x) => x.status === 'rejected')) expect(c.error).toBe('A newer version of this card replaced it.');
-    const left = mine.find((c) => c.status === 'pending')!;
-    expect((await page()).waiting).toEqual([{ id: left.id, numbers: (left.args as { series: string[] }).series.length }]);
+    const numbers = (c: { args: unknown }) => (c.args as { series: string[] }).series;
+    const left = mine.filter((c) => c.status === 'pending');
+    const gone = mine.filter((c) => c.status === 'rejected');
+    // Whatever order they were filed in: at least one still waits, every other was replaced and says so, and no
+    // number is on two waiting cards (the card for both was replaced by a later one, or replaced the two before it).
+    expect(left.length + gone.length).toBe(3);
+    expect(left.length).toBeGreaterThanOrEqual(1);
+    expect(gone.length).toBeGreaterThanOrEqual(1);
+    for (const c of gone) expect(c.error).toBe('A newer version of this card replaced it.');
+    const named = left.flatMap(numbers);
+    expect(new Set(named).size).toBe(named.length);
+    expect((await page()).waiting.map((w) => [w.id, w.numbers]).sort()).toEqual(left.map((c) => [c.id, numbers(c).length]).sort());
     // Each rejection is in the audit trail, once, with the card's id and nothing of its numbers' values.
     const rejections = (await k.owner(`SELECT "correlationId", actor, kind, outcome FROM "AuditEntry" WHERE kind = 'rejection' AND "correlationId" = ANY($1) ORDER BY seq`, [ids])).rows;
-    expect(rejections.map((r) => [r.actor, r.kind, r.outcome])).toEqual([['will:console', 'rejection', 'denied'], ['will:console', 'rejection', 'denied']]);
-    expect(rejections.map((r) => r.correlationId).sort()).toEqual(mine.filter((c) => c.status === 'rejected').map((c) => c.id as string).sort());
-    // One filed later replaces the one left (or, asked for the same numbers, is that very card).
+    expect(rejections.map((r) => [r.actor, r.kind, r.outcome])).toEqual(gone.map(() => ['will:console', 'rejection', 'denied']));
+    expect(rejections.map((r) => r.correlationId).sort()).toEqual(gone.map((c) => c.id as string).sort());
+    for (const c of left) await rejectProposal(k.db, c.id as string, { error: 'a test put it away' }, undefined, 'test');
+
+    // One at a time, the rule is plain. Cards for different numbers both wait: neither replaces the other.
+    const nexus = await call('POST', '/v1/predictions/turn-on', { series: [NEXUS] });
+    const helm = await call('POST', '/v1/predictions/turn-on', { series: [HELM] });
+    const waiting = async () => (await cards()).filter((c) => c.status === 'pending').map((c) => c.id as string).sort();
+    expect(await waiting()).toEqual([nexus.body.id as string, helm.body.id as string].sort());
+    expect((await page()).waiting).toHaveLength(2);
+    // A card that names both replaces both.
+    const both = await call('POST', '/v1/predictions/turn-on', { series: [NEXUS, HELM] });
+    expect(await waiting()).toEqual([both.body.id]);
+    // And one filed later that names one of its numbers replaces it in turn (asked for the same numbers, it is that very card).
+    expect((await call('POST', '/v1/predictions/turn-on', { series: [HELM, NEXUS] })).body).toEqual({ id: both.body.id, deduped: true });
     const next = await call('POST', '/v1/predictions/turn-on', { series: [NEXUS] });
     expect(next.status).toBe(200);
-    const now = await cards();
-    expect(now.find((c) => c.id === left.id)!.status).toBe((left.args as { series: string[] }).series.join() === NEXUS ? 'pending' : 'rejected');
-    expect(now.filter((c) => c.status === 'pending')).toHaveLength(1);
+    expect(await waiting()).toEqual([next.body.id]);
+    expect((await k.db.proposal.findUniqueOrThrow({ where: { id: both.body.id as string } })).error).toBe('A newer version of this card replaced it.');
     // Nothing is left waiting for the tests below.
-    expect(now.find((c) => c.status === 'pending')!.id).toBe(next.body.id);
     await rejectProposal(k.db, next.body.id as string, { error: 'a test put it away' }, undefined, 'test');
     expect((await page()).waiting).toEqual([]);
   });
