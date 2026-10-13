@@ -709,7 +709,7 @@ export const WaitingGoal = z.object({ proposalId: ProposalRef, goalId: GoalId, t
 /**
  * A goal Flint suggested from a chat (part 5), for the Suggested tab: its short
  * title, Will's own words it rests on, the day he said them (null once nothing
- * that held it is kept) and the day he named, if he named one. `waiting`: its
+ * that held it is kept) and the day Flint read, if it read one. `waiting`: its
  * card has not been approved, so there is no goal row yet. Either way Make It a
  * Goal starts it with one signature, and Dismiss sets it aside.
  */

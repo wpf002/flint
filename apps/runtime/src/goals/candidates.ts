@@ -11,7 +11,7 @@
  *
  *  - the request, against the shared contract (@flint/policy ChatCandidate):
  *    ids of the shape the server names turns by, a quote of 12 to 300
- *    characters in the form the check leaves it, a short text that could be a
+ *    characters in his own characters, a short text that could be a
  *    goal's title (its length, no control or format character), a real day
  *    that has not passed and is not over ten years out, a turn that ended in
  *    the last 30 days and not in the future;
@@ -191,7 +191,7 @@ export async function applySuggestion(tx: Tx, action: ChatSuggestionAction, args
     const a = args as GoalProposeArgs;
     const there = await tx.goal.findFirst({ where: { OR: [{ id: a.goalId }, { sourceRef: a.sourceRef }] }, select: { id: true } });
     if (there) return { result: { goalId: there.id, existed: true } };
-    // The day he named, to its end in his zone, while that is still ahead: a goal's date is never in the past.
+    // The day Flint read, to its end in his zone, while that is still ahead: a goal's date is never in the past.
     const horizon = a.dueOn ? localWallTime(ctx.tz, a.dueOn, 23, 59) : null;
     await tx.goal.create({
       data: {

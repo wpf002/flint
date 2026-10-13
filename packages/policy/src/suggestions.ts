@@ -98,7 +98,9 @@ export function saidHolds(said: string, quote: string): boolean {
  * words before the model's excerpt is always on it. A sentence starts at the
  * top of a line, or after a full stop, a question mark, an exclamation mark or
  * an ellipsis that is followed by anything but a lower-case letter ("e.g. so"
- * does not end one). Undefined when the quote is not in his words, or when the
+ * does not end one). A line that follows one ending in a colon is the rest of
+ * that sentence ("I pasted this from the page:" stays on what it introduces).
+ * Undefined when the quote is not in his words, or when the
  * sentences that hold it run past `max` characters: a sentence that cannot be
  * shown whole is not quoted in part.
  */
@@ -111,9 +113,11 @@ export function saidSentences(said: string, quote: string, max: number = SUGGEST
   if (at === -1) return undefined;
   const starts = new Set<number>([0]);
   let pos = 0;
+  let before = '';
   for (const l of lines) {
-    starts.add(pos);
+    if (!/[:\uFF1A]$/.test(before)) starts.add(pos);
     pos += l.length + 1;
+    before = l;
   }
   for (const m of shown.matchAll(/[.!?\u2026]+["'\u2019\u201D)\]]*\s(?!\p{Ll})/gu)) starts.add(m.index + m[0].length);
   const sorted = [...starts].sort((x, y) => x - y);

@@ -430,26 +430,38 @@ only the candidates intake files those (below).
 
 ### Suggestions from chat
 
-Off until the server is told to send them (`FLINT_EXTRACT_CANDIDATES=1` there).
-The server's memory extractor, on its local model, hands the runtime a goal you
-set or something you said you would do: a few words, your own quoted words, and
-the conversation and turn they came from (`POST /v1/goals/candidates`, scope
+Off until the server is told to send them (`FLINT_EXTRACT_CANDIDATES=1` there
+for goals; commitments have their own switch, `FLINT_EXTRACT_COMMITMENTS=1`,
+also off: see "A view of commitments" under the follow-ups).
+The server's memory extractor, on a model that runs on this Mac, hands the
+runtime a goal you set or something you said you would do: a few words, your
+own sentence quoted whole, and the conversation and turn they came from (`POST /v1/goals/candidates`, scope
 `proposals`: the server's token only, never the runtime connector's). The
 server has already checked that the quote is in your own message of that turn.
 The runtime holds no transcript, so that check is the server's. Everything else
 it checks again, whatever the server says:
 
-- the request's shape: ids as the server names conversations and turns, a
-  quote of 12 to 300 characters in the form the check leaves it (no curly
-  quotes, no doubled spaces), a real day that has not passed, a turn that ended
-  in the last 30 days;
+- the request's shape: ids as the server names conversations and turns; a
+  quote of 12 to 300 characters in your own characters, one space between
+  words; a short text of 3 to 120 characters, counted as a goal's title is,
+  with no control or format character (no direction override, no zero-width
+  mark); a real day that has not passed and is at most ten years out; a turn
+  that ended in the last 30 days;
 - the same conversation, turn and quote is one suggestion for good. Its source
   (`chat:` and a hash of the three) is kept in the audit trail, so a replay
   files nothing, even after you dismissed the card and its words were cleared;
+- once you turn one down (Dismiss, or Reject on its card), nothing more of
+  that kind is taken from that turn, however the quote is cut;
 - at most 3 goals and 10 commitments a day.
 
+Known, the day's limit and the filing happen as one step, under one lock on
+the source: the same suggestion posted many times at once is one card and one
+of the day's slots, and a card that fails to file takes none.
+
 Then it files a card (`src/goals/candidates.ts`), from a chat origin, personal,
-kept 7 days, with your quote as its provenance. The database refuses such a card
+kept 7 days, with your quote as its provenance. Each card is marked
+consequential: it asks on its own, with its own touch, and is never part of
+Approve All, so what a later table rests on is cards you read one at a time. The database refuses such a card
 without your quoted words (`proposal_quote_check`, part 1), and the card is
 checked once more when it runs: its origin, its template, and that its source
 is the hash of that conversation, turn and quote.
@@ -460,22 +472,35 @@ is the hash of that conversation, turn and quote.
   Goal form with your words in it, and one signature (`goal.activate`, through
   `POST /v1/goals/:id/start`) starts it. Made a goal before its own card was
   approved, that card is set aside in the same step; made a goal after, the
-  goal the card added is the one started, never a second one.
+  goal the card added is the one started, never a second one. A waiting card
+  whose goal already exists, in any status, is not listed as waiting, and
+  Dismiss sets that card aside.
 - **Add a Commitment from Chat** (`world.commitment.from_chat`): approving it
   adds an unconfirmed commitment. The world model holds no word of it: your
   quote is kept apart, as a calendar title is, and cleared after a week; what
-  stays is its hash and the day you named. No route on `world:read` serves it
+  stays is its hash and the day Flint read. No route on `world:read` serves it
   (chat's tools cannot read it, by id or in a count), and it can never stand
   behind a person: people come from calendar events only.
 
 A new suggestion that shares two content words with an active goal's title asks
 for that goal's review, as a watched item's change does, within its 12 a day.
 
-`promotion-table --phase p3c` is the table that lets both land without asking
-(see "Ending the trial week"). Until you sign it, every suggestion is a card.
-Signed, the intake adds them directly under the rule's caps and its own (3 and
-10 a day, whatever cap a rule carries), and a goal it adds is still only a
-suggestion.
+**Nothing from chat runs without a card yet.** `promotion-table --phase p3c` is
+the table that would let them land without asking (see "Ending the trial
+week"), and for now it refuses with one sentence: "Suggestions from chat stay
+cards for now: the database does not yet hold a goal Flint adds from chat to a
+card you signed." The database's quote rule covers a card, not a goal added
+without one. Until a small migration adds that floor (one constant in
+`src/goals/candidates.ts` flips with it), the command files nothing, and the
+intake files a card whatever a rule says: a rule that reached the table some
+other way still lets nothing from chat run on its own. With the floor in
+place and the table signed, the intake adds them under the rule's caps and its
+own (3 and 10 a day, whatever cap a rule carries), and a goal it adds is still
+only a suggestion.
+
+The Suggested tab reads each row against the panel's contract and leaves out
+one that does not fit (a title stored before a rule tightened, say), with a
+count in the log: one bad row never takes the tab, or the Finished tab, down.
 
 ### The P3 report
 
@@ -502,8 +527,10 @@ yet), with the numbers behind it:
 5. started goals without your signed approval behind their latest change;
 6. reviews without their goal's forecast in the ledger;
 7. suggestions from chat without your own quoted words (must be 0), with how
-   many you approved and rejected and how many expired, and how many a signed
-   rule added with no card;
+   many you approved, how many you made into goals yourself (Make It a Goal
+   on one still waiting, which sets its card aside: that is a yes, and is
+   counted as one, not as a rejection), how many you rejected and how many
+   expired, and how many a signed rule added with no card;
 8. the size of the goals block on the chat turns that carried it, by day: the
    mean and the largest, which must stay within 300 tokens.
 
@@ -561,12 +588,17 @@ waiting and this command did not file it, or it carries other words than the
 command's, the command stops and names that card, for you to reject first.
 
 `--phase p3c` is a second, later table, for what Flint takes from your chats
-(see "Suggestions from chat"): it lets a goal land in Suggested without asking,
-3 a day at most, and a commitment land unconfirmed, 10 a day at most. It needs
-the first of those cards to be 14 days old, and some of them filed within those
-14 days. Its card is "Let Flint Take Goals and Commitments from Chat", and its
-details count what you did with the suggestions: "Since Oct 1, Flint suggested
-9 goals and 4 commitments from chat: you approved 6, rejected 5, and 2
+(see "Suggestions from chat"). It is refused for now, with the sentence quoted
+there, until the database holds a goal from chat to a signed card. When that
+lands: it lets a goal land in Suggested without asking, 3 a day at most. The
+commitments row (unconfirmed, 10 a day at most) is offered only when Flint
+suggested a commitment in the 14 days it looks at, so with commitments
+switched off on the server the table is goals alone. It needs the first of
+those cards to be 14 days old, and some of them filed within those 14 days.
+Its card is "Let Flint Suggest Goals from Chat" (or "Let Flint Take Goals and
+Commitments from Chat" with both rows), and its details count what you did
+with the suggestions: "Since Oct 1, Flint suggested 9 goals and 4 commitments
+from chat: you approved 6, made 2 into goals yourself, rejected 3, and 2
 expired." A suggested goal is never active until you start it with your
 signature.
 
@@ -660,7 +692,16 @@ they are. This is also the first step of rolling P3 back.
   out, as the `world:read` routes do, unless the brain being asked is on this
   Mac: one may come from a turn that stays here.
 - **A view of commitments in the console** is still to build: an approved
-  commitment from chat is kept, and shown nowhere yet but on its card.
+  commitment from chat is kept, and shown nowhere yet but on its card, and
+  nothing removes one. That is why commitments have their own switch on the
+  server (`FLINT_EXTRACT_COMMITMENTS`), off: turn it on when a panel lists them
+  and a route forgets one.
+- **The database's floor under a goal from chat** is still to add: a small
+  migration that holds a proposed goal whose source is a chat to a card you
+  signed (or to a signed rule and your quoted words), as `proposal_quote_check`
+  holds the card. Until it lands `promotion-table --phase p3c` refuses and the
+  intake always files a card (`CHAT_FLOOR_IN_DATABASE` in
+  `src/goals/candidates.ts`; the migration flips it).
 - **A later part** must add a way to forget a goal's words (a signed
   `goal.forget`). Goals, plans, steps and reviews have no forget path yet.
 
@@ -672,16 +713,19 @@ they are. This is also the first step of rolling P3 back.
   that the quote is in it. That check is the server's, on your own message
   only. What the runtime adds is its own shape rules, the one-suggestion-per-
   source rule, the day's limit and the database's floor.
-- **A dismissed suggestion is final.** Dismiss asks first; after it, the same
-  words from the same turn are never suggested again. The same goal said again
-  in a later chat is a new suggestion.
+- **A dismissed suggestion is final for that turn.** Dismiss asks first; after
+  it, nothing more of that kind is suggested from what you said that time. The
+  same goal said again in a later chat is a new suggestion, and the Dismiss
+  question says so.
+- **One sentence is one suggestion.** A goal and a commitment in the same
+  sentence come to one card, whichever the model named first.
 - **What a signed rule adds leaves no card.** Once you sign the later table, a
   suggestion is added with an audit entry (its source, the day you said it, the
   rule that let it) and no card to read. The P3 report counts those apart, and
   its seventh criterion rests on the cards.
 - **A commitment's words last a week.** Your quote is kept beside the
   commitment for 7 days, then cleared with the rest of the kept text; the
-  commitment and the day you named stay. Forgetting the commitment clears its
+  commitment and the day Flint read stay. Forgetting the commitment clears its
   words at once, but its approved card keeps them until the cleanup clears that
   card (7 days after it ran).
 - **A refused suggestion is not asked again.** One refused because a rule

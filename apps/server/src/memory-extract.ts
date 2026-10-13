@@ -520,7 +520,7 @@ export interface ExtractorOptions {
   commitments?: boolean;
   /** One suggestion whose quote is Will's own: hand it on, and say what became of it. Its words are never logged. */
   onCandidate?: (s: ChatSuggestion) => Promise<SuggestionOutcome>;
-  /** Will's zone, for "has the day he named passed". */
+  /** Will's zone, for "has the day the model read passed". */
   tz?: string;
   now?: () => number;
 }

@@ -1498,8 +1498,8 @@ function apprOpSays(o,at,took){o=o||{};at=at||'';took=took||function(){};
 function apprCount(n,one,many){return n+' '+(n===1?one:many||one+'s');}
 /* A card's own words for some of its keys, where the stored name would not read: by the kind of card. */
 var APPR_KEYS_GOAL={successCriteria:'Check',check:'',links:'Link',ops:'Change',from:'Current',to:'New',dueAt:'Due',horizonAt:'Finish By',reviewCadence:'Review Every',dependsOn:'Waits On',watchPaths:'Watches',ordinal:'Order'};
-/* A suggestion from chat (part 5): what Will said, when, and the day he named. */
-var APPR_KEYS_SAID={title:'Goal',text:'Commitment',quote:'You Said',saidAt:'Said On',dueOn:'Due',dueAt:'Due'};
+/* A suggestion from chat (part 5): what Will said and when. The day is Flint's reading of his words, and is said so. */
+var APPR_KEYS_SAID={title:'Goal',text:'Commitment',quote:'You Said',saidAt:'Said On',dueOn:'Day Flint Read',dueAt:'Due'};
 /* A list whose items are numbered under one word ("Link 1") goes by that word's plural when it is empty: "Links: None". */
 var APPR_MANY={successCriteria:'Checks',links:'Links',ops:'Changes',people:'People',rows:'Rules'};
 var APPR_KEYS_RULE={rows:'Rule',pattern:'Action',dailyCap:'Limit a Day',expiresAt:'Last Day'};
@@ -1553,7 +1553,8 @@ function apprDetails(p){p=p||{};var a=p.args&&typeof p.args==='object'&&!Array.i
     /* His own words, whole: in the sentence when they can sit in one, else under it in full. */
     if(typeof a.quote==='string'&&a.quote){t=q('quote',a.quote,300);says.push(t?apprEnds('You said '+t):'What you said is listed below.');}
     if(typeof a.saidAt==='string'&&a.saidAt)says.push('You said it on '+when('saidAt',a.saidAt)+'.');
-    if(typeof a.dueOn==='string'&&a.dueOn)says.push('The day you named is '+when('dueOn',a.dueOn)+'.');
+    /* The day is the local model's reading of what he said, never his own word for it: the card says whose it is. */
+    if(typeof a.dueOn==='string'&&a.dueOn)says.push('Flint read the day as '+when('dueOn',a.dueOn)+'.');
     if(a.dueAt)says.push('It’s due '+when('dueAt',a.dueAt)+'.');}
   else if(f==='world.person.create'){names=APPR_KEYS_PERSON;
     (Array.isArray(a.people)?a.people:[]).forEach(function(x,i){x=x&&typeof x==='object'?x:{};var at='people.'+i,nm=apprInline(x.name,80)?x.name:'',em=apprInline(x.email,120)?x.email:'';
@@ -1629,8 +1630,8 @@ function apprGoalFacts(p){var a=p.args||{},f=[];var when=function(t){return t?ap
   else if(p.fullName==='goal.criteria_change')f=[['Goal',a.title],['Checks',apprChecks(a.successCriteria)]];
   else if(p.fullName==='goal.horizon_change')f=[['Goal',a.goalTitle],['Finish By',a.goalTitle?when(a.horizonAt):''],['Review Every',apprCadence(a.reviewCadence)]];
   else if(p.fullName==='plan.change')f=[['Goal',a.goalTitle],['Changes',apprChanges(a.ops)],['Filed By',apprFrom(p.origin)]];
-  else if(p.fullName==='goal.propose')f=[['Goal',a.title],['You Said',a.quote],['Due',typeof a.dueOn==='string'&&a.dueOn?apprWhenSays(a.dueOn):'']];
-  else if(p.fullName==='world.commitment.from_chat')f=[['Commitment',a.text],['You Said',a.quote],['Due',typeof a.dueOn==='string'&&a.dueOn?apprWhenSays(a.dueOn):a.dueAt?when(a.dueAt):'']];
+  else if(p.fullName==='goal.propose')f=[['Goal',a.title],['You Said',a.quote],['Day Flint Read',typeof a.dueOn==='string'&&a.dueOn?apprWhenSays(a.dueOn):'']];
+  else if(p.fullName==='world.commitment.from_chat')f=[['Commitment',a.text],['You Said',a.quote],typeof a.dueOn==='string'&&a.dueOn?['Day Flint Read',apprWhenSays(a.dueOn)]:['Due',a.dueAt?when(a.dueAt):'']];
   else f=[['Goal',a.goalTitle],['Filed By',apprFrom(p.origin)],['Expires',p.expiresAt?apprDate(p.expiresAt):'']];
   /* A card whose args were cleared keeps only what it still knows. */
   return f.filter(function(x){return typeof x[1]==='string'&&x[1];}).slice(0,3);}
@@ -1745,7 +1746,8 @@ function apprFacts(p){var a=p.args||{},f=[];
   if(p.expiresAt&&f.length<3)f.push(['Expires',apprDate(p.expiresAt)]);
   return f.slice(0,3);}
 /* Asks on its own, never in Approve All, with a fresh touch: outside text, money, every card marked consequential
-   (each goal card, a plan change that is not a review's small one: apprSmallPlan; turning predictions on), and every rule card that would let
+   (each goal card, a plan change that is not a review's small one: apprSmallPlan; turning predictions on; what chat
+   suggested, which the runtime files with the mark so that each one is read before it is signed), and every rule card that would let
    anything run on its own. That last one is read from the card's rows, whatever its mark says: a card that widens what
    Flint may do alone is never signed in a batch, even one a server sent without the mark. So are the cards that change
    what Flint reads and how it sorts it (APPR_ASKS), by their names; and so is any card that does not show all of
@@ -1977,20 +1979,25 @@ function goalRender(list,d){list.textContent='';var goals=d.goals||[],waiting=d.
 /* One suggestion: its short title, when Will said it, his own words in quotation marks (whole, never cut), and what he can
    do with it. Make It a Goal opens the New Goal form with what he said already in it; nothing starts until he signs it there. */
 function goalSaidLine(x){return x&&x.saidAt?'You said this in a chat on '+gDay(x.saidAt)+'.':'You said this in a chat.';}
-function goalSuggestion(x){var row=gEl('div','row two gwrap gsug');var l=gEl('span','lbl');l.appendChild(gEl('b',null,x.title));l.appendChild(gEl('span',null,goalSaidLine(x)));
+/* A title starts with a capital letter, whoever wrote it. */
+function gCap(s){s=String(s||'');return s.charAt(0).toUpperCase()+s.slice(1);}
+/* The day a suggestion carries is Flint's reading of his words: said so wherever it is used, and only while it is still ahead. */
+function goalDayRead(x){return x&&x.dueOn&&x.dueOn>gLocalDay()?x.dueOn:'';}
+function goalSuggestion(x){var row=gEl('div','row two gwrap gsug');var l=gEl('span','lbl');l.appendChild(gEl('b',null,gCap(x.title)));l.appendChild(gEl('span',null,goalSaidLine(x)));
   l.appendChild(gEl('span','gquote','“'+String(x.quote||'')+'”'));row.appendChild(l);
   var act=gEl('span','gsact');
   act.appendChild(gBtn('btn','Dismiss',function(){goalDismissAsk(x);}));
   act.appendChild(gBtn('btn pri','Make It a Goal',function(){goalFromSuggestion(x);}));row.appendChild(act);return row;}
-/* Dismiss asks in place first, in the footer: a dismissed suggestion is not suggested again, and there is no undo. */
+/* Dismiss asks in place first, in the footer: there is no undo. What it promises is what is true: nothing more is taken
+   from what he said that time; the same idea said again in a later chat is a new suggestion. */
 function goalDismissAsk(x){if(GOALS.busy)return;var f=goalFoot();f.hidden=false;var t=gEl('span','note gconfirm');t.appendChild(gEl('b',null,'Dismiss This Suggestion'));
-  t.appendChild(gEl('span',null,'Flint won’t suggest '+gQuote(x.title)+' again.'));f.appendChild(t);
+  t.appendChild(gEl('span',null,'Flint sets aside '+gQuote(gCap(x.title))+'. If you say it again in a later chat, Flint may suggest it again.'));f.appendChild(t);
   f.appendChild(gBtn('btn','Cancel',function(){goalFoot();}));
   f.appendChild(gBtn('btn pri','Dismiss',function(b){goalPlain('/goals/'+encodeURIComponent(x.goalId)+'/dismiss',{},b,function(){GOALS.note='You dismissed it.';goalList('suggested');});}));}
-/* The New Goal form for a suggestion: its title, his words as why it matters, and the day he named when it is still ahead.
+/* The New Goal form for a suggestion: its title, his words as why it matters, and the day Flint read when it is still ahead.
    It is a form of its own, never the kept New Goal draft. */
-function goalFromSuggestion(x){GOALS.form={mode:'new',suggestion:x,draftKey:null,title:String(x.title||''),why:String(x.quote||''),checks:[goalCheck()],
-    finishBy:(x.dueOn&&x.dueOn>gLocalDay())?x.dueOn:'',cadence:'P1W',steps:[{title:'',due:''}],done:false};goalNav('form');goalForm('check:0:text');}
+function goalFromSuggestion(x){GOALS.form={mode:'new',suggestion:x,draftKey:null,title:gCap(x.title),why:String(x.quote||''),checks:[goalCheck()],
+    finishBy:goalDayRead(x),cadence:'P1W',steps:[{title:'',due:''}],done:false};goalNav('form');goalForm('check:0:text');}
 function goalRow(title,line,tags,open){var row=gEl('div','row two click gwrap');row.tabIndex=0;var l=gEl('span','lbl');l.appendChild(gEl('b',null,title));l.appendChild(gEl('span',null,line));row.appendChild(l);
   (tags||[]).forEach(function(t){row.appendChild(t);});row.appendChild(gIcon('chev'));
   row.onclick=open;row.onkeydown=function(e){if(e&&e.key==='Enter')open();};return row;}
@@ -2261,7 +2268,8 @@ function goalForm(focus){var f=GOALS.form;if(!f)return;goalHead(f.mode==='edit'?
   if(f.done){goalFormDone(body);return;}
   var form=gEl('div','gform');
   /* From a suggestion: say where its words came from, above the fields they fill. */
-  if(f.suggestion){var from=gEl('p','gnote',goalSaidLine(f.suggestion)+' Add how you’ll know it’s done, then make it a goal.');from.id='goalfromchat';form.appendChild(from);}
+  if(f.suggestion){var read=goalDayRead(f.suggestion);
+    var from=gEl('p','gnote',goalSaidLine(f.suggestion)+(read?' Flint read the day as '+gDay(gAt(read,12,0))+'.':'')+' Add how you’ll know it’s done, then make it a goal.');from.id='goalfromchat';form.appendChild(from);}
   form.appendChild(gEl('div','gsh','Goal'));var g1=gEl('div','group');
   var r1=gEl('div','formrow');var title=goalField('Name','input','Run a half marathon',120);gKey(title.input,'name');title.input.value=f.title;title.input.oninput=function(){f.title=title.input.value;};r1.appendChild(title.wrap);g1.appendChild(r1);
   var r2=gEl('div','formrow');var why=goalField('Why It Matters','textarea','Optional',1000);gKey(why.input,'why');why.input.value=f.why;why.input.oninput=function(){f.why=why.input.value;};r2.appendChild(why.wrap);g1.appendChild(r2);

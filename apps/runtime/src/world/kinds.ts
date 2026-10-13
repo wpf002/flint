@@ -85,7 +85,7 @@ export const STATE: Record<string, z.ZodTypeAny> = {
  * refuses a chat key): only world.commitment.from_chat's executor writes one,
  * from a card Will approved or under a rule he signed. Unconfirmed, with no
  * times, no attendees and no title: his words are in EntityText, and here only
- * their hash and the day he named, if he named one.
+ * their hash and the day Flint read in them, if it read one.
  */
 export const CHAT_COMMITMENT = z
   .object({

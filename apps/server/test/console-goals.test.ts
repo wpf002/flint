@@ -1629,7 +1629,7 @@ describe('the Suggested tab', () => {
     expect(calls.length).toBe(before);
   });
 
-  it('Make It a Goal opens the New Goal form with his words in it: the title, why it matters, and the day he named', async () => {
+  it('Make It a Goal opens the New Goal form with his words in it: the title, why it matters, and the day Flint read, said as Flint’s reading', async () => {
     suggested(two());
     await openSuggested();
     rows()[0]!.button('Make It a Goal').onclick!();
@@ -1641,7 +1641,9 @@ describe('the Suggested tab', () => {
     expect(body().field('Why It Matters').value).toBe(QUOTE);
     expect(body().field('Finish By').value).toBe(day(later(120)));
     expect(body().field('Check').value).toBe('');
-    expect(body().shown()).toContain(`You said this in a chat on ${says(SAID_ON)}. Add how you’ll know it’s done, then make it a goal.`);
+    // The day in Finish By is the local model's reading of his words, never his own word for it: the form says whose it is.
+    expect(body().shown()).toContain(`You said this in a chat on ${says(SAID_ON)}. Flint read the day as ${says(later(120))}. Add how you’ll know it’s done, then make it a goal.`);
+    expect(body().shown()).not.toMatch(/you named/i);
     // It is this suggestion's form, not the kept New Goal draft: no Clear, and the draft is not touched.
     expect(ids.goalclear!.hidden).toBe(true);
     expect(run('GOALS.draft')).toBeNull();
@@ -1651,11 +1653,34 @@ describe('the Suggested tab', () => {
     foot().button('Cancel').onclick!();
     await settle();
     expect(rows()).toHaveLength(2);
-    // A day that is today, or has passed, is not put in the form; a suggestion with no day has none.
+    // A day that is today, or has passed, is not put in the form; a suggestion with no day has none. Then the form says nothing of a day.
     for (const s of [one({ dueOn: day(new Date()) }), one({ dueOn: day(later(-3)) }), one({ dueOn: null })]) {
       run(`goalFromSuggestion(${JSON.stringify(s)})`);
       expect(body().field('Finish By').value).toBe('');
+      expect(body().shown()).toContain(`You said this in a chat on ${says(SAID_ON)}. Add how you’ll know it’s done, then make it a goal.`);
+      expect(body().shown()).not.toContain('Flint read the day');
     }
+  });
+
+  it('a title starts with a capital letter, on the row, in the form and in the Dismiss question, whoever wrote it; his words are shown in his own characters', async () => {
+    // A row stored before the server gave titles their capital, with a quote in his own marks (a curly apostrophe, a dash, an accent).
+    const his = 'I’ll finish the café’s “winter menu” — all of it — before the 1st';
+    suggested([one({ title: 'finish the winter menu', quote: his })]);
+    await openSuggested();
+    const lines = rows()[0]!.children[0]!.children.map((c) => c.textContent);
+    expect(lines[0]).toBe('Finish the winter menu');
+    expect(lines[2]).toBe(`“${his}”`);
+    rows()[0]!.button('Dismiss').onclick!();
+    expect(foot().shown()).toContain('“Finish the winter menu”');
+    foot().button('Cancel').onclick!();
+    rows()[0]!.button('Make It a Goal').onclick!();
+    expect(body().field('Name').value).toBe('Finish the winter menu');
+    // Why It Matters starts as his words, character for character.
+    expect(body().field('Why It Matters').value).toBe(his);
+    // Only the first letter is touched: a name inside the title keeps its own letters.
+    expect(run(`gCap('visit iOS meetup in São Paulo')`)).toBe('Visit iOS meetup in São Paulo');
+    expect(run(`gCap('')`)).toBe('');
+    expect(run(`gCap('Émile’s book')`)).toBe('Émile’s book');
   });
 
   it('one signature: it posts the suggestion’s own start route, then signs exactly the args it showed; the goal stays one Flint suggested', async () => {
@@ -1726,11 +1751,13 @@ describe('the Suggested tab', () => {
       return c.url === '/goals?tab=suggested' ? { status: 200, body: { tab: 'suggested', goals: [], waiting: [], reviews: 'off', suggestions: left } } : undefined;
     });
     await openSuggested();
-    // It asks first, in the footer, naming the one it is about: a dismissed suggestion does not come back.
+    // It asks first, in the footer, naming the one it is about. It promises what is true and no more: this one is set aside,
+    // and the same idea said again in a later chat may be suggested again.
     rows()[0]!.button('Dismiss').onclick!();
     await settle();
     expect(posted()).toEqual([]);
-    expect(foot().shown()).toContain('Dismiss This SuggestionFlint won’t suggest “Run a half marathon” again.');
+    expect(foot().shown()).toContain('Dismiss This SuggestionFlint sets aside “Run a half marathon”. If you say it again in a later chat, Flint may suggest it again.');
+    expect(foot().shown()).not.toMatch(/won’t suggest|never/);
     expect(foot().buttons()).toEqual(['Cancel', 'Dismiss']);
     foot().button('Cancel').onclick!();
     expect(foot().buttons()).toEqual([]);
@@ -1775,7 +1802,8 @@ describe('the Suggested tab', () => {
   });
 
   it('its own lines are plain sentences by the note rules, and its buttons Title Case', () => {
-    for (const line of ['You said this in a chat on Oct 8.', 'You said this in a chat.', 'You said this in a chat on Oct 8. Add how you’ll know it’s done, then make it a goal.', 'You dismissed it.', 'Goals Flint suggests from your chats show here.', 'Flint won’t suggest “Run a half marathon” again.']) {
+    for (const line of ['You said this in a chat on Oct 8.', 'You said this in a chat.', 'You said this in a chat on Oct 8. Add how you’ll know it’s done, then make it a goal.', 'You dismissed it.', 'Goals Flint suggests from your chats show here.', 'Flint sets aside “Run a half marathon”. If you say it again in a later chat, Flint may suggest it again.',
+      'You said this in a chat on Oct 8. Flint read the day as Mar 11, 2027. Add how you’ll know it’s done, then make it a goal.']) {
       expect(noteProblems('Suggested', line), line).toEqual([]);
       expect(sentence(line), line).toBe(true);
     }

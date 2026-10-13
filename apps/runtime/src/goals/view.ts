@@ -247,7 +247,7 @@ const INTAKE_ACTOR = 'runtime:goals.candidates';
  * The Suggested tab's rows (part 5), oldest first: every proposed goal Flint
  * added from chat, then every suggestion whose own card still waits (it has no
  * goal row yet). Each with Will's quote, the day he said it (from the intake's
- * audit entry, which is kept; a card's args are not) and the day he named.
+ * audit entry, which is kept; a card's args are not) and the day Flint read.
  * A row that does not fit its contract is left out, never shown half-read.
  */
 async function suggestions(db: Db | Tx, proposed: readonly GoalRecord[], now: Date, tz: string): Promise<Suggestion[]> {

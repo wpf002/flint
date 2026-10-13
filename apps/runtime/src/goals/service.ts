@@ -146,7 +146,8 @@ export async function pauseGoal(db: Db, id: string, now = new Date()): Promise<v
 /**
  * Dismiss a goal Flint suggested: it is never started. One whose own card still
  * waits has no goal row yet: dismissing it sets that card aside (unsigned, with
- * a fixed sentence), and the same words are never suggested again.
+ * a fixed sentence), and nothing more of that kind is taken from that turn
+ * (the same idea said again in a later chat is a new suggestion).
  */
 export async function dismissGoal(db: Db, id: string, now = new Date()): Promise<void> {
   /** Set aside every card of this suggestion that still waits (one, under the intake's lock). True when there was one. */
