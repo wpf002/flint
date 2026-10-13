@@ -13,7 +13,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, generateKeyPairSync, sign as signRaw } from 'node:crypto';
-import { digestOf, type TierDecision } from '@flint/policy';
+import { POLICY_CHANGE_SHAPE, digestOf, type TierDecision } from '@flint/policy';
 import type { Tool, Turn } from '@flint/core';
 import type { GateRequest } from '@flint/mcp';
 import { ActionQueue, keyOf, outcomeOf } from '../src/actions';
@@ -610,6 +610,55 @@ describe('approval routes', () => {
     // A server with no approver role says how to set it up.
     await serve(baseDeps());
     expect(await post('/approvals/begin', { proposalId: id })).toEqual({ status: 501, body: { error: 'Approvals aren’t set up on this server. Set FLINT_DB_APPROVER_URL, then restart it.' } });
+    server?.close();
+  });
+
+  it('a rule card is signed only when it says one thing: rows, or the rules it switches off. Both at once, or neither, starts no signature (a reject still can)', async () => {
+    const dir = tmp();
+    const code = join(dir, 'code');
+    writeFileSync(code, 'abcd-efgh-ijkl-mnop\n');
+    const mem = memoryStore();
+    const off = [{ id: 'apbrake01', pattern: 'goal.propose', tier: 'approval' }];
+    const rows = [{ pattern: 'mcp:hive.*', tier: 'alone', expiresAt: '2027-04-05T00:00:00.000Z' }];
+    // The reviewed card: it names a rule to switch off, and adds one that lets every tool of a server run on its own.
+    const proposal: Record<string, unknown> = { id: 'prmixed', origin: 'cli', action: 'policy.change', args: { off, rows }, argsDigest: digestOf({ off, rows }), tainted: false, status: 'pending' };
+    const rt = fakeRuntime(proposal);
+    const proposals = new RuntimeProposals({ runtime: () => RT, spoolDir: tmp(), fetchImpl: rt.fetchImpl });
+    await serve(baseDeps({ approvals: new Approvals({ store: mem.store, enrollCodeFile: code }), proposals }));
+    const k = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const b = await post('/approvals/enroll/begin', { code: 'abcd-efgh-ijkl-mnop', label: 'Mac' });
+    await post('/approvals/enroll/finish', { challengeId: b.body.challengeId, factor: 'secure_enclave', publicKey: k.publicKey.export({ format: 'der', type: 'spki' }).toString('base64url'), signature: signRaw('sha256', Buffer.from(String(b.body.challenge), 'base64url'), k.privateKey).toString('base64url') });
+    const begin = (args: unknown, more: Record<string, unknown> = {}) => {
+      proposal.args = args;
+      proposal.argsDigest = digestOf(args);
+      return post('/approvals/begin', { proposalId: 'prmixed', argsDigest: digestOf(args), ...more });
+    };
+    const REFUSED = { status: 409, body: { error: POLICY_CHANGE_SHAPE } };
+    expect(POLICY_CHANGE_SHAPE).toBe('It can’t be signed: a rule card adds rules or switches rules off, never both.');
+    // The digest is right and the console shows the same args: it is the card's shape that is refused.
+    expect(await begin({ off, rows })).toEqual(REFUSED);
+    for (const args of [{ off, rows: [] }, { off: [], rows }, { off: [] }, { rows: [] }, { off, note: 'x' }, { rows, also: 1 }, { off: off[0] }, { rows: 'all' }, {}, { switchOff: off }, [{ off }]]) {
+      expect(await begin(args), JSON.stringify(args)).toEqual(REFUSED);
+    }
+    // Turning such a card down is always allowed: that carries nothing out.
+    expect((await begin({ off, rows }, { decision: 'reject' })).status).toBe(200);
+    // One thing: signed as before.
+    for (const args of [{ off }, { rows }, { rows: [...rows, ...rows] }]) {
+      const begun = await begin(args);
+      expect(begun.status, JSON.stringify(args)).toBe(200);
+      expect(begun.body).toHaveProperty('challenge');
+    }
+    // Any other action's card says what it likes.
+    proposal.action = 'world.source.enable';
+    expect((await begin({ off, rows })).status).toBe(200);
+    // And a card that changed between the two steps is not carried out on the signature begun for it (its args no
+    // longer hash to what was signed: the check that was there before).
+    proposal.action = 'policy.change';
+    const begun = await begin({ off });
+    proposal.args = { off, rows };
+    const finished = await post('/approvals/finish', { challengeId: begun.body.challengeId, credentialId: mem.creds[0]!.credentialId, signature: signRaw('sha256', Buffer.from(String(begun.body.challenge), 'base64url'), k.privateKey).toString('base64url') });
+    expect(finished).toMatchObject({ status: 409, body: { error: DOES_NOT_MATCH } });
+    expect(ran).toEqual([]);
     server?.close();
   });
 

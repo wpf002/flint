@@ -559,10 +559,12 @@ describe('asks on its own: read from what the card would sign, whatever mark it 
     const tightens = card([{ pattern: 'notify.push', tier: 'forbidden' }, { pattern: 'goal.review.local', tier: 'approval' }], 'x');
     expect(alone(tightens)).toBe(false);
     expect(alone({ ...tightens, consequential: true })).toBe(true);
-    // Rows that are not rows change nothing.
-    expect(alone({ fullName: 'policy.change', args: { rows: 'alone' } })).toBe(false);
+    // Rows that are not rows let nothing run.
     expect(alone({ fullName: 'policy.change', args: { rows: [null, 7, 'alone'] } })).toBe(false);
-    expect(alone({ fullName: 'policy.change', args: {} })).toBe(false);
+    // A rule card that is not a list of rows at all is not one Flint files (a rule card says one thing: rows, or the
+    // rules it switches off). Whatever it is, it is never signed in a batch: it asks on its own.
+    expect(alone({ fullName: 'policy.change', args: { rows: 'alone' } })).toBe(true);
+    expect(alone({ fullName: 'policy.change', args: {} })).toBe(true);
     // The rule is about rule cards: another card with such a row inside it is not one.
     expect(alone({ fullName: 'runtime.inbox_recent', args: { rows: [{ pattern: 'x', tier: 'alone' }] } })).toBe(false);
   });

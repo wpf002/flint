@@ -10,6 +10,14 @@
  * that says what kind, the rules by name, each row as a sentence under Show
  * Details, every signed field on screen (the ids under REFERENCES, exactly),
  * and it always asks on its own with a fresh touch, whatever mark it carries.
+ *
+ * A rule card says ONE thing. Only a card whose sole key is `off`, holding a
+ * list that is not empty, reads as a switch-off. A card that carries `rows`
+ * as well (it would add a rule under a title that says rules end), an empty
+ * list, or anything beside the one list is shown as neither: a title that
+ * promises nothing, both halves under Show Details with each row said as
+ * ended or as added, and it asks on its own. The runtime files no such card
+ * and the server signs none; the console still never dresses one up.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -92,6 +100,8 @@ describe('the card that switches rules off', () => {
       expect(say(card(off)).alone, JSON.stringify(off)).toBe(true);
       expect(say(card(off, { consequential: false })).alone).toBe(true);
     }
+    // A rule with a limit of its own that ends has no limit to show: it is named, and no more.
+    expect(say(card([{ id: 'apbk', pattern: 'backup.local', tier: 'alone' }])).facts[0]).toEqual(['Switches Off', 'Backup']);
     // A card that adds rules is as it was: one that only tightens can be approved with the rest.
     const adds = { ...card([]), args: { rows: [{ pattern: 'goal.propose', tier: 'approval', expiresAt: '2027-04-05T00:00:00.000Z' }] } };
     expect(say(adds).alone).toBe(false);
@@ -115,7 +125,88 @@ describe('the card that switches rules off', () => {
     expect(odd.says).toEqual(['A rule ends. What it says is listed below.']);
     expect(odd.facts).toEqual(expect.arrayContaining([['Rule 1 Action', 'goal.propose'], ['Rule 1 Tier', 'Sometimes'], ['Rule 1 Note', 'Synthetic note']]));
     expect(odd.refs).toEqual([['Rule 1 ID', 'apbrake01']]);
-    expect(details(card([])).facts).toEqual([['Rules', 'None']]);
+  });
+
+  describe('a card that is not one thing', () => {
+    const UNTIL = '2027-04-05T00:00:00.000Z';
+    const WIDE = { pattern: 'mcp:hive.*', tier: 'alone', expiresAt: UNTIL };
+    const REVIEWS = { pattern: 'goal.review.local', tier: 'alone', dailyCap: 20, expiresAt: UNTIL };
+    const both = (off: unknown, rows: unknown, more: Record<string, unknown> = {}) => ({ ...card([]), args: { off, rows }, ...more });
+
+    it('the reviewed card, rows beside off: never "Switch Off", both halves named apart, every row said as ended or as added', () => {
+      const c = both([ALONE], [WIDE]);
+      const said = say(c);
+      expect(said.title).toBe('Change 2 Rules');
+      expect(said.title).not.toMatch(/Switch Off|Let /);
+      expect(said.sub).toBe('It adds rules and ends rules at once.');
+      expect(said.facts).toEqual([['Ends', 'Goal Reviews'], ['Adds', 'Every MCP Hive Action'], ['Filed By', 'You']]);
+      expect(said.alone).toBe(true);
+      expect(say({ ...c, consequential: false }).alone).toBe(true);
+      const d = details(c);
+      expect(d.says[0]).toBe('This rule ends: Goal reviews may run on their own.');
+      expect(d.says[1]).toMatch(/^This rule is added: .*may run on its own until /);
+      expect(d.says).toHaveLength(2);
+      // Nothing is "Rule 1" twice: what the sentences did not state is listed under which list it is in.
+      expect(d.refs).toEqual([['Ended Rule 1 ID', 'apalone03']]);
+      expect(d.facts).toEqual([['Added Rule 1 Action', 'mcp:hive.*']]);
+      for (const line of d.says) expect(noteProblems('Rule', line), line).toEqual([]);
+    });
+
+    it('a known promotion beside a switch-off is not titled as that promotion either', () => {
+      const said = say(both([BRAKE], [REVIEWS]));
+      expect(said.title).toBe('Change 2 Rules');
+      expect(said.facts.slice(0, 2)).toEqual([['Ends', 'Goal Suggestions from Chat'], ['Adds', 'Goal Reviews 20 a Day']]);
+      expect(details(both([BRAKE], [REVIEWS])).says).toEqual([
+        'This rule ends: You approve “Goal Suggestions from Chat” each time.',
+        expect.stringMatching(/^This rule is added: Goal reviews may run on their own, up to 20 a day, until /),
+      ]);
+    });
+
+    it('an empty list never reads as a switch-off or a promotion: not "Switch Off 0 Rules", and each empty list is said by name', () => {
+      // off: [] beside rows: the rows are what it does, and it is not a pure rows card either.
+      const empty = both([], [WIDE]);
+      expect(say(empty)).toMatchObject({ title: 'Change 1 Rule', sub: 'It changes what Flint may do on its own.', alone: true });
+      expect(say(empty).facts[0]).toEqual(['Adds', 'Every MCP Hive Action']);
+      expect(details(empty).facts).toEqual(expect.arrayContaining([['Ended Rules', 'None'], ['Added Rule 1 Action', 'mcp:hive.*']]));
+      expect(details(empty).says).toEqual([expect.stringMatching(/^This rule is added: /)]);
+      // rows: [] beside off.
+      const none = both([BRAKE], []);
+      expect(say(none)).toMatchObject({ title: 'Change 1 Rule', alone: true });
+      expect(say(none).facts[0]).toEqual(['Ends', 'Goal Suggestions from Chat']);
+      expect(details(none).facts).toEqual([['Added Rules', 'None']]);
+      // off alone and empty.
+      const nothing = card([]);
+      expect(say(nothing)).toMatchObject({ title: 'Change 0 Rules', sub: 'It changes what Flint may do on its own.', alone: true });
+      expect(say(nothing).facts[0]).toEqual(['Rules', 'None']);
+      expect(details(nothing).facts).toEqual([['Ended Rules', 'None']]);
+      for (const c of [empty, none, nothing]) expect(say(c).title).not.toMatch(/Switch Off/);
+    });
+
+    it('a key beside the one list, or a list that is not a list, is neither kind: it asks on its own and shows all it holds', () => {
+      const extra = { ...card([BRAKE]), args: { off: [BRAKE], also: 'Synthetic extra' } };
+      expect(say(extra)).toMatchObject({ title: 'Change 1 Rule', alone: true });
+      expect(details(extra).facts).toEqual(expect.arrayContaining([['Also', 'Synthetic extra']]));
+      expect(details(extra).says).toEqual(['This rule ends: You approve “Goal Suggestions from Chat” each time.']);
+      const beside = { ...card([]), args: { rows: [REVIEWS], note: 'Synthetic extra' } };
+      expect(say(beside)).toMatchObject({ title: 'Change 1 Rule', alone: true });
+      expect(say(beside).title).not.toMatch(/Let /);
+      for (const args of [{ off: BRAKE }, { off: 'all' }, { rows: 'goal.review.local' }, {}, { switchOff: [BRAKE] }]) {
+        const c = { ...card([]), args };
+        expect(say(c).title, JSON.stringify(args)).toBe('Change 0 Rules');
+        expect(say(c).alone, JSON.stringify(args)).toBe(true);
+        expect(details(c).withheld).toBe('');
+      }
+    });
+
+    it('a card that only adds rules is as it was', () => {
+      const adds = { ...card([]), args: { rows: [REVIEWS] } };
+      expect(say(adds).title).toBe('Let Goal Reviews Run on Their Own');
+      expect(say(adds).facts[1]).toEqual(['Limits', 'Goal Reviews 20 a Day']);
+      expect(details(adds).says).toEqual([expect.stringMatching(/^Goal reviews may run on their own, up to 20 a day, until /)]);
+      expect(details(adds).refs).toEqual([]);
+      const asks = { ...card([]), args: { rows: [{ pattern: 'goal.propose', tier: 'approval', expiresAt: UNTIL }] } };
+      expect(say(asks)).toMatchObject({ title: 'Ask Before 1 Action', alone: false });
+    });
   });
 
   it('every line is Will’s standard: Title Case titles and labels, one complete sentence, nothing internal in the card’s own lines', () => {

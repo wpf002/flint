@@ -1571,10 +1571,25 @@ function apprPromotes(rows){
    its own, 'approval' has Flint ask each time, 'forbidden' stops it. Rows that do not all say the same, or say
    nothing this panel knows, are 'mixed': such a card is never titled as letting something run. */
 function apprRowsKind(rows){rows=rows||[];var kind='';for(var i=0;i<rows.length;i++){var t=rows[i]&&rows[i].tier;t=t==='alone'||t==='approval'||t==='forbidden'?t:'mixed';if(kind&&kind!==t)return 'mixed';kind=t;}return kind||'mixed';}
-/* A rule card that switches rules off (policy.change with `off`): the rows it names, each by its id, what it covers and
-   what it does. It adds nothing. It is the only way a rule that holds an action back goes off (the runtime cannot
-   switch one off itself), so such a card always asks on its own (apprAlone), whatever its mark says. */
-function apprOffRows(p){var a=(p&&p.args)||{};return p&&p.fullName==='policy.change'&&Array.isArray(a.off)?a.off:null;}
+/* What a rule card (policy.change) says, read from its args and never from a label. It says ONE thing: 'rows' when
+   its only key is `rows`, holding a list that is not empty (it adds rules); 'off' when its only key is `off`, holding
+   a list that is not empty (it switches rules off). Anything else is 'other': both at once, an empty list, a key
+   beside them, no list at all. The runtime files and the server signs only the first two. A card of the third kind
+   is never titled as either: it shows both halves under a title that promises nothing, each row labelled as ended or
+   as added, and it always asks on its own. (A card titled "Switch Off 1 Rule" that also added a rule is what this
+   keeps from ever being shown.) */
+function apprRuleKind(p){if(!p||p.fullName!=='policy.change')return '';var a=p.args;
+  if(!a||typeof a!=='object'||Array.isArray(a))return 'other';var keys=Object.keys(a),k=keys[0];
+  return keys.length===1&&(k==='rows'||k==='off')&&Array.isArray(a[k])&&a[k].length>0?k:'other';}
+/* The rows a switch-off card names, each by its id, what it covers and what it does; null for any other card. It is
+   the only way a rule that holds an action back goes off (the runtime cannot switch one off itself), so such a card
+   always asks on its own (apprAlone), whatever its mark says. */
+function apprOffRows(p){return apprRuleKind(p)==='off'?p.args.off:null;}
+/* Both lists of a rule card of the third kind, each as a list (whatever the card holds under those names). */
+function apprBoth(p){var a=p&&p.args&&typeof p.args==='object'&&!Array.isArray(p.args)?p.args:{};
+  return {rows:Array.isArray(a.rows)?a.rows:[],off:Array.isArray(a.off)?a.off:[]};}
+/* A switch-off's rows as the Limits fact names rules: by name alone (a rule that ends has no limit to show). */
+function apprOffNames(off){return apprLimits((off||[]).map(function(r){r=r||{};return {pattern:r.pattern,tier:r.tier==='alone'?'approval':r.tier};}));}
 /* What ending those rules means, as the card's one sentence: read from what the rules do, never from a label. */
 function apprOffSub(off){var kind=apprRowsKind(off),one=off.length===1,what=one?'a rule that ':'rules that ';
   if(kind==='alone')return 'This ends '+what+(one?'lets':'let')+' Flint act on its own.';
@@ -1656,9 +1671,9 @@ function apprScopeInto(sc,path,says,took){if(!sc||typeof sc!=='object'||Array.is
     if(words){took(path+'.'+k);says.push('It covers only these '+label+': '+list.map(apprShown).join(', ')+'.');}else below=true;});
   if(below)says.push('It covers only part of what it names, listed below.');}
 /* A rule card's sentences, and (through `took`) which of its fields they state. */
-function apprRulesInto(a,says,took){var rows=a&&Array.isArray(a.rows)?a.rows:[];
+function apprRulesInto(a,says,took,lead){var rows=a&&Array.isArray(a.rows)?a.rows:[];
   rows.forEach(function(r,i){r=r&&typeof r==='object'?r:{};var at='rows.'+i,pat=String(r.pattern||'');
-    says.push(apprRuleSays(r));
+    says.push((lead||'')+apprRuleSays(r));
     /* A rule this panel has words for is named by them. Any other is named in words too, and given as written below. */
     if(typeof r.pattern==='string'&&(apprRule(pat)||apprGet(APPR_TOOLS,'runtime.'+pat)))took(at+'.pattern');
     if(r.tier==='alone'||r.tier==='approval'||r.tier==='forbidden')took(at+'.tier');
@@ -1791,6 +1806,8 @@ var APPR_KEYS_SAID={title:'Goal',text:'Commitment',quote:'You Said',saidAt:'Said
 /* A list whose items are numbered under one word ("Link 1") goes by that word's plural when it is empty: "Links: None". */
 var APPR_MANY={successCriteria:'Checks',links:'Links',ops:'Changes',people:'People',rows:'Rules',off:'Rules'};
 var APPR_KEYS_RULE={rows:'Rule',off:'Rule',pattern:'Action',dailyCap:'Limit a Day',expiresAt:'Last Day'};
+/* ...and for a card that holds both lists, each row by which list it is in: nothing is "Rule 1" twice. */
+var APPR_KEYS_BOTH={rows:'Added Rule',off:'Ended Rule',pattern:'Action',dailyCap:'Limit a Day',expiresAt:'Last Day'};
 /* ...and the keys whose value is shown exactly as it is stored even where it looks like one of Flint's names: an action's own name. */
 var APPR_EXACT_RULE={pattern:1};
 var APPR_KEYS_PERSON={people:'Person'};
@@ -1802,7 +1819,11 @@ function apprDetails(p){p=p||{};var a=p.args&&typeof p.args==='object'&&!Array.i
   var q=function(at,text,max){if(!apprInline(text,max))return '';took(at);return apprQ(text);};
   var when=function(at,v){took(at);return apprWhenSays(v);};
   var every=function(c){var w=apprCadence(c);return w?'every '+w.toLowerCase():'';};
-  if(f==='policy.change'&&Array.isArray(a.off)){names=APPR_KEYS_RULE;apprOffInto(a,says,took);}
+  if(apprRuleKind(p)==='off'){names=APPR_KEYS_RULE;apprOffInto(a,says,took);}
+  /* Neither one thing nor the other: both halves, every row said as ended or as added, and each list that is empty said so by name. */
+  else if(apprRuleKind(p)==='other'){names=APPR_KEYS_BOTH;apprOffInto(a,says,took);apprRulesInto(a,says,took,'This rule is added: ');
+    if(Array.isArray(a.off)&&!a.off.length){took('off');lead.push(['Ended Rules','None']);}
+    if(Array.isArray(a.rows)&&!a.rows.length){took('rows');lead.push(['Added Rules','None']);}}
   else if(f==='policy.change'){var rows=Array.isArray(a.rows)?a.rows:[];names=APPR_KEYS_RULE;apprRulesInto(a,says,took);
     /* One reason for every rule is said once, not once a rule. */
     var why=rows.length>1&&rows[0]&&typeof rows[0].reason==='string'?rows[0].reason:'';
@@ -2003,6 +2024,8 @@ function apprTitle(p){var a=p.args||{};var n=function(x){return Array.isArray(x)
   if(p.fullName===APPR_PREDICT)return 'Turn On Predictions';
   if(p.fullName==='world.source.enable')return 'Turn On the '+apprWords(a.source)+' Source';
   var off=apprOffRows(p);if(off)return off.length===1?'Switch Off 1 Rule':'Switch Off '+off.length+' Rules';
+  /* Neither one thing nor the other: how many rules it touches, and no more. */
+  if(apprRuleKind(p)==='other'){var both=apprBoth(p),bn=both.rows.length+both.off.length;return bn===1?'Change 1 Rule':'Change '+bn+' Rules';}
   if(p.fullName==='policy.change'){var rows=Array.isArray(a.rows)?a.rows:[],kind=apprRowsKind(rows),c=rows.length;
     /* Only rows that let something run are titled so. A row that makes Flint ask, or stops it, says that instead. */
     var many=apprHowMany(rows);
@@ -2028,6 +2051,7 @@ function apprSub(p){var a=p.args||{};
   if(p.fullName===APPR_PREDICT){var k=apprPredictCount(p);return 'Flint forecasts '+(k?k+' of ':'')+'its own numbers each night, on this Mac.';}
   if(p.fullName==='world.source.enable')return apprGet(APPR_SOURCES,a.source)||'Flint starts reading this source.';
   var off=apprOffRows(p);if(off)return apprOffSub(off);
+  if(apprRuleKind(p)==='other'){var both=apprBoth(p);return both.rows.length&&both.off.length?'It adds rules and ends rules at once.':'It changes what Flint may do on its own.';}
   if(p.fullName==='policy.change'){var rows=Array.isArray(a.rows)?a.rows:[],kind=apprRowsKind(rows);var exp=rows[0]&&rows[0].expiresAt,until=exp?'Until '+apprDate(exp)+', ':'';
     if(kind==='approval')return until+'Flint asks you each time.';
     if(kind==='forbidden')return until+(rows.length===1?'Flint may not run it.':'Flint may not run them.');
@@ -2048,7 +2072,10 @@ function apprFrom(o){o=String(o||'');if(o==='cli'||o==='console')return 'You';if
 function apprFacts(p){var a=p.args||{},f=[];
   if(apprGoalCard(p))return apprGoalFacts(p);
   /* A switch-off names the rules that end, by their own names (never a limit: nothing here lets anything run). */
-  if(apprOffRows(p))f.push(['Switches Off',apprLimits(apprOffRows(p).map(function(r){r=r||{};return {pattern:r.pattern,tier:r.tier};}))]);
+  if(apprOffRows(p))f.push(['Switches Off',apprOffNames(apprOffRows(p))]);
+  /* A card that is neither one thing nor the other says each half under its own label. */
+  else if(apprRuleKind(p)==='other'){var both=apprBoth(p);if(both.off.length)f.push(['Ends',apprOffNames(both.off)]);if(both.rows.length)f.push(['Adds',apprLimits(both.rows)]);
+    if(!both.off.length&&!both.rows.length)f.push(['Rules','None']);}
   else if(p.fullName==='policy.change'){var rows=Array.isArray(a.rows)?a.rows:[],kind=apprRowsKind(rows);var exp=rows[0]&&rows[0].expiresAt;if(exp)f.push(['Until',apprDate(exp)]);
     /* The rules by name, under what the card does to them: only rows that let something run have limits to show. */
     f.push([kind==='alone'?'Limits':kind==='approval'?'Asks First':kind==='forbidden'?'Stopped':'Rules',apprLimits(rows)]);}
@@ -2071,8 +2098,9 @@ function apprFacts(p){var a=p.args||{},f=[];
 var APPR_ASKS={'world.source.enable':1,'triage.rule.create':1};
 function apprAlone(p){return !!p.consequential||!!apprGet(APPR_GOAL,p.fullName)||!!apprGet(APPR_ASKS,p.fullName)||p.fullName===APPR_PREDICT||apprWithheld(p)||(p.fullName==='plan.change'&&!apprSmallPlan(p))||!!p.tainted||!!p.destructive||p.sensitivity==='financial'||/spend|pay|purchase|transfer|invoice|charge|money|send|delete|remove/i.test(String(p.fullName||''))||
   (p.fullName==='policy.change'&&((p.args&&Array.isArray(p.args.rows)&&p.args.rows)||[]).some(function(r){return !!r&&(r.tier==='alone'||r.pattern==='world.person.create');}))||
-  /* ...and every card that switches rules off: ending a rule that holds an action back widens what Flint may do alone. */
-  !!apprOffRows(p);}
+  /* ...and every rule card that is not purely rows: one that switches rules off (ending a rule that holds an action
+     back widens what Flint may do alone), and one that is neither one thing nor the other. */
+  (p.fullName==='policy.change'&&apprRuleKind(p)!=='rows');}
 function apprAge(t){return typeof laneAgo==='function'?laneAgo(t):'';}
 
 function apprCard(p){var open=APPR.open===p.id;var card=apprEl('div','card row'+(open?' open':''));card.style.display='block';
