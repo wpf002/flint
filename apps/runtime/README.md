@@ -2276,8 +2276,8 @@ role but the migration owner:
   you signed (the database computes their digest again), and they name the
   rule by its id, what it covers and what it does. A card for one rule
   switches off no other.
-- **A rule that lets Flint act on its own, the runtime may switch off
-  itself.** That only takes power away: the action goes back to asking you.
+- **The runtime may itself switch off a rule that lets Flint act on its
+  own.** That only takes power away: the action goes back to asking you.
   There is one exception. When two such rules cover the same action, the
   lower daily limit is the one in force. So a rule with a limit also goes off
   only on your card while another rule that is on could run the same action
@@ -2292,11 +2292,12 @@ asking or changes nothing, unless that rule carried the lowest limit.
 
 A test proves it against the engine itself
 (`test/policy-off-guard-db.test.ts`). Over every table of up to three rules
-about an action and its family, 4,000 random tables, and 150 more put to the
-database row by row as the runtime's own role: no rule the runtime may switch
-off makes any action less restricted, in any context, whatever the clock
-says. The same test shows that two simpler rules fail: "any rule" loosens a
-tier, and "any rule that lets go" loosens a limit.
+about one action and its family (for three such families), 4,000 random
+tables, and 150 more put to the database row by row as the runtime's own
+role: no rule the runtime may switch off makes any action less restricted, in
+any context, whatever the clock says. The same test shows that two simpler
+rules fail: "any rule" loosens a tier, and "any rule that lets go" loosens a
+limit.
 
 What the next parts must know:
 
