@@ -1150,6 +1150,18 @@ What to type is in [docs/RECOVERY.md](../../docs/RECOVERY.md). This is how it wo
   which is then dropped. Nothing in use changes, and it says how long a real
   restore would take and what would be in force. It is recorded in the audit
   trail and in `~/.flint/restore-log.jsonl`, as is every attempt that fails.
+- **`restore-production --compare`** reads the database in use and says every
+  way it is not what this copy of the code builds, with no backup and without
+  restoring anything. It is the comparison of step 5, taken from the database
+  in use, so every difference is listed at once before one stops a restore.
+  The database is read in sessions that refuse every write. One scratch
+  database is built beside it and removed again, also when the command is
+  interrupted; one that a run cut short by a power loss left behind is removed
+  at the next start, and said. What it lists first would stop a restore, and
+  its last sentence counts only that. What it says after that lives on the
+  server and is in no backup (who owns what, the database's own rights and
+  settings, the roles): a restore sets or carries those itself, so they stop
+  nothing.
 - **`restore-production --repair`** puts right what a run that was stopped
   part-way left: a closed database is opened, a missing one gets its newest
   kept copy back (Will confirms that one), copies that never went into use are
@@ -1164,6 +1176,30 @@ What to type is in [docs/RECOVERY.md](../../docs/RECOVERY.md). This is how it wo
   only to `~/.flint/secrets.env` and `backup.env`: staged first, then every
   role in one transaction, then the files take their names. It refuses a Mac
   that already has them.
+
+Who may connect to the database, create a schema in it or make temporary
+tables is in no backup: Postgres keeps that on the server. A restore gives its
+copy exactly Flint's own setup for everyone and for Flint's three roles, and
+carries over what any other role holds on the database in use (an addition of
+your own, which it says by name). It takes away everything else. A backup's SQL
+runs as the owner of its own copy and can give a right on that copy to any role
+the server already has; that right is removed before the copy is compared, and
+a restore checks once more, just before the swap, that no role holds a right on
+the copy beyond those two lists.
+
+### Rolling the public schema floor back
+
+`20261013000150_public_schema_floor` takes everyone off the public schema and
+off the database, and names Flint's three roles instead. Its `down.sql` gives
+back what a database built before it had: everyone may connect and use the
+public schema again.
+
+Do not run that `down.sql` on the Studio. Its database was closed to everyone
+by hand at first setup, long before this update existed, and the update changed
+nothing there when it was applied. So on the Studio `down.sql` would not put
+back what was there before the update ran. It would leave the database looser
+than it has ever been. `rollback.sh` never runs a `down.sql` itself, and Claude
+runs one only with your OK, after a dump.
 
 One thing on the Studio is needed once, because its roles were made by hand
 before this existed: the migration owner must be a member of the restoring

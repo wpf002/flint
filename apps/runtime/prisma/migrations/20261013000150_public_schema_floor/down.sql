@@ -5,6 +5,11 @@
 -- working, through what everyone has. It loses no data. It also removes its own
 -- row from _prisma_migrations, so the next deploy re-applies it. Every statement
 -- tolerates a half-applied state, and a database with none of Flint's roles.
+--
+-- NOT for a database that was already closed to everyone by hand before this
+-- update ran (the one on the Studio was). There the update changed nothing, and
+-- this would not put back what was there before it: it would leave the database
+-- looser than it ever was. The runtime README says the same.
 DO $$
 DECLARE
   r text;
