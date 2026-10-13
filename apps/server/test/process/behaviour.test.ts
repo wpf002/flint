@@ -130,6 +130,23 @@ const GOALS_SAID = {
   localOnlyInLocalMode: { conversationId: 'g-both', said: 'I want to restring the COPPERWREN guitar by June.', quote: 'I want to restring the COPPERWREN guitar by June', text: 'restring the COPPERWREN guitar', word: 'COPPERWREN' },
 } as const;
 
+/**
+ * What a turn he ASKED to keep private held, asked about afterwards in Local mode (the follow-up review's probe A,
+ * whole): the private thing said once with Local Only on, then three turns that Local mode alone kept, two of them
+ * in the same conversation (so each was handed the private turn) and one in a conversation of its own.
+ */
+const LEAK = {
+  word: 'QUARTZMOLE',
+  kept: 'Keep this private: my doctor found a QUARTZMOLE lesion last week.',
+  asked: 'What did I just tell you about my health, in one line?',
+  restated: 'You told me your doctor found a QUARTZMOLE lesion last week.',
+  after: 'I want to finish that treatment plan by spring for sure.',
+  apart: 'I want to book the follow-up scan by March for sure.',
+  learned: "Will's doctor found a QUARTZMOLE lesion.",
+} as const;
+/** A day the extraction "model" works out for every goal (none of the sentences names one): a real one, months ahead. */
+const DAY_WORKED_OUT = new Date(Date.now() + 150 * 86_400_000).toISOString().slice(0, 10);
+
 /** A complete stored turn, as the conversation store writes one. */
 const storedTurn = (conversationId: string, id: string, user: string, context?: unknown) => {
   const at = Date.now() - 60 * 60 * 1000;
@@ -645,9 +662,38 @@ describe('the real server, as a process: Cloud mode, then Local mode', () => {
     expect(stored[GOALS_SAID.localOnlyInLocalMode.conversationId]!.map((t) => t.context)).toEqual([{ private: true }]);
   });
 
+  // The follow-up review's F1. The note "kept by Local mode alone" lets a turn be asked for the goal he set in it.
+  // A turn of Local mode that was HANDED one he asked to keep private is not that: its model read the private
+  // thing, and here repeats it. It is stored as his word, the same rule as outside Local mode.
+  it('a turn of Local mode that was handed one he asked to keep private is stored as his word; in a conversation of its own it carries the note', async () => {
+    expect(await mode()).toBe('cloud');
+    // The chat "model" repeats what it was handed of the private turn, as a helpful model does.
+    ollama.replyFor = (body, last) => (body.format === undefined && last === LEAK.asked && JSON.stringify(body.messages).includes(LEAK.word) ? LEAK.restated : undefined);
+    try {
+      const said = await srv.post('/chat', { conversationId: 'leak', message: LEAK.kept, localOnly: true });
+      expect(said.events?.[0]).toMatchObject({ brain: 'local', route: { mode: 'cloud', private: true } });
+      expect((await srv.post('/inference/mode', { mode: 'local' })).json).toMatchObject({ mode: 'local' });
+      const asked = await srv.post('/chat', { conversationId: 'leak', message: LEAK.asked });
+      const after = await srv.post('/chat', { conversationId: 'leak', message: LEAK.after });
+      const apart = await srv.post('/chat', { conversationId: 'leak-apart', message: LEAK.apart });
+      for (const r of [asked, after, apart]) expect(r.events?.[0]).toMatchObject({ brain: 'local', route: { mode: 'local', reason: 'mode_local' } });
+      // The second turn's model was handed the first, and said it back.
+      expect(asked.text).toBe(LEAK.restated);
+    } finally {
+      ollama.replyFor = undefined;
+    }
+    expect((await srv.post('/inference/mode', { mode: 'cloud' })).json).toMatchObject({ mode: 'cloud' });
+    await waitFor(() => srv.read('memory', 'conversations.json').includes('follow-up scan'));
+    const stored = (JSON.parse(srv.read('memory', 'conversations.json')) as { conversations: Record<string, Array<{ context?: unknown }>> }).conversations;
+    expect(stored.leak!.map((t) => t.context)).toEqual([{ private: true }, { private: true }, { private: true }]);
+    expect(stored['leak-apart']!.map((t) => t.context)).toEqual([{ private: true, byMode: true }]);
+    expect(cloud.saw(LEAK.word)).toBe(false);
+  });
+
   it('the log holds none of what was asked or answered, and every [route] line is made of the fields on the list', () => {
     const log = srv.log();
     expect(log).not.toContain(SECRET);
+    expect(log).not.toContain(LEAK.word);
     for (const g of Object.values(GOALS_SAID)) expect(log, g.word).not.toContain(g.word);
     expect(log).not.toMatch(/LOCAL\(|CLOUD\(|synthetic question|Synthetic words|Synthetic private words/);
     for (const canary of ['GARNETFINCH', 'TOPAZWREN', 'OPALHERON']) expect(log).not.toContain(canary);
@@ -1149,15 +1195,22 @@ describe('the real server, as a process: the same Mac restarted with goals from 
   beforeAll(async () => {
     await modes.srv.stop();
     runtime = await startRuntimeStub();
-    // The "model" makes a goal of every turn it is shown that holds one of the four sentences, asked or not.
+    // The "model" makes a goal of every turn it is shown that holds one of the sentences, asked or not, each with a
+    // day it worked out. It learns the private thing from the turn that said it. And in a goal about "that
+    // treatment" or "the follow-up" it NAMES the private thing whenever its own prompt shows it the word: so the
+    // word in a card could only have come from the prompt Flint sent it.
     ollama().toolFor = undefined;
     ollama().replyFor = (body, last) => {
       if (body.format === undefined || !last.includes('TURNS:')) return undefined;
-      const shown = (last.split('TURNS:')[1] ?? '').split('### Turn ').slice(1);
-      const suggestions = shown.flatMap((text, i) =>
-        Object.values(GOALS_SAID).filter((g) => (text.split('\nWILL: ').at(-1) ?? '').includes(g.word)).map((g) => ({ turn: i + 1, kind: 'goal', quote: g.quote, text: g.text, dueOn: '' })),
-      );
-      return JSON.stringify({ facts: [], suggestions });
+      const shown = (last.split('TURNS:')[1] ?? '').split('### Turn ').slice(1).map((text) => text.split('\nWILL: ').at(-1) ?? '');
+      const named = last.includes(LEAK.word) ? `${LEAK.word} ` : '';
+      const facts = shown.flatMap((will, i) => (will.startsWith(LEAK.kept) ? [{ turn: i + 1, quote: 'my doctor found a QUARTZMOLE lesion last week', fact: LEAK.learned, category: 'other', supersedes: [] }] : []));
+      const suggestions = shown.flatMap((will, i) => [
+        ...Object.values(GOALS_SAID).filter((g) => will.includes(g.word)).map((g) => ({ turn: i + 1, kind: 'goal', quote: g.quote, text: g.text, dueOn: DAY_WORKED_OUT })),
+        ...(will.startsWith(LEAK.after) ? [{ turn: i + 1, kind: 'goal', quote: 'I want to finish that treatment plan by spring', text: named ? `finish the ${named}treatment plan by spring` : 'finish that treatment plan by spring', dueOn: DAY_WORKED_OUT }] : []),
+        ...(will.startsWith(LEAK.apart) ? [{ turn: i + 1, kind: 'goal', quote: 'I want to book the follow-up scan by March', text: `book the ${named}follow-up scan by March`, dueOn: DAY_WORKED_OUT }] : []),
+      ]);
+      return JSON.stringify({ facts, suggestions });
     };
     const before = mined().length;
     srv = await startServer({
@@ -1181,8 +1234,12 @@ describe('the real server, as a process: the same Mac restarted with goals from 
 
   it('a turn taken in Local mode is asked for the goal he set in it, and it is filed with the runtime on this Mac; so is an ordinary turn’s', () => {
     const filed = runtime.candidates();
-    expect(filed.map((c) => c.text).sort()).toEqual(['Finish the PEARLFINCH boat deck', 'Plant the IVORYLARK orchard']);
+    expect(filed.map((c) => c.text).sort()).toEqual(['Book the follow-up scan by March', 'Finish the PEARLFINCH boat deck', 'Plant the IVORYLARK orchard']);
     expect(filed.find((c) => c.text === 'Finish the PEARLFINCH boat deck')).toMatchObject({ kind: 'goal', quote: GOALS_SAID.localMode.said, conversationId: GOALS_SAID.localMode.conversationId });
+    // The day the model worked out is its reading, and an ordinary turn's card keeps it. From a turn that stays here
+    // a day is kept only when he named it in that turn: neither sentence did, so neither card has one.
+    expect(filed.find((c) => c.text === 'Plant the IVORYLARK orchard')).toMatchObject({ dueOn: DAY_WORKED_OUT });
+    expect(filed.find((c) => c.text === 'Finish the PEARLFINCH boat deck')).not.toHaveProperty('dueOn');
     // Its call asked for goals: the lines in the prompt, and the reply held to a schema with them.
     const asked = callWith('PEARLFINCH');
     expect(chatFacts(asked.body).last).toContain(SUGGEST_GOALS_PROMPT);
@@ -1201,9 +1258,42 @@ describe('the real server, as a process: the same Mac restarted with goals from 
       expect(chatFacts(call.body).last, g.word).not.toContain('PEARLFINCH');
     }
     // The pass says how many turns were not asked, by a count, and none of his words is in the log.
-    expect(srv.log()).toMatch(/\[memory-extract\] v2 local pass: [^\n]*suggestion-private-turn=\d+[^\n]*suggestion\(s\) → kept 2, filed 2; /);
+    expect(srv.log()).toMatch(/\[memory-extract\] v2 local pass: [^\n]*suggestion-private-turn=\d+[^\n]*suggestion\(s\) → kept 3, filed 3; /);
     for (const g of Object.values(GOALS_SAID)) expect(srv.log(), g.word).not.toContain(g.word);
+    expect(srv.log()).not.toContain(LEAK.word);
     expect(blocked(srv)).toEqual([]);
+  });
+
+  // The follow-up review's F1, its probe A whole (the turns are the ones the first run took and marked).
+  it('what a turn he asked to keep private held reaches no call that is asked for goals, and no suggestion: not through a later turn of Local mode, not through what was learned from it', () => {
+    const prompt = (c: { body?: Record<string, unknown> }) => chatFacts(c.body).last;
+    const known = (c: { body?: Record<string, unknown> }) => (prompt(c).split('KNOWN FACTS (id: text):')[1] ?? '').split('TURNS:')[0]!;
+    const asked = mined().filter((c) => prompt(c).includes(SUGGEST_GOALS_PROMPT) || JSON.stringify(c.body?.format).includes('suggestions'));
+    // The private thing was mined, on this Mac, in a call that asked for facts alone; so were the two turns of
+    // Local mode that were handed it (the one that asked about it, whose reply says it back, and the one after).
+    const told = mined().filter((c) => prompt(c).includes(LEAK.word));
+    expect(told.length).toBeGreaterThan(0);
+    for (const c of told) expect(asked).not.toContain(c);
+    for (const said of [LEAK.kept, LEAK.asked, LEAK.after]) expect(told.some((c) => (prompt(c).split('TURNS:')[1] ?? '').includes(`\nWILL: ${said}`)), said).toBe(true);
+    // What it learned there is in memory, marked.
+    const facts = (JSON.parse(srv.read('memory', 'knowledge.json')) as { facts: Array<{ text: string; fromPrivate?: boolean }> }).facts;
+    expect(facts.find((f) => f.text === LEAK.learned)).toMatchObject({ fromPrivate: true });
+    // The turn in a conversation of its own WAS asked, after that fact was learned: its call shows it no fact from
+    // a private turn (this one, or the ones the first run's model saved), and the ordinary fact as ever.
+    const apart = callWith('follow-up scan');
+    expect(asked).toContain(apart);
+    expect(mined().indexOf(apart)).toBeGreaterThan(mined().indexOf(told[0]!));
+    for (const c of asked) {
+      expect(prompt(c)).not.toContain(LEAK.word);
+      for (const word of ['TOPAZWREN', 'GARNETFINCH']) expect(known(c), word).not.toContain(word);
+    }
+    expect(known(apart)).toContain('OPALHERON');
+    // So its goal is filed in his own words, without the day the model worked out, and nothing filed names the private thing.
+    const filed = runtime.candidates();
+    expect(filed.find((c) => c.conversationId === 'leak-apart')).toEqual({ kind: 'goal', text: 'Book the follow-up scan by March', quote: LEAK.apart, conversationId: 'leak-apart', turnId: expect.any(String), sourceAt: expect.any(String) });
+    expect(filed.filter((c) => c.conversationId === 'leak')).toEqual([]);
+    expect(runtime.saw(LEAK.word)).toBe(false);
+    expect(runtime.saw('treatment plan')).toBe(false);
   });
 });
 

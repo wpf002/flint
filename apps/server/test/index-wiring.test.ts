@@ -72,6 +72,11 @@ describe('index.ts wiring', () => {
     expect(src.match(/goalsChat\.name\(\{ persona, provider, model \}, brains, keptTools, standby \? \[standby\] : \[\]\);/g)).toHaveLength(2);
     expect(src.match(/goalsChat\.name\(/g)).toHaveLength(2);
     expect(src.indexOf('const brains = buildTiers<Persona>(')).toBeLessThan(src.indexOf('goalsChat.name('));
+    // ...and BEFORE anything can ask for a turn: a turn has no rule to be marked by until they are named
+    // (GoalsChat.forTurn refuses one; test/goals-chat.test.ts), so no request is taken before that.
+    expect(src.indexOf('goalsChat.name(')).toBeLessThan(src.indexOf('const server = createServer('));
+    expect(src.indexOf('const server = createServer(')).toBeLessThan(src.indexOf('server.listen('));
+    expect(src.match(/createServer\(/g)).toHaveLength(1);
     expect(src).toContain('provider: inference.standby.provider,');
     expect(between('const adoptLocal = (): void => {', 'inference.onAdopt(adoptLocal);')).toMatch(/persona = nextPersona;\s*standby = nextStandby;[\s\S]*goalsChat\.name\(/);
     // The tools an ask that stays here is offered are the module's, built from the server's own search tools, memory and gate.

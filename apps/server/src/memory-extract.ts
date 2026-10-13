@@ -1073,7 +1073,12 @@ export class MemoryExtractor {
   /** The call's prompt, and the ids of the known facts it shows (the only ones a fact may supersede). */
   private prompt(items: Item[], room: Room, asking?: Suggesting): { text: string; shown: Set<string> } {
     // The known facts that stay on this Mac are shown only to a call whose turns do too, and are held as closely.
-    const known = this.knownFacts(items, room.knownChars, Math.max(0, ...items.map(heldAs)) as 0 | 1 | 2);
+    // A call that is ASKED for goals is shown none from a turn Will kept private, whatever its own turns are: what
+    // it answers can be filed, and a fact from a turn he asked to keep private (a fact does not say which kind of
+    // private turn it came from) must be in no prompt whose answer can. Facts from his goals are shown as before,
+    // to a call whose turns carry the goals mark or a closer one.
+    const held = Math.max(0, ...items.map(heldAs)) as 0 | 1 | 2;
+    const known = this.knownFacts(items, room.knownChars, asking ? (Math.min(held, 1) as 0 | 1) : held);
     const knownBlock = known.length
       ? known.map((f) => `${f.id}: ${f.text}`).join('\n')
       : '(none yet)';
@@ -1211,7 +1216,9 @@ export class MemoryExtractor {
       // What it says is his too: a short text, most of whose words, and every number, are in that same message.
       // It starts with a capital, as a title does.
       const text = capital(normalizeSaid(s.text));
-      if (!SuggestionText.safeParse(text).success || factCoverage([src.said], text) < FACT_COVERAGE || !numbersGrounded([src.said], text, src.at)) {
+      // From a turn that carries the private mark, ALL of them: its call can hold words that are not his own message
+      // (the turn shown before it, what the model answered him), and none of those may reach a card.
+      if (!SuggestionText.safeParse(text).success || factCoverage([src.said], text) < (src.private ? 1 : FACT_COVERAGE) || !numbersGrounded([src.said], text, src.at)) {
         drop('text');
         continue;
       }
@@ -1223,7 +1230,9 @@ export class MemoryExtractor {
           drop('date');
           continue;
         }
-        if (s.dueOn >= today) dueOn = s.dueOn;
+        // From a turn that carries the private mark, a day is kept only when it is in his own words in that turn:
+        // one the model worked out could be a day it read somewhere else in its call. Any other is left off.
+        if (s.dueOn >= today && (!src.private || daySaid(src.said, s.dueOn, localDay(this.tz, new Date(src.at))))) dueOn = s.dueOn;
       }
       if (this.now() - src.at > SUGGESTION_MAX_AGE_DAYS * 86_400_000) {
         drop('old');
@@ -1545,6 +1554,38 @@ export function factCoverage(will: string[], fact: string): number {
 
 /** A grounded fact's content words must be at least this much Will's (see factCoverage). */
 export const FACT_COVERAGE = 0.5;
+
+const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+
+/**
+ * Did Will name this day in these words? Asked of a day the model read for a
+ * suggestion from a turn that carries the private mark: it is kept only when
+ * nothing about it is the model's own.
+ *  - the date written out (2027-03-03), or
+ *  - its month by name ("March", "Mar") with its day of the month ("3",
+ *    "3rd", "03"), or the two as a short date, month first ("3/3", "03/03").
+ * And then the year is his too: he wrote it, or the day is the first such day
+ * on or after the day he said it (`saidOn`), which is what "March 3" means.
+ * A day worked out from "by spring", "next Friday" or "before then" is not
+ * named, whatever it is.
+ */
+export function daySaid(said: string, day: string, saidOn: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  const from = /^(\d{4})-(\d{2})-(\d{2})$/.exec(saidOn);
+  if (!m || !from) return false;
+  const text = normalizeSaid(said).toLowerCase();
+  if (text.includes(day)) return true;
+  const month = MONTHS[Number(m[2]) - 1];
+  if (!month) return false;
+  const dom = String(Number(m[3]));
+  const byName = new RegExp(`\\b(?:${month}|${month.slice(0, 3)})\\b`).test(text) && new RegExp(`(?<![\\d/.-])0?${dom}(?:st|nd|rd|th)?(?![\\d/])`).test(text);
+  const byNumber = new RegExp(`(?<![\\d/])0?${Number(m[2])}/0?${dom}(?![\\d])`).test(text);
+  if (!byName && !byNumber) return false;
+  if (new RegExp(`(?<!\\d)${m[1]}(?!\\d)`).test(text)) return true;
+  // The first such day on or after the day he said it.
+  const first = `${m[2]}-${m[3]}` >= `${from[2]}-${from[3]}` ? Number(from[1]) : Number(from[1]) + 1;
+  return Number(m[1]) === first;
+}
 
 /** The numbers in `s`, as digits: "1,200" is 1200 and "09" is 9, so how they are written doesn't matter. */
 function numbersIn(s: string): string[] {

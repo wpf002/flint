@@ -55,9 +55,12 @@ export const LOCAL_MODE_TURN: Readonly<{ private: true; byMode: true }> = Object
  * Flint was in Local mode? The narrower of the two notions, as stored.
  *
  * A private mark with no note is read as his own word: that is every turn
- * marked before the note existed, and a turn outside Local mode that was
- * marked because its model was handed one (a private turn in its history, or
- * a fact from one). Only the note makes a turn the mode's.
+ * marked before the note existed, a turn outside Local mode that was marked
+ * because its model was handed one (a private turn in its history, or a fact
+ * from one), and a turn OF Local mode whose conversation still carried a turn
+ * he asked to keep private when it was answered (./goals-chat ChatTurn.ask:
+ * its model read that turn, and may have said it back). Only the note makes a
+ * turn the mode's.
  */
 export function privateByRequest(turn: { context?: unknown }): boolean {
   return wasPrivate(turn) && (turn.context as { byMode?: unknown }).byMode !== true;
@@ -86,9 +89,11 @@ export function turnStaysHere(route: StayRoute): boolean {
 }
 
 /**
- * Does this turn stay here by the MODE alone: Flint is in Local mode, and Will
- * did not ask for this turn to be private? Its stored mark then carries the
- * note (LOCAL_MODE_TURN).
+ * Does this turn stay here by the MODE alone, as far as its route says: Flint
+ * is in Local mode, and Will did not ask for this turn to be private? Its
+ * stored mark then carries the note (LOCAL_MODE_TURN), unless the conversation
+ * it is answered in still carries a turn he asked to keep private
+ * (./goals-chat ChatTurn.ask).
  */
 export function keptByModeAlone(route: StayRoute): boolean {
   return !route.private && route.mode === 'local';

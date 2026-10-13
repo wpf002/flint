@@ -36,7 +36,7 @@ import { ChatCandidate, GoalTitle } from '@flint/policy';
 import { KnowledgeStore } from '../src/knowledge';
 import { localExtractBrain } from '../src/memory-brain';
 import {
-  EXTRACT_SYSTEM, EXTRACT_VERSION, FACTS_SCHEMA, GOAL_SUGGESTIONS_SCHEMA, MemoryBrainError, MemoryExtractor, SUGGESTIONS_SCHEMA, SUGGEST_GOALS_PROMPT, SUGGEST_PROMPT, suggestionOf, suggestionsReply,
+  EXTRACT_SYSTEM, EXTRACT_VERSION, FACTS_SCHEMA, GOAL_SUGGESTIONS_SCHEMA, MemoryBrainError, MemoryExtractor, SUGGESTIONS_SCHEMA, daySaid, SUGGEST_GOALS_PROMPT, SUGGEST_PROMPT, suggestionOf, suggestionsReply,
   type BrainReply, type ChatSuggestion, type ExtractBrain, type ExtractorOptions, type Suggesting, type SuggestionOutcome, type TurnSource,
 } from '../src/memory-extract';
 
@@ -586,6 +586,88 @@ describe('goals and commitments from chat, in the extractor', () => {
     expect(r.stats.rejected['suggestion-private-turn']).toBeUndefined();
     // Memory is the wider notion: the fact stays on this Mac as before.
     expect(r.k.all().map((f) => [f.text, f.fromPrivate])).toEqual([['Will keeps a Mac Studio in the office.', true]]);
+  });
+
+  // The follow-up review's F1. A call about a turn the private mark is on can hold words that are not that turn's own
+  // message: the turn shown before it, what the model answered him, the facts it is shown. Half of a card's words
+  // could come from there (the rule for an ordinary turn). From a marked turn every one must be his, in that turn.
+  it('from a turn that carries the private mark, every word of a suggestion must be his own in that turn; an ordinary turn keeps the looser rule', async () => {
+    const said = `${CANARY} I want to finish that treatment plan by spring.`;
+    const lifted = { turn: 1, kind: 'goal', quote: 'I want to finish that treatment plan by spring', text: 'finish the QUARTZMOLE treatment plan by spring', dueOn: '' };
+    const own = { ...lifted, text: 'finish that treatment plan by spring' };
+    const byMode = { keptPrivate: () => true, privateByRequest: () => false };
+    // "QUARTZMOLE" is not in his message: 4 of the 5 content words are, which an ordinary turn's rule lets through.
+    const ordinary = await pass({ c1: [turn('c1', said)] }, [lifted]);
+    expect(ordinary.got.map((g) => g.text)).toEqual(['Finish the QUARTZMOLE treatment plan by spring']);
+    const marked = await pass({ c1: [turn('c1', said)] }, [lifted], byMode);
+    expect(marked.calls[0]!.suggestions).toBe('all'); // it was asked
+    expect(marked.got).toEqual([]);
+    expect(marked.stats.rejected['suggestion-text']).toBe(1);
+    // His own words, and nothing else: handed on.
+    const kept = await pass({ c1: [turn('c1', said)] }, [own], byMode);
+    expect(kept.got.map((g) => [g.text, g.staysHere])).toEqual([['Finish that treatment plan by spring', true]]);
+    // A turn answered with his goals carries the goals mark, not this one: it keeps the looser rule, as before.
+    const goals = await pass({ c1: [turn('c1', said)] }, [lifted], { carriedGoals: () => true });
+    expect(goals.got).toHaveLength(1);
+  });
+
+  it('a call that is asked for goals is shown no fact from a turn Will kept private, whatever its own turns are; a call that is not asked is shown them as before', async () => {
+    const seeded = async (name: string) => {
+      const k = new KnowledgeStore(join(dir, `${name}.json`), downEmbedder);
+      await k.add('Will keeps a kayak in the garage.', 'history');
+      await k.add("Will's doctor found a QUARTZMOLE lesion.", 'history', { fromPrivate: true });
+      await k.add('Will wants the MARLINGOAL regatta entry finished.', 'history', { fromGoals: true });
+      return k;
+    };
+    const known = (prompt: string) => (prompt.split('KNOWN FACTS (id: text):')[1] ?? '').split('TURNS:')[0]!;
+    const run = async (name: string, opts: ExtractorOptions) => {
+      const { brain, calls } = local(() => ({ facts: [] }));
+      await new MemoryExtractor(source({ c1: [turn('c1', SAID)] }), await seeded(name), brain, join(dir, `${name}-state.json`), { now: () => NOW, onCandidate: async () => 'filed' as SuggestionOutcome, ...opts }).run();
+      expect(calls, name).toHaveLength(1);
+      return { asked: calls[0]!.suggestions !== undefined, facts: ['kayak', 'QUARTZMOLE', 'MARLINGOAL'].filter((w) => known(calls[0]!.prompt).includes(w)) };
+    };
+    const byMode = { keptPrivate: () => true, privateByRequest: () => false };
+    const byRequest = { keptPrivate: () => true, privateByRequest: () => true };
+    // Asked (a turn of Local mode): no private fact; the goals fact, which its mark is close enough for, as before.
+    expect(await run('asked-by-mode', { candidates: true, ...byMode })).toEqual({ asked: true, facts: ['kayak', 'MARLINGOAL'] });
+    // The same turn with the setting off: not asked, and shown everything its mark allows.
+    expect(await run('off-by-mode', { ...byMode })).toEqual({ asked: false, facts: ['kayak', 'QUARTZMOLE', 'MARLINGOAL'] });
+    // A turn he asked to keep private is never asked, so it is shown them too.
+    expect(await run('by-request', { candidates: true, ...byRequest })).toEqual({ asked: false, facts: ['kayak', 'QUARTZMOLE', 'MARLINGOAL'] });
+    // Asked, an ordinary turn and a goals turn: what each was always shown.
+    expect(await run('asked-ordinary', { candidates: true })).toEqual({ asked: true, facts: ['kayak'] });
+    expect(await run('asked-goals', { candidates: true, carriedGoals: () => true })).toEqual({ asked: true, facts: ['kayak', 'MARLINGOAL'] });
+    // Both marks, asked (answered with his goals, in Local mode): still no private fact.
+    expect(await run('asked-both', { candidates: true, carriedGoals: () => true, ...byMode })).toEqual({ asked: true, facts: ['kayak', 'MARLINGOAL'] });
+  });
+
+  it('from a turn that carries the private mark, a day is kept only when he named it in that turn; an ordinary turn keeps the model’s reading', async () => {
+    // (Turns here are said on 2026-10-12.)
+    const byMode = { keptPrivate: () => true, privateByRequest: () => false };
+    const named = `${CANARY} I want to run a half marathon by spring, on March 3 if I can.`;
+    const vague = `${CANARY} I want to run a half marathon by spring.`;
+    const dated = (dueOn: string) => [good({ dueOn })];
+    const due = async (said: string, dueOn: string, opts: ExtractorOptions = {}) => (await pass({ c1: [turn('c1', said)] }, dated(dueOn), opts)).got.map((g) => g.dueOn ?? 'none');
+    // He named the day: kept.
+    expect(await due(named, '2027-03-03', byMode)).toEqual(['2027-03-03']);
+    // The model worked one out of "by spring" (or read it somewhere else in its call): the suggestion is handed on without it.
+    expect(await due(vague, '2027-03-20', byMode)).toEqual(['none']);
+    expect(await due(named, '2027-03-04', byMode)).toEqual(['none']);
+    expect(await due(named, '2028-03-03', byMode)).toEqual(['none']); // his March 3 is the next one
+    // An ordinary turn: the model's reading is kept, as before (the card says it is the model's).
+    expect(await due(vague, '2027-03-20')).toEqual(['2027-03-20']);
+    // What "named" is.
+    const on = '2026-10-12';
+    for (const [said, day] of [
+      ['see the dentist on March 3', '2027-03-03'], ['see the dentist on Mar 3rd', '2027-03-03'], ['see the dentist on the 3rd of March', '2027-03-03'], ['see the dentist on 3/3', '2027-03-03'],
+      ['see the dentist on 03/03', '2027-03-03'], ['see the dentist on 2028-03-03', '2028-03-03'], ['see the dentist on March 3, 2028', '2028-03-03'], ['pay the bill by October 20', '2026-10-20'],
+      ['pay the bill by October 12', '2026-10-12'], ['pay the bill by October 11', '2027-10-11'],
+    ] as const) expect(daySaid(said, day, on), `${said} -> ${day}`).toBe(true);
+    for (const [said, day] of [
+      ['see the dentist by spring', '2027-03-20'], ['see the dentist next Friday', '2026-10-16'], ['see the dentist on March 3', '2027-03-13'], ['see the dentist on March 13', '2027-03-03'],
+      ['see the dentist on March 30', '2027-03-03'], ['see the dentist on March 3', '2028-03-03'], ['see the dentist on April 3', '2027-03-03'], ['see the dentist in March, 3 times', '2027-04-03'],
+      ['see the dentist on 13/3', '2027-03-03'], ['pay the bill by October 11', '2026-10-11'], ['march on', '2027-03-03'], ['', '2027-03-03'], ['on March 3', 'not-a-day'],
+    ] as const) expect(daySaid(said, day, on), `${said} -> ${day}`).toBe(false);
   });
 
   it('in a pass that asks, the turns he asked to keep private are sent apart from the ones Local mode kept; a turn shown after one he asked to keep is held with it', async () => {

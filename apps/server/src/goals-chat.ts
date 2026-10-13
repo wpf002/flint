@@ -50,7 +50,7 @@ import { rememberTool, type KnowledgeStore } from './knowledge';
 import { LOCALITY, type OllamaLocality } from './ollama-locality';
 import type { PersistentStore } from './persistent-store';
 import { brainIsLocal, brainOf, listedAt, placeUnknown, placedHere, type AnsweringBrain } from './policy';
-import { LOCAL_MODE_TURN, PRIVATE_TURN, corpusMark, keptByModeAlone, privateByRequest, turnStaysHere, type StayRoute } from './private-turns';
+import { corpusMark, keptByModeAlone, privateByRequest, turnStaysHere, type StayRoute } from './private-turns';
 import type { PaidToolSpec } from './spend';
 import { isPartOf } from './spoken-text';
 import { asKeptText, asLocalTurn, isLocalTurn } from './turn-taint';
@@ -335,11 +335,14 @@ export class GoalsChat<P extends Speaker> {
    * whichever brain is asked.
    */
   async forTurn(conversationId: string, message: string, route?: StayRoute): Promise<ChatTurn<P>> {
-    const goals = await this.#gate?.forTurn();
+    // The brains are named before the server takes a request (index.ts: `name` comes before it listens), and again
+    // whenever the local brain is swapped. A turn with no gate has no rule to be marked by, so there is none.
+    if (!this.#gate) throw new Error('GoalsChat.forTurn was called before the brains were named (GoalsChat.name)');
+    const goals = await this.#gate.forTurn();
     // With the persona's own words, the rest of the prompt: what the block's room is measured against.
     const restChars = message.length + this.#o.memory.historyChars(conversationId);
     return new ChatTurn<P>(
-      this.#o.memory, goals, conversationId, restChars, route !== undefined && turnStaysHere(route), this.#tools,
+      this.#o.memory, goals, conversationId, restChars, route !== undefined && turnStaysHere(route),
       (turnId, text) => this.#streamed(conversationId, turnId, text),
       route !== undefined && keptByModeAlone(route),
     );
@@ -476,15 +479,17 @@ export class ChatTurn<P extends Speaker> {
 
   constructor(
     private readonly memory: PersistentStore,
-    private readonly goals: TurnGoals<P> | undefined,
+    private readonly goals: TurnGoals<P>,
     private readonly conversationId: string,
     private readonly restChars: number,
     /** The turn stays here by its route: Will kept it private, or Flint is in Local mode. */
     private readonly kept = false,
-    private readonly keptTools?: KeptTools,
     /** Told what was streamed as a stored turn's reply (GoalsChat keeps it for `/speak`). */
     private readonly streamed?: (turnId: string, text: string) => void,
-    /** ...and it is the mode alone that keeps it here (Local mode, and Will did not ask for this turn to be private): its mark says so. */
+    /**
+     * ...and by its route it is the mode alone that keeps it here (Local mode, and Will did not ask for this turn
+     * to be private). Whether its mark carries the note is settled at each ask: see `ask`.
+     */
     private readonly byMode = false,
   ) {}
 
@@ -501,24 +506,22 @@ export class ChatTurn<P extends Speaker> {
    */
   ask(persona: P, a: { context: string; whole: string; outside: string; lifted?: string; tools: readonly Tool[] }): ChatAsk {
     const open = contextOutside(a.context, a.whole, a.outside);
-    const asked = this.goals
-      ? this.goals.ask(persona, {
-          context: open,
-          here: a.context,
-          ...(a.lifted !== undefined ? { lifted: contextOutside(a.context, a.whole, a.lifted) } : {}),
-          // The history this brain is about to be handed, as the store will hand it.
-          carried: this.memory.windowHas(this.conversationId, carriedGoals),
-          carriedPrivate: this.memory.windowHas(this.conversationId, keptStrictly),
-          kept: this.kept,
-          byMode: this.byMode,
-          tools: a.tools,
-          promptChars: persona.styleGuide.length + (persona.engine?.length ?? 0) + this.restChars,
-        })
-      : // No brain has been named yet: nothing that stays here is handed out. A turn its route keeps here is still
-        // marked, and saves nothing unmarked.
-        this.kept
-        ? { context: open, tools: this.keptTools ? this.keptTools(a.tools, { private: true }) : a.tools.filter((t) => t.definition.name !== 'remember'), tokens: 0, mark: { context: this.byMode ? LOCAL_MODE_TURN : PRIVATE_TURN } }
-        : { context: open, tools: a.tools, tokens: 0, mark: {} };
+    const asked = this.goals.ask(persona, {
+      context: open,
+      here: a.context,
+      ...(a.lifted !== undefined ? { lifted: contextOutside(a.context, a.whole, a.lifted) } : {}),
+      // The history this brain is about to be handed, as the store will hand it.
+      carried: this.memory.windowHas(this.conversationId, carriedGoals),
+      carriedPrivate: this.memory.windowHas(this.conversationId, keptStrictly),
+      kept: this.kept,
+      // The mode's alone only while the conversation it carries holds no turn Will ASKED to keep private. A turn
+      // of Local mode that is handed one (its model reads it as history, and can say it back) is held as his
+      // word too, the same as a turn outside Local mode that read one: what a private turn held must not reach a
+      // later turn that is asked for a goal.
+      byMode: this.byMode && !this.memory.windowHas(this.conversationId, privateByRequest),
+      tools: a.tools,
+      promptChars: persona.styleGuide.length + (persona.engine?.length ?? 0) + this.restChars,
+    });
     const staysHere = asked.mark.context !== undefined;
     this.#stays = staysHere;
     // Measured from the context as it is sent, not from what the gate meant to add: a block that came out
