@@ -216,7 +216,8 @@ export interface CatalogDifference {
 /** What kind of thing a line is about, as a heading. Anything not named here is under the last. */
 const GROUPS: ReadonlyArray<{ title: string; kinds: readonly string[] }> = [
   { title: 'Who may do what', kinds: ['privilege', 'default privilege', 'may'] },
-  { title: 'Tables, columns and views', kinds: ['schema', 'relation', 'column', 'view', 'sequence', 'type'] },
+  { title: 'Tables, columns and views', kinds: ['relation', 'column', 'view'] },
+  { title: 'Schemas, sequences and types', kinds: ['schema', 'sequence', 'type'] },
   { title: 'Checks and indexes', kinds: ['constraint', 'index'] },
   { title: 'Triggers and rules', kinds: ['trigger', 'rule', 'policy', 'event trigger'] },
   { title: 'Functions', kinds: ['function'] },
@@ -224,8 +225,21 @@ const GROUPS: ReadonlyArray<{ title: string; kinds: readonly string[] }> = [
 ];
 const groupOf = (kind: string): string => GROUPS.find((g) => g.kinds.includes(kind))?.title ?? GROUPS[GROUPS.length - 1]!.title;
 
-/** How many `|` fields of a line say WHICH object it is (the rest say what it is like). */
-const NAMED_BY: Record<string, number> = { column: 2, constraint: 2, index: 2, trigger: 2, rule: 2, policy: 2, privilege: 3, 'default privilege': 3, may: 1 };
+/** How many `|` fields of a line say WHICH object it is (the rest say what it is like). None: there is only one of it. */
+const NAMED_BY: Record<string, number> = { column: 2, constraint: 2, index: 2, trigger: 2, rule: 2, policy: 2, privilege: 3, 'default privilege': 3, may: 1, 'large objects': 0 };
+/** Who a privilege is for, in words: "everyone" for Postgres's PUBLIC, a role by its own name. */
+const whoIs = (who: string | undefined): string => (who === 'PUBLIC' ? 'everyone' : who ?? 'a role');
+/** What a default privilege is on, from its one-letter kind. */
+const NEW_THINGS: Record<string, string> = { r: 'table', S: 'sequence', f: 'function', T: 'type', n: 'schema' };
+/** What a line of the grants list (./grants.ts) is on, in words: `flint_app CREATE schema public` is on "the schema public". */
+function grantedOn(priv: string, rest: readonly string[]): string {
+  const on = rest.join(' ');
+  if (on === 'database') return 'the database itself';
+  if (rest[0] === 'schema') return `the schema ${rest.slice(1).join(' ')}`;
+  if (rest[0] === 'sequence') return `the sequence ${rest.slice(1).join(' ')}`;
+  if (priv === 'EXECUTE') return `the function ${on}`;
+  return on.split('.').length > 2 ? `the column ${on}` : `the table ${on}`;
+}
 const WORDS: Record<string, (id: string[]) => string> = {
   column: ([on, name]) => `the column ${name} of ${on}`,
   constraint: ([on, name]) => `the constraint ${name} on ${on}`,
@@ -233,17 +247,54 @@ const WORDS: Record<string, (id: string[]) => string> = {
   trigger: ([on, name]) => `the trigger ${name} on ${on}`,
   rule: ([on, name]) => `the rule ${name} on ${on}`,
   policy: ([on, name]) => `the row policy ${name} on ${on}`,
-  privilege: ([what, who, priv]) => `${who} holding ${priv} on the ${what}`,
-  'default privilege': ([what, who, priv]) => `a default privilege (${who}, ${priv}, ${what?.trim()})`,
-  may: ([what]) => `what a role may do (${what})`,
+  privilege: ([what, who, priv]) => `${whoIs(who)} holding ${priv} on the ${what}`,
+  'default privilege': ([what, who, priv]) => {
+    const [maker, schema, kind] = (what ?? '').split(' ');
+    const made = maker && maker !== 'owner' ? ` that ${maker} makes` : '';
+    return `a standing rule that gives ${whoIs(who)} ${priv} on every new ${NEW_THINGS[kind ?? ''] ?? 'thing'}${made}${schema ? ` in the schema ${schema}` : ''}`;
+  },
+  // What a role ends up holding, however it came by it (a grant to everyone, a role it is a member of): said in
+  // the same words as a privilege, so that the two are one line when they are one difference.
+  may: ([grant]) => {
+    const [role, priv, ...rest] = (grant ?? '').split(' ');
+    return `${whoIs(role)} holding ${priv === 'TEMP' ? 'TEMPORARY' : priv ?? 'a right'} on ${grantedOn(priv ?? '', rest)}`;
+  },
   relation: ([name]) => `the table or view ${name}`,
+  'large objects': () => 'the number of large objects',
 };
 /** A name from a catalog, cut to what a sentence can hold and to characters that are safe on a terminal. */
-const safe = (s: string): string => s.replace(/[^\w .,:()<>"=/-]/g, '?').slice(0, 120);
+const safe = (s: string): string => s.replace(/[^\w .,:()<>"=/-]/g, '?').slice(0, 160);
+/** "1 table", "3 tables": never "table(s)". */
+export const counted = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
+
+/** The bare name a line is about: `function public.f(a text)`, `schema public` and `public.T.col` are about `f`, `public` and `col`. */
+const tail = (name: string): string => (name.replace(/\(.*$/, '').split(' ').pop() ?? '').split('.').pop() ?? '';
+
+/**
+ * The whole thing a line is part of, as that thing's own key: a column, a
+ * check, an index, a trigger, a privilege or a view's text belongs to its
+ * table; a privilege on a function, a schema or a type to that. A table that
+ * is missing, or is not one Flint makes, is one difference, not one for every
+ * part of it.
+ */
+function partOf(key: string): string[] {
+  const [kind, on] = key.split('|');
+  if (!on) return [];
+  if (['column', 'constraint', 'index', 'trigger', 'rule', 'policy', 'view'].includes(kind!)) return [`relation|${on}`];
+  if (kind !== 'privilege') return [];
+  const [what, ...name] = on.split(' ');
+  const full = name.join(' ');
+  // Postgres keeps a sequence's privileges where it keeps a table's.
+  if (what === 'table') return [`relation|${full}`, `sequence|${full}`];
+  if (what === 'column') return [`relation|${full.split('.').slice(0, -1).join('.')}`];
+  if (what === 'function' || what === 'schema' || what === 'type') return [`${what}|${full}`];
+  return [];
+}
 
 function named(line: string): { key: string; words: string; group: string } {
   const fields = line.split('|');
-  const kind = fields[0] ?? '';
+  // A sequence has two lines, one as a relation like any other and one of its own: both are about the sequence.
+  const kind = fields[0] === 'relation' && fields[2] === 'kind=S' ? 'sequence' : fields[0] ?? '';
   const id = fields.slice(1, 1 + (NAMED_BY[kind] ?? 1));
   const words = WORDS[kind]?.(id) ?? `the ${kind} ${id.join(' ')}`;
   return { key: `${kind}|${id.join('|')}`, words: safe(words), group: groupOf(kind) };
@@ -253,21 +304,26 @@ function named(line: string): { key: string; words: string; group: string } {
  * How `restored` differs from `reference`. A date-named partition the reference
  * has and the restored database lacks is not a difference (a database holds the
  * months it has lived through); anything else on either side is.
+ *
+ * One difference is said once: the lines that only follow from another one
+ * that is said are left unsaid. Leaving one unsaid never makes a difference
+ * into none, because the one it follows from stays.
  */
 export function catalogDifference(reference: readonly string[], restored: readonly string[], alternatives: ReadonlyArray<readonly string[]> = []): CatalogDifference {
   const ref = new Set(reference);
   const got = new Set(restored);
   const extra = restored.filter((l) => !ref.has(l));
   const missing = reference.filter((l) => !got.has(l) && !/<month>|<day>/.test(l));
-  const objects = new Map<string, { said: string; group: string }>();
+  type How = 'missing' | 'extra' | 'different';
+  const objects = new Map<string, { words: string; how: How; group: string }>();
   const extraKeys = new Set(extra.map((l) => named(l).key));
   for (const l of missing) {
     const n = named(l);
-    objects.set(n.key, { said: extraKeys.has(n.key) ? `${n.words} is different` : `${n.words} is missing`, group: n.group });
+    objects.set(n.key, { words: n.words, how: extraKeys.has(n.key) ? 'different' : 'missing', group: n.group });
   }
   for (const l of extra) {
     const n = named(l);
-    if (!objects.has(n.key)) objects.set(n.key, { said: `${n.words} is not one Flint makes`, group: n.group });
+    if (!objects.has(n.key)) objects.set(n.key, { words: n.words, how: 'extra', group: n.group });
   }
   // An object that is, whole, exactly as one of the alternatives has it is not a difference. (Postgres writes an
   // expression back in one of two forms, depending on whether the database has been through a dump: a database
@@ -294,10 +350,36 @@ export function catalogDifference(reference: readonly string[], restored: readon
       }
     }
   }
-  const all = [...objects.values()];
+  // What is left is every real difference. From here lines are only left UNSAID, each because another that stays
+  // says it, so the list cannot become empty by it.
+  //
+  // 1. A right shows twice over in the lines: as the privilege itself, and as what each of Flint's roles holds
+  //    because of it (a right given to everyone is one privilege and three of those). Where a privilege on a thing
+  //    differs, the "what a role holds" lines for the same right on the same thing follow from it.
+  const granted = new Set([...objects.keys()].filter((k) => k.startsWith('privilege|')).map((k) => {
+    const [, what, , priv] = k.split('|');
+    return `${priv}|${tail(what ?? '')}`;
+  }));
+  for (const key of [...objects.keys()]) {
+    if (!key.startsWith('may|')) continue;
+    const [, priv, ...rest] = key.slice('may|'.length).split(' ');
+    if (rest.join(' ') !== 'database' && granted.has(`${priv}|${tail(rest.join(' '))}`)) objects.delete(key);
+  }
+  // 2. A table, a function, a schema or a type that is missing as a whole, or is not one Flint makes, is said
+  //    once: its columns, checks, indexes, triggers and privileges are part of it.
+  for (const key of [...objects.keys()]) {
+    const whole = partOf(key).map((k) => objects.get(k)).find((o) => o !== undefined);
+    if (whole && whole.how !== 'different') objects.delete(key);
+  }
+  // 3. Two lines that would read as the very same sentence are one.
+  const HOW: Record<How, string> = { missing: 'is missing', extra: 'is not one Flint makes', different: 'is different' };
+  const all = [...new Map([...objects.values()].map((o) => [`${o.words} ${HOW[o.how]}`, { said: `${o.words} ${HOW[o.how]}`, group: o.group }])).values()];
   const groups = GROUPS.map((g) => ({ title: g.title, items: all.filter((o) => o.group === g.title).map((o) => o.said).sort() })).filter((g) => g.items.length > 0);
   return { objects: all.map((o) => o.said).sort(), groups, lines: all.length ? extra.length + missing.length : 0 };
 }
+
+/** What the three endings of a difference mean, for the reader of a list of them. */
+export const LEGEND = '"Is missing" means Flint builds it and the database lacks it. "Is not one Flint makes" means the database has it and Flint would not build it. "Is different" means both have it, and not in the same form.';
 
 /**
  * A difference in full, for the terminal: every object, under what kind of
@@ -308,7 +390,7 @@ export function catalogDifference(reference: readonly string[], restored: readon
 export function differenceLines(d: CatalogDifference): string[] {
   // A role's name is written as it is, never with a capital it does not have: it is introduced as "The role".
   const sentence = (s: string): string => {
-    const said = /^[a-z][a-z0-9_]* holding /.test(s) ? `The role ${s}` : `${s.charAt(0).toUpperCase()}${s.slice(1)}`;
+    const said = /^[a-z][a-z0-9_]* holding /.test(s) && !s.startsWith('everyone holding ') ? `The role ${s}` : `${s.charAt(0).toUpperCase()}${s.slice(1)}`;
     return `  ${said}.`;
   };
   return d.groups.flatMap((g) => [`${g.title}:`, ...g.items.map(sentence)]);
@@ -338,7 +420,7 @@ export async function ownedByOthers(c: pg.Client, owner: string, strangers: read
        WHERE ${USER_NS('n')} AND t.typowner <> $1::regrole
          AND NOT (t.typtype = 'c' AND EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = t.typrelid AND c.relkind <> 'c'))
          AND NOT (t.typcategory = 'A' AND t.typelem <> 0)
-     UNION ALL SELECT 'a default privilege of ' || pg_get_userbyid(d.defaclrole) FROM pg_default_acl d WHERE d.defaclrole <> $1::regrole`,
+     UNION ALL SELECT 'a standing rule for what ' || pg_get_userbyid(d.defaclrole) || ' makes' FROM pg_default_acl d WHERE d.defaclrole <> $1::regrole`,
     [owner],
   )).rows.map((r) => safe(r.l));
   if (strangers.length) {
@@ -350,8 +432,8 @@ export async function ownedByOthers(c: pg.Client, owner: string, strangers: read
          UNION ALL SELECT 'a column of ' || c.relname, a.attacl FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
          UNION ALL SELECT 'the function ' || proname, proacl FROM pg_proc
          UNION ALL SELECT 'the type ' || typname, typacl FROM pg_type
-         UNION ALL SELECT 'a default privilege', defaclacl FROM pg_default_acl)
-       SELECT DISTINCT what || ' (a privilege of ' || pg_get_userbyid(CASE WHEN r.oid = x.grantee THEN x.grantee ELSE x.grantor END) || ')' AS l
+         UNION ALL SELECT 'a standing rule for new things', defaclacl FROM pg_default_acl)
+       SELECT DISTINCT 'a privilege ' || pg_get_userbyid(CASE WHEN r.oid = x.grantee THEN x.grantee ELSE x.grantor END) || ' holds or gave on ' || what AS l
        FROM acls, LATERAL aclexplode(acl) x JOIN pg_roles r ON r.oid IN (x.grantee, x.grantor)
        WHERE acl IS NOT NULL AND r.rolname = ANY($1)`,
       [[...strangers]],
@@ -360,6 +442,10 @@ export async function ownedByOthers(c: pg.Client, owner: string, strangers: read
   }
   return out.sort();
 }
+
+/** One line of `ownedByOthers`, as a whole sentence. */
+export const straySentence = (stray: string): string =>
+  `${stray.charAt(0).toUpperCase()}${stray.slice(1)} ${stray.startsWith('a privilege ') ? 'is still in place' : 'belongs to another role'}.`;
 
 /** One of this checkout's migrations: its name, its file's sha256 (what Prisma records as its checksum) and its SQL. */
 export interface Migration {
@@ -410,9 +496,9 @@ export async function migrationState(c: pg.Client, migrationsDir: string): Promi
   const changed = live.filter((r) => r.done && byName.has(r.name) && byName.get(r.name)!.checksum !== r.checksum);
   const twice = live.length - new Set(live.map((r) => r.name)).size;
   if (live.length === 0) problems.push('no Flint migration is recorded');
-  if (unknown.length) problems.push(`the backup is from a newer Flint than this copy of the code (${unknown.length} migration(s) it does not know)`);
-  if (unfinished.length) problems.push(`${unfinished.length} migration(s) never finished`);
-  if (changed.length) problems.push(`${changed.length} migration(s) are not the ones this copy of Flint has (${safe(changed[0]!.name)})`);
+  if (unknown.length) problems.push(`the backup is from a newer Flint than this copy of the code, with ${counted(unknown.length, 'migration')} it does not know`);
+  if (unfinished.length) problems.push(`${counted(unfinished.length, 'migration')} never finished`);
+  if (changed.length) problems.push(`${counted(changed.length, 'migration is not the one', 'migrations are not the ones')} this copy of Flint has, ${changed.length === 1 ? 'namely' : 'the first being'} ${safe(changed[0]!.name)}`);
   if (twice > 0) problems.push('a migration is recorded twice');
   const done = new Set(live.filter((r) => r.done).map((r) => r.name));
   return { applied: ours.filter((m) => done.has(m.name)), pending: ours.filter((m) => !done.has(m.name)).map((m) => m.name), problems };
@@ -484,6 +570,12 @@ export async function compareWithReference(
   if (!difference.objects.length) return { difference, byHand: [] };
   const early = checkoutMigrations(migrationsDir).filter((m) => ALREADY_BY_HAND.includes(m.name) && state.pending.includes(m.name));
   if (!early.length) return { difference, byHand: [] };
+  // The second reference is what the record lists PLUS the listed update, and nothing else that is pending: the
+  // question is only whether this database is "its record, with that one update already done by hand". Prisma
+  // itself would never build that set when another pending update sorts before the listed one; that is harmless
+  // here because a listed update only changes who may do what (it is read file by file by a test), so it does not
+  // depend on the ones skipped. Nothing rests on this comparison alone: once the pending updates have run on the
+  // restored copy, the copy is compared again, whole, against a reference built from the whole checkout.
   const withEarly = await against([...state.applied, ...early]);
   // The same, or nearer to it than to what the record says: it is that database, and what is left is said against it.
   return withEarly.objects.length < difference.objects.length ? { difference: withEarly, byHand: early.map((m) => m.name) } : { difference, byHand: [] };

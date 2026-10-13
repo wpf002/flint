@@ -22,7 +22,7 @@
  * old, so a test with a date written into it stops passing a month later.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -30,10 +30,10 @@ import pg from 'pg';
 import { bootstrapDb, scramVerifier } from '../src/backup/bootstrap';
 import { ToolFailed, countRows, dumpDatabase, sha256File, toolError } from '../src/backup/backup';
 import { carryLines, type CarryReport } from '../src/backup/carry';
-import { ALREADY_BY_HAND, catalogDifference, catalogLines, checkoutMigrations, differenceSentence, migrationState } from '../src/backup/catalog';
+import { ALREADY_BY_HAND, LEGEND, catalogDifference, catalogLines, checkoutMigrations, counted, differenceLines, differenceSentence, migrationState, straySentence } from '../src/backup/catalog';
 import { grantLines } from '../src/backup/grants';
 import {
-  KEEP_DAYS, RestoreRefused, VOIDED_BY_RESTORE, checkDump, compareDatabase, referenceBuilder, repairDatabase, restoreDatabase, roleProblems, verifyRestored, writeDumpHash,
+  KEEP_DAYS, RestoreRefused, VOIDED_BY_RESTORE, checkDump, compareDatabase, compareVerdict, grantsBeyond, referenceBuilder, repairDatabase, restoreDatabase, roleProblems, verifyRestored, writeDumpHash,
   type RestoreOptions, type RestoreSummary,
 } from '../src/backup/restore';
 import { NotRunHere, execFor, refusalLines, restoreEmptyCommand, restoreProductionCommand, runtimeAgent, summaryLines, terminal } from '../src/backup/restore-cli';
@@ -334,13 +334,84 @@ describe('the command is Will’s alone', () => {
     ];
     const d = catalogDifference(reference, tampered);
     expect(d.objects).toEqual([
+      'flint_app holding INSERT on the table public.Approval is not one Flint makes',
+      'flint_app holding INSERT on the table public.AuditEntry is missing',
       'the function public.backdoor() is not one Flint makes',
       'the function public.consume_approval(text) is different',
       'the trigger Approval_consume_once on public."Approval" is different',
-      'what a role may do (flint_app INSERT public.Approval) is not one Flint makes',
-      'what a role may do (flint_app INSERT public.AuditEntry) is missing',
     ]);
-    expect(differenceSentence(d, 2)).toBe('the function public.backdoor() is not one Flint makes; the function public.consume_approval(text) is different; and 3 more');
+    expect(differenceSentence(d, 2)).toBe('flint_app holding INSERT on the table public.Approval is not one Flint makes; flint_app holding INSERT on the table public.AuditEntry is missing; and 3 more');
+  });
+
+  it('one difference is one line, said in plain words: never the same thing twice, never an internal form, and "everyone" for everyone', () => {
+    const base = [
+      'schema|public', 'relation|public.Approval|kind=r', 'column|public.Approval|id|text', 'privilege|schema public|flint_app|USAGE|may_grant=false',
+      'may|flint_app USAGE schema public', 'may|flint_app CONNECT database', 'large objects|0',
+    ];
+    const said = (restored: string[], reference = base): string[] => differenceLines(catalogDifference(reference, restored));
+    // A right given to everyone is one privilege, and three more lines for what each of Flint's roles now holds by it.
+    expect(said([...base, 'privilege|schema public|PUBLIC|CREATE|may_grant=false', 'may|flint_app CREATE schema public', 'may|flint_approver CREATE schema public', 'may|flint_backup CREATE schema public']))
+      .toEqual(['Who may do what:', '  Everyone holding CREATE on the schema public is not one Flint makes.']);
+    // A table Flint does not make: its columns, checks, indexes, triggers and privileges are part of it.
+    expect(said([
+      ...base, 'relation|public.stray|kind=r', 'column|public.stray|id|integer', 'constraint|public.stray|stray_pkey|PRIMARY KEY (id)|validated=true', 'index|public.stray|stray_pkey|CREATE UNIQUE INDEX',
+      'trigger|public.stray|t|CREATE TRIGGER t|enabled=O', 'privilege|table public.stray|PUBLIC|SELECT|may_grant=false', 'privilege|column public.stray.id|flint_app|UPDATE|may_grant=false',
+      'may|flint_app SELECT public.stray', 'may|PUBLIC SELECT public.stray',
+    ])).toEqual(['Tables, columns and views:', '  The table or view public.stray is not one Flint makes.']);
+    // The same for one that is missing, and for a function with the privileges every function is born with.
+    expect(said(base.filter((l) => !l.includes('Approval')))).toEqual(['Tables, columns and views:', '  The table or view public.Approval is missing.']);
+    expect(said([...base, 'function|public.backdoor(a text, b integer)|CREATE FUNCTION', 'privilege|function public.backdoor(a text, b integer)|PUBLIC|EXECUTE|may_grant=false', 'may|PUBLIC EXECUTE backdoor', 'may|flint_app EXECUTE backdoor']))
+      .toEqual(['Functions:', '  The function public.backdoor(a text, b integer) is not one Flint makes.']);
+    // A part of a table that is there on both sides is still its own line.
+    expect(said([...base.filter((l) => !l.startsWith('column|')), 'column|public.Approval|id|integer'])).toEqual(['Tables, columns and views:', '  The column id of public.Approval is different.']);
+    // What a role holds on the database itself, which no privilege line says: in the same words as any privilege.
+    expect(said([...base, 'may|flint_app TEMP database'])).toEqual(['Who may do what:', '  The role flint_app holding TEMPORARY on the database itself is not one Flint makes.']);
+    expect(said(base.filter((l) => l !== 'may|flint_app CONNECT database'))).toEqual(['Who may do what:', '  The role flint_app holding CONNECT on the database itself is missing.']);
+    // One count is one thing: more or fewer large objects is a single difference.
+    expect(said([...base.filter((l) => l !== 'large objects|0'), 'large objects|1'])).toEqual(['Everything else:', '  The number of large objects is different.']);
+    // A schema, a sequence or a type is filed under a heading that names it; a standing rule for new things is said as one.
+    expect(said([...base, 'schema|hidden', 'sequence|public.n_seq|bigint|start=1', 'relation|public.n_seq|kind=S', 'privilege|table public.n_seq|flint_app|USAGE|may_grant=false', 'type|public.mood|e|sad,ok', 'default privilege|owner public r|flint_app|SELECT', 'default privilege|outsider  f|PUBLIC|EXECUTE'])).toEqual([
+      'Who may do what:',
+      '  A standing rule that gives everyone EXECUTE on every new function that outsider makes is not one Flint makes.',
+      '  A standing rule that gives flint_app SELECT on every new table in the schema public is not one Flint makes.',
+      'Schemas, sequences and types:',
+      '  The schema hidden is not one Flint makes.',
+      '  The sequence public.n_seq is not one Flint makes.',
+      '  The type public.mood is not one Flint makes.',
+    ]);
+    // Leaving a line unsaid never makes a difference into none: the one it follows from is still there.
+    const every = catalogDifference(base, [...base, 'privilege|schema public|PUBLIC|CREATE|may_grant=false', 'may|flint_app CREATE schema public']);
+    expect(every.objects).toHaveLength(1);
+    expect(every.lines).toBe(2);
+    expect(catalogDifference(base, [...base, 'may|flint_app CREATE schema public']).objects).toEqual(['flint_app holding CREATE on the schema public is not one Flint makes']);
+    // Nothing in a list is an internal form, a bracketed plural or a parenthesis, and every line is a heading or a sentence.
+    for (const l of said([...base, 'privilege|schema public|PUBLIC|CREATE|may_grant=false', 'may|flint_app TEMP database', 'large objects|3', 'relation|public.stray|kind=r'])) {
+      expect(l, l).toMatch(/^([A-Z][A-Za-z ,]+:|  [A-Z].*\.)$/);
+      expect(l, l).not.toMatch(/PUBLIC|\(s\)|[()]|a role may do/);
+    }
+    expect(LEGEND).toMatch(/"Is missing" means .*"Is not one Flint makes" means .*"Is different" means /);
+    expect(counted(1, 'other role')).toBe('1 other role');
+    expect(counted(2, 'other role')).toBe('2 other roles');
+    expect(counted(0, 'thing')).toBe('0 things');
+    expect(straySentence('the table or view public.stray')).toBe('The table or view public.stray belongs to another role.');
+  });
+
+  it('the last word of a comparison counts only what would stop a restore', () => {
+    expect(compareVerdict({ differences: 0, stops: 0 })).toBe("A backup of this database would pass the restore's comparison.");
+    expect(compareVerdict({ differences: 1, stops: 0 })).toBe('A restore would refuse a backup of this database until the 1 difference listed first is settled.');
+    expect(compareVerdict({ differences: 6, stops: 0 })).toBe('A restore would refuse a backup of this database until the 6 differences listed first are settled.');
+    expect(compareVerdict({ differences: 0, stops: 1 })).toBe('A restore would stop at the 1 thing marked so above.');
+    expect(compareVerdict({ differences: 2, stops: 2 })).toBe('A restore would refuse a backup of this database until the 2 differences listed first are settled, and would stop at the 2 things marked so above.');
+    expect(compareVerdict({ differences: 1, stops: 0, unreadable: true })).toBe('A restore would refuse a backup of this database until its record of updates is one this copy of Flint can follow.');
+  });
+
+  it('a right on the database that a restore did not mean to leave is found by name, whoever holds it and however', () => {
+    const wanted = [{ grantee: 'flint_app', privilege: 'CONNECT', grantable: false }, { grantee: 'reader', privilege: 'CONNECT', grantable: false }];
+    expect(grantsBeyond(wanted, wanted)).toEqual([]);
+    expect(grantsBeyond(wanted, [...wanted, { grantee: 'outsider', privilege: 'CREATE', grantable: false }]).map((g) => g.grantee)).toEqual(['outsider']);
+    expect(grantsBeyond(wanted, [...wanted, { grantee: null, privilege: 'CONNECT', grantable: false }]).map((g) => g.grantee)).toEqual([null]);
+    // The same right with leave to pass it on is not the right that was wanted.
+    expect(grantsBeyond(wanted, [{ grantee: 'reader', privilege: 'CONNECT', grantable: true }])).toHaveLength(1);
   });
 });
 
@@ -386,6 +457,22 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
     await admin((c) => c.query(`ALTER DATABASE ${name} ALLOW_CONNECTIONS true`));
     return onDb(urls.owner, name);
   };
+
+  /** Who holds what on the public schema and on the database, the owner's own left out. */
+  const rights = (name: string) => admin(async (c) => (await c.query<{ r: string }>(
+    `SELECT 'schema ' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END || '=' || a.privilege_type AS r
+     FROM pg_namespace n, LATERAL aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) a WHERE n.nspname = 'public' AND a.grantee <> n.nspowner
+     UNION ALL
+     SELECT 'database ' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END || '=' || a.privilege_type
+     FROM pg_database d, LATERAL aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) a WHERE d.datname = current_database() AND a.grantee <> d.datdba
+     ORDER BY 1`)).rows.map((x) => x.r), name);
+  /** What the floor leaves: nobody by default, each of Flint's three roles by name. */
+  const FLOORED = ['database flint_app=CONNECT', 'database flint_approver=CONNECT', 'database flint_backup=CONNECT', 'schema flint_app=USAGE', 'schema flint_approver=USAGE', 'schema flint_backup=USAGE'];
+  /** The database's whole list of rights as Postgres stores it, the owner's own entry included, in a fixed order. */
+  const datacl = (name: string) => admin(async (c) => (await c.query<{ acl: string[] | null }>(`SELECT (SELECT array_agg(x::text ORDER BY x::text) FROM unnest(d.datacl) AS x) AS acl FROM pg_database d WHERE d.datname = $1`, [name])).rows[0]!.acl);
+  const FLOORED_ACL = ['flint_app=c/flint_owner', 'flint_approver=c/flint_owner', 'flint_backup=c/flint_owner', 'flint_owner=CTc/flint_owner'];
+  /** A role of the server's that is none of Flint's (it has no password and cannot sign in). */
+  const serverRole = (name: string) => admin((c) => c.query(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${name}') THEN CREATE ROLE ${name}; END IF; END $$`));
 
   interface Scenario { name: string; owner: string; app: string; approver: string; backup: string; marker: string }
   /**
@@ -840,7 +927,7 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       writeFileSync(`${off}.counts.json`, JSON.stringify(counts));
       fresh();
       const before = await databases();
-      await expect(restoreDatabase(options(p, { dump: off, recorded: [dumpSha] }))).rejects.toThrow(/did not pass its checks: row counts differ in 1 table\(s\)\. Nothing was changed\./);
+      await expect(restoreDatabase(options(p, { dump: off, recorded: [dumpSha] }))).rejects.toThrow(/did not pass its checks: row counts differ in 1 table\. Nothing was changed\./);
       expect(calls).toEqual([]);
       expect(await databases()).toEqual(before);
       expect(await statusOf(p.owner, p.marker)).toMatchObject({ status: 'pending' });
@@ -858,7 +945,7 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       for (const m of all) cpSync(join(MIGRATIONS, m.name), join(edited, m.name), { recursive: true });
       const first = join(edited, all[0]!.name, 'migration.sql');
       writeFileSync(first, `${readFileSync(first, 'utf8')}\n-- changed\n`);
-      await expect(restoreDatabase(options(p, { migrationsDir: edited, checkOnly: true }))).rejects.toThrow(/1 migration\(s\) are not the ones this copy of Flint has.*Nothing was changed/);
+      await expect(restoreDatabase(options(p, { migrationsDir: edited, checkOnly: true }))).rejects.toThrow(/1 migration is not the one this copy of Flint has, namely \d{14}_\w+\. Nothing was changed/);
       expect(await databases()).toEqual(before);
       expect(await statusOf(p.owner, p.marker)).toMatchObject({ status: 'pending' });
     });
@@ -1033,25 +1120,25 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       expect((await doctored((c) => c.query('GRANT UPDATE ON "AuditEntry" TO flint_app'))).text).toMatch(/flint_app holding UPDATE/);
       expect((await doctored((c) => c.query('REVOKE INSERT ON "AuditEntry" FROM flint_app'))).text).toMatch(/flint_app holding INSERT on the table public.AuditEntry is missing/);
       expect((await doctored((c) => c.query('GRANT SELECT ON "Proposal" TO flint_approver'))).text).toMatch(/flint_approver holding SELECT/);
-      expect((await doctored((c) => c.query('GRANT EXECUTE ON FUNCTION forget_entity(text, text) TO PUBLIC'))).text).toMatch(/PUBLIC holding EXECUTE on the function public.forget_entity/);
+      expect((await doctored((c) => c.query('GRANT EXECUTE ON FUNCTION forget_entity(text, text) TO PUBLIC'))).text).toMatch(/everyone holding EXECUTE on the function public.forget_entity/);
       expect((await doctored((c) => c.query('GRANT UPDATE ("revokedAt") ON "ApprovalCredential" TO flint_app'))).text).toMatch(/flint_app holding UPDATE on the column public.ApprovalCredential.revokedAt/);
       // A temp table could shadow a governance table; a schema an application role may create in could hold anything.
       const temp = await doctored(async (c) => { await c.query(`DO $$ BEGIN EXECUTE format('GRANT TEMPORARY ON DATABASE %I TO flint_app', current_database()); END $$`); });
-      expect(temp.text).toMatch(/what a role may do \(flint_app TEMP database\) is not one Flint makes/);
+      expect(temp.text).toMatch(/flint_app holding TEMPORARY on the database itself is not one Flint makes/);
       expect((await doctored((c) => c.query('GRANT CREATE ON SCHEMA public TO flint_app'))).text).toMatch(/flint_app holding CREATE on the schema public/);
-      expect((await doctored((c) => c.query('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO flint_app'))).text).toMatch(/a default privilege/);
+      expect((await doctored((c) => c.query('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO flint_app'))).text).toMatch(/a standing rule that gives flint_app DELETE on every new table in the schema public is not one Flint makes/);
     });
 
     it('something that belongs to another role, or that the restoring role still holds, is named', async () => {
       const stray = await doctored(async (c) => { await c.query('ALTER TABLE "Proposal" OWNER TO scratch_admin'); }, 'admin');
-      expect(stray.text).toMatch(/1 thing\(s\) in it do not belong to the migration owner \(the table or view public.Proposal\)/);
+      expect(stray.text).toMatch(/1 thing in it does not belong to the migration owner, namely the table or view public.Proposal$/);
       const held = await doctored((c) => c.query('GRANT SELECT ON "Proposal" TO flint_restore'));
-      expect(held.text).toMatch(/a privilege of flint_restore/);
+      expect(held.text).toMatch(/1 thing in it does not belong to the migration owner, namely a privilege flint_restore holds or gave on the table or view Proposal$/);
     });
 
     it('a migration that never finished, or a record with no migration in it, is refused', async () => {
       const unfinished = await doctored((c) => c.query(`UPDATE _prisma_migrations SET finished_at = NULL WHERE migration_name = (SELECT max(migration_name) FROM _prisma_migrations)`));
-      expect(unfinished.text).toMatch(/1 migration\(s\) never finished/);
+      expect(unfinished.text).toMatch(/1 migration never finished/);
       const none = await doctored((c) => c.query('DELETE FROM _prisma_migrations'));
       expect(none.text).toMatch(/no Flint migration is recorded/);
       const twice = await doctored((c) => c.query(`INSERT INTO _prisma_migrations (id, checksum, finished_at, migration_name) SELECT 'again', checksum, now(), migration_name FROM _prisma_migrations LIMIT 1`));
@@ -1203,6 +1290,35 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       expect(await restoreRole()).toEqual({ databases: 0, settings: 0 });
     });
 
+    it('a right on the database itself that a backup gives a role of the server never reaches the database in use', async () => {
+      await serverRole('outsider');
+      for (const [grant, daysAgo] of [
+        ['GRANT CONNECT, CREATE, TEMPORARY ON DATABASE %I TO outsider', 15],
+        ['GRANT CONNECT ON DATABASE %I TO outsider WITH GRANT OPTION', 16],
+        // To a role Flint's backup role is a member of, to everyone, and to one of Flint's own with leave to pass it on.
+        ['GRANT CREATE, TEMPORARY ON DATABASE %I TO pg_read_all_data, PUBLIC', 17],
+        ['GRANT CONNECT, CREATE ON DATABASE %I TO flint_app WITH GRANT OPTION', 18],
+      ] as const) {
+        const p = await production();
+        expect(await datacl(p.name), grant).toEqual(FLOORED_ACL);
+        const dump = await forged(p, daysAgo, { after: `DO $f$ BEGIN EXECUTE format('${grant}', current_database()); RAISE LOG 'n13-probe % ran in %', ${daysAgo}, current_database(); END $f$;` });
+        fresh();
+        const now = tick();
+        const r = await restoreDatabase(options(p, { dump, now }));
+        expect(r, grant).toMatchObject({ database: p.name, runtimeStarted: true });
+        // The grant did run, on the copy...
+        expect(cluster.log(), grant).toContain(`n13-probe ${daysAgo} ran in ${p.name}_restoring_${stampOf(now)}`);
+        // ...and the database now in use holds exactly what Flint's setup gives, entry for entry: nobody else is on it.
+        expect(await datacl(p.name), grant).toEqual(FLOORED_ACL);
+        expect(await rights(p.name), grant).toEqual(FLOORED);
+        for (const priv of ['CONNECT', 'CREATE', 'TEMP']) {
+          expect((await one<{ ok: boolean }>(urls.owner, 'SELECT has_database_privilege($1, $2, $3) AS ok', ['outsider', p.name, priv]))!.ok, `${grant}: ${priv}`).toBe(false);
+        }
+        // Nothing of it was Will's to be told: the database in use never had it, and the restored one does not.
+        expect(said.filter((l) => /outsider|privilege/.test(l)), grant).toEqual([]);
+      }
+    });
+
     it('a backup that fails its checks after marking its copy a template is still removed whole: nothing was changed, and that is true', async () => {
       const p = await production();
       const dump = await forged(p, 7, {
@@ -1216,9 +1332,10 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       const before = await databases();
       const err = await refusal(restoreDatabase(options(p, { dump })));
       expect(err.message).toMatch(/the function public\.backdoor\(\) is not one Flint makes.*\)\. Nothing was changed\.$/);
-      // Its lines are the whole list of differences, and nothing about a copy that could not be removed.
-      expect(err.lines[0]).toBe('Every difference:');
-      expect(err.lines.join('\n')).not.toMatch(/could not remove/);
+      // One function Flint does not make is one difference (the right to run it that every function is born with is
+      // part of it), so the sentence holds it whole: no list follows, and nothing about a copy that could not be removed.
+      expect(err.message).toMatch(/builds its database \(the function public\.backdoor\(\) is not one Flint makes\)\. Nothing was changed\.$/);
+      expect(err.lines).toEqual([]);
       expect(await databases()).toEqual(before);
       expect((await admin(async (c) => (await c.query(`SELECT count(*)::int AS n FROM pg_db_role_setting s WHERE NOT EXISTS (SELECT 1 FROM pg_database d WHERE d.oid = s.setdatabase) AND s.setdatabase <> 0`)).rows[0])).n).toBe(0);
       expect(calls).toEqual([]);
@@ -1376,15 +1493,6 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
 
   describe('a database that was set up by hand, as the one Flint runs on was', () => {
     const FLOOR = '20261013000150_public_schema_floor';
-    /** Who holds what on the public schema and on the database, the owner's own left out. */
-    const rights = (name: string) => admin(async (c) => (await c.query<{ r: string }>(
-      `SELECT 'schema ' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END || '=' || a.privilege_type AS r
-       FROM pg_namespace n, LATERAL aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) a WHERE n.nspname = 'public' AND a.grantee <> n.nspowner
-       UNION ALL
-       SELECT 'database ' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END || '=' || a.privilege_type
-       FROM pg_database d, LATERAL aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) a WHERE d.datname = current_database() AND a.grantee <> d.datdba
-       ORDER BY 1`)).rows.map((x) => x.r), name);
-    const FLOORED = ['database flint_app=CONNECT', 'database flint_approver=CONNECT', 'database flint_backup=CONNECT', 'schema flint_app=USAGE', 'schema flint_approver=USAGE', 'schema flint_backup=USAGE'];
     /**
      * A production database as the real one was the night its backup was refused: everyone already taken off the
      * public schema and the database, each role named instead, and no record of the update that does the same
@@ -1420,9 +1528,25 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       // they are exactly what the database in use has now, so there is nothing to tell.
       expect(said).toEqual(['The database this backup is of was already set up as a later update sets it. That update is applied to the restored copy, and changes nothing.']);
       fresh();
-      const r = await restoreDatabase(options(live, { dump }));
+      // "Changes nothing" is checked, not taken on trust: the copy's rights are read just before that update is applied
+      // to it and just after, on the public schema and on the database itself.
+      const around: string[][] = [];
+      const seen = async (copy: string): Promise<string[]> => [...(await rights(copy)), ...((await datacl(copy)) ?? [])];
+      const watched = async (url: string): Promise<void> => {
+        const copy = new URL(url).pathname.slice(1);
+        around.push(await seen(copy));
+        await migrate(url);
+        around.push(await seen(copy));
+      };
+      const r = await restoreDatabase(options(live, { dump, migrate: watched }));
       expect(r).toMatchObject({ database: live.name, pending: [FLOOR], runtimeStarted: true });
-      expect(said.filter((l) => /The database in use (gives|is missing)/.test(l))).toEqual([]);
+      expect(around).toHaveLength(2);
+      expect(around[0]).toEqual([...FLOORED, ...FLOORED_ACL]);
+      expect(around[1]).toEqual(around[0]);
+      // And none of the sentences about the database's own rights: the restored database has what the one in use has.
+      expect(said[0]).toBe('The database this backup is of was already set up as a later update sets it. That update is applied to the restored copy, and changes nothing.');
+      expect(said.filter((l) => /privilege|Flint's (own )?setup|The database in use/.test(l))).toEqual([]);
+      expect(await datacl(live.name)).toEqual(FLOORED_ACL);
       // What is in use afterwards, read from the restored database itself: everyone holds nothing on the database or
       // its public schema, and the three roles are named. As it was by hand, and now its record says so too.
       expect(await rights(live.name)).toEqual(FLOORED);
@@ -1442,11 +1566,11 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       expect(said).not.toContain('The database this backup is of was already set up as a later update sets it. That update is applied to the restored copy, and changes nothing.');
       // Here the restored database really will differ from the one in use (which lets everyone connect, and names no
       // role): that is said, once for each right, and it is what the restored database then has.
-      expect(said.filter((l) => /The database in use (gives|is missing)/.test(l)).sort()).toEqual([
+      expect(said.filter((l) => /^The database in use (gives|does not give)/.test(l)).sort()).toEqual([
+        "The database in use does not give flint_app the privilege CONNECT, which Flint's own setup does. The restored database gives it.",
+        "The database in use does not give flint_approver the privilege CONNECT, which Flint's own setup does. The restored database gives it.",
+        "The database in use does not give flint_backup the privilege CONNECT, which Flint's own setup does. The restored database gives it.",
         "The database in use gives everyone the privilege CONNECT, which Flint's own setup does not. The restored database follows Flint's setup.",
-        "The database in use is missing a privilege Flint's setup gives (flint_app CONNECT). The restored database has it.",
-        "The database in use is missing a privilege Flint's setup gives (flint_approver CONNECT). The restored database has it.",
-        "The database in use is missing a privilege Flint's setup gives (flint_backup CONNECT). The restored database has it.",
       ]);
       expect(await rights(old.name)).toEqual(FLOORED);
       expect(await recorded(old.owner)).toBe(1);
@@ -1454,11 +1578,11 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
 
     it('everyone being GIVEN something is still refused, in a database set up by hand and in one that was not', async () => {
       for (const [make, grant, named] of [
-        [byHand, 'GRANT CREATE ON SCHEMA public TO PUBLIC', /PUBLIC holding CREATE on the schema public is not one Flint makes/],
+        [byHand, 'GRANT CREATE ON SCHEMA public TO PUBLIC', /\(everyone holding CREATE on the schema public is not one Flint makes\)/],
         // (Everyone given the schema back, with the backup role still named on it: neither what the record says nor what was done by hand.)
         [byHand, 'GRANT USAGE ON SCHEMA public TO PUBLIC', /flint_backup holding USAGE on the schema public is not one Flint makes/],
-        [byHand, 'GRANT SELECT ON "Approval" TO PUBLIC', /PUBLIC holding SELECT on the table public.Approval is not one Flint makes/],
-        [before, 'GRANT CREATE ON SCHEMA public TO PUBLIC', /PUBLIC holding CREATE on the schema public is not one Flint makes/],
+        [byHand, 'GRANT SELECT ON "Approval" TO PUBLIC', /\(everyone holding SELECT on the table public.Approval is not one Flint makes\)/],
+        [before, 'GRANT CREATE ON SCHEMA public TO PUBLIC', /\(everyone holding CREATE on the schema public is not one Flint makes\)/],
         [before, 'GRANT USAGE ON SCHEMA public TO flint_restore', /flint_restore holding USAGE on the schema public is not one Flint makes/],
       ] as const) {
         const bad = await make();
@@ -1490,49 +1614,88 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       });
       const err = await refusal(restoreDatabase(options(await production(), { dump: await backupOf(bad, 14), checkOnly: true })));
       expect(err.message).toMatch(/it is not built the way this copy of Flint builds its database \(.*; and \d+ more\)\. Nothing was changed\.$/);
-      expect(err.lines[0]).toBe('Every difference:');
-      const text = err.lines.join('\n');
-      expect(text).toContain('Who may do what:\n');
-      expect(text).toContain('  PUBLIC holding CREATE on the schema public is not one Flint makes.');
-      expect(text).toContain('  The role flint_app holding UPDATE on the table public.AuditEntry is not one Flint makes.');
-      expect(text).toContain('Checks and indexes:\n  The constraint ActionPolicy_tier_check on public.ActionPolicy is missing.');
-      expect(text).toContain('Triggers and rules:\n  The trigger Approval_consume_once on public.Approval is different.');
-      expect(text).toContain('Functions:\n  The function public.backdoor() is not one Flint makes.');
-      for (const l of err.lines) expect(l, l).toMatch(/^([A-Z][A-Za-z ,]+:|  [A-Z].*\.)$/);
+      // What the three endings mean, then the list: five things were changed, and it has five lines.
+      expect(err.lines).toEqual([
+        LEGEND,
+        'Every difference:',
+        'Who may do what:',
+        '  Everyone holding CREATE on the schema public is not one Flint makes.',
+        '  The role flint_app holding UPDATE on the table public.AuditEntry is not one Flint makes.',
+        'Checks and indexes:',
+        '  The constraint ActionPolicy_tier_check on public.ActionPolicy is missing.',
+        'Triggers and rules:',
+        '  The trigger Approval_consume_once on public.Approval is different.',
+        'Functions:',
+        '  The function public.backdoor() is not one Flint makes.',
+      ]);
+      expect(err.message).toMatch(/; and 2 more\)\. Nothing was changed\.$/);
     });
 
     describe('--compare: the database in use, read against what this code builds', () => {
       const lines: string[] = [];
+      const PASSES = "A backup of this database would pass the restore's comparison.";
+      const scratchDatabases = (p: Scenario) => databases(`${p.name}_re`);
       const compare = async (p: Scenario) => {
         lines.length = 0;
         const before = await databases('');
-        const r = await compareDatabase({ owner: p.owner, restore: urls.restore, tools: cluster.tools, migrationsDir: MIGRATIONS, say: (l) => lines.push(l), now: tick() });
-        // The reference it built beside it is gone again, and nothing else came or went.
+        let listening = 0;
+        const r = await compareDatabase({
+          owner: p.owner, restore: urls.restore, tools: cluster.tools, migrationsDir: MIGRATIONS, say: (l) => lines.push(l), now: tick(),
+          onSignal: () => { listening += 1; return () => { listening -= 1; }; },
+        });
+        // The reference it built beside it is gone again, nothing else came or went, and it no longer listens for a signal.
         expect(await databases('')).toEqual(before);
+        expect(listening).toBe(0);
         return r;
+      };
+      /** Every line said is a heading or a whole sentence, with no bracketed plural, no parenthesis and no word of Postgres's for everyone. */
+      const plain = (): void => {
+        for (const l of lines) {
+          expect(l, l).toMatch(/^( {2})?[A-Z"].*[.:]$/);
+          expect(l, l).not.toMatch(/\(s\)|[()]|PUBLIC|a role may do/);
+        }
       };
 
       it('a database this code built is the same, and it says how a restored copy would be made', async () => {
         const p = await production();
-        expect(await compare(p)).toEqual({ same: true, differences: 0, byHand: [], notes: 0 });
-        expect(lines[0]).toMatch(new RegExp(`^The database ${p.name} is built the way this copy of Flint builds one \\(\\d+ updates on record\\)\\.$`));
-        expect(lines).toContain('A restored copy is made the way this database was: UTF8, sorted by the system (C).');
-        expect(lines.slice(-2)).toEqual(["A backup of this database would pass the restore's comparison.", 'Nothing was changed.']);
-        for (const l of lines) expect(l, l).toMatch(/^[A-Z"].*\.$/);
+        expect(await compare(p)).toEqual({ same: true, differences: 0, stops: 0, byHand: [], notes: 0, verdict: PASSES });
+        expect(lines[0]).toMatch(new RegExp(`^The database ${p.name} is built the way this copy of Flint builds one\\. It has \\d+ updates on record\\.$`));
+        expect(lines).toContain('A restored copy is made the way this database was: UTF8, sorted by the system as C.');
+        expect(lines.slice(-2)).toEqual([PASSES, 'Nothing was changed.']);
+        plain();
       });
 
-      it('one set up by hand is the same too, and it says which way', async () => {
+      it('one set up by hand is the same too, it says which way, and it says nothing about rights a restore would leave as they are', async () => {
         const live = await byHand();
-        expect(await compare(live)).toEqual({ same: true, differences: 0, byHand: [FLOOR], notes: 0 });
-        expect(lines[0]).toMatch(/is built the way this copy of Flint builds one \(\d+ updates on record, 1 still to apply\)\.$/);
+        expect(await compare(live)).toEqual({ same: true, differences: 0, stops: 0, byHand: [FLOOR], notes: 0, verdict: PASSES });
+        expect(lines[0]).toMatch(/is built the way this copy of Flint builds one\. It has \d+ updates on record and 1 still to apply\.$/);
         expect(lines[1]).toBe('It was already set up as an update that is still to apply sets it, which a restore accepts.');
+        // Not one sentence about who may do what on the database itself: a restored database would hold what this one holds.
+        expect(lines.filter((l) => /privilege|Flint's (own )?setup/.test(l))).toEqual([]);
+        plain();
         // It read, and wrote nothing: the record still lacks the update, and the rights are as they were.
         expect(await recorded(live.owner)).toBe(0);
         expect(await rights(live.name)).toEqual(FLOORED);
       });
 
-      it('every difference is listed at once, grouped, with what lives on the server said apart', async () => {
+      it('one this code built before that update is the same, and is told what a restore would change on the database itself', async () => {
+        const old = await before();
+        // A backup of it restores (the update is applied to the copy), so nothing here stops a restore. But the
+        // restored database would end with the update's rights, which this one does not have yet: each is said.
+        expect(await compare(old)).toMatchObject({ same: true, differences: 0, stops: 0, byHand: [], notes: 4, verdict: PASSES });
+        expect(lines.filter((l) => /privilege/.test(l)).sort()).toEqual([
+          "This database does not give flint_app the privilege CONNECT, which Flint's own setup does. A restored database gives it.",
+          "This database does not give flint_approver the privilege CONNECT, which Flint's own setup does. A restored database gives it.",
+          "This database does not give flint_backup the privilege CONNECT, which Flint's own setup does. A restored database gives it.",
+          "This database gives everyone the privilege CONNECT, which Flint's own setup does not. A restored database follows Flint's setup.",
+        ]);
+        expect(lines.slice(-2)).toEqual([PASSES, 'Nothing was changed.']);
+        plain();
+      });
+
+      it('every difference is listed at once, each on one line, with what lives on the server said apart and counted as stopping nothing', async () => {
         const p = await production();
+        await serverRole('reader');
         await connect(p.owner, async (c) => {
           await c.query('ALTER TABLE "Approval" DISABLE TRIGGER "Approval_consume_once"');
           await c.query('GRANT CREATE ON SCHEMA public TO PUBLIC');
@@ -1541,9 +1704,12 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
         await admin(async (c) => {
           await c.query(`GRANT TEMPORARY ON DATABASE ${p.name} TO flint_app`);
           await c.query(`REVOKE CONNECT ON DATABASE ${p.name} FROM flint_backup`);
+          await c.query(`GRANT CONNECT, TEMPORARY ON DATABASE ${p.name} TO reader`);
           await c.query(`ALTER DATABASE ${p.name} SET statement_timeout = '45s'`);
           await c.query(`ALTER DATABASE ${p.name} CONNECTION LIMIT 50`);
-          await c.query('CREATE TABLE stray (id integer)');
+          await c.query(`ALTER ROLE flint_app IN DATABASE ${p.name} SET work_mem = '8MB'`);
+          await c.query('CREATE TABLE stray (id integer PRIMARY KEY)');
+          await c.query('SELECT lo_create(0)');
           // And three things done to Flint's roles by hand, which live on the server alone.
           await c.query('GRANT pg_monitor TO flint_app');
           await c.query(`ALTER ROLE flint_app SET statement_timeout = '30s'`);
@@ -1559,38 +1725,123 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
             await c.query('ALTER ROLE flint_approver CONNECTION LIMIT -1');
           });
         }
-        expect(r.same).toBe(false);
-        const text = lines.join('\n');
-        expect(lines[0]).toMatch(new RegExp(`^The database ${p.name} differs from the one this copy of Flint builds in \\d+ ways \\(\\d+ updates on record\\)\\.$`));
-        expect(text).toContain('Who may do what:\n');
-        expect(text).toContain('  PUBLIC holding CREATE on the schema public is not one Flint makes.');
-        expect(text).toContain('  The role flint_app holding UPDATE on the table public.AuditEntry is not one Flint makes.');
-        expect(text).toContain('Triggers and rules:\n  The trigger Approval_consume_once on public.Approval is different.');
-        expect(text).toContain('Tables, columns and views:\n');
-        expect(text).toMatch(/In it, \d+ things? do(es)? not belong to the migration owner\. A restore gives everything to the migration owner, so this stops nothing:/);
-        // What is on the server and in no backup: said, and none of it stops a restore.
-        expect(text).toContain("On the database itself, flint_app holds TEMPORARY, which Flint's own setup does not give. A restored database follows Flint's setup.");
-        expect(text).toContain("On the database itself, a right Flint's setup gives is missing (flint_backup CONNECT). A restored database has it.");
-        expect(text).toContain('The database has 1 setting of its own (statement_timeout). A restore carries it over.');
-        expect(text).toContain('The database has a connection limit of 50. A restored database has none.');
-        expect(text).toContain("The role flint_app is a member of pg_monitor, which Flint's own setup does not make it.");
-        expect(text).toContain('The role flint_app has 1 setting of its own on this server (statement_timeout). No backup holds it.');
-        expect(text).toContain('The role flint_approver has a connection limit of 20.');
-        // The last word is the command's.
-        expect(lines.at(-1)).not.toBe('Nothing was changed.');
+        // Five things were changed that a backup would carry, and the list has five lines: one right given to everyone
+        // is one line (not one more for each role that now holds it), a table Flint does not make is one line (not
+        // one more for its column, its key and its index), and one more large object is one line.
+        expect(lines.slice(0, lines.indexOf('In it, 1 thing does not belong to the migration owner. A restore gives everything to the migration owner, so this stops nothing:'))).toEqual([
+          expect.stringMatching(new RegExp(`^The database ${p.name} differs from the one this copy of Flint builds in 5 ways\\. It has \\d+ updates on record\\.$`)),
+          LEGEND,
+          'Who may do what:',
+          '  Everyone holding CREATE on the schema public is not one Flint makes.',
+          '  The role flint_app holding UPDATE on the table public.AuditEntry is not one Flint makes.',
+          'Tables, columns and views:',
+          '  The table or view public.stray is not one Flint makes.',
+          'Triggers and rules:',
+          '  The trigger Approval_consume_once on public.Approval is different.',
+          'Everything else:',
+          '  The number of large objects is different.',
+        ]);
+        expect(lines).toContain('  The table or view public.stray belongs to another role.');
+        // What is on the server and in no backup: said, by name, and none of it stops a restore.
+        const server = [
+          "This database gives flint_app the privilege TEMPORARY, which Flint's own setup does not. A restored database follows Flint's setup.",
+          "This database does not give flint_backup the privilege CONNECT, which Flint's own setup does. A restored database gives it.",
+          "This database gives the role reader the privileges CONNECT and TEMPORARY, which are no part of Flint's own setup. A restored database keeps them as your own addition.",
+          'The database has 1 setting of its own, statement_timeout. A restore carries it over.',
+          'The database holds settings stored for 1 role by name. A restore cannot copy those, and says so.',
+          'The database has a connection limit of 50. A restored database has none.',
+          "The role flint_app is a member of pg_monitor, which Flint's own setup does not make it.",
+          'The role flint_app has 1 setting of its own on this server, statement_timeout. No backup holds it.',
+          'The role flint_approver has a connection limit of 20.',
+        ];
+        for (const sentence of server) expect(lines, sentence).toContain(sentence);
+        plain();
+        // The last word is the command's, and it counts the five: not the stray table's owner, not the nine things on the server.
+        expect(r).toMatchObject({ same: false, differences: 5, stops: 0, notes: server.length, verdict: 'A restore would refuse a backup of this database until the 5 differences listed first are settled.' });
+        expect(lines.at(-1)).toBe('A restored copy is made the way this database was: UTF8, sorted by the system as C.');
         // Nothing in it was changed by being read: what was done to it above is all still there.
         expect((await one<{ tgenabled: string }>(p.owner, `SELECT tgenabled::text FROM pg_trigger WHERE tgname = 'Approval_consume_once'`))!.tgenabled).toBe('D');
+      });
+
+      it('what a restore would stop at is marked and counted, also when the database itself is the same', async () => {
+        const p = await production();
+        // A right of Will's own on the database, given to a role Flint's backup role is a member of: a restore carries
+        // it over, finds the backup role holding more than Flint's setup gives it, and refuses. So it is a difference here.
+        await admin((c) => c.query(`GRANT CREATE ON DATABASE ${p.name} TO pg_read_all_data`));
+        expect(await compare(p)).toMatchObject({ same: false, differences: 1, stops: 0, verdict: 'A restore would refuse a backup of this database until the 1 difference listed first is settled.' });
+        expect(lines).toContain('  The role flint_backup holding CREATE on the database itself is not one Flint makes.');
+        await admin((c) => c.query(`REVOKE CREATE ON DATABASE ${p.name} FROM pg_read_all_data`));
+        // A role with more power than it may have: the database is the same, and a restore would still stop.
+        await admin((c) => c.query('ALTER ROLE flint_app CREATEDB'));
+        try {
+          expect(await compare(p)).toMatchObject({ same: true, differences: 0, stops: 1, notes: 1, verdict: 'A restore would stop at the 1 thing marked so above.' });
+          expect(lines).toContain('A restore would stop at this: flint_app has more power than an application role may.');
+          expect(lines).not.toContain(PASSES);
+          expect(lines).not.toContain('Nothing was changed.');
+          plain();
+        } finally {
+          await admin((c) => c.query('ALTER ROLE flint_app NOCREATEDB'));
+        }
       });
 
       it('a record this code cannot follow is said first, and nothing else is compared', async () => {
         const p = await production();
         await connect(p.owner, (c) => c.query(`UPDATE _prisma_migrations SET checksum = repeat('0', 64) WHERE migration_name = (SELECT min(migration_name) FROM _prisma_migrations)`));
-        expect((await compare(p)).same).toBe(false);
-        expect(lines[0]).toMatch(/^The database's own record of its updates is not one this copy of Flint can follow: 1 migration\(s\) are not the ones this copy of Flint has/);
+        expect(await compare(p)).toMatchObject({ same: false, verdict: 'A restore would refuse a backup of this database until its record of updates is one this copy of Flint can follow.' });
+        expect(lines[0]).toMatch(/^The database's own record of its updates is not one this copy of Flint can follow: 1 migration is not the one this copy of Flint has, namely \d{14}_\w+\.$/);
         expect(lines[1]).toBe('A restore would refuse a backup of it for that alone, so nothing else was compared.');
       });
 
-      it('as a command: --compare takes nothing else, asks nothing, and ends as a refusal only when something differs', async () => {
+      it('a scratch database an earlier run left is removed at the start, and said; a restored copy that never went into use is left for a restore', async () => {
+        const p = await production();
+        const stale = `${p.name}_reference_20200101t000000z`;
+        const copy = `${p.name}_restoring_20200101t000000z`;
+        await admin(async (c) => {
+          await c.query(`CREATE DATABASE ${stale} TEMPLATE template0 OWNER flint_owner`);
+          await c.query(`CREATE DATABASE ${copy} TEMPLATE template0 OWNER flint_owner`);
+        });
+        try {
+          const out: string[] = [];
+          const r = await compareDatabase({ owner: p.owner, restore: urls.restore, tools: cluster.tools, migrationsDir: MIGRATIONS, say: (l) => out.push(l), now: tick() });
+          expect(r.same).toBe(true);
+          expect(out[0]).toBe(`Flint removed ${stale}, a scratch database left by an earlier run that did not finish.`);
+          expect(out.filter((l) => /Flint removed/.test(l))).toHaveLength(1);
+          expect(await scratchDatabases(p)).toEqual([copy]);
+        } finally {
+          await admin((c) => c.query(`DROP DATABASE IF EXISTS ${copy}`));
+        }
+      });
+
+      it('it removes only the reference it made itself: never one a running restore holds, never one it found there', async () => {
+        const p = await production();
+        const now = tick();
+        const theirs = `${p.name}_reference_${stampOf(now)}`;
+        const run = (out: string[] = []) => refusal(compareDatabase({ owner: p.owner, restore: urls.restore, tools: cluster.tools, migrationsDir: MIGRATIONS, say: (l) => out.push(l), now }));
+        await admin((c) => c.query(`CREATE DATABASE ${theirs} TEMPLATE template0 OWNER flint_owner`));
+        try {
+          // A restore is running (it holds the lock), and its reference has this very second's name.
+          await admin(async (c) => {
+            await c.query('SELECT pg_advisory_lock($1, $2)', [0x464c4e54, 7]);
+            const err = await run();
+            expect(err.message).toBe('A restore is running. Wait for it to finish.');
+            expect(err.stage).toBe('lock');
+          });
+          expect(await scratchDatabases(p)).toEqual([theirs]);
+          // No restore is running, and the database of that name cannot be removed (someone is connected to it): it
+          // is said, the run stops, and the database is still there afterwards.
+          await admin(async () => {
+            const out: string[] = [];
+            const err = await run(out);
+            expect(out).toEqual(['Flint could not remove 1 scratch database left by an earlier run. The next restore removes it.']);
+            expect(err.message).toBe('A comparison from this same second is already there. Wait a moment and run this again.');
+          }, theirs);
+          expect(await scratchDatabases(p)).toEqual([theirs]);
+        } finally {
+          await admin((c) => c.query(`DROP DATABASE IF EXISTS ${theirs}`));
+        }
+      });
+
+      it('as a command: --compare takes nothing else, asks nothing, and ends as a refusal only when a restore would not go through', async () => {
         const p = await production();
         const cfg: RestoreConfig = {
           home, tz: 'UTC', ownerUrl: p.owner, appUrl: p.app, restoreUrl: urls.restore, dumpDir, copyDir, fingerprintKey: keyFile,
@@ -1599,10 +1850,16 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
         await expect(restoreProductionCommand(['--compare', '--check'], cfg, { say: () => {}, uid: 501 })).rejects.toThrow('--compare takes no other option.');
         const out: string[] = [];
         await restoreProductionCommand(['--compare'], cfg, { say: (l) => out.push(l), uid: 501 });
-        expect(out.at(-1)).toBe('Nothing was changed.');
+        expect(out.slice(-2)).toEqual([PASSES, 'Nothing was changed.']);
+        // Something on the server that stops nothing: it is said, and the command still ends well.
+        await admin((c) => c.query(`ALTER DATABASE ${p.name} CONNECTION LIMIT 50`));
+        out.length = 0;
+        await restoreProductionCommand(['--compare'], cfg, { say: (l) => out.push(l), uid: 501 });
+        expect(out).toContain('The database has a connection limit of 50. A restored database has none.');
+        expect(out.slice(-2)).toEqual([PASSES, 'Nothing was changed.']);
         await connect(p.owner, (c) => c.query('GRANT CREATE ON SCHEMA public TO PUBLIC'));
         const err = await refusal(restoreProductionCommand(['--compare'], cfg, { say: () => {}, uid: 501 }));
-        expect(err.message).toBe('A restore would refuse a backup of this database until what is listed above is settled. Nothing was changed.');
+        expect(err.message).toBe('A restore would refuse a backup of this database until the 1 difference listed first is settled. Nothing was changed.');
         expect(err.stage).toBe('compare');
       });
     });
@@ -1633,10 +1890,10 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
           await admin((c) => c.query(`DROP DATABASE IF EXISTS ${name}`));
         }
       };
-      expect((await made('flint_sort_c', `ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'`)).said).toBe('A restored copy is made the way this database was: UTF8, sorted by the system (C).');
-      expect((await made('flint_sort_b', `ENCODING 'UTF8' LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF-8' LC_COLLATE 'C' LC_CTYPE 'C'`)).said).toBe('A restored copy is made the way this database was: UTF8, sorted by Postgres itself (C.UTF-8).');
+      expect((await made('flint_sort_c', `ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'`)).said).toBe('A restored copy is made the way this database was: UTF8, sorted by the system as C.');
+      expect((await made('flint_sort_b', `ENCODING 'UTF8' LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF-8' LC_COLLATE 'C' LC_CTYPE 'C'`)).said).toBe('A restored copy is made the way this database was: UTF8, sorted by Postgres itself as C.UTF-8.');
       const icu = await admin(async (c) => (await c.query(`SELECT count(*)::int AS n FROM pg_collation WHERE collprovider = 'i'`)).rows[0].n);
-      if (icu > 0) expect((await made('flint_sort_i', `ENCODING 'UTF8' LOCALE_PROVIDER icu ICU_LOCALE 'en-US' LC_COLLATE 'C' LC_CTYPE 'C'`)).said).toBe('A restored copy is made the way this database was: UTF8, sorted by ICU (en-US).');
+      if (icu > 0) expect((await made('flint_sort_i', `ENCODING 'UTF8' LOCALE_PROVIDER icu ICU_LOCALE 'en-US' LC_COLLATE 'C' LC_CTYPE 'C'`)).said).toBe('A restored copy is made the way this database was: UTF8, sorted by ICU as en-US.');
     });
   });
 
@@ -1646,6 +1903,8 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       await admin(async (c) => {
         await c.query(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'reader') THEN CREATE ROLE reader; END IF; END $$`);
         await c.query(`GRANT CONNECT ON DATABASE ${p.name} TO reader`);
+        // And one to the role a restore works as, which is nobody's addition: it never connects to the database in use.
+        await c.query(`GRANT CONNECT ON DATABASE ${p.name} TO flint_restore`);
         await c.query(`GRANT TEMPORARY ON DATABASE ${p.name} TO flint_app`);
         await c.query(`ALTER DATABASE ${p.name} SET statement_timeout = '45s'`);
         await c.query(`ALTER DATABASE ${p.name} SET search_path = "$user", public`);
@@ -1654,6 +1913,11 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       fresh();
       await restoreDatabase(options(p));
       expect(said).toContain("The database in use gives flint_app the privilege TEMPORARY, which Flint's own setup does not. The restored database follows Flint's setup.");
+      // A right Will gave another role himself is carried over, and said by name: a role he did not mean to let in is one he sees.
+      expect(said).toContain("The database in use gives the role reader the privilege CONNECT, which is no part of Flint's own setup. The restored database keeps it as your own addition.");
+      expect(said).toContain("The database in use gives flint_restore the privilege CONNECT, which Flint's own setup does not. The restored database follows Flint's setup.");
+      expect(said.filter((l) => /privilege/.test(l))).toHaveLength(3);
+      expect(await datacl(p.name)).toEqual([...FLOORED_ACL, 'reader=c/flint_owner'].sort());
       expect(said).toContain('The database in use has a setting Flint could not copy to the restored one: work_mem for flint_app. Set it again afterwards if you still want it.');
       const has = (role: string, privilege: string) => admin(async (c) => (await c.query<{ ok: boolean }>('SELECT has_database_privilege($1, $2, $3) AS ok', [role, p.name, privilege])).rows[0]!.ok);
       expect(await has('reader', 'CONNECT')).toBe(true);
@@ -2027,6 +2291,36 @@ describe.skipIf(NO_CLUSTER)('restore (a throwaway cluster)', () => {
       expect(last).toMatchObject({ outcome: 'ok', mode: 'check', sha256: dumpSha });
       expect(typeof last.at).toBe('string');
     });
+
+    it('restore-production --compare that is stopped part-way removes the scratch database and the folder it made, however it is stopped', async () => {
+      const before = await databases('');
+      for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+        // A temp folder of its own, so that what it leaves there (or does not) can be seen.
+        const tmp = scratchDir('flint-compare-tmp-');
+        const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'restore-production', '--compare'], {
+          cwd: RUNTIME, env: { PATH: process.env.PATH ?? '', HOME: home, NODE_ENV: 'test', TMPDIR: tmp }, stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let out = '';
+        let err = '';
+        child.stdout.on('data', (d: Buffer) => { out += d.toString('utf8'); });
+        child.stderr.on('data', (d: Buffer) => { err += d.toString('utf8'); });
+        const ended = new Promise<number | null>((resolve) => child.on('exit', (code) => resolve(code)));
+        // Stopped while its reference database exists: the moment an unhandled signal would leave that database behind.
+        let seen = false;
+        for (let i = 0; i < 600 && !seen && child.exitCode === null; i++) {
+          seen = (await databases('flint_reference_')).length > 0 && readdirSync(tmp).some((f) => f.startsWith('flint-reference-'));
+          if (!seen) await new Promise((r) => setTimeout(r, 25));
+        }
+        expect(seen, `${signal}: ${out}${err}`).toBe(true);
+        child.kill(signal);
+        expect(await ended, `${signal}: ${out}${err}`).toBe(130);
+        expect(out.trim().split('\n').at(-1), signal).toBe('Flint stopped because it was interrupted. Nothing in use was changed.');
+        expect(err, signal).toBe('');
+        // Gone by the time the process has ended: the database, and the folder (anything else there is the test runner's own).
+        expect(await databases(''), signal).toEqual(before);
+        expect(readdirSync(tmp).filter((f) => f.startsWith('flint-')), signal).toEqual([]);
+      }
+    }, 120_000);
 
     it('restore-production with RESTORE piped in refuses, prints one sentence, and changes nothing', async () => {
       const before = await databases();

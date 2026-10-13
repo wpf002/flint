@@ -287,8 +287,13 @@ export async function restoreProductionCommand(argv: string[], config: RestoreCo
   // Reading only: how the database in use differs from what this copy of Flint builds. It needs no backup, restores
   // nothing, asks nothing, and so needs no one at a keyboard. When a restore would refuse a backup of it, it ends as a refusal.
   if (compare) {
-    const r = await compareDatabase({ owner: config.ownerUrl, restore: config.restoreUrl, tools: config.tools, migrationsDir: MIGRATIONS, say: io.say, ...(io.now ? { now: io.now } : {}) });
-    if (!r.same) throw new RestoreRefused('A restore would refuse a backup of this database until what is listed above is settled. Nothing was changed.', { stage: 'compare' });
+    const r = await compareDatabase({
+      owner: config.ownerUrl, restore: config.restoreUrl, tools: config.tools, migrationsDir: MIGRATIONS, say: io.say, ...(io.now ? { now: io.now } : {}),
+      // Ctrl-C, a closed window or a kill: it removes the scratch database it made, and only then ends.
+      ...(io.onSignal ? { onSignal: io.onSignal } : {}), ...(io.exit ? { exit: io.exit } : {}),
+    });
+    // The last word counts only what would stop a restore: the rest of what was said stops nothing.
+    if (!r.same || r.stops > 0) throw new RestoreRefused(`${r.verdict} Nothing was changed.`, { stage: 'compare' });
     return;
   }
   const agent = runtimeAgent(config.home, io.uid, exec);
