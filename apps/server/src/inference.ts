@@ -36,12 +36,12 @@ import type { FrontierBreaker } from './frontier-breaker';
 import { startLocalBrains, type BuildLocalDeps, type LocalBrainSpec, type LocalBrains, type LocalHandle } from './local-brains';
 import { cloudChainFor, heldToHere, planLocal, privateRefusal, type LocalChoice, type LocalPlan } from './local-serve';
 import { finishRoute, preRoute, type ModeRoute, type OpenRoute, type PreRoute, type PreRouteInput } from './mode-route';
-import { LOCALITY } from './ollama-locality';
+import { FRESH_MS, LOCALITY } from './ollama-locality';
 import { OUTSIDE_OFF_LOCAL_MODE, isPrivateOff, offered, offeredPrivate, outsideOffPrivate, outsideTools, withPrivateNote, withheldWhenOff, type OutsideOff } from './outside-ai';
 import { brainIsLocal, brainOf, setPlaceRules, type MediaFlags } from './policy';
 import { turnStaysHere, type StayRoute } from './private-turns';
 import { paidToolSpecs, type BrainChooser, type BudgetView, type PaidToolSpec } from './spend';
-import { isEvalTurn, isPrivateRequest, isPrivateTurn, isStaysHereTurn, markPrivateRequest } from './turn-taint';
+import { carriesKeptText, isEvalTurn, isPrivateRequest, isPrivateTurn, isStaysHereRequest, isStaysHereTurn, markPrivateRequest, markStaysHereRequest } from './turn-taint';
 import type { TurnFacts } from './hybrid-rules';
 
 type Env = Record<string, string | undefined>;
@@ -110,9 +110,14 @@ export class Inference {
   private withheld: ReadonlySet<string>;
   private readonly log: (msg: string) => void;
   private readonly now: () => number;
+  /** Have the server at this address asked what runs on it, when its word is more than two seconds old (./ollama-locality fresh). */
+  private readonly listing: (baseURL: string) => Promise<void>;
   private readonly refusalLoggedAt = new Map<CloudCallKind, number>();
 
-  constructor(parts: { cfg: InferenceConfig; handle: LocalHandle; mode: ModeStore; machine: () => Machine | undefined; ready: Promise<void>; paid: readonly PaidToolSpec[]; log?: (msg: string) => void; now?: () => number }) {
+  constructor(parts: {
+    cfg: InferenceConfig; handle: LocalHandle; mode: ModeStore; machine: () => Machine | undefined; ready: Promise<void>; paid: readonly PaidToolSpec[];
+    log?: (msg: string) => void; now?: () => number; listing?: (baseURL: string) => Promise<void>;
+  }) {
     this.cfg = parts.cfg;
     this.handle = parts.handle;
     this.mode = parts.mode;
@@ -122,6 +127,7 @@ export class Inference {
     this.withheld = outsideTools(parts.paid);
     this.log = parts.log ?? (() => {});
     this.now = parts.now ?? Date.now;
+    this.listing = parts.listing ?? ((baseURL) => LOCALITY.fresh(baseURL));
     // What these settings say about addresses, for the one rule that decides whether a brain is on this Mac
     // (./policy brainIsLocal): the model server on another machine that Will said is his is held as this Mac
     // is, and an address reached through Node's env proxy never is.
@@ -245,10 +251,23 @@ export class Inference {
    *  - otherwise the request is marked private from this moment, so the
    *    helpers that would embed its words at an Ollama on another machine (the
    *    tool router, recall) are off for it (`helpersOff`).
+   *
+   * A turn that stays here by its ROUTE is marked the same way (every turn of
+   * Local mode; in Hybrid a turn stays here only when it is private, which is
+   * the case above). Its words are then held to the strict rule by every
+   * helper: embedded, or sent anywhere, only by a model that is confirmed to
+   * run on this Mac. "Not known to run elsewhere" used to be enough in Local
+   * mode, so with the listing silent the words of a turn that was about to be
+   * refused still went to the embedding model, and with the whole server hung
+   * the turn waited on that request instead of getting its sentence.
    */
   preRoute(i: Omit<PreRouteInput, 'mode' | 'localCan'>): PreRoute {
     const pre = preRoute({ ...i, mode: this.mode.current(), localCan: this.localCan() });
-    if ('error' in pre || !pre.private) return pre;
+    if ('error' in pre) return pre;
+    if (!pre.private) {
+      if (turnStaysHere(pre)) markStaysHereRequest();
+      return pre;
+    }
     const refusal = privateRefusal(pre, this.confined);
     if (refusal) return { error: refusal, status: 503 };
     markPrivateRequest();
@@ -330,8 +349,31 @@ export class Inference {
    * whether Will asked for it to stay on this Mac, and whether it was routed
    * as one that stays here (that, or any turn of Local mode).
    */
-  keeping(route: StayRoute): { private: boolean; staysHere: boolean } {
-    return { private: route.private, staysHere: turnStaysHere(route) };
+  keeping(route: StayRoute): { private: boolean; staysHere: boolean; heard: () => Promise<void> } {
+    return { private: route.private, staysHere: turnStaysHere(route), heard: () => this.heardLately() };
+  }
+
+  /**
+   * Before a local model is asked: have the model server looked at again when
+   * the last look is more than two seconds old, and wait for it (as long as
+   * a look may take). The look is where the server says where each of its
+   * models runs (./ollama-locality), and that is what decides, inside the ask,
+   * whether this model is handed the turns and facts that stay here.
+   *
+   * A turn that stays here by its route has just had its own look
+   * (`routeFirst`), and the local and hybrid modes look before they plan
+   * (`freshen`). This is for what is left: an ordinary turn the local model
+   * answers in the cloud mode (no cloud model set up, or one that failed),
+   * where no timer watches the server and the last look can be a minute old.
+   * Such a turn can carry a private turn in its history.
+   */
+  async heardLately(): Promise<void> {
+    const p = this.local.monitor.snapshot().primary;
+    if (p.checkedAt !== 0 && this.now() - p.checkedAt < FRESH_MS) return;
+    await this.local.monitor.check().then(
+      () => undefined,
+      () => undefined,
+    );
   }
 
   /** Is this model, asked through that local brain's server, known to run here (./policy brainIsLocal)? */
@@ -365,8 +407,10 @@ export class Inference {
    * review's N5); and one pointed back at a model of its own would keep being
    * refused. So a look taken a moment ago does not stand in for this one (only
    * one already under way does), and the turn waits for it: as long as a look
-   * may take, two seconds, and then goes on with what is known, which ages
-   * into "not known to run here".
+   * may take, two seconds. A look that comes back without the server's
+   * listing leaves nothing it said before believed to run here
+   * (./ollama-locality silent), so the turn is planned on no model, and gets a
+   * sentence: it is never decided on a word the server no longer stands behind.
    *
    * A turn that does not stay here is not held up at all. Neither is one the
    * settings alone already refuse (a model server on another machine, or
@@ -453,22 +497,84 @@ export class Inference {
    *  - a private message is sent only to a model Ollama lists as its own: an
    *    embedding model that is such a copy, or one Ollama has not been heard
    *    on, embeds none of its words;
-   *  - in the local and hybrid modes nothing is sent to a model that is known
-   *    to be such a copy. (A model not heard on yet is still asked there: the
-   *    tools' descriptions are embedded while Flint boots, before any server
-   *    has answered, and they are nobody's private words.)
+   *  - a turn that stays here by its route (every turn of Local mode) is held
+   *    the same way: its words go only to a model Ollama lists as its own. A
+   *    server that gives no word is not one, so with the listing silent the
+   *    turn's words are embedded nowhere, and the turn gets its sentence
+   *    instead of waiting on a request to a server that does not answer;
+   *  - anything else made in the local and hybrid modes (the tools'
+   *    descriptions embedded while Flint boots, before any server has
+   *    answered: nobody's words) is sent unless the model is KNOWN to be such
+   *    a copy.
    */
   helpersOff(model?: string): string | undefined {
-    const mustStay = isPrivateRequest() || this.mode.current() !== 'cloud';
+    // Text that stays here whatever the mode: a private message's words and the words of a turn its route keeps
+    // here (the request was marked where it was routed), and what a helper sends of a fact or a turn that stays
+    // here (./turn-taint asKeptText).
+    const kept = carriesKeptText();
+    const here = isStaysHereRequest();
+    const strict = here || kept;
+    const mustStay = strict || this.mode.current() !== 'cloud';
     if (!ollamaIsLocal(this.cfg)) {
-      // A private message's words stay here in every mode, Cloud included (the request was marked where it was routed).
       if (isPrivateRequest()) return 'the Ollama server is on another machine, and a private message is not sent off this Mac';
+      if (kept) return 'the Ollama server is on another machine, and what stays on this Mac is not sent to it';
       return mustStay ? 'the Ollama server is on another machine, and in this mode nothing is sent off this Mac' : undefined;
     }
     if (model === undefined) return undefined;
     if (isPrivateRequest() && !this.helperRunsHere(model)) return 'the model asked for is not known to run on this Mac, and a private message is not sent to it';
+    if (here && !this.helperRunsHere(model)) return 'the model asked for is not known to run on this Mac, and a turn that stays on this Mac is not sent to it';
+    if (kept && !this.helperRunsHere(model)) return 'the model asked for is not known to run on this Mac, and what stays on this Mac is not sent to it';
     if (mustStay && this.helperElsewhere(model)) return "the model asked for runs on Ollama's servers, and in this mode nothing is sent off this Mac";
     return undefined;
+  }
+
+  /**
+   * Before a helper's request is sent: have Ollama's own address asked what
+   * runs on it, when its word is more than two seconds old, and wait for the
+   * answer (./ollama-locality fresh). Only an Ollama that is here is asked:
+   * nothing another machine says makes its models local.
+   */
+  async helpersHeard(): Promise<void> {
+    const base = this.helperBase;
+    if (base && ollamaIsLocal(this.cfg)) await this.listing(base);
+  }
+
+  /**
+   * The fetch a helper that always talks to Ollama's own address is built
+   * with: the embedder and local memory extraction (`helper`), and the
+   * runtime's background calls (`background`). Each request is decided where
+   * it is SENT, on a listing no more than two seconds old: Ollama is asked
+   * first (`helpersHeard`), then the helpers' rule is read (`helpersOff`, or
+   * for a background call the rule of `helperBrain`). A request that may not
+   * be sent fails like an Ollama that is down, which every one of them
+   * already lives with.
+   *
+   * So the rule no longer rests on what was known a minute ago: a model
+   * pointed at a cloud model while Flint runs is found by the next request
+   * that would have carried something to it.
+   */
+  helperFetch(kind: 'helper' | 'background', base: typeof fetch = fetch): typeof fetch {
+    return (async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      // Asked first only where the answer decides something: a request for a private message or for a turn its
+      // route keeps here, one that carries text that stays here, a background call (answered only by a model that
+      // runs here), and any request outside the cloud mode (where nothing may go to a model on Ollama's servers).
+      // An ordinary request in the cloud mode is sent whatever the listing says, so it does not wait for one: a
+      // model server whose listing hangs would otherwise hold every ordinary turn's embedding for as long as an
+      // ask may take.
+      if (kind === 'background' || isStaysHereRequest() || carriesKeptText() || this.mode.current() !== 'cloud') await this.helpersHeard();
+      const model = helperModel(init?.body);
+      const off = kind === 'background' ? this.backgroundOff(model) : this.helpersOff(model);
+      if (off) throw new TypeError(`fetch refused: ${off}`);
+      return base(url, init);
+    }) as typeof fetch;
+  }
+
+  /** Why a background call may not ask this model right now; undefined when it may (the rule `helperBrain` reads). */
+  private backgroundOff(model: string | undefined): string | undefined {
+    const off = this.helpersOff();
+    if (off) return off;
+    if (!ollamaIsLocal(this.cfg) || model === undefined) return undefined;
+    return this.helperRunsHere(model) ? undefined : 'the model asked for is not known to run on this Mac, and a background call is answered only by a model that does';
   }
 
   /** Ollama's own address, as the helpers use it (OLLAMA_HOST as config checked it); undefined when it was refused. */
@@ -497,10 +603,11 @@ export class Inference {
    * listing every other "is it here" reads (./ollama-locality), never the name.
    * (An Ollama on another machine is asked in the cloud mode only, as it
    * always was, and `helpersOff` already keeps the other modes off it.)
+   * This reads what is known when the gate looks for a brain; the request
+   * itself is decided again where it is sent (`helperFetch('background')`).
    */
   helperBrain<T extends { model: string }>(brain: T | undefined): T | undefined {
-    if (!brain || this.helpersOff() !== undefined) return undefined;
-    return !ollamaIsLocal(this.cfg) || this.helperRunsHere(brain.model) ? brain : undefined;
+    return brain && this.backgroundOff(brain.model) === undefined ? brain : undefined;
   }
 
   /**
@@ -644,6 +751,12 @@ export interface BuildInferenceDeps {
    * server is using).
    */
   observeOnly?: boolean;
+  /**
+   * Have the server at an address asked what runs on it, when its word is more
+   * than two seconds old. Default: the server's own record
+   * (./ollama-locality fresh). A test hands one in.
+   */
+  listing?: (baseURL: string) => Promise<void>;
 }
 
 /**
@@ -698,6 +811,10 @@ export async function buildInference(deps: BuildInferenceDeps): Promise<Inferenc
     // What the model server says it is, each time the monitor looks at it, and where each of its models really runs
     // (./ollama-locality).
     place: (baseURL, said) => (said === 'other' ? LOCALITY.notOllama(baseURL) : LOCALITY.learn(baseURL, said.ollama)),
+    // ...and a look that came back without that answer leaves nothing it said before believed to run here: a turn
+    // that stays here waited for this look, and is not decided on a listing the server no longer stands behind.
+    // (As of when the look began: a word the server gave another asker during the look is kept.)
+    silent: (baseURL, since) => LOCALITY.silent(baseURL, since),
     // ...and a model it says runs elsewhere is never loaded ahead of a turn.
     elsewhere: (baseURL, model) => LOCALITY.runsElsewhere(baseURL, model),
     log,
@@ -739,5 +856,5 @@ export async function buildInference(deps: BuildInferenceDeps): Promise<Inferenc
     // A brain adopted behind the boot (the tier's model, the server's late answer) is looked at and warmed the same way.
     handle.onChange(() => void ready.then(follow));
   }
-  return new Inference({ cfg, handle, mode, machine: () => machine, ready, paid: paidToolSpecs(deps.env), log });
+  return new Inference({ cfg, handle, mode, machine: () => machine, ready, paid: paidToolSpecs(deps.env), log, ...(deps.listing ? { listing: deps.listing } : {}) });
 }

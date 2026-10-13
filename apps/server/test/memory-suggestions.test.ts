@@ -36,7 +36,7 @@ import { ChatCandidate, GoalTitle } from '@flint/policy';
 import { KnowledgeStore } from '../src/knowledge';
 import { localExtractBrain } from '../src/memory-brain';
 import {
-  EXTRACT_SYSTEM, EXTRACT_VERSION, FACTS_SCHEMA, GOAL_SUGGESTIONS_SCHEMA, MemoryExtractor, SUGGESTIONS_SCHEMA, SUGGEST_GOALS_PROMPT, SUGGEST_PROMPT, suggestionOf, suggestionsReply,
+  EXTRACT_SYSTEM, EXTRACT_VERSION, FACTS_SCHEMA, GOAL_SUGGESTIONS_SCHEMA, MemoryBrainError, MemoryExtractor, SUGGESTIONS_SCHEMA, daySaid, everyWord, everyWordSaid, SUGGEST_GOALS_PROMPT, SUGGEST_PROMPT, suggestionOf, suggestionsReply,
   type BrainReply, type ChatSuggestion, type ExtractBrain, type ExtractorOptions, type Suggesting, type SuggestionOutcome, type TurnSource,
 } from '../src/memory-extract';
 
@@ -528,10 +528,11 @@ describe('goals and commitments from chat, in the extractor', () => {
     expect(got).toEqual([expect.objectContaining({ staysHere: true, turnId: t.id })]);
   });
 
-  // Local inference (this branch) marks the turns Will kept private: Local Only, a message that asked to stay
-  // private, any turn of Local mode. A suggestion is his own sentence on its way to being a goal, and his goals can
-  // be sent to every brain (FLINT_GOALS_TO_FRONTIER). So a call about such turns asks for facts alone.
-  it('a turn Will kept private is mined for facts and never for suggestions: its call is the one a pass with the setting off makes', async () => {
+  // Two notions (../src/private-turns). "Stays here": a turn Will asked to keep private OR any turn of Local mode
+  // (history, memory, speech). "Explicitly private": he asked for THAT turn (the Local Only switch, or its words).
+  // Tools follow the second, and so do suggestions: a suggestion is his own sentence on its way to being a goal, and
+  // his goals can be sent to every brain (FLINT_GOALS_TO_FRONTIER). A turn taken in Local mode is asked like any other.
+  it('a turn Will ASKED to keep private is mined for facts and never for suggestions: its call is the one a pass with the setting off makes', async () => {
     const kept = turn('c-private', `${CANARY} I want to run a half marathon by spring and I keep a Mac Studio in the office.`);
     const open = turn('c-open', SAID);
     const fact = { turn: 1, quote: 'I keep a Mac Studio in the office', fact: 'Will keeps a Mac Studio in the office.', category: 'other', supersedes: [] };
@@ -541,7 +542,7 @@ describe('goals and commitments from chat, in the extractor', () => {
     const k = new KnowledgeStore(join(dir, 'k-private.json'), downEmbedder);
     const ex = new MemoryExtractor(source({ 'c-private': [kept], 'c-open': [open] }), k, brain, join(dir, 's-private.json'), {
       now: () => NOW, candidates: true, commitments: true, onCandidate: async (sug) => (got.push(sug), 'filed' as SuggestionOutcome),
-      keptPrivate: (cid) => cid === 'c-private',
+      keptPrivate: (cid) => cid === 'c-private', privateByRequest: (cid) => cid === 'c-private',
     });
     await ex.run();
     // Two calls: turns of different marks never share one.
@@ -560,13 +561,223 @@ describe('goals and commitments from chat, in the extractor', () => {
     // The log says how many turns were not asked, by a count.
     expect(ex.lastStats.rejected['suggestion-private-turn']).toBe(1);
     expect(ex.lastStats.suggestionsFiled).toBe(1);
-    // A turn that carries both marks (answered with his goals, and kept private) is held the same way.
-    const both = await pass({ c1: [turn('c1', SAID)] }, [good()], { carriedGoals: () => true, keptPrivate: () => true });
+    // A turn that carries both marks (answered with his goals, and one he asked to keep private) is held the same way.
+    const both = await pass({ c1: [turn('c1', SAID)] }, [good()], { carriedGoals: () => true, keptPrivate: () => true, privateByRequest: () => true });
     expect(both.calls.map((c) => c.suggestions)).toEqual([undefined]);
     expect(both.got).toEqual([]);
+    // Told only that a turn is kept private, and not whose word it was: it is read as his (every turn marked before the note existed).
+    const untold = await pass({ c1: [turn('c1', SAID)] }, [good()], { keptPrivate: () => true });
+    expect(untold.calls.map((c) => c.suggestions)).toEqual([undefined]);
+    expect(untold.got).toEqual([]);
     // With the setting off there is nothing to count.
     const off = await pass({ c1: [turn('c1', SAID)] }, [good()], { candidates: false, keptPrivate: () => true });
     expect(off.stats.rejected['suggestion-private-turn']).toBeUndefined();
+  });
+
+  it('a turn taken in Local mode IS asked: its suggestion is handed on as one that stays here, and what is learned from it is still marked', async () => {
+    const t = turn('c-local', `${CANARY} I want to run a half marathon by spring and I keep a Mac Studio in the office.`);
+    const fact = { turn: 1, quote: 'I keep a Mac Studio in the office', fact: 'Will keeps a Mac Studio in the office.', category: 'other', supersedes: [] };
+    // Kept here by the mode, and not by his word for it (LOCAL_MODE_TURN: the private mark, with its note).
+    const r = await pass({ 'c-local': [t] }, [good()], { keptPrivate: () => true, privateByRequest: () => false }, [fact]);
+    expect(r.calls).toHaveLength(1);
+    expect(r.calls[0]!.suggestions).toBe('all');
+    expect(r.calls[0]!.prompt).toContain(SUGGEST_PROMPT);
+    expect(r.got).toEqual([expect.objectContaining({ kind: 'goal', conversationId: 'c-local', turnId: t.id, staysHere: true })]);
+    expect(r.stats.rejected['suggestion-private-turn']).toBeUndefined();
+    // Memory is the wider notion: the fact stays on this Mac as before.
+    expect(r.k.all().map((f) => [f.text, f.fromPrivate])).toEqual([['Will keeps a Mac Studio in the office.', true]]);
+  });
+
+  // The follow-up review's F1. A call about a turn the private mark is on can hold words that are not that turn's own
+  // message: the turn shown before it, what the model answered him, the facts it is shown. Half of a card's words
+  // could come from there (the rule for an ordinary turn). From a marked turn every one must be his, in that turn.
+  it('from a turn that carries the private mark, every word of a suggestion must be his own in that turn; an ordinary turn keeps the looser rule', async () => {
+    const said = `${CANARY} I want to finish that treatment plan by spring.`;
+    const lifted = { turn: 1, kind: 'goal', quote: 'I want to finish that treatment plan by spring', text: 'finish the QUARTZMOLE treatment plan by spring', dueOn: '' };
+    const own = { ...lifted, text: 'finish that treatment plan by spring' };
+    const byMode = { keptPrivate: () => true, privateByRequest: () => false };
+    // "QUARTZMOLE" is not in his message: 4 of the 5 content words are, which an ordinary turn's rule lets through.
+    const ordinary = await pass({ c1: [turn('c1', said)] }, [lifted]);
+    expect(ordinary.got.map((g) => g.text)).toEqual(['Finish the QUARTZMOLE treatment plan by spring']);
+    const marked = await pass({ c1: [turn('c1', said)] }, [lifted], byMode);
+    expect(marked.calls[0]!.suggestions).toBe('all'); // it was asked
+    expect(marked.got).toEqual([]);
+    expect(marked.stats.rejected['suggestion-text']).toBe(1);
+    // His own words, and nothing else: handed on.
+    const kept = await pass({ c1: [turn('c1', said)] }, [own], byMode);
+    expect(kept.got.map((g) => [g.text, g.staysHere])).toEqual([['Finish that treatment plan by spring', true]]);
+    // A turn answered with his goals carries the goals mark, not this one: it keeps the looser rule, as before.
+    const goals = await pass({ c1: [turn('c1', said)] }, [lifted], { carriedGoals: () => true });
+    expect(goals.got).toHaveLength(1);
+  });
+
+  // The re-review's N1. "Every word" was every CONTENT word: ASCII, longer than one character, not on the stop
+  // list. So a name that is also a stop word ("May"), a short word and a word in another script rode along from
+  // the rest of the call onto a card. From a turn that stays here every word is counted, in any script.
+  it('from a turn that carries the private mark, EVERY word is his: a stop word, a one-letter word and a word in another script count like any other', async () => {
+    const byMode = { keptPrivate: () => true, privateByRequest: () => false };
+    const one = async (said: string, quote: string, text: string, opts: ExtractorOptions = byMode) => {
+      const r = await pass({ c1: [turn('c1', `${CANARY} ${said}`)] }, [{ turn: 1, kind: 'goal', quote, text, dueOn: '' }], opts);
+      return { filed: r.got.map((g) => g.text), dropped: r.stats.rejected['suggestion-text'] ?? 0 };
+    };
+    // The reviewer's two cards. His reply named May and the illness; his message named neither.
+    const trip = ['After the surgery I want to plan a trip by June for sure.', 'I want to plan a trip by June'] as const;
+    expect(await one(...trip, 'plan a trip with May by June')).toEqual({ filed: [], dropped: 1 });
+    const papers = ['After the surgery I want to sort the paperwork by autumn.', 'I want to sort the paperwork by autumn'] as const;
+    expect(await one(...papers, 'sort the меланома paperwork by autumn')).toEqual({ filed: [], dropped: 1 });
+    // The same two in his own words are filed, as are a plural and an -ing form of a word he used.
+    expect((await one(...trip, 'plan a trip by June')).filed).toEqual(['Plan a trip by June']);
+    expect((await one(...papers, 'sort the paperwork by autumn')).filed).toEqual(['Sort the paperwork by autumn']);
+    expect((await one('I want to book two follow-up scans by June.', 'I want to book two follow-up scans by June', 'book the two follow-up scan')).filed).toEqual([]); // "the" is not his here
+    expect((await one('I want to book the two follow-up scans by June.', 'I want to book the two follow-up scans by June', 'book the two follow-up scan')).filed).toEqual(['Book the two follow-up scan']);
+    // One word is enough to drop it, wherever it sits and however small it is.
+    for (const text of ['plan a trip to X by June', 'plan a trip by June, with Jo', 'plan a trip by June 東京', 'plan a trip by June é', 'plan a trip in June']) {
+      expect(await one(...trip, text), text).toEqual({ filed: [], dropped: 1 });
+    }
+    // An ordinary turn keeps the looser rule (the card says it is the model's reading), exactly as before.
+    expect((await one(...trip, 'plan a trip with May by June', {})).filed).toEqual(['Plan a trip with May by June']);
+    expect((await one(...papers, 'sort the меланома paperwork by autumn', {})).filed).toEqual(['Sort the меланома paperwork by autumn']);
+    // What a word is.
+    expect(everyWord("Will's follow-up SCANS, running by June 9th: “меланома” 東京")).toEqual(['will', 'follow', 'up', 'scan', 'runn', 'by', 'june', '9th', 'меланома', '東京']);
+    expect(everyWordSaid(['I want to plan a trip by June'], 'Plan a trip by June!')).toBe(true);
+    expect(everyWordSaid(['I want to plan a trip by June'], 'plan trips')).toBe(true); // the same stem
+    expect(everyWordSaid(['I want to plan a trip by June'], 'plan a trip with May')).toBe(false);
+    expect(everyWordSaid(['I want to plan a trip by June'], '')).toBe(false);
+    expect(everyWordSaid(['I want to plan a trip by June'], '…!?')).toBe(false);
+    expect(everyWordSaid([], 'plan')).toBe(false);
+  });
+
+  it('a call that is asked for goals is shown no fact from a turn Will kept private, whatever its own turns are; a call that is not asked is shown them as before', async () => {
+    const seeded = async (name: string) => {
+      const k = new KnowledgeStore(join(dir, `${name}.json`), downEmbedder);
+      await k.add('Will keeps a kayak in the garage.', 'history');
+      await k.add("Will's doctor found a QUARTZMOLE lesion.", 'history', { fromPrivate: true });
+      await k.add('Will wants the MARLINGOAL regatta entry finished.', 'history', { fromGoals: true });
+      return k;
+    };
+    const known = (prompt: string) => (prompt.split('KNOWN FACTS (id: text):')[1] ?? '').split('TURNS:')[0]!;
+    const run = async (name: string, opts: ExtractorOptions) => {
+      const { brain, calls } = local(() => ({ facts: [] }));
+      await new MemoryExtractor(source({ c1: [turn('c1', SAID)] }), await seeded(name), brain, join(dir, `${name}-state.json`), { now: () => NOW, onCandidate: async () => 'filed' as SuggestionOutcome, ...opts }).run();
+      expect(calls, name).toHaveLength(1);
+      return { asked: calls[0]!.suggestions !== undefined, facts: ['kayak', 'QUARTZMOLE', 'MARLINGOAL'].filter((w) => known(calls[0]!.prompt).includes(w)) };
+    };
+    const byMode = { keptPrivate: () => true, privateByRequest: () => false };
+    const byRequest = { keptPrivate: () => true, privateByRequest: () => true };
+    // Asked (a turn of Local mode): no private fact; the goals fact, which its mark is close enough for, as before.
+    expect(await run('asked-by-mode', { candidates: true, ...byMode })).toEqual({ asked: true, facts: ['kayak', 'MARLINGOAL'] });
+    // The same turn with the setting off: not asked, and shown everything its mark allows.
+    expect(await run('off-by-mode', { ...byMode })).toEqual({ asked: false, facts: ['kayak', 'QUARTZMOLE', 'MARLINGOAL'] });
+    // A turn he asked to keep private is never asked, so it is shown them too.
+    expect(await run('by-request', { candidates: true, ...byRequest })).toEqual({ asked: false, facts: ['kayak', 'QUARTZMOLE', 'MARLINGOAL'] });
+    // Asked, an ordinary turn and a goals turn: what each was always shown.
+    expect(await run('asked-ordinary', { candidates: true })).toEqual({ asked: true, facts: ['kayak'] });
+    expect(await run('asked-goals', { candidates: true, carriedGoals: () => true })).toEqual({ asked: true, facts: ['kayak', 'MARLINGOAL'] });
+    // Both marks, asked (answered with his goals, in Local mode): still no private fact.
+    expect(await run('asked-both', { candidates: true, carriedGoals: () => true, ...byMode })).toEqual({ asked: true, facts: ['kayak', 'MARLINGOAL'] });
+  });
+
+  it('from a turn that carries the private mark, a day is kept only when he named it in that turn; an ordinary turn keeps the model’s reading', async () => {
+    // (Turns here are said on 2026-10-12.)
+    const byMode = { keptPrivate: () => true, privateByRequest: () => false };
+    const named = `${CANARY} I want to run a half marathon by spring, on March 3 if I can.`;
+    const vague = `${CANARY} I want to run a half marathon by spring.`;
+    const dated = (dueOn: string) => [good({ dueOn })];
+    const due = async (said: string, dueOn: string, opts: ExtractorOptions = {}) => (await pass({ c1: [turn('c1', said)] }, dated(dueOn), opts)).got.map((g) => g.dueOn ?? 'none');
+    // He named the day: kept.
+    expect(await due(named, '2027-03-03', byMode)).toEqual(['2027-03-03']);
+    // The model worked one out of "by spring" (or read it somewhere else in its call): the suggestion is handed on without it.
+    expect(await due(vague, '2027-03-20', byMode)).toEqual(['none']);
+    expect(await due(named, '2027-03-04', byMode)).toEqual(['none']);
+    expect(await due(named, '2028-03-03', byMode)).toEqual(['none']); // his March 3 is the next one
+    // An ordinary turn: the model's reading is kept, as before (the card says it is the model's).
+    expect(await due(vague, '2027-03-20')).toEqual(['2027-03-20']);
+    // What "named" is.
+    const on = '2026-10-12';
+    for (const [said, day] of [
+      ['see the dentist on March 3', '2027-03-03'], ['see the dentist on Mar 3rd', '2027-03-03'], ['see the dentist on the 3rd of March', '2027-03-03'], ['see the dentist on 3/3', '2027-03-03'],
+      ['see the dentist on 03/03', '2027-03-03'], ['see the dentist on 2028-03-03', '2028-03-03'], ['see the dentist on March 3, 2028', '2028-03-03'], ['pay the bill by October 20', '2026-10-20'],
+      ['pay the bill by October 12', '2026-10-12'], ['pay the bill by October 11', '2027-10-11'],
+    ] as const) expect(daySaid(said, day, on), `${said} -> ${day}`).toBe(true);
+    for (const [said, day] of [
+      ['see the dentist by spring', '2027-03-20'], ['see the dentist next Friday', '2026-10-16'], ['see the dentist on March 3', '2027-03-13'], ['see the dentist on March 13', '2027-03-03'],
+      ['see the dentist on March 30', '2027-03-03'], ['see the dentist on March 3', '2028-03-03'], ['see the dentist on April 3', '2027-03-03'], ['see the dentist in March, 3 times', '2027-04-03'],
+      ['see the dentist on 13/3', '2027-03-03'], ['pay the bill by October 11', '2026-10-11'], ['march on', '2027-03-03'], ['', '2027-03-03'], ['on March 3', 'not-a-day'],
+    ] as const) expect(daySaid(said, day, on), `${said} -> ${day}`).toBe(false);
+  });
+
+  it('in a pass that asks, the turns he asked to keep private are sent apart from the ones Local mode kept; a turn shown after one he asked to keep is held with it', async () => {
+    // One conversation taken in Local mode: an ordinary turn, then one with the Local Only switch on, then two more.
+    const first = turn('c-mix', SAID, 'ok', 't-first');
+    const asked = turn('c-mix', 'Keep this private: I want to learn the cello by June and tell nobody.', 'ok', 't-asked');
+    const after = turn('c-mix', `${CANARY} I want to repaint the fence by summer.`, 'ok', 't-after');
+    const later = turn('c-mix', `${CANARY} I want to restring the guitar by autumn.`, 'ok', 't-later');
+    const got: ChatSuggestion[] = [];
+    const quotes: Record<string, [string, string]> = {
+      'half marathon': [QUOTE, 'run a half marathon'], cello: ['I want to learn the cello by June', 'learn the cello'],
+      fence: ['I want to repaint the fence by summer', 'repaint the fence'], guitar: ['I want to restring the guitar by autumn', 'restring the guitar'],
+    };
+    // A model that makes a goal of every turn it is shown, asked or not.
+    const { brain, calls } = local((prompt) => {
+      const shown = (prompt.split('TURNS:')[1] ?? '').split('### Turn ').slice(1);
+      return { suggestions: shown.flatMap((text, i) => Object.entries(quotes).filter(([word]) => text.split('\nWILL: ').at(-1)!.includes(word)).map(([, [quote, title]]) => ({ turn: i + 1, kind: 'goal', quote, text: title, dueOn: '' }))) };
+    });
+    const ex = new MemoryExtractor(source({ 'c-mix': [first, asked, after, later] }), new KnowledgeStore(join(dir, 'k-mix.json'), downEmbedder), brain, join(dir, 's-mix.json'), {
+      now: () => NOW, candidates: true, commitments: true, onCandidate: async (sug) => (got.push(sug), 'filed' as SuggestionOutcome),
+      keptPrivate: () => true, privateByRequest: (_cid, tid) => tid === 't-asked',
+    });
+    await ex.run();
+    // Three calls, in order: the first turn; the one he asked to keep private with the one shown after it (which is
+    // shown his private words as its context, so it is held too); then the last, whose context is an ordinary turn.
+    expect(calls.map((c) => [c.suggestions, ['half marathon', 'cello', 'fence', 'guitar'].filter((w) => (c.prompt.split('TURNS:')[1] ?? '').includes(w))])).toEqual([
+      ['all', ['half marathon']],
+      [undefined, ['half marathon', 'cello', 'fence']],
+      ['all', ['fence', 'guitar']],
+    ]);
+    expect(got.map((g) => g.turnId)).toEqual(['t-first', 't-later']);
+    expect(ex.lastStats.rejected['suggestion-private-turn']).toBe(2);
+    // The same turns, with the setting off: one call, as it always was (the pass that asks for facts alone batches by the marks only).
+    const off = await pass({ 'c-mix': [first, asked, after, later] }, [], { candidates: false, keptPrivate: () => true, privateByRequest: (_cid, tid) => tid === 't-asked' });
+    expect(off.calls).toHaveLength(1);
+  });
+
+  // `isTainted` read what the model server had said when the pass began. A call about turns that stay here is also
+  // SENT as one that carries them, so where the request is made it goes only to a model listed as the server's own
+  // at that moment (../src/inference helperFetch). An ordinary turn's call is sent as it always was.
+  it('a call about turns that stay here is sent as one that carries them; refused where it is sent, its turns wait and nothing is lost', async () => {
+    const convs = { 'c-open': [turn('c-open', SAID)], 'c-goals': [turn('c-goals', `${CANARY} I keep a Mac Studio in the office and it matters to my goals.`)], 'c-kept': [turn('c-kept', `${CANARY} I keep a spare key in the blue tin by the door.`)] };
+    let carrying = false;
+    const sentAs: Array<[string, boolean]> = [];
+    const brain: ExtractBrain = { generate: async (i) => (sentAs.push([['Mac Studio', 'spare key', 'half marathon'].find((w) => i.prompt.includes(w))!, carrying]), { facts: [] } as BrainReply) };
+    const kept = <T>(send: () => T): T => {
+      carrying = true;
+      try {
+        return send();
+      } finally {
+        carrying = false;
+      }
+    };
+    const opts: ExtractorOptions = { now: () => NOW, carriedGoals: (cid) => cid === 'c-goals', keptPrivate: (cid) => cid === 'c-kept', kept };
+    await new MemoryExtractor(source(convs), new KnowledgeStore(join(dir, 'k-kept.json'), downEmbedder), brain, join(dir, 's-kept.json'), opts).run();
+    expect(sentAs.sort()).toEqual([['Mac Studio', true], ['half marathon', false], ['spare key', true]]);
+    // The follow-up review's F3. A call that ASKS for goals is sent that way too, whatever its turns are: whether the
+    // pass asks was decided on what the model's server last said, and the request is where that is asked again.
+    sentAs.length = 0;
+    await new MemoryExtractor(source(convs), new KnowledgeStore(join(dir, 'k-kept3.json'), downEmbedder), brain, join(dir, 's-kept3.json'), { ...opts, candidates: true, onCandidate: async () => 'filed' as SuggestionOutcome }).run();
+    expect(sentAs.sort()).toEqual([['Mac Studio', true], ['half marathon', true], ['spare key', true]]);
+    // ...and only a call that asks: with the question answered "no" for this pass, an ordinary turn's call is as it was.
+    sentAs.length = 0;
+    await new MemoryExtractor(source(convs), new KnowledgeStore(join(dir, 'k-kept4.json'), downEmbedder), brain, join(dir, 's-kept4.json'), { ...opts, candidates: () => false, onCandidate: async () => 'filed' as SuggestionOutcome }).run();
+    expect(sentAs.sort()).toEqual([['Mac Studio', true], ['half marathon', false], ['spare key', true]]);
+    // The request is refused where it is sent (the model was pointed at a cloud model since the pass began): no
+    // reply, no strike against the turns, and the watermark does not move past them.
+    const refusing = new MemoryExtractor(source({ 'c-kept': convs['c-kept'] }), new KnowledgeStore(join(dir, 'k-kept2.json'), downEmbedder), brain, join(dir, 's-kept2.json'), {
+      ...opts, kept: (() => Promise.reject(new MemoryBrainError('unavailable', 'fetch refused'))) as never,
+    });
+    await refusing.run();
+    expect(refusing.lastStats).toMatchObject({ turnsSent: 0, failed: 1, calls: 0 });
+    const state = JSON.parse(readFileSync(join(dir, 's-kept2.json'), 'utf8')) as { watermarks: Record<string, number> };
+    expect(state.watermarks['c-kept']).toBeUndefined();
   });
 
   it('the knowledge facts are stored exactly as with it off', async () => {

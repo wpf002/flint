@@ -50,7 +50,7 @@ describe('index.ts wiring', () => {
   // (test/goals-*.test.ts drive ../src/goals-chat, the same module, through whole chat turns); what is left to
   // check here is that index.ts makes the calls, and decides nothing about what stays on this Mac itself.
   it('index.ts hands every decision about what stays on this Mac to ./goals-chat, and makes none itself', () => {
-    expect(src).toContain("import { GoalsChat, SPEECH_STAYS_HERE, embedderHere, recallForAnyBrain, toolsKeptHere } from './goals-chat';");
+    expect(src).toContain("import { GoalsChat, SPEECH_STAYS_HERE, embedderHere, keptText, recallForAnyBrain, toolsKeptHere } from './goals-chat';");
     // It reaches none of the pieces the module is made of: not the gate, not the marks, not the tool filter, not the locality rule.
     expect(src).not.toMatch(/from '\.\/(goals-now|goals-tools|ollama-locality|private-turns)'/);
     expect(src).not.toMatch(/\b(goalsForChat|GoalsNow|historyFor|staysHere|keptHere|carriedGoals|GOALS_TURN|contextOutside|withoutOutsideAi|isAiBacked|brainIsLocal|isLocalTurn|LOCAL_WIRES|onThisMachine|renderGoals|GoalsNowAnswer|windowHas)\b/);
@@ -72,6 +72,11 @@ describe('index.ts wiring', () => {
     expect(src.match(/goalsChat\.name\(\{ persona, provider, model \}, brains, keptTools, standby \? \[standby\] : \[\]\);/g)).toHaveLength(2);
     expect(src.match(/goalsChat\.name\(/g)).toHaveLength(2);
     expect(src.indexOf('const brains = buildTiers<Persona>(')).toBeLessThan(src.indexOf('goalsChat.name('));
+    // ...and BEFORE anything can ask for a turn: a turn has no rule to be marked by until they are named
+    // (GoalsChat.forTurn refuses one; test/goals-chat.test.ts), so no request is taken before that.
+    expect(src.indexOf('goalsChat.name(')).toBeLessThan(src.indexOf('const server = createServer('));
+    expect(src.indexOf('const server = createServer(')).toBeLessThan(src.indexOf('server.listen('));
+    expect(src.match(/createServer\(/g)).toHaveLength(1);
     expect(src).toContain('provider: inference.standby.provider,');
     expect(between('const adoptLocal = (): void => {', 'inference.onAdopt(adoptLocal);')).toMatch(/persona = nextPersona;\s*standby = nextStandby;[\s\S]*goalsChat\.name\(/);
     // The tools an ask that stays here is offered are the module's, built from the server's own search tools, memory and gate.
@@ -83,7 +88,8 @@ describe('index.ts wiring', () => {
     expect(between('const startMemory = (): void => {', '// On the local model it reads the model that was settled')).toContain('...goalsChat.extractor({ brain: extractBrain, tainted: (cid, tid) => convTaint.isTainted(cid, tid) }),');
     expect(src).toContain("const extractBrain = memoryPlan.kind === 'local' ? { provider: 'ollama', model: memoryPlan.model.model, baseURL: memoryPlan.model.baseURL } : brains && brainOf(brains.primary.provider, brains.primary.model);");
     // The embedder is "here" on its own model's listing, which is watched from boot like any local brain's.
-    expect(src).toContain('{ embedderHere: () => embedderHere(embedHost, inference.embedModel) }');
+    // ...and such a fact is handed to the embedder as a request that carries one, so the rule is read again where it is sent.
+    expect(src).toContain('{ embedderHere: () => embedderHere(embedHost, inference.embedModel), kept: keptText }');
     expect(src).toContain("goalsChat.hears({ provider: 'ollama', model: inference.embedModel, baseURL: embedHost });");
     // What a turn streams is kept as its own words, for the one question /speak asks of a text (the reply and its note).
     expect(chat.match(/asked\.said\(/g)).toHaveLength(2);
@@ -473,7 +479,8 @@ describe('index.ts wiring', () => {
   it('background calls (/internal/complete) go to the local model, yielding to chat, and never to a frontier tier', () => {
     const block = between('const backgroundModel = localBackgroundModel(', 'startInternal({');
     expect(block).toContain('const backgroundModel = localBackgroundModel(b.env, b.model,');
-    expect(block).toContain('return backgroundModel && localBackgroundBrain(backgroundModel, { chatActive });');
+    // Each request is decided again where it is sent, on a listing two seconds old at most (test/inference.test.ts helperFetch).
+    expect(block).toContain("return backgroundModel && localBackgroundBrain(backgroundModel, { chatActive, fetch: inference.helperFetch('background') });");
     expect(block).toContain('let backgroundBrain = makeBackground();');
     // The model a background call asks is one Ollama's own listing says runs on it (test/inference.test.ts helperBrain).
     expect(block).toContain('brain: () => inference.helperBrain(backgroundBrain),');
@@ -657,7 +664,10 @@ describe('index.ts wiring', () => {
   it('the helpers that always talk to Ollama (the embedder, local memory extraction, background calls) send nothing to another machine in a mode that keeps things here', () => {
     // One fetch, read on every request, for the embedder and the local memory brain.
     // (It reads the model each request names too: a cloud model under a plain name is not "here", test/inference.test.ts.)
-    expect(src).toMatch(/const helperFetch = \(\(url: Parameters<typeof fetch>\[0\], init\?: Parameters<typeof fetch>\[1\]\) => \{\s*const off = inference\.helpersOff\(helperModel\(init\?\.body\)\);\s*return off \? Promise\.reject\(new TypeError\(`fetch refused: \$\{off\}`\)\) : fetch\(url, init\);\s*\}\) as typeof fetch;/);
+    // (Built by the facade: it asks Ollama what runs on it when its word is more than two seconds old, reads the
+    // model each request names, and decides where the request is sent: test/inference.test.ts helperFetch runs it.)
+    expect(src).toContain("const helperFetch = inference.helperFetch('helper');");
+    expect(src).not.toMatch(/inference\.helpersOff\(/);
     expect(between('const embedder = new OllamaEmbedder({', 'const knowledge = new KnowledgeStore(')).toContain('fetch: helperFetch,');
     expect(between('const memoryPlan = chooseMemoryBrain(localEnv, {', "if (memoryPlan.kind === 'none') {")).toContain('fetch: helperFetch,');
     // The runtime's background calls have no local model to ask then.

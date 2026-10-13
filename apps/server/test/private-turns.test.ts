@@ -18,7 +18,7 @@ import { afterEach, describe, it, expect } from 'vitest';
 import { speechStaysHere } from '../src/goals-chat';
 import { GOALS_TURN, HISTORY_GAP, STAY_MARKS, carriedGoals, historyFor, keepsPrivate, keptHere, keptStrictly, stayMark, staysHere } from '../src/goals-now';
 import { PersistentStore } from '../src/persistent-store';
-import { PRIVATE_TURN, corpusMark, turnStaysHere, wasPrivate } from '../src/private-turns';
+import { LOCAL_MODE_TURN, PRIVATE_TURN, corpusMark, keptByModeAlone, privateByRequest, turnStaysHere, wasPrivate } from '../src/private-turns';
 import { CANARY, HERE, answer, cleanup, goal, listed, miniServer as server, storedTurn, tmpStore } from './goals-mini';
 
 afterEach(cleanup);
@@ -69,6 +69,83 @@ describe('the mark', () => {
     expect(stayMark({ goals: true, private: false })).toBe(GOALS_TURN);
     expect(stayMark({ goals: false, private: true })).toBe(PRIVATE_TURN);
     expect(stayMark({ goals: true, private: true })).toEqual({ goals: true, private: true });
+  });
+
+  // "Stays here" (history, memory, speech: a private turn OR any turn of Local mode) and "explicitly private" (the
+  // tools a turn is offered, and whether it is asked for a goal) are two notions. A route says both while the turn
+  // runs. Stored, the mark is one, and a note tells the turns the mode alone kept from the ones Will asked to keep.
+  it('two notions, as stored: a turn of Local mode carries the same mark with a note, and only the note makes a turn the mode’s', () => {
+    expect(LOCAL_MODE_TURN).toEqual({ private: true, byMode: true });
+    // Everything the mark does, it does for both.
+    for (const context of [PRIVATE_TURN, LOCAL_MODE_TURN, { goals: true, private: true, byMode: true }]) {
+      expect(wasPrivate({ context })).toBe(true);
+      expect(keptHere({ context })).toBe(true);
+      expect(keptStrictly({ context })).toBe(true);
+    }
+    // By Will's own word: the mark with no note. That is also every turn marked before the note existed.
+    expect(privateByRequest({ context: PRIVATE_TURN })).toBe(true);
+    expect(privateByRequest({ context: { goals: true, private: true } })).toBe(true);
+    expect(privateByRequest({ context: LOCAL_MODE_TURN })).toBe(false);
+    expect(privateByRequest({ context: { goals: true, private: true, byMode: true } })).toBe(false);
+    // Anything but `true` is no note, and a note without the mark is nothing.
+    for (const byMode of [false, 'true', 1, null, undefined, {}]) expect(privateByRequest({ context: { private: true, byMode } }), String(byMode)).toBe(true);
+    for (const context of [undefined, null, {}, { byMode: true }, GOALS_TURN, { private: false, byMode: true }]) expect(privateByRequest({ context }), JSON.stringify(context)).toBe(false);
+    // Which route is the mode's alone: Local mode, and he did not ask for the turn to be private.
+    expect(keptByModeAlone(LOCAL_MODE)).toBe(true);
+    expect(keptByModeAlone({ private: true, mode: 'local' })).toBe(false);
+    expect(keptByModeAlone(PRIVATE)).toBe(false);
+    expect(keptByModeAlone(ORDINARY)).toBe(false);
+    expect(keptByModeAlone({ private: false, mode: 'hybrid' })).toBe(false);
+    // The call context, by the marks and the note.
+    expect(stayMark({ goals: false, private: true, byMode: true })).toBe(LOCAL_MODE_TURN);
+    expect(stayMark({ goals: false, private: true, byMode: false })).toBe(PRIVATE_TURN);
+    expect(stayMark({ goals: true, private: true, byMode: true })).toEqual({ goals: true, private: true, byMode: true });
+    expect(stayMark({ goals: true, private: false, byMode: true })).toBe(GOALS_TURN);
+    expect(stayMark({ goals: false, private: false, byMode: true })).toBeUndefined();
+  });
+
+  // The follow-up review's F1. The note was written from the route alone. A turn of Local mode in a conversation that
+  // held a turn Will had asked to keep private read that turn as history, said it back when asked, and was then
+  // itself mined for a goal: his private words reached a card through it.
+  it('the note: Local Only in Local mode is his word, and so is ANY turn that was handed one he asked to keep private, in Local mode or out of it', async () => {
+    const s = server({ frontier: claude, goals: answer([]), goalsOn: false, local: localSaying('a', 'b', 'c', 'd', 'e', 'f', 'g') });
+    await s.chat('local', 'a turn of Local mode', 'mode', LOCAL_MODE);
+    await s.chat('local', 'another, in the same conversation', 'mode', LOCAL_MODE);
+    await s.chat('local', 'Local Only, while in Local mode', 'both', { private: true, mode: 'local' });
+    await s.chat('local', SECRET, 'word', PRIVATE);
+    // An ordinary turn by its route, answered by the local model, which read the private turn before it.
+    await s.chat('local', 'and remind me of it', 'word', ORDINARY);
+    // A conversation of Local mode alone: every turn carries the note (a turn the mode kept is no one's private word).
+    expect(await contexts(s.store, 'mode')).toEqual([LOCAL_MODE_TURN, LOCAL_MODE_TURN]);
+    expect(await contexts(s.store, 'both')).toEqual([PRIVATE_TURN]);
+    expect(await contexts(s.store, 'word')).toEqual([PRIVATE_TURN, PRIVATE_TURN]);
+    // A turn of Local mode in the conversation that holds the one he asked to keep private: its model is handed
+    // that turn, so it is held as his word too. So is the next one, and the one after.
+    await s.chat('local', 'what did I just tell you?', 'word', LOCAL_MODE);
+    await s.chat('local', 'I want to finish that by spring', 'word', LOCAL_MODE);
+    expect(await contexts(s.store, 'word')).toEqual([PRIVATE_TURN, PRIVATE_TURN, PRIVATE_TURN, PRIVATE_TURN]);
+    expect((await s.store.getTurns('word')).every((t) => privateByRequest(t))).toBe(true);
+    // Another conversation is not touched by it.
+    await s.chat('local', 'a third turn of Local mode', 'mode', LOCAL_MODE);
+    expect((await contexts(s.store, 'mode')).at(-1)).toEqual(LOCAL_MODE_TURN);
+  });
+
+  it('it carries: every later turn of that conversation is held as his word for as long as one turn held so is still in what it is handed', async () => {
+    // A window of two turns: the third turn after the private one no longer carries the private turn itself.
+    const s = server({ frontier: claude, goals: answer([]), goalsOn: false, local: localSaying('a', 'b', 'c', 'd'), history: { maxTurns: 2, maxAgeMs: Number.POSITIVE_INFINITY } });
+    await s.chat('local', SECRET, 'c1', PRIVATE);
+    await s.chat('local', 'one', 'c1', LOCAL_MODE);
+    await s.chat('local', 'two', 'c1', LOCAL_MODE);
+    await s.chat('local', 'three', 'c1', LOCAL_MODE);
+    // "one" read the private turn. "two" read "one", which is held as his word (it may have said the private turn
+    // back). "three" read "one" and "two" the same way: the rule carries for as long as anything held so is carried.
+    expect(await contexts(s.store, 'c1')).toEqual([PRIVATE_TURN, PRIVATE_TURN, PRIVATE_TURN, PRIVATE_TURN]);
+    // Once nothing held so is carried any more (here: the stored turns have aged out of what a message is handed),
+    // a turn of Local mode in that conversation is the mode's again.
+    const later = server({ frontier: claude, goals: answer([]), goalsOn: false, local: localSaying('a'), history: { maxTurns: 2, maxAgeMs: 60_000 } });
+    await storedTurn(later.store, { conversationId: 'c1', id: 'old', context: PRIVATE_TURN, user: SECRET, assistant: 'noted', at: Date.now() - 3_600_000 });
+    await later.chat('local', 'a new day', 'c1', LOCAL_MODE);
+    expect((await contexts(later.store, 'c1')).at(-1)).toEqual(LOCAL_MODE_TURN);
   });
 
   it('who may read it: a brain on this Mac, and no other, whatever Will set for his goals', () => {
@@ -126,7 +203,9 @@ describe('a private turn never goes out later as history', () => {
   it('a turn taken in Local mode stays here after the mode changes: it was marked when it was stored', async () => {
     const s = server({ frontier: claude, goals: answer([]), goalsOn: false, local: localSaying(SECRET_REPLY) });
     await s.chat('local', SECRET, 'c3', LOCAL_MODE);
-    expect(await contexts(s.store, 'c3')).toEqual([PRIVATE_TURN]);
+    // (The same mark, with the note that it is the mode that keeps it here: see "two notions, as stored" below.)
+    expect(await contexts(s.store, 'c3')).toEqual([LOCAL_MODE_TURN]);
+    expect((await s.store.getTurns('c3')).map((t) => wasPrivate(t))).toEqual([true]);
     await s.chat('frontier', 'what did I just say?', 'c3', ORDINARY);
     expect(s.tiers[0]!.seen()).not.toContain('ZEBRA-PRIVATE-7781');
     expect(s.tiers[0]!.seen()).not.toContain('QUOKKA-PRIVATE-REPLY');
@@ -156,6 +235,7 @@ describe('a private turn never goes out later as history', () => {
     await s.chat('local', SECRET, 'c1', PRIVATE);
     await s.chat('standby', 'and again?', 'c1', LOCAL_MODE);
     expect(JSON.stringify(s.standby!.requests[0]!.messages)).toContain('ZEBRA-PRIVATE-7781');
+    // (A turn of Local mode, and it read one he asked to keep private: it is held as his word, with no note.)
     expect(await contexts(s.store)).toEqual([PRIVATE_TURN, PRIVATE_TURN]);
   });
 

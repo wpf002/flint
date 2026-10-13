@@ -55,21 +55,34 @@ describe('the `meta` event: the client is told whether the reply stays here, and
   });
 
   it('it is given once, and not before the turn is stored', async () => {
-    const store = tmpStore();
-    const turn = new ChatTurn<Persona>(store, undefined, 'c1', 0);
-    const asked = turn.ask(undefined as never, { context: 'ctx', whole: 'ctx', outside: 'ctx', tools: [] });
+    const s = server({ frontier: claude, goalsOn: false });
+    const { store } = s;
+    const turn = await s.goalsChat.forTurn('c1', 'hi');
+    const none = { styleGuide: '' } as never;
+    const asked = turn.ask(none, { context: 'ctx', whole: 'ctx', outside: 'ctx', tools: [] });
     expect(asked.meta()).toBeUndefined();
     await store.beginTurn({ conversationId: 'c1', turnId: 't1', createdAt: 1, userMessage: { id: 'u', role: 'user', content: 'hi', timestamp: 1 } });
     expect(asked.meta()).toEqual({ type: 'meta', staysHere: false, turn: 't1' });
     expect(asked.meta()).toBeUndefined();
     // Two turns begun at once in one conversation cannot be told apart: the event then names none.
-    const both = turn.ask(undefined as never, { context: 'ctx', whole: 'ctx', outside: 'ctx', tools: [] });
+    const both = turn.ask(none, { context: 'ctx', whole: 'ctx', outside: 'ctx', tools: [] });
     for (const id of ['t2', 't3']) await store.beginTurn({ conversationId: 'c1', turnId: id, createdAt: 2, userMessage: { id: `u${id}`, role: 'user', content: 'hi', timestamp: 2 } });
     expect(both.meta()).toEqual({ type: 'meta', staysHere: false });
   });
 });
 
 // ---------------------------------------------------------------------------
+// A turn is marked by the gate, and the gate is there only once the brains are named. index.ts names them before the
+// server listens (test/index-wiring.test.ts pins the order), so a turn with no gate cannot happen there. There used
+// to be a second, simpler rule for that case; it could not be reached and was not tested, and it is gone.
+describe('a turn has no rule to be marked by until the brains are named', () => {
+  it('forTurn before name() is an error, not a turn with a rule of its own', async () => {
+    const unnamed = new GoalsChat<Persona>({ memory: tmpStore(), blocks: { goals: false, goalsToFrontier: false }, runtime: () => RT, log: () => {}, locality: { watch: () => Promise.resolve() } });
+    await expect(unnamed.forTurn('c1', 'hi', { private: true, mode: 'cloud' })).rejects.toThrow('GoalsChat.forTurn was called before the brains were named (GoalsChat.name)');
+    await expect(unnamed.forTurn('c1', 'hi')).rejects.toThrow(/before the brains were named/);
+  });
+});
+
 describe('speechStaysHere: a reply that stays on this Mac is never sent to an outside speech service', () => {
   /** /speak as index.ts answers it: the refusal the client falls back on, or the outside call. */
   async function speak(s: { goalsChat: GoalsChat<Persona> }, body: { text: string; conversationId?: unknown; turnId?: unknown }, synth: (text: string) => Promise<string>) {
@@ -301,13 +314,13 @@ describe('recallForAnyBrain: /generate has no per-ask gate, so it is given the f
 describe('plannerHeld: deep_research’s planner is an outside model, and a local model’s turn does not ask it', () => {
   const chat = () => new GoalsChat<Persona>({ memory: tmpStore(), blocks: { goals: false, goalsToFrontier: false }, runtime: () => RT, log: () => {}, locality: { watch: () => Promise.resolve() } });
 
-  it('held on a local model’s turn, with a sentence that says why; not held on any other', () => {
+  it('held on a local model’s turn, with a sentence that says why; not held on any other', async () => {
     const c = chat();
     expect(c.plannerHeld(true)).toBeUndefined();
     expect(asLocalTurn(() => c.plannerHeld(true))).toBe('the local model is answering this turn, so its question stays here');
     // A tier on this Mac answers as a local model's turn, so its research plans by rule too.
-    expect(c.run({ provider: recording('ollama', ['answer'], { baseURL: HERE }).provider, model: 'qwen2.5:72b' }, () => c.plannerHeld(true))).toMatch(/stays here/);
-    expect(c.run({ provider: recording('anthropic', ['answer']).provider, model: 'claude-opus-5-5' }, () => c.plannerHeld(true))).toBeUndefined();
+    expect(await c.run({ provider: recording('ollama', ['answer'], { baseURL: HERE }).provider, model: 'qwen2.5:72b' }, () => c.plannerHeld(true))).toMatch(/stays here/);
+    expect(await c.run({ provider: recording('anthropic', ['answer']).provider, model: 'claude-opus-5-5' }, () => c.plannerHeld(true))).toBeUndefined();
   });
 
   it('with no outside planner there is nothing to hold', () => {

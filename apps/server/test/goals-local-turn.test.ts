@@ -110,7 +110,7 @@ describe('GoalsChat.run: an ask runs as a local model’s turn when its brain is
   const ollama = (baseURL: string) => recording('ollama', ['answer'], { baseURL }).provider;
 
   it('a brain on this Mac: the ask is made inside the mark, and its result is handed back', async () => {
-    const inside = chat().run({ provider: ollama(HERE), model: 'qwen2.5:72b' }, () => isLocalTurn());
+    const inside = await chat().run({ provider: ollama(HERE), model: 'qwen2.5:72b' }, () => isLocalTurn());
     expect(inside).toBe(true);
     // An async ask keeps the mark across its awaits, and it does not outlive the ask.
     const later = await chat().run({ provider: ollama(HERE), model: 'qwen2.5:72b' }, async () => {
@@ -121,7 +121,7 @@ describe('GoalsChat.run: an ask runs as a local model’s turn when its brain is
     expect(isLocalTurn()).toBe(false);
   });
 
-  it('any other brain: the ask runs as it is, with no mark', () => {
+  it('any other brain: the ask runs as it is, with no mark', async () => {
     listed(HERE, ['qwen2.5:72b', { name: 'mine', remote_host: 'https://ollama.com' }]);
     for (const brain of [
       { provider: recording('anthropic', ['answer']).provider, model: 'claude-opus-5-5' },
@@ -131,11 +131,52 @@ describe('GoalsChat.run: an ask runs as a local model’s turn when its brain is
       { provider: ollama(HERE), model: 'mine' },
       { provider: ollama(HERE), model: 'never-pulled:7b' },
     ]) {
-      expect(chat().run(brain, () => isLocalTurn()), brain.model).toBe(false);
+      expect(await chat().run(brain, () => isLocalTurn()), brain.model).toBe(false);
     }
     // FLINT_GOALS_TO_FRONTIER=on sends goals out; it does not make an outside brain a local one.
     const out = new GoalsChat<Persona>({ memory: undefined as never, blocks: { goals: true, goalsToFrontier: true }, runtime: () => RT, log: () => {}, locality: { watch: () => Promise.resolve() } });
-    expect(out.run({ provider: recording('anthropic', ['answer']).provider, model: 'claude-opus-5-5' }, () => isLocalTurn())).toBe(false);
+    expect(await out.run({ provider: recording('anthropic', ['answer']).provider, model: 'claude-opus-5-5' }, () => isLocalTurn())).toBe(false);
+  });
+});
+
+// The follow-up to N5. A tier on a local wire answers ordinary turns, which take no look of their own, and its
+// server's listing was asked once a minute: a name pointed at a cloud model in between was a brain on this Mac
+// until the next one, and was handed the turns and facts that stay here.
+describe('GoalsChat.run: before a tier on a local wire is asked, its server says what runs on it now', () => {
+  it('a name pointed at a cloud model since the last listing is asked as an outside brain; an outside brain’s server is never asked', async () => {
+    listed(HERE, ['qwen2.5:72b']);
+    const asked: string[] = [];
+    let says: Parameters<typeof listed>[1] = ['qwen2.5:72b'];
+    const c = new GoalsChat<Persona>({
+      memory: undefined as never, blocks: { goals: true, goalsToFrontier: false }, runtime: () => RT, log: () => {},
+      locality: { watch: () => Promise.resolve(), fresh: async (url) => (asked.push(url), listed(HERE, says)) },
+    });
+    const tier = { provider: recording('ollama', ['answer'], { baseURL: HERE }).provider, model: 'qwen2.5:72b' };
+    expect(await c.run(tier, () => isLocalTurn())).toBe(true);
+    expect(asked).toEqual([HERE]);
+    // `ollama cp gpt-oss:120b-cloud qwen2.5:72b`, while Flint runs.
+    says = [{ name: 'qwen2.5:72b', remote_host: 'https://ollama.com:443' }];
+    expect(await c.run(tier, () => isLocalTurn())).toBe(false);
+    expect(asked).toEqual([HERE, HERE]);
+    // The OpenAI-compatible wire: its server is asked at its origin.
+    await c.run({ provider: recording('local', ['answer'], { baseURL: `${HERE}/v1` }).provider, model: 'qwen2.5:72b' }, () => isLocalTurn());
+    expect(asked.at(-1)).toBe(HERE);
+    // An outside brain, and an Ollama on another machine: nothing they say makes them local, so they are not asked.
+    const n = asked.length;
+    await c.run({ provider: recording('anthropic', ['answer']).provider, model: 'claude-opus-5-5' }, () => isLocalTurn());
+    await c.run({ provider: recording('ollama', ['answer'], { baseURL: AWAY }).provider, model: 'qwen2.5:72b' }, () => isLocalTurn());
+    expect(asked).toHaveLength(n);
+  });
+
+  it('an ask that cannot be made holds nothing up, and a record that only watches is asked that way', async () => {
+    listed(HERE, ['qwen2.5:72b']);
+    const tier = { provider: recording('ollama', ['answer'], { baseURL: HERE }).provider, model: 'qwen2.5:72b' };
+    const failing = new GoalsChat<Persona>({ memory: undefined as never, blocks: { goals: true, goalsToFrontier: false }, runtime: () => RT, log: () => {}, locality: { watch: () => Promise.resolve(), fresh: () => Promise.reject(new Error('down')) } });
+    expect(await failing.run(tier, () => 'answered')).toBe('answered');
+    const watched: string[] = [];
+    const watching = new GoalsChat<Persona>({ memory: undefined as never, blocks: { goals: true, goalsToFrontier: false }, runtime: () => RT, log: () => {}, locality: { watch: async (url) => void watched.push(url) } });
+    expect(await watching.run(tier, () => isLocalTurn())).toBe(true);
+    expect(watched).toEqual([HERE]);
   });
 });
 

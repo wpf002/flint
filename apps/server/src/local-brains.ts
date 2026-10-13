@@ -213,6 +213,13 @@ export interface BuildLocalDeps {
    */
   place?: (baseURL: string, said: PlaceSaid) => void;
   /**
+   * Told when a look at the model server came back WITHOUT that answer (it
+   * did not answer, or its listing failed): the address the brain is asked
+   * at, and when that look began. What it said before the look does not
+   * stand through it (./ollama-locality silent). Left out: nobody is told.
+   */
+  silent?: (baseURL: string, since: number) => void;
+  /**
    * Is this model known to run somewhere else than the server at this address
    * (./ollama-locality runsElsewhere)? Such a model is never warmed. Left out:
    * none is.
@@ -412,9 +419,11 @@ export async function startLocalBrains(deps: BuildLocalDeps): Promise<LocalHandl
   // What the model server says it is, and where each of its models runs, is kept for ./policy (./ollama-locality),
   // under the address the brain itself is asked at. Told at every look the monitor takes.
   const placeOf = (baseURL: string) => (said: PlaceSaid): void => deps.place?.(baseURL, said);
+  // ...and so is a look that came back without its answer: what it said before does not stand through it.
+  const silentAt = (baseURL: string) => (since: number): void => deps.silent?.(baseURL, since);
   const nativeBackend =
     ollamaAt && nativeFetch
-      ? ollamaBackend(`${ollamaAt.origin}${ollamaAt.path}`, nativeFetch, (rows) => placeOf(`${ollamaAt.origin}${ollamaAt.path}`)({ ollama: [...rows] as ListedModel[] }))
+      ? ollamaBackend(`${ollamaAt.origin}${ollamaAt.path}`, nativeFetch, (rows) => placeOf(`${ollamaAt.origin}${ollamaAt.path}`)({ ollama: [...rows] as ListedModel[] }), silentAt(`${ollamaAt.origin}${ollamaAt.path}`))
       : undefined;
   // One guarded fetch and one backend per kind of server, so a rebuild that changes nothing hands the monitor the backend it has.
   const openaiSites = new Map<ServerKind, { f: typeof fetch; backend: LocalBackend }>();
@@ -431,8 +440,8 @@ export async function startLocalBrains(deps: BuildLocalDeps): Promise<LocalHandl
       // same. So whatever the kind, every look asks the server whether it is an Ollama, and tells ./policy.
       const backend =
         k === 'ollama'
-          ? ollamaBackend(openaiAt.origin, f, (rows) => told({ ollama: [...rows] as ListedModel[] }))
-          : withPlace(k === 'llamacpp' ? llamaCppBackend(openaiAt.origin, openaiAt.path, f) : openAiBackend(openaiAt.origin, openaiAt.path, f, cfg.local.apiKey), (signal) => askPlace(f, openaiAt.origin, signal, key), told);
+          ? ollamaBackend(openaiAt.origin, f, (rows) => told({ ollama: [...rows] as ListedModel[] }), silentAt(openaiAt.baseURL))
+          : withPlace(k === 'llamacpp' ? llamaCppBackend(openaiAt.origin, openaiAt.path, f) : openAiBackend(openaiAt.origin, openaiAt.path, f, cfg.local.apiKey), (signal) => askPlace(f, openaiAt.origin, signal, key), told, silentAt(openaiAt.baseURL));
       site = { f, backend };
       openaiSites.set(k, site);
     }

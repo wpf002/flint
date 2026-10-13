@@ -31,7 +31,7 @@ const offline = (async () => {
   throw new TypeError('fetch failed');
 }) as unknown as typeof fetch;
 
-async function build(env: Record<string, string | undefined>, opts: { on?: () => boolean; connects?: number[]; fetch?: typeof fetch; tier?: ReturnType<typeof hardwareTier>; place?: BuildLocalDeps['place']; elsewhere?: BuildLocalDeps['elsewhere'] } = {}) {
+async function build(env: Record<string, string | undefined>, opts: { on?: () => boolean; connects?: number[]; fetch?: typeof fetch; tier?: ReturnType<typeof hardwareTier>; place?: BuildLocalDeps['place']; elsewhere?: BuildLocalDeps['elsewhere']; silent?: BuildLocalDeps['silent'] } = {}) {
   const lines: string[] = [];
   const cfg = readInferenceConfig(env, (m) => lines.push(m));
   const brains = await buildLocalBrains({
@@ -43,6 +43,7 @@ async function build(env: Record<string, string | undefined>, opts: { on?: () =>
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
     ...(opts.tier ? { tier: opts.tier } : {}),
     ...(opts.place ? { place: opts.place } : {}),
+    ...(opts.silent ? { silent: opts.silent } : {}),
     ...(opts.elsewhere ? { elsewhere: opts.elsewhere } : {}),
     pick: { capMs: 500 },
   });
@@ -486,6 +487,55 @@ describe('every look tells whoever keeps it what the model server says it is', (
     up = true;
     await brains.monitor.check();
     expect(rowsOf(h.told.at(-1)?.said)).toEqual([[MAIN, undefined], [ALIAS, 'https://ollama.com:443']]);
+  });
+
+  // The follow-up review's F2. A look that comes back WITHOUT the server's answer is told too, under the same
+  // address: what it said before must not stand through it (../src/ollama-locality silent).
+  it('a look that came back without that answer is told as silence, under the address the brain is asked at, on either wire and for every kind of server', async () => {
+    const cases: Array<{ label: string; kind: MockLocalServer['kind']; env: (s: MockLocalServer) => Record<string, string>; at: (s: MockLocalServer) => string }> = [
+      { label: "Ollama's own API", kind: 'ollama', env: (s) => ({ OLLAMA_HOST: s.origin, OLLAMA_MODEL: MAIN }), at: (s) => s.origin },
+      { label: 'an Ollama on the OpenAI-compatible wire', kind: 'ollama', env: (s) => ({ FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: s.baseURL, FLINT_LOCAL_MODEL: MAIN }), at: (s) => s.baseURL },
+      { label: 'an Ollama that the settings call a plain server', kind: 'ollama', env: (s) => ({ FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: s.baseURL, FLINT_LOCAL_MODEL: MAIN, FLINT_LOCAL_SERVER: 'openai' }), at: (s) => s.baseURL },
+      { label: 'llama.cpp', kind: 'llamacpp', env: (s) => ({ FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: s.baseURL, FLINT_LOCAL_MODEL: MAIN }), at: (s) => s.baseURL },
+      { label: 'a plain OpenAI-compatible server', kind: 'openai', env: (s) => ({ FLINT_LOCAL_PROVIDER: 'openai', FLINT_LOCAL_BASE_URL: s.baseURL, FLINT_LOCAL_MODEL: MAIN }), at: (s) => s.baseURL },
+    ];
+    for (const c of cases) {
+      const s = await start({ [MAIN]: { loaded: true, contextLength: 16384 } }, c.kind);
+      const h = heard();
+      const quiet: string[] = [];
+      const since: number[] = [];
+      const failedAt: number[] = [];
+      let listing: 'answers' | '500' = 'answers';
+      // (The listing fails a moment after it is asked, so "when the look began" and "when it gave up" are two times.)
+      const gate = ((url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
+        listing === '500' && String(url).endsWith('/api/tags')
+          ? new Promise<Response>((resolve) => setTimeout(() => (failedAt.push(Date.now()), resolve(new Response('{"error":"x"}', { status: 500 }))), 15))
+          : fetch(url, init)) as typeof fetch;
+      const { brains } = await build(c.env(s), { ...h, fetch: gate, silent: (baseURL, at) => (quiet.push(baseURL), void since.push(at)) });
+      await brains.monitor.check();
+      expect(h.told.length, c.label).toBeGreaterThan(0);
+      expect(quiet, c.label).toEqual([]); // while it answers, never
+      // Its listing fails, and everything else it answers still does.
+      listing = '500';
+      const told = h.told.length;
+      const began = Date.now();
+      const snapshot = await brains.monitor.check();
+      expect(snapshot.reachable, c.label).toBe(true);
+      expect(quiet, c.label).toEqual([c.at(s)]);
+      expect(h.told.length, c.label).toBe(told);
+      // Asked twice (one bad answer is not yet silence), and told with when the look BEGAN: before either answer.
+      expect(failedAt, c.label).toHaveLength(2);
+      expect(since[0], c.label).toBeGreaterThanOrEqual(began);
+      expect(since[0], c.label).toBeLessThan(failedAt[0]!);
+      await brains.monitor.check();
+      expect(quiet, c.label).toEqual([c.at(s), c.at(s)]); // every such look
+      listing = 'answers';
+      await brains.monitor.check();
+      expect(quiet, c.label).toHaveLength(2);
+      expect(h.told.length, c.label).toBe(told + 1);
+      await s.close();
+      server = undefined;
+    }
   });
 
   it('a model the server says runs elsewhere is never loaded ahead of a turn: the standby as much as the main one', async () => {

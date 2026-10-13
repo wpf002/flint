@@ -435,6 +435,13 @@ interface Item {
    * a call only with turns that carry the same marks.
    */
   private?: boolean;
+  /**
+   * ...and it (or the earlier one shown with it) is one he ASKED to keep
+   * private, not one that only Local mode kept (./private-turns
+   * privateByRequest). A call that holds such a turn is never asked for a
+   * goal; in a pass that asks, it never shares a call with a turn that may be.
+   */
+  byRequest?: boolean;
 }
 
 /** How closely what is learned from this turn is held, like a fact's own marks (./knowledge): 0, 1 for Will's goals, 2 for a private turn. */
@@ -537,11 +544,28 @@ export interface ExtractorOptions {
    */
   keptPrivate?: (conversationId: string, turnId: string) => boolean;
   /**
+   * Of the turns he kept private: is this one kept by his own word for it (the
+   * Local Only switch, or a message that asked to stay private), and not only
+   * because Flint was in Local mode (./private-turns privateByRequest)? Such a
+   * turn is never asked for a goal. Left out: every turn he kept private is
+   * read as one he asked to.
+   */
+  privateByRequest?: (conversationId: string, turnId: string) => boolean;
+  /**
+   * Send a call as one that carries text which stays on this Mac (the server
+   * passes ./goals-chat keptText). A call about turns answered with Will's
+   * goals, or turns he kept private, is made through it: where the request is
+   * sent, it goes only to a model the model server lists as its own at that
+   * moment (./inference helperFetch). `isTainted` read what was known when the
+   * pass began. Default: sent as it is.
+   */
+  kept?: <T>(send: () => T) => T;
+  /**
    * Also ask for the goals Will set (FLINT_EXTRACT_CANDIDATES=1). Only with
    * the local brain (`kind` local) and somewhere to hand them (`onCandidate`):
    * otherwise it is off, and the prompt is what it always was. And never of a
-   * call about turns he kept private (`keptPrivate`): those are asked for
-   * facts alone. Given as a
+   * call about a turn he asked to keep private (`privateByRequest`): those are
+   * asked for facts alone. A turn taken in Local mode is asked like any other. Given as a
    * question, it is asked again at the start of every pass (does the model
    * run on this Mac right now?): a pass it says no to asks for facts alone.
    */
@@ -580,6 +604,8 @@ export class MemoryExtractor {
   private readonly isTainted: (conversationId: string, turnId: string) => boolean;
   private readonly carriedGoals: (conversationId: string, turnId: string) => boolean;
   private readonly keptPrivate: (conversationId: string, turnId: string) => boolean;
+  private readonly privateByRequest: (conversationId: string, turnId: string) => boolean;
+  private readonly kept: <T>(send: () => T) => T;
   private readonly candidates: boolean;
   private readonly mayPropose: () => boolean;
   private readonly commitments: boolean;
@@ -625,6 +651,8 @@ export class MemoryExtractor {
     this.isTainted = opts.isTainted ?? (() => false);
     this.carriedGoals = opts.carriedGoals ?? (() => false);
     this.keptPrivate = opts.keptPrivate ?? (() => false);
+    this.privateByRequest = opts.privateByRequest ?? this.keptPrivate;
+    this.kept = opts.kept ?? ((send) => send());
     // Goals and commitments are asked of the local model alone, and only with somewhere to hand them.
     const asked = opts.candidates;
     this.candidates = (asked === true || typeof asked === 'function') && local && opts.onCandidate !== undefined;
@@ -790,7 +818,9 @@ export class MemoryExtractor {
         // is learned from a marked turn stays on this Mac under its marks, and a call that mixed them could not
         // say which fact came from where.
         let marks: string | undefined;
-        const marksOf = (it: Item) => `${it.goals ? 'g' : ''}${it.private ? 'p' : ''}`;
+        // (A pass that asks for goals also keeps the turns he asked to keep private apart from the ones Local mode
+        // kept: the first are never asked, the second are. A pass that asks for facts alone batches as it always did.)
+        const marksOf = (it: Item) => `${it.goals ? 'g' : ''}${it.private ? 'p' : ''}${asking && it.byRequest ? 'r' : ''}`;
         // A batch that strikes have halved keeps that size until it goes through.
         const head = pending.slice(idx).find((it) => !it.skip);
         const struck = head && state.failures?.key === `${head.cid}@${head.at}` ? state.failures.cap : undefined;
@@ -824,17 +854,25 @@ export class MemoryExtractor {
           const key = `${toSend[0]!.cid}@${toSend[0]!.at}`;
           state.budget.calls++;
           stats.calls++;
-          // A call about turns Will kept private asks for facts alone, whatever the pass asks (a call is all turns
-          // of one kind of mark, so it is all of them or none). A suggestion is his own sentence on its way to
-          // being a goal, and his goals can be sent to every brain (FLINT_GOALS_TO_FRONTIER): what he asked to
-          // keep on this Mac is never put on that road. The facts are learned and marked as ever.
-          const asked = asking && !toSend.some((it) => it.private) ? asking : undefined;
+          // A call about turns Will ASKED to keep private (the Local Only switch, or the words) asks for facts
+          // alone, whatever the pass asks (a call is all turns of one kind, so it is all of them or none). A
+          // suggestion is his own sentence on its way to being a goal, and his goals can be sent to every brain
+          // (FLINT_GOALS_TO_FRONTIER): what he asked to keep on this Mac is never put on that road. The facts are
+          // learned and marked as ever. A turn taken in Local mode is asked: the mode keeps its answer here, and
+          // a goal he then approves is a goal like any he typed.
+          const asked = asking && !toSend.some((it) => it.byRequest) ? asking : undefined;
           const ask = this.prompt(toSend, room, asked);
           let reply: BrainReply | undefined;
           let why: BrainFailure | undefined;
           let detail: string | undefined;
           try {
-            reply = await this.brain.generate({ system: EXTRACT_SYSTEM, prompt: ask.text, ...(asked ? { suggestions: asked } : {}) });
+            const send = (): Promise<BrainReply> => this.brain.generate({ system: EXTRACT_SYSTEM, prompt: ask.text, ...(asked ? { suggestions: asked } : {}) });
+            // (A call's turns all carry the same marks: it stays here, or none of it does.) A call that ASKS for
+            // goals is sent the same way, whatever its turns are: whether this pass asks was decided when it began,
+            // on what the model's server had last said, and that can be a minute old. Sent as kept text, the
+            // request goes only to a model its server, asked a moment ago, lists as its own (./inference
+            // helperFetch): a memory model pointed at a cloud model since then is not asked for Will's goals.
+            reply = await (asked || toSend.some((it) => it.goals || it.private) ? this.kept(send) : send());
           } catch (err) {
             why = err instanceof MemoryBrainError ? err.why : 'unavailable';
             detail = err instanceof MemoryBrainError ? err.detail : errorKind(err);
@@ -1021,6 +1059,8 @@ export class MemoryExtractor {
               // and either one being a turn he kept private marks it private.
               ...(this.carriedGoals(cid, t.id) || (context && this.carriedGoals(cid, context.id)) ? { goals: true } : {}),
               ...(this.keptPrivate(cid, t.id) || (context && this.keptPrivate(cid, context.id)) ? { private: true } : {}),
+              // ...and either one being a turn he ASKED to keep private keeps the call from being asked for a goal.
+              ...(this.privateByRequest(cid, t.id) || (context && this.privateByRequest(cid, context.id)) ? { byRequest: true } : {}),
             });
           }
         }
@@ -1037,7 +1077,12 @@ export class MemoryExtractor {
   /** The call's prompt, and the ids of the known facts it shows (the only ones a fact may supersede). */
   private prompt(items: Item[], room: Room, asking?: Suggesting): { text: string; shown: Set<string> } {
     // The known facts that stay on this Mac are shown only to a call whose turns do too, and are held as closely.
-    const known = this.knownFacts(items, room.knownChars, Math.max(0, ...items.map(heldAs)) as 0 | 1 | 2);
+    // A call that is ASKED for goals is shown none from a turn Will kept private, whatever its own turns are: what
+    // it answers can be filed, and a fact from a turn he asked to keep private (a fact does not say which kind of
+    // private turn it came from) must be in no prompt whose answer can. Facts from his goals are shown as before,
+    // to a call whose turns carry the goals mark or a closer one.
+    const held = Math.max(0, ...items.map(heldAs)) as 0 | 1 | 2;
+    const known = this.knownFacts(items, room.knownChars, asking ? (Math.min(held, 1) as 0 | 1) : held);
     const knownBlock = known.length
       ? known.map((f) => `${f.id}: ${f.text}`).join('\n')
       : '(none yet)';
@@ -1175,7 +1220,12 @@ export class MemoryExtractor {
       // What it says is his too: a short text, most of whose words, and every number, are in that same message.
       // It starts with a capital, as a title does.
       const text = capital(normalizeSaid(s.text));
-      if (!SuggestionText.safeParse(text).success || factCoverage([src.said], text) < FACT_COVERAGE || !numbersGrounded([src.said], text, src.at)) {
+      // From a turn that carries the private mark, ALL of them: its call can hold words that are not his own message
+      // (the turn shown before it, what the model answered him), and none of those may reach a card. All of them
+      // is every word, not every content word: a name that is also a stop word ("May"), or a word in another
+      // script, is a word like any other (everyWordSaid).
+      const his = src.private ? factCoverage([src.said], text) >= 1 && everyWordSaid([src.said], text) : factCoverage([src.said], text) >= FACT_COVERAGE;
+      if (!SuggestionText.safeParse(text).success || !his || !numbersGrounded([src.said], text, src.at)) {
         drop('text');
         continue;
       }
@@ -1187,7 +1237,9 @@ export class MemoryExtractor {
           drop('date');
           continue;
         }
-        if (s.dueOn >= today) dueOn = s.dueOn;
+        // From a turn that carries the private mark, a day is kept only when it is in his own words in that turn:
+        // one the model worked out could be a day it read somewhere else in its call. Any other is left off.
+        if (s.dueOn >= today && (!src.private || daySaid(src.said, s.dueOn, localDay(this.tz, new Date(src.at))))) dueOn = s.dueOn;
       }
       if (this.now() - src.at > SUGGESTION_MAX_AGE_DAYS * 86_400_000) {
         drop('old');
@@ -1209,7 +1261,7 @@ export class MemoryExtractor {
       stats.suggestionsKept++;
       let outcome: SuggestionOutcome;
       try {
-        outcome = await this.onCandidate!({ kind: s.kind, text, quote, ...(dueOn ? { dueOn } : {}), conversationId: src.cid, turnId: src.turnId, sourceAt: src.at, staysHere: src.goals === true });
+        outcome = await this.onCandidate!({ kind: s.kind, text, quote, ...(dueOn ? { dueOn } : {}), conversationId: src.cid, turnId: src.turnId, sourceAt: src.at, staysHere: src.goals === true || src.private === true });
       } catch {
         outcome = 'unreachable';
       }
@@ -1509,6 +1561,65 @@ export function factCoverage(will: string[], fact: string): number {
 
 /** A grounded fact's content words must be at least this much Will's (see factCoverage). */
 export const FACT_COVERAGE = 0.5;
+
+/**
+ * Every word of a text: runs of letters and digits in ANY script, lower-cased,
+ * with the stem ./knowledge contentTokens gives a word ("trips" is "trip").
+ * No stop list, and no word too short or too foreign to count: "with", "may"
+ * and a word in Cyrillic are words here, where contentTokens leaves each out.
+ */
+export function everyWord(s: string): string[] {
+  return normalizeQuoteText(s)
+    .replace(/'s(?![\p{L}\p{N}])/gu, '')
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((t) => t.length > 0)
+    .map((t) => (t.length > 4 && t.endsWith('ing') ? t.slice(0, -3) : t.length > 3 && t.endsWith('s') && !t.endsWith('ss') ? t.slice(0, -1) : t));
+}
+
+/**
+ * Is EVERY word of `text` one of Will's words in `will`? The rule for what a
+ * turn that stays here may put on a card: factCoverage counts content words
+ * only, so a stop word ("with May") or a word in another script could ride
+ * along from the rest of the call. Here nothing rides along. False for a text
+ * with no word in it.
+ */
+export function everyWordSaid(will: string[], text: string): boolean {
+  const said = new Set(everyWord(will.join(' ')));
+  const words = everyWord(text);
+  return words.length > 0 && words.every((w) => said.has(w));
+}
+
+const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+
+/**
+ * Did Will name this day in these words? Asked of a day the model read for a
+ * suggestion from a turn that carries the private mark: it is kept only when
+ * nothing about it is the model's own.
+ *  - the date written out (2027-03-03), or
+ *  - its month by name ("March", "Mar") with its day of the month ("3",
+ *    "3rd", "03"), or the two as a short date, month first ("3/3", "03/03").
+ * And then the year is his too: he wrote it, or the day is the first such day
+ * on or after the day he said it (`saidOn`), which is what "March 3" means.
+ * A day worked out from "by spring", "next Friday" or "before then" is not
+ * named, whatever it is.
+ */
+export function daySaid(said: string, day: string, saidOn: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  const from = /^(\d{4})-(\d{2})-(\d{2})$/.exec(saidOn);
+  if (!m || !from) return false;
+  const text = normalizeSaid(said).toLowerCase();
+  if (text.includes(day)) return true;
+  const month = MONTHS[Number(m[2]) - 1];
+  if (!month) return false;
+  const dom = String(Number(m[3]));
+  const byName = new RegExp(`\\b(?:${month}|${month.slice(0, 3)})\\b`).test(text) && new RegExp(`(?<![\\d/.-])0?${dom}(?:st|nd|rd|th)?(?![\\d/])`).test(text);
+  const byNumber = new RegExp(`(?<![\\d/])0?${Number(m[2])}/0?${dom}(?![\\d])`).test(text);
+  if (!byName && !byNumber) return false;
+  if (new RegExp(`(?<!\\d)${m[1]}(?!\\d)`).test(text)) return true;
+  // The first such day on or after the day he said it.
+  const first = `${m[2]}-${m[3]}` >= `${from[2]}-${from[3]}` ? Number(from[1]) : Number(from[1]) + 1;
+  return Number(m[1]) === first;
+}
 
 /** The numbers in `s`, as digits: "1,200" is 1200 and "09" is 9, so how they are written doesn't matter. */
 function numbersIn(s: string): string[] {

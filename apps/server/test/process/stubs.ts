@@ -32,6 +32,8 @@ export interface StubRequest {
   method: string;
   path: string;
   body: Record<string, unknown> | undefined;
+  /** When it arrived (the model server stand-in records it). */
+  at?: number;
 }
 
 export interface OllamaModel {
@@ -64,6 +66,20 @@ export interface OllamaStub {
   chatDelayMs: number;
   /** The models it has, as its listing gives them: a test may change one while the server runs. */
   models: Record<string, OllamaModel>;
+  /**
+   * How it answers the questions a look asks, while chat and the embedding calls go on answering. As an Ollama
+   * does (`answers`), or with no word about what it lists, in each way a server can give none:
+   *   listing-fails        `/api/tags` is a 500
+   *   listing-fails-once   ...once, and then it answers as an Ollama does
+   *   listing-401, -403    the question is not let through
+   *   listing-not-json     a 200 whose body is no listing
+   *   listing-drops        the connection is dropped
+   *   listing-hangs        `/api/tags` is never answered
+   *   looks-hang           no GET is ever answered
+   *   all-hang             nothing is ever answered, chat and the embedding calls included
+   * A test changes it while the server runs.
+   */
+  looks: 'answers' | 'listing-fails' | 'listing-fails-once' | 'listing-401' | 'listing-403' | 'listing-not-json' | 'listing-drops' | 'listing-hangs' | 'looks-hang' | 'all-hang';
   /** Does anything this stub was sent, from request `from` on, contain `needle`? */
   saw(needle: string, from?: number): boolean;
   close(): Promise<void>;
@@ -105,18 +121,32 @@ export async function startOllamaStub(models: Record<string, OllamaModel>): Prom
     replyFor: undefined,
     chatDelayMs: 0,
     models,
+    looks: 'answers',
     saw: (needle, from = 0) => requests.slice(from).some((r) => JSON.stringify(r.body ?? '').includes(needle)),
     close: () => close(server),
   };
   const server = createServer(async (req, res) => {
     const path = (req.url ?? '/').split('?')[0]!;
     const body = parse(await readBody(req));
-    requests.push({ method: req.method ?? 'GET', path, body });
+    requests.push({ method: req.method ?? 'GET', path, body, at: Date.now() });
     const json = (status: number, b: unknown): void => {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(b));
     };
     const named = (name: unknown): OllamaModel | undefined => (typeof name === 'string' ? models[name] : undefined);
+    // (Never answered: the connection is dropped when the stub closes.)
+    if (stub.looks === 'all-hang' || (req.method === 'GET' && stub.looks === 'looks-hang')) return;
+    if (req.method === 'GET' && path === '/api/tags' && stub.looks !== 'answers') {
+      const how = stub.looks;
+      if (how === 'listing-hangs') return;
+      if (how === 'listing-drops') return void req.socket.destroy();
+      if (how === 'listing-not-json') {
+        res.writeHead(200, { 'content-type': 'text/html' });
+        return void res.end('<html>busy</html>');
+      }
+      if (how === 'listing-fails-once') stub.looks = 'answers';
+      return json(how === 'listing-401' ? 401 : how === 'listing-403' ? 403 : 500, { error: 'no listing' });
+    }
     if (req.method === 'GET' && path === '/api/version') return json(200, { version: '0.34.4' });
     if (req.method === 'GET' && path === '/api/tags') {
       return json(200, {

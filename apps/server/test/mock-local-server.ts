@@ -69,6 +69,8 @@ export interface MockLocalServer {
   loading: boolean;
   /** Answer every request with a redirect to this URL. */
   redirectTo: string | undefined;
+  /** An Ollama whose model listing fails (`/api/tags` is a 500) while everything else it is asked still answers. */
+  listingFails: boolean;
   /** What a model answers to one chat request, when the test decides it from the request itself; undefined: its scripted `replies`. */
   replyFor: ((request: RecordedRequest) => MockReply | undefined) | undefined;
   close(): Promise<void>;
@@ -80,7 +82,7 @@ export async function startMockLocalServer(init: { kind?: MockLocalServer['kind'
   const models = new Map<string, MockModel>(Object.entries(init.models ?? {}));
   const requests: RecordedRequest[] = [];
   const calls = new Map<string, number>();
-  const state = { kind: init.kind ?? 'ollama', loading: false, redirectTo: undefined as string | undefined, replyFor: undefined as MockLocalServer['replyFor'] };
+  const state = { kind: init.kind ?? 'ollama', loading: false, listingFails: false, redirectTo: undefined as string | undefined, replyFor: undefined as MockLocalServer['replyFor'] };
   const open = new Set<ServerResponse>();
 
   const json = (res: ServerResponse, status: number, body: unknown): void => {
@@ -132,6 +134,7 @@ export async function startMockLocalServer(init: { kind?: MockLocalServer['kind'
       // --- probes -----------------------------------------------------------
       if (method === 'GET' && path === '/api/version') return state.kind === 'ollama' ? json(res, 200, { version: '0.34.4' }) : json(res, 404, { error: 'not found' });
       if (method === 'GET' && path === '/api/tags' && state.kind === 'ollama') {
+        if (state.listingFails) return json(res, 500, { error: 'listing failed' });
         return json(res, 200, { models: [...models].filter(([, m]) => m.installed !== false).map(([name, m]) => ({ name, model: name, details: { family: 'test' }, ...(m.remoteHost ? { remote_host: m.remoteHost, remote_model: 'cloud-model:120b' } : {}) })) });
       }
       if (method === 'GET' && path === '/api/ps' && state.kind === 'ollama') {
@@ -214,6 +217,12 @@ export async function startMockLocalServer(init: { kind?: MockLocalServer['kind'
     },
     set loading(v) {
       state.loading = v;
+    },
+    get listingFails() {
+      return state.listingFails;
+    },
+    set listingFails(v) {
+      state.listingFails = v;
     },
     get redirectTo() {
       return state.redirectTo;

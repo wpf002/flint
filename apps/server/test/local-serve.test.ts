@@ -246,9 +246,9 @@ describe('heldToHere: a plan for a turn that stays here keeps only the models kn
     const cloudModel = heldToHere(both(), { route: local, here: never, elsewhere: (s) => s.which === 'primary' });
     expect(cloudModel).toEqual({ steps: [], primaryState: 'loaded', warmPrimary: false, refusal: "The local model is one that runs on Ollama's servers, and Local mode never uses the cloud." });
     const unknown = heldToHere(both(), { route: hybridPrivate, here: never, elsewhere: never });
-    expect(unknown.refusal).toBe('Flint has not confirmed yet that its local model runs on this Mac, and a private message never leaves this Mac.');
+    expect(unknown.refusal).toBe('Flint cannot confirm right now that its local model runs on this Mac, and a private message never leaves this Mac.');
     expect(heldToHere(both(), { route: hybridPrivate, here: never, elsewhere: never, allowedRemote: true }).refusal).toBe(
-      'Flint has not confirmed yet that its local model runs on this Mac or the model server you allowed, and a private message never leaves this Mac or the model server you allowed.',
+      'Flint cannot confirm right now that its local model runs on this Mac or the model server you allowed, and a private message never leaves this Mac or the model server you allowed.',
     );
     // A main model that is not there at all gets the sentence any turn that must be local gets.
     const missing = health('main-model', 'unavailable', 'not_installed');
@@ -468,6 +468,21 @@ describe('runLocalPlan', () => {
     // A hybrid turn the rules kept local: neither.
     expect(await seen({})).toEqual([['primary', false, false], ['cloud', false, false]]);
     expect(isStaysHereTurn()).toBe(false);
+    // Before each LOCAL step is asked, the model server is heard from (./inference heardLately): what it says of where
+    // its models run decides, inside the ask, what that model is handed. A cloud step waits for nothing.
+    const order: string[] = [];
+    await runLocalPlan(
+      steps,
+      async (step) => {
+        order.push(`ask ${step.kind === 'cloud' ? 'cloud' : step.which}`);
+        if (step.kind !== 'cloud') throw new FlintError(makeAiError('provider_unavailable', 'down', { retryable: true }));
+        return 'ok';
+      },
+      { progressed: () => false, heard: async () => void order.push('heard') },
+    );
+    expect(order).toEqual(['heard', 'ask primary', 'ask cloud']);
+    // A look that fails holds nothing up.
+    await expect(runLocalPlan(steps, async (step) => step.kind, { progressed: () => false, heard: () => Promise.reject(new Error('the look failed')) })).resolves.toMatchObject({ result: 'local' });
   });
 
   it('a plan with no steps cannot run: the caller refused before this', async () => {

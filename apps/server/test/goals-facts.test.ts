@@ -359,6 +359,43 @@ describe('a fact that stays here and the embedder', () => {
     expect(vectors().every(([, embedded]) => embedded)).toBe(true);
   });
 
+  // `embedderHere` reads what the model server said up to a minute ago. A fact that stays here is also SENT as a
+  // request that carries one, so the rule is read again where the request is made (../src/inference helperFetch).
+  it('a fact that stays here is handed to the embedder as a request that carries one; an ordinary fact as it is; refused there, it is stored without an embedding', async () => {
+    const sentAs: Array<[string, boolean]> = [];
+    let carrying = false;
+    const embedder = { embed: async (texts: string[]) => (sentAs.push([texts[0]!, carrying]), texts.map(vec)) } as Emb;
+    const kept = <T>(send: () => T): T => {
+      carrying = true;
+      try {
+        return send();
+      } finally {
+        carrying = false;
+      }
+    };
+    const k = new KnowledgeStore(kpath(), embedder, undefined, undefined, { embedderHere: () => true, kept });
+    await k.add(SECRET, 'history', { fromPrivate: true });
+    await k.add(`${SECRET} Again.`, 'history', { fromGoals: true });
+    await k.add(OPEN, 'history');
+    expect(sentAs).toEqual([[SECRET, true], [`${SECRET} Again.`, true], [OPEN, false]]);
+    // Where the request is made, the model server has just said the embedding model runs elsewhere: the request is
+    // refused, and the fact is stored like one whose embedder was down. An ordinary fact is embedded as before.
+    const refused: string[] = [];
+    const file = join(mkdtempSync(join(tmpdir(), 'flint-kept-')), 'k.json');
+    const strict = new KnowledgeStore(file, upEmbedder, undefined, undefined, {
+      embedderHere: () => true,
+      kept: (() => (refused.push('refused'), Promise.reject(new TypeError('fetch refused: the model asked for is not known to run on this Mac')))) as never,
+    });
+    await strict.add(SECRET, 'history', { fromPrivate: true });
+    await strict.add(OPEN, 'history');
+    const stored = () => (JSON.parse(readFileSync(file, 'utf8')) as { facts: Array<{ text: string; vector: number[] }> }).facts.map((f) => [f.text, f.vector.length > 0]);
+    expect(stored()).toEqual([[SECRET, false], [OPEN, true]]);
+    // Healing a fact stored without an embedding goes the same way: it is not sent as an ordinary request later.
+    expect(await strict.reembedMissing()).toBe(0);
+    expect(refused).toEqual(['refused', 'refused']);
+    expect(stored()).toEqual([[SECRET, false], [OPEN, true]]);
+  });
+
   it('an embedder nobody vouched for is not here: the default holds a marked fact back', async () => {
     const e = recordingEmbedder();
     const k = new KnowledgeStore(kpath(), e.embedder);

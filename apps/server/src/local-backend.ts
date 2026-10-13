@@ -193,25 +193,52 @@ export const OLLAMA_PATHS = ['/api/version', '/api/tags', '/api/ps', '/api/show'
  * /api/tags, as they came), each time one is read. The listing is where an
  * Ollama says whether a model really runs on it (a `remote_host` on the row
  * means it does not), and ./ollama-locality keeps that for ./policy.
+ *
+ * `onSilent`: told every look that came back WITHOUT a listing: the server
+ * did not answer at all, or it answered and its listing failed (a 500, a
+ * hang, anything that is no listing). A turn that stays here waits for this
+ * look before it is routed, so a look with no listing in it must not leave
+ * the last one standing: a name could have been pointed at a cloud model
+ * behind the silence (./ollama-locality silent). It is told when the look
+ * BEGAN, so a word the server gave someone else during the look is kept.
+ *
+ * One bad answer is not yet silence: a question that failed AT ONCE (an
+ * error, a dropped connection, an answer that is no listing) is asked once
+ * more inside the same look, so a server that was busy for a moment does not
+ * cost a turn. One that was not answered in time is not asked again: the look
+ * has one deadline (`signal`), and whoever waits has waited as long as it may.
  */
-export function ollamaBackend(origin: string, f: Fetch, onListing?: (rows: ReadonlyArray<Record<string, unknown>>) => void): LocalBackend {
+export function ollamaBackend(origin: string, f: Fetch, onListing?: (rows: ReadonlyArray<Record<string, unknown>>) => void, onSilent?: (since: number) => void): LocalBackend {
   const at = (path: string): string => `${origin}${path}`;
+  const tell = (what: (() => void) | undefined): void => {
+    try {
+      what?.();
+    } catch {
+      /* whoever keeps the listing has its own trouble: a look at the server never fails for it */
+    }
+  };
+  /** Ask, and once more when the first answer came at once and was not `good`. Never past the look's own deadline. */
+  const twice = async (path: string, signal: AbortSignal, good: (a: Awaited<ReturnType<typeof ask>>) => boolean): Promise<Awaited<ReturnType<typeof ask>>> => {
+    const first = await ask(f, at(path), signal);
+    return good(first) || signal.aborted ? first : ask(f, at(path), signal);
+  };
+  const versionOf = (a: Awaited<ReturnType<typeof ask>>): string | undefined => {
+    const v = (a?.json as { version?: unknown } | undefined)?.version;
+    return a && a.status === 200 && typeof v === 'string' ? v : undefined;
+  };
   return {
     kind: 'ollama',
     async probe(models, signal) {
-      const version = await ask(f, at('/api/version'), signal);
-      const v = (version?.json as { version?: unknown } | undefined)?.version;
-      if (!version || version.status !== 200 || typeof v !== 'string') return { reachable: false, models: {} };
-      const [tags, ps] = await Promise.all([ask(f, at('/api/tags'), signal), ask(f, at('/api/ps'), signal)]);
+      const began = Date.now();
+      const v = versionOf(await twice('/api/version', signal, (a) => versionOf(a) !== undefined));
+      if (v === undefined) {
+        tell(() => onSilent?.(began));
+        return { reachable: false, models: {} };
+      }
+      const [tags, ps] = await Promise.all([twice('/api/tags', signal, (a) => a?.status === 200), ask(f, at('/api/ps'), signal)]);
       const installed = tags?.status === 200 ? rows(tags.json, 'models') : undefined;
       const loaded = ps?.status === 200 ? rows(ps.json, 'models') : undefined;
-      if (installed) {
-        try {
-          onListing?.(installed);
-        } catch {
-          /* whoever keeps the listing has its own trouble: a look at the server never fails for it */
-        }
-      }
+      tell(installed ? () => onListing?.(installed) : () => onSilent?.(began));
       const out: Record<string, ModelProbe> = {};
       for (const m of models) {
         const named = (r: Record<string, unknown>): boolean => typeof r.name === 'string' && same(r.name, m);
@@ -298,19 +325,25 @@ export async function askPlace(f: Fetch, origin: string, signal: AbortSignal, he
  * FLINT_LOCAL_SERVER says; either can be wrong, and an Ollama behind that wire
  * serves cloud models under plain names like any other. So the question is
  * asked of every kind, at every look, and ./policy takes nothing on that wire
- * for local until the server has answered it.
+ * for local until the server has answered it. A look in which it did NOT
+ * answer the question tells `silent`, with when the look began: what it said
+ * before does not stand through a look that came back without it
+ * (./ollama-locality silent). As for an Ollama's listing, a question that
+ * failed at once is asked once more inside the same look, and one that was
+ * not answered in time is not.
  */
-export function withPlace(backend: LocalBackend, look: (signal: AbortSignal) => Promise<PlaceSaid | undefined>, told: (said: PlaceSaid) => void): LocalBackend {
+export function withPlace(backend: LocalBackend, look: (signal: AbortSignal) => Promise<PlaceSaid | undefined>, told: (said: PlaceSaid) => void, silent?: (since: number) => void): LocalBackend {
   return {
     kind: backend.kind,
     async probe(models, signal) {
-      const [out, said] = await Promise.all([backend.probe(models, signal), look(signal)]);
-      if (said) {
-        try {
-          told(said);
-        } catch {
-          /* whoever keeps the answer has its own trouble: a look at the server never fails for it */
-        }
+      const began = Date.now();
+      const asked = async (): Promise<PlaceSaid | undefined> => (await look(signal)) ?? (signal.aborted ? undefined : look(signal));
+      const [out, said] = await Promise.all([backend.probe(models, signal), asked()]);
+      try {
+        if (said) told(said);
+        else silent?.(began);
+      } catch {
+        /* whoever keeps the answer has its own trouble: a look at the server never fails for it */
       }
       return out;
     },
