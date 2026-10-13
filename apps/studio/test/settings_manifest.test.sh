@@ -42,6 +42,20 @@ done
 for name in FLINT_LOCAL_PROVIDER FLINT_LOCAL_SERVER; do
   check "$name is a word a rebuild may put back" 'manifest_lookup secrets.env $name && [[ $REPLY == restore && $REPLY2 == word ]]'
 done
+# Voice. Which provider hears and which speaks are words, and may be put back: unset, speech goes to OpenAI, so a
+# rebuild that dropped a more private choice would send replies out again. Where a local speech server is, and its
+# key, are never taken from a backup. Each name's shape is the one the server takes for it (section 7).
+for name in FLINT_STT_PROVIDER FLINT_TTS_PROVIDER FLINT_TTS_VOICE; do
+  check "$name is a word a rebuild may put back" 'manifest_lookup secrets.env $name && [[ $REPLY == restore && $REPLY2 == word ]]'
+done
+for name in FLINT_LOCAL_STT_MODEL FLINT_LOCAL_TTS_MODEL FLINT_TTS_MODEL; do
+  check "$name is a model's name a rebuild may put back" 'manifest_lookup secrets.env $name && [[ $REPLY == restore && $REPLY2 == model ]]'
+done
+check "a voice of the Mac's own is put back in the shape the Mac names one" 'manifest_lookup secrets.env FLINT_SAY_VOICE && [[ $REPLY == restore && $REPLY2 == sayvoice ]]'
+check "a voice on a local speech server is put back in the shape the server takes" 'manifest_lookup secrets.env FLINT_LOCAL_TTS_VOICE && [[ $REPLY == restore && $REPLY2 == speechname ]]'
+for name in FLINT_LOCAL_STT_BASE_URL FLINT_LOCAL_TTS_BASE_URL FLINT_LOCAL_VOICE_API_KEY; do
+  check "$name is re-entered, never restored" 'manifest_lookup secrets.env $name && [[ $REPLY == reenter && $REPLY2 == Local-Speech-Server ]]'
+done
 check "and the server does not take either word for where a model runs" 'grep -q "return said === .ollama. ? listed(brain.baseURL, brain.model) : said === .other.;" "$here/../../server/src/policy.ts"'
 check "no restorable name says it is a secret" '! grep -E "^[a-z.]+ +[A-Z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)[A-Z0-9_]* +restore" "$SETTINGS_MANIFEST"'
 check "the manifest holds names, never a value" '! grep -vE "^#|^$" "$SETTINGS_MANIFEST" | grep -E "=|://|sk-|[0-9a-f]{32}"'
@@ -64,7 +78,9 @@ for row in \
   'onoff|on' 'onoff|off' 'number|16384' 'number|12.5' 'port|8080' 'model|muse-glimmer:30b' 'model|hf.co/someone/Model-7B-GGUF:Q4_K_M' \
   'spec|openai:gpt-5' 'word|v2' 'duration|24h' 'duration|-1' 'loopback|http://127.0.0.1:11434' 'loopback|http://[::1]:8090' \
   'bindaddr|127.0.0.1:11434' 'email|someone@example.com' 'zone|America/Chicago' 'place|Austin, Texas' \
-  'homepath|~/Library/Mobile Documents/com~apple~CloudDocs/FlintBackups/pg'; do
+  'homepath|~/Library/Mobile Documents/com~apple~CloudDocs/FlintBackups/pg' \
+  'sayvoice|Samantha' 'sayvoice|Eddy (English (US))' 'sayvoice|Bad News' 'sayvoice|Anna-Marie' 'sayvoice|Zoe (Premium)' \
+  'speechname|alloy' 'speechname|af_heart' 'speechname|en/kokoro:af_heart' 'speechname|voices/en_US-lessac-medium.onnx'; do
   check "accepts ${row%%|*}: ${row#*|}" 'ok "${row%%|*}" "${row#*|}"'
 done
 long=$(printf 'a%.0s' {1..40})
@@ -74,7 +90,9 @@ for row in \
   'bindaddr|0.0.0.0:11434' 'bindaddr|192.168.1.5:11434' 'email|not-an-email' 'zone|America/Chi cago' \
   'homepath|/etc/passwd' 'homepath|~/../../etc' 'homepath|~/a/../b' 'nosuchshape|x' \
   "model|sk-ant-api03-short" "model|tvly-abc" "model|ghp_abcdef" "word|$long" "model|$long" "model|AKIAABCDEFGH" \
-  'model|eyJhbGciOiJIUzI1NiJ9' 'word|age1qqqq' 'number|'; do
+  'model|eyJhbGciOiJIUzI1NiJ9' 'word|age1qqqq' 'number|' \
+  'sayvoice|-o /tmp/x' 'sayvoice|--help' 'sayvoice|Samantha; rm -rf' 'sayvoice|Sam$(id)' 'sayvoice| Samantha' 'sayvoice|1984' "sayvoice|A$long" 'sayvoice|' \
+  'speechname|two words' 'speechname|-v' 'speechname|a;rm' 'speechname|$(id)' 'speechname|../x' "speechname|$long$long$long" 'speechname|'; do
   check "refuses ${row%%|*}: ${row#*|}" '! ok "${row%%|*}" "${row#*|}"'
 done
 check "a URL with a password in it is secret-shaped" 'flint_secret_shaped "postgresql://flint_app:hunter2@[::1]:5432/flint"'
@@ -246,6 +264,68 @@ done
 check "the mode's sentence is the one sentence" 'grep -qxF "  Routing-Mode   \"Flint is in Local mode after a rebuild. Choose another mode in Settings if you want one.\"" "$here/../rebuild.sh"'
 check "it is said always, not only when a backup held a mode" 'grep -qxF "say \"\${WHERE_TO[Routing-Mode]}\"" "$here/../rebuild.sh" && grep -qxF "outside=(\${outside:#Routing-Mode})" "$here/../rebuild.sh"'
 check "the rebuild writes Local mode for the new Mac, and no restored line can name another" 'grep -qxF "    print -r -- \"FLINT_INFERENCE_MODE=local\"" "$here/../rebuild.sh" && grep -qF "[[ \$kv == (FLINT_RUNTIME_URL|FLINT_INFERENCE_MODE)=* ]] || print -r -- \"\$kv\"" "$here/../rebuild.sh"'
+
+# ---- 7. voice settings: what the server uses is what a rebuild puts back ------------------------------------
+# The review's L6. A voice of the Mac's own ("Eddy (English (US))") and a local voice with ':' or '/' in its name
+# were listed as one plain word, so the snapshot left them out and a rebuilt Mac spoke with another voice. A
+# second small Mac, with only voice settings: what the snapshot saves, and what a rebuild would take back.
+home2="$fx/home2"; data2="$home2/.flint"; mkdir -p "$data2"
+cat > "$data2/secrets.env" <<ENV
+FLINT_TTS_PROVIDER=say
+FLINT_SAY_VOICE=Eddy (English (US))
+FLINT_STT_PROVIDER=local
+FLINT_LOCAL_STT_MODEL=Systran/faster-whisper-small.en
+FLINT_LOCAL_TTS_MODEL=kokoro
+FLINT_LOCAL_TTS_VOICE=voices/en:af_heart
+FLINT_TTS_MODEL=tts-1-hd
+FLINT_TTS_VOICE=nova
+FLINT_LOCAL_STT_BASE_URL=http://127.0.0.1:8178/v1
+FLINT_LOCAL_TTS_BASE_URL=http://127.0.0.1:8880/v1
+FLINT_LOCAL_VOICE_API_KEY=voice-key-not-a-real-one
+ENV
+chmod 600 "$data2/secrets.env"
+out=$(env -i HOME="$home2" PATH=/usr/bin:/bin /bin/zsh "$script" 2>"$fx/err2.log"); st=$?
+snap2="$data2/settings-snapshot.tsv"
+check "the snapshot of the voice settings succeeds" '[ "$st" = 0 ] && [[ "$out" == "Flint saved 8 settings for a rebuild."* ]]'
+voice_set=(
+  "FLINT_TTS_PROVIDER${T}say"
+  "FLINT_SAY_VOICE${T}Eddy (English (US))"
+  "FLINT_STT_PROVIDER${T}local"
+  "FLINT_LOCAL_STT_MODEL${T}Systran/faster-whisper-small.en"
+  "FLINT_LOCAL_TTS_MODEL${T}kokoro"
+  "FLINT_LOCAL_TTS_VOICE${T}voices/en:af_heart"
+  "FLINT_TTS_MODEL${T}tts-1-hd"
+  "FLINT_TTS_VOICE${T}nova"
+)
+for w in $voice_set; do check "saved as it is set: ${w%%$T*}" 'grep -qxF "set${T}secrets.env${T}$w" "$snap2"'; done
+check "exactly those were saved" '[ "$(grep -c "^set${T}" "$snap2")" = "${#voice_set}" ]'
+check "where the speech server is, and its key, are in the snapshot by name alone" '! grep -q "8178\|8880\|voice-key" "$snap2" && grep -qxF "present${T}secrets.env${T}FLINT_LOCAL_STT_BASE_URL" "$snap2" && grep -qxF "present${T}secrets.env${T}FLINT_LOCAL_TTS_BASE_URL" "$snap2" && grep -qxF "present${T}secrets.env${T}FLINT_LOCAL_VOICE_API_KEY" "$snap2"'
+# What a rebuild does with each saved line (rebuild.sh reads the snapshot with these same two checks, then leaves
+# a MODEL whose name has a slash in it for the owner to check).
+put_back=()
+while IFS=$'\t' read -r kind where name value extra; do
+  [[ $kind == set ]] || continue
+  manifest_lookup "$where" "$name" && [[ $REPLY == restore ]] && flint_value_ok "$REPLY2" "$value" || continue
+  [[ $REPLY2 == model && $value == */* ]] && continue
+  put_back+=("$name=$value")
+done < "$snap2"
+has() { (( ${put_back[(Ie)$1]} )); }   # exactly this line, brackets and all
+check "a rebuild puts the Mac's voice back as the Mac names it, and the local voice with its ':' and '/'" 'has "FLINT_SAY_VOICE=Eddy (English (US))" && has "FLINT_LOCAL_TTS_VOICE=voices/en:af_heart"'
+check "and the two provider words, the speech model and OpenAI's model and voice" 'has FLINT_TTS_PROVIDER=say && has FLINT_STT_PROVIDER=local && has FLINT_LOCAL_TTS_MODEL=kokoro && has FLINT_TTS_MODEL=tts-1-hd && has FLINT_TTS_VOICE=nova'
+check "a speech model named with a slash is left for the owner to check, like any other model" '(( ! ${put_back[(I)FLINT_LOCAL_STT_MODEL=*]} )) && [ "${#put_back}" = 7 ]'
+# The shapes here are the server's own: the same patterns, character for character.
+cfg="$here/../../server/src/inference-config.ts"
+check "the Mac's voice has the shape the server takes for it" 'grep -qF "export const SAY_VOICE_RE = /${FLINT_PATTERNS[sayvoice]}/;" "$cfg"'
+check "a speech server's voice and model have the shape the server takes for them" 'grep -qF "const SPEECH_NAME_RE = /${FLINT_PATTERNS[speechname]}/;" "$cfg"'
+check "and so has OpenAI's voice" 'grep -qF "const SPEECH_WORD_RE = /${FLINT_PATTERNS[word]}/;" "$cfg"'
+check "a model's name and a speech name are one pattern, so the server takes what a rebuild puts back" '[[ ${FLINT_PATTERNS[model]} == ${FLINT_PATTERNS[speechname]} ]]'
+
+# The review's L7. The sentence a rebuild says about a local speech server has to be true whichever of the two it
+# was: one that only turned speech into text (replies were spoken by OpenAI or by the Mac all along), one that
+# only spoke, or both. So it says what THAT server did, and promises nothing about speech it never made.
+speech_line="$(grep -E '^  Local-Speech-Server +"' "$here/../rebuild.sh")"
+check "the speech server's sentence says what that server did is done without it" '[[ $speech_line == *"what that server did is done without it: transcription runs on this Mac, and replies it spoke are spoken by each device'"'"'s own voice."* ]]'
+check "and does not say every device speaks with its own voice, which is false when OpenAI or the Mac speaks" '[[ $speech_line != *"and each device speaks with its own voice"* ]]'
 
 (( fail )) && exit 1
 print "ok: the settings manifest holds names only, and the snapshot keeps ${#want_set} plain settings and no secret"

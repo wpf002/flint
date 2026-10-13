@@ -142,12 +142,16 @@ secrets.env  WHISPER_BIN                          reenter   Voice
 # more private choice (this Mac's own voice, a speech server on this Mac, off) would send replies out again. A word
 # can only choose among Flint's own providers, and one that names a local speech server without its address means
 # no speech is made here at all (never OpenAI in its place) and transcription stays on this Mac.
+# Each shape is the one the server takes for that setting (apps/server/src/inference-config.ts), so what the server
+# uses is what a rebuild puts back: a voice of the Mac's own keeps its brackets ("Eddy (English (US))"), and a
+# voice on a local speech server may hold ':' and '/'. A speech MODEL whose name has a slash in it is treated like
+# any other model's: not put back, and said at the end for you to check.
 secrets.env  FLINT_STT_PROVIDER                   restore   word
 secrets.env  FLINT_TTS_PROVIDER                   restore   word
 secrets.env  FLINT_LOCAL_STT_MODEL                restore   model
 secrets.env  FLINT_LOCAL_TTS_MODEL                restore   model
-secrets.env  FLINT_LOCAL_TTS_VOICE                restore   word
-secrets.env  FLINT_SAY_VOICE                      restore   word
+secrets.env  FLINT_LOCAL_TTS_VOICE                restore   speechname
+secrets.env  FLINT_SAY_VOICE                      restore   sayvoice
 # Where a local speech server is, and its key, are never taken from a backup, like the local model server's.
 secrets.env  FLINT_LOCAL_STT_BASE_URL             reenter   Local-Speech-Server
 secrets.env  FLINT_LOCAL_TTS_BASE_URL             reenter   Local-Speech-Server
