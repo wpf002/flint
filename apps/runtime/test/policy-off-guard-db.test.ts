@@ -102,6 +102,9 @@ const CALLS: Array<{ action: string; mcp?: McpFacts }> = [
   { action: 'goal.review.local' }, // promotable, 20 a day in code
   { action: 'backup.prune' }, // promoted by name only, never from chat
   { action: 'backup.local' }, // promotable, 1 a day in code
+  { action: 'backup.nexus' }, // promoted by name only, never from chat (Nexus's own backup, P7)
+  { action: 'backup.nexus.offsite' }, // by name only, and it leaves the box
+  { action: 'restore.drill.nexus' }, // by name only, 1 a week in code
   { action: 'notify.push' }, // promotable, leaves the box
   { action: 'world.sync.git' },
   { action: 'world_now' }, // a chat read
@@ -125,12 +128,13 @@ const keyOf = (c: { action: string; mcp?: McpFacts }): string => (c.mcp?.server 
 
 // (No pattern covers a policy change: the database makes no such row.)
 const PATTERNS = [
-  'goal.propose', 'goal.review.local', 'goal.*', 'goal.review.*', 'backup.prune', 'backup.local', 'backup.*', 'notify.push', 'notify.*', 'world.sync.git', 'world.sync.*', 'world.*',
-  'world_now', 'calculate', 'deep_research', 'ledger.void', 'ledger.*', 'restore.production', 'restore.*', 'task.check_bar', 'task.dispatch.local_worker', 'task.dispatch.*', 'task.*',
+  'goal.propose', 'goal.review.local', 'goal.*', 'goal.review.*', 'backup.prune', 'backup.local', 'backup.nexus', 'backup.nexus.offsite', 'backup.nexus.*', 'backup.*', 'notify.push', 'notify.*',
+  'world.sync.git', 'world.sync.*', 'world.*', 'world_now', 'calculate', 'deep_research', 'ledger.void', 'ledger.*', 'restore.production', 'restore.drill.nexus', 'restore.drill.*', 'restore.*',
+  'task.check_bar', 'task.dispatch.local_worker', 'task.dispatch.*', 'task.*',
   'review.local', 'review.*', 'unknown.thing', 'unknown.*',
   'mcp:hive.do_thing', 'mcp:hive.open_position', 'mcp:hive.*', 'mcp:nexus.recall', 'mcp:nexus.*',
 ];
-const FAMILIES = ['goal.', 'backup.', 'notify.', 'world', 'mcp:hive.', 'ledger.', 'task.', 'review.', 'unknown.', ''];
+const FAMILIES = ['goal.', 'backup.', 'restore.', 'notify.', 'world', 'mcp:hive.', 'ledger.', 'task.', 'review.', 'unknown.', ''];
 
 /** A small seeded generator, so a failure names a table that can be made again. */
 function rng(seed: number): () => number {
@@ -259,8 +263,10 @@ describe('the rule: a row the runtime may switch off on its own never loosens an
     let refused = 0;
     const bad: Found[] = [];
     // Goals from chat (promotable, no cap in code) and the rule that covers the family; an action promoted by name only;
-    // and one promoted by name only that then runs under a cap of its own (P5's acceptance, ALONE_CAPS).
-    for (const universe of [universeOf(['goal.propose', 'goal.*'], [null, SCOPE_A]), universeOf(['backup.prune', 'backup.*'], [null]), universeOf(['task.check_bar', 'task.*'], [null])]) {
+    // one promoted by name only that then runs under a cap of its own (P5's acceptance, ALONE_CAPS); and one promoted
+    // by name only that leaves the box, under a family inside a family (Nexus's offsite copy).
+    for (const universe of [universeOf(['goal.propose', 'goal.*'], [null, SCOPE_A]), universeOf(['backup.prune', 'backup.*'], [null]), universeOf(['task.check_bar', 'task.*'], [null]),
+      universeOf(['backup.nexus.offsite', 'backup.nexus.*'], [null])]) {
       for (const table of smallTables(universe)) {
         for (const r of table) {
           if (!mayGoOff(r, table)) {
@@ -274,8 +280,8 @@ describe('the rule: a row the runtime may switch off on its own never loosens an
     }
     expect(bad.slice(0, 5)).toEqual([]);
     // Both kinds of answer in number: the rule is neither "never" nor "always".
-    expect(allowed).toBeGreaterThan(3_000);
-    expect(refused).toBeGreaterThan(20_000);
+    expect(allowed).toBeGreaterThan(4_000);
+    expect(refused).toBeGreaterThan(25_000);
   }, 120_000);
 
   it('4,000 random tables (rows on and off, ended and not, scoped and not, exact and wide, every tier and cap): none, whatever the clock says', () => {

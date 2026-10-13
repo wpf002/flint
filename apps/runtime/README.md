@@ -2323,7 +2323,7 @@ rule after, so the limit never applied. Hence: no limit, or your card.
 
 A test proves it against the engine itself
 (`test/policy-off-guard-db.test.ts`). Over every table of up to three rules
-about one action and its family (for three such families), 4,000 random
+about one action and its family (for four such families), 4,000 random
 tables, 3,000 runs of switch-offs with signed rules carried out in between,
 and 150 more tables put to the database row by row as the runtime's own
 role: no rule the runtime may switch off makes any action less restricted,
