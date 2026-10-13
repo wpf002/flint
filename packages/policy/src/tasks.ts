@@ -171,8 +171,11 @@ export const TASK_OUTPUTS = {
 /**
  * Probability words a result may not carry: a task never states odds the
  * ledger did not produce. The runtime's notes are held to the same pattern.
+ * "Even" on its own is a plain word ("even after a retry"); as odds it comes
+ * with one of the others ("even odds", "an even chance") or as the ledger's
+ * own "about even".
  */
-export const LOOSE_ODDS = /\b(likely|unlikely|probabl[ey]|almost certain|certain(ly)?|chances?|odds|confident|even)\b|\d+ ?%/i;
+export const LOOSE_ODDS = /\b(likely|unlikely|probabl[ey]|almost certain|certain(ly)?|chances?|odds|confident|about even)\b|\d+ ?%/i;
 
 export const CHECK_OPS = ['shape', 'refs_known', 'covers', 'count', 'max_chars', 'all_labelled', 'no_loose_odds', 'item', 'ci'] as const;
 export type CheckOp = (typeof CHECK_OPS)[number];
@@ -236,7 +239,12 @@ export const Acceptance = z
   });
 export type Acceptance = z.infer<typeof Acceptance>;
 
-/** The rule checks a template ships with, in order. Will's own check, when he adds one, comes after them. */
+/**
+ * The rule checks a template ships with, in order. Will's own check, when he
+ * adds one, comes after them. A watched run's bar is that it passed and that
+ * the result is about the run that was asked for: a result naming another run
+ * does not pass.
+ */
 export function ruleChecks(spec: TaskSpec): Acceptance {
   const rule = (op: 'shape' | 'refs_known' | 'covers' | 'all_labelled' | 'no_loose_odds'): TaskCheck => ({ type: 'deterministic', op });
   const length = (max: number): TaskCheck => ({ type: 'deterministic', op: 'max_chars', max });
@@ -244,7 +252,7 @@ export function ruleChecks(spec: TaskSpec): Acceptance {
     spec.template === 'summarize_items' ? [rule('shape'), rule('refs_known'), rule('covers'), length(1600), rule('no_loose_odds')]
     : spec.template === 'sort_items' ? [rule('shape'), rule('all_labelled'), rule('refs_known')]
     : spec.template === 'draft_note' ? [rule('shape'), length(1280), rule('no_loose_odds')]
-    : [{ type: 'deterministic', op: 'ci', sha: spec.params.sha }];
+    : [{ type: 'deterministic', op: 'ci', sha: spec.params.sha }, rule('refs_known')];
   return checks.map((check, i) => ({ id: `a${i + 1}`, text: nameOf(check), check }));
 }
 
@@ -438,7 +446,7 @@ export const TASK_SAYS = {
   fromConsole: 'Tasks and assets are changed from the console.',
   flintFiles: 'Flint files this card itself, once a task passes its checks.',
   template: 'A card you file carries no template.',
-  provenance: 'A task card names where its parts came from by id only.',
+  provenance: 'A task card says where each detail came from by naming an item, never by quoting text.',
   reshaped: 'Flint reads this card differently since you approved it. File it again.',
   nothing: 'It changes nothing.',
   noAsset: 'Flint doesn’t know this asset.',

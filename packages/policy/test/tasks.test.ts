@@ -34,6 +34,8 @@ import {
   TASK_STATUS_SAYS,
   TASK_STATUSES,
   TASK_TEMPLATE_IDS,
+  TASK_WILL_ONLY,
+  PAID_DISPATCH,
   TaskAcceptArgs,
   TaskAnswer,
   TaskCancelArgs,
@@ -95,7 +97,10 @@ describe('a task is a template with parameters', () => {
     expect(ops(summarize())).toEqual(['shape', 'refs_known', 'covers', 'max_chars', 'no_loose_odds']);
     expect(ops(sort())).toEqual(['shape', 'all_labelled', 'refs_known']);
     expect(ops(TaskSpec.parse({ template: 'draft_note', params: { about: 'A note' } }))).toEqual(['shape', 'max_chars', 'no_loose_odds']);
-    expect(ruleChecks(ci({ sha: 'abc1234' }))).toEqual([{ id: 'a1', text: 'CI Run Passed', check: { type: 'deterministic', op: 'ci', sha: 'abc1234' } }]);
+    expect(ruleChecks(ci({ sha: 'abc1234' }))).toEqual([
+      { id: 'a1', text: 'CI Run Passed', check: { type: 'deterministic', op: 'ci', sha: 'abc1234' } },
+      { id: 'a2', text: 'Names Only Your Items', check: { type: 'deterministic', op: 'refs_known' } },
+    ]);
     for (const spec of [summarize(), sort(), ci()]) expect(Acceptance.safeParse(ruleChecks(spec)).success).toBe(true);
   });
 
@@ -175,8 +180,12 @@ describe('evaluateChecks: every rule against hand-made results', () => {
 
   it('no_loose_odds: it states no odds of its own', () => {
     expect(one(summarize(), rule('no_loose_odds'), summary)).toBe(true);
-    for (const text of ['This will likely slip', 'About 80% done', 'The odds are good', 'It is almost certain']) {
+    for (const text of ['This will likely slip', 'About 80% done', 'The odds are good', 'It is almost certain', 'It is about even', 'An even chance of slipping', 'Even odds it lands']) {
       expect(one(summarize(), rule('no_loose_odds'), { ...summary, headline: text }), text).toBe(false);
+    }
+    // The plain word is not odds.
+    for (const text of ['It passed even after a retry', 'Even the docs build is green', 'An even split of open and closed']) {
+      expect(one(summarize(), rule('no_loose_odds'), { ...summary, headline: text }), text).toBe(true);
     }
   });
 
@@ -189,6 +198,14 @@ describe('evaluateChecks: every rule against hand-made results', () => {
     expect(one(summarize(), merged, summary)).toBe(false);
     // The field must be one that kind of item has: an issue is never merged.
     expect(one(summarize(), merged, summary, REFS, { e9: { kind: 'issue', state: { state: 'merged' } } })).toBe(false);
+    // A field every object has is no field of an item: the check is refused as a card's part, and never throws.
+    for (const key of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+      for (const value of ['open', 'constructor', 'name']) {
+        const check = { type: 'deterministic', op: 'item', entityId: 'e9', key, value };
+        expect(() => Acceptance.safeParse([{ id: 'a1', text: CHECK_NAMES.item, check }]), key).not.toThrow();
+        expect(Acceptance.safeParse([{ id: 'a1', text: CHECK_NAMES.item, check }]).success, key).toBe(false);
+      }
+    }
   });
 
   it('ci: the run is completed, it succeeded, and it is for the commit asked for', () => {
@@ -201,15 +218,28 @@ describe('evaluateChecks: every rule against hand-made results', () => {
     expect(one(ci(), check(null), seen({ conclusion: 'failure' }))).toBe(false);
     expect(one(ci(), check(null), seen({ status: 'in_progress', conclusion: null }))).toBe(false);
     expect(one(ci(), check(null), seen({ conclusion: 'passed' }))).toBe(false);
+    // A run that says success before it is completed has not passed.
+    for (const status of ['queued', 'in_progress']) expect(one(ci(), check(null), seen({ status })), status).toBe(false);
+  });
+
+  it('a watched run\'s shipped bar: it passed, and the result is about the run that was asked for', () => {
+    const seen = (over: Record<string, unknown> = {}) => ({ ref: 'ci_run#aaa111', status: 'completed', conclusion: 'success', sha: 'abc1234def', ...over });
+    const bar = (output: unknown, refs: readonly string[] = ['ci_run#aaa111']) => evaluateChecks(ci(), ruleChecks(ci()), output, { refs });
+    expect(bar(seen())).toEqual({ metBar: true, findings: [{ id: 'a1', op: 'ci', met: true }, { id: 'a2', op: 'refs_known', met: true }] });
+    // A result that names another run passes its own CI check and still does not meet the bar.
+    expect(bar(seen({ ref: 'ci_run#zzz999' }))).toEqual({ metBar: false, findings: [{ id: 'a1', op: 'ci', met: true }, { id: 'a2', op: 'refs_known', met: false }] });
+    expect(bar(seen(), []).metBar).toBe(false);
+    expect(bar(seen({ conclusion: 'failure' })).metBar).toBe(false);
+    for (const output of [null, {}, 'success', { ...seen(), extra: 1 }]) expect(bar(output).findings.every((f) => f.met === false), JSON.stringify(output)).toBe(true);
   });
 
   it('the bar is met only when every check is; a judge\'s item is not a rule, so a bar with one is not met by rules alone', () => {
     const all = evaluateChecks(summarize(), ruleChecks(summarize()), summary, { refs: REFS });
     expect(all).toEqual({ metBar: true, findings: [{ id: 'a1', op: 'shape', met: true }, { id: 'a2', op: 'refs_known', met: true }, { id: 'a3', op: 'covers', met: true }, { id: 'a4', op: 'max_chars', met: true }, { id: 'a5', op: 'no_loose_odds', met: true }] });
     expect(evaluateChecks(summarize(), ruleChecks(summarize()), { ...summary, attention: [] }, { refs: REFS }).metBar).toBe(false);
-    const judged = Acceptance.parse([...ruleChecks(ci()), item('a2', { type: 'judge', rubric: 'It is the right run.' })]);
-    const r = evaluateChecks(ci(), judged, { ref: 'ci_run#aaa111', status: 'completed', conclusion: 'success', sha: null }, { refs: [] });
-    expect(r).toEqual({ metBar: false, findings: [{ id: 'a1', op: 'ci', met: true }, { id: 'a2', op: 'judge', met: null }] });
+    const judged = Acceptance.parse([...ruleChecks(ci()), item('a3', { type: 'judge', rubric: 'It is the right run.' })]);
+    const r = evaluateChecks(ci(), judged, { ref: 'ci_run#aaa111', status: 'completed', conclusion: 'success', sha: null }, { refs: ['ci_run#aaa111'] });
+    expect(r).toEqual({ metBar: false, findings: [{ id: 'a1', op: 'ci', met: true }, { id: 'a2', op: 'refs_known', met: true }, { id: 'a3', op: 'judge', met: null }] });
     // A result that is not its template's shape meets no check that reads it.
     expect(evaluateChecks(summarize(), ruleChecks(summarize()), { anything: true }, { refs: REFS }).findings.every((f) => f.met === false)).toBe(true);
   });
@@ -229,6 +259,9 @@ describe('the cards', () => {
     expect(isTaskCard('hive.dispatch_job') || isTaskCard('goal.done')).toBe(false);
     expect(ASSET_KINDS.map(dispatchActionOf)).toEqual(['task.dispatch.local_worker', 'review.local', 'task.dispatch.ci_runner', 'task.dispatch.nexus_participant', 'review.trident_panel', 'hive.dispatch_job']);
     expect(taskIdOf(DRAFT)).toBe(`tk${DRAFT}`);
+    // What only Will files: the two switches, stopping and overruling, and a dispatch that spends.
+    expect([...TASK_WILL_ONLY].sort()).toEqual(['asset.enable', 'review.enforce', 'task.bar_override', 'task.cancel', 'task.dispatch.nexus_participant']);
+    expect(TASK_WILL_ONLY.has(PAID_DISPATCH)).toBe(true);
   });
 
   it('a dispatch card is the whole task, strictly: money a whole number in hundreds, a step only with its goal, a time to the millisecond', () => {
