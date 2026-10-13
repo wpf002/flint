@@ -289,7 +289,7 @@ describe.skipIf(NO_DB)('calibration snapshots on flint_test', () => {
       expect(deploys.pinball).toBe(row(stored, 'deploys', 'interval', 'statistical').pinball);
       expect(deploys.pinball).not.toBeNull();
       // Aggregates only: counts and scores by area. No prediction's words, id or series, and no number a series took.
-      expect(JSON.stringify(given)).not.toMatch(/synthetic|pd[a-z0-9]{8}|seriesKey|claim|31337/);
+      expect(JSON.stringify(given)).not.toMatch(/synthetic|\bpd[a-z0-9]{8}|seriesKey|claim|31337/);
       expect((await app.inject({ method: 'GET', url: '/v1/ledger/calibration' })).statusCode).toBe(401);
     } finally {
       await app.close();

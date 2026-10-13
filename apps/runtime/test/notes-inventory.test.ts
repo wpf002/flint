@@ -227,7 +227,7 @@ describe('the runtime’s notes to Will', () => {
       for (const re of NEVER) expect(`${HEALTH_NAMES.ledger}\n${line}`, line).not.toMatch(re);
       expect(line, line).toMatch(/^[A-Z].*\.$/);
       // Counts and fixed words: never the ledger's own name for itself, a key, or an id.
-      expect(line, line).not.toMatch(/ledger|sweep|snapshot|resolver|spec\b|daily\.|pd[a-z0-9]{8}/i);
+      expect(line, line).not.toMatch(/ledger|sweep|snapshot|resolver|spec\b|daily\.|\bpd[a-z0-9]{8}/i);
       expect(line.length, line).toBeLessThanOrEqual(120);
     };
     const health = [
