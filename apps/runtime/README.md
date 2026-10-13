@@ -1946,9 +1946,20 @@ no model can read a task or start one:
 Run Again takes the new task's key and nothing else. The new task has the same
 kind, the same items and the same goal as the ended one, and no due date. It
 goes through every check a new task goes through, as things are now, and it
-waits for its own card. A task that has not ended, or whose details are no
-longer kept, can't be run again, and the open task's view says so
-(`can.again`).
+waits for its own card. It is held to what the New Task form would offer
+today. A task can't be run again, and the open task's view says so
+(`can.again`), when any of these is true:
+
+- it has not ended, or its details are no longer kept;
+- Flint asked for it (only a task you asked for is yours to run again);
+- no asset that is on can run its kind of task;
+- one of its items is gone, is no longer active, or is the wrong kind;
+- its goal is no longer active.
+
+A new task and its card are written together or not at all. A card that can't
+be filed leaves no task behind. When a rule of yours forbids the card, the
+answer is "A rule you set doesn’t allow this." When Flint's own rules do, it is
+"Flint may not do this." The refusal is on record either way.
 
 The form's answer lists each kind of task an asset that is on can run, with the
 items it can be about (up to 50, the latest seen first, each by its label and
@@ -2258,6 +2269,15 @@ approved. Any later deploy of P5 code applies the migration again. Claude runs
   The panel should offer that in one click.
 - The runtime can create a large object, and one it owns makes the backup's
   dump fail. That predates P5 and needs its own fix.
+- The cards that cancel a task, accept its result, and end it against its
+  checks sign only the task's id. The console names the task on those cards
+  from a read of the task, on a row marked Looked Up. A later part should put
+  the task's title in their signed details, so the card names its task in
+  words you sign.
+- The rules for what can be run again are applied to Run Again. A new task
+  filed straight to `POST /v1/tasks` is checked that its items and its goal
+  exist, and not that they are still active. The console's form only offers
+  active ones. The route should apply the same rules.
 
 ## Your rules, and switching one off
 

@@ -2005,10 +2005,19 @@ card); a refusal reaches the console only as one of the fixed task sentences, by
 and every answer says `Cache-Control: no-store`. The one read with a query is the tab
 (`?tab=active|finished`, and nothing else).
 
+Before a new task is sent, its `params` are checked against its own kind of task's schema,
+and the checked params are what goes to the runtime. Of what comes back: an answer about a
+task is refused (502) unless its id is the one the path, or the form's key, names; a 2xx that
+is not JSON is a 502, "The runtime sent an answer Flint can't read."; and an answer is cut off
+at 1 MB while it is read, never held whole. A field path in a log line names only fields the
+contracts know (anything a client chose reads as `?`), and is capped in places, depth and
+length.
+
 Tasks ship switched off (the runtime's `FLINT_ASSETS`). While they are, the runtime answers
 every one of these routes with the code `off`, and the proxy passes on its one sentence:
-"Tasks are turned off on this Mac." The Tasks panel then says that sentence and offers
-nothing, and so does Settings > Assets.
+"Tasks are turned off on this Mac." The console then hides the header's Tasks button,
+Settings > Assets says that one sentence, and nothing in the panel writes until the runtime
+answers otherwise (a button that did nothing says the sentence).
 
 A server and a runtime of different versions can meet during an update. A runtime without
 these routes answers 404 on a page (the assets, a tab, the form), which is a 501 here, and
@@ -2032,7 +2041,11 @@ in place first; unsigned while the task has not gone out, else its card), **Acce
 and **Reject Anyway** (their cards), **Run Again** (a new task like it, and its card), and
 **Review Card** while a card of its own waits. **New Task** offers what the runtime's form
 says can run now: today that is Watch a CI Run, with the runs Flint tracks by label, an
-optional goal and an optional due date. The form's key makes a form sent twice one task.
+optional goal and an optional due date. The form's key makes a form sent twice one task; a
+refusal by its code made nothing, so the key is dropped and the next press starts clean
+(Run Again's key the same). Run Again is offered only for a task Will asked for that the
+form would still offer today. With no asset on the list says "No Asset Is On"; a form with
+nothing to offer says "Nothing to Run Yet".
 
 A card filed from the panel is read back from the Approvals list and shown there and then
 in the Approvals panel's own words, with everything it holds behind Show Details; Approve
@@ -2044,8 +2057,28 @@ runtime allows), or **Open Approvals** while its card waits.
 
 In the approvals list (`GET /proposals`), a task's dispatch card carries `cost: { micros }`:
 the estimate in the args Will signs, in millionths of a dollar, zero included. The card
-shows it as "No Cost" or "About $0.25". No other card has one, and a number the card could
-not hold is not shown as an estimate.
+shows it as "No Cost" or "About $0.25". No other card has one. The console reads the cost
+from the signed args and holds the server's reading to it: when the two differ, or the
+number is one no card could hold, the Cost row says "Flint couldn't read the cost." and the
+card asks on its own. Only a cost that reads exactly 0 may share a prompt.
+
+What a card's face shows is what Will signs, with one exception that says so. A card that
+holds only its task's id (cancel, accept, and the two that end a task against its checks)
+names its task from a read of that task: that row is marked "Looked Up", is never part of
+the title or the sentence, and Show Details (signed fields only) says in one sentence that
+the row above was looked up. A title the card signs is never replaced by a looked-up one.
+The names are read before a list is drawn, for at most 600 ms, and a list is drawn once:
+names that land later wait for the next load. While an approval is in flight the list is
+not drawn again and no other card is opened, approved or rejected; what the approval said
+stays with its card, also when its panel was closed before the prompt was answered.
+
+The list marks a card that is a connected server's tool (`mcp: true`). Whoever runs a server
+chooses its tools' names, so a tool can be called `task.check_bar` or `goal.activate`. The
+console gives a card the words it keeps for one of Flint's own (a goal, a plan, a rule, a
+source, a nightly job, a forecast, an asset, a task) only when the card is not marked and its
+kind is the kind the runtime files that action under. Any other card under such a name is
+drawn as a tool's card ("Approve a Tool Call", with its server and tool named), asks on its
+own, is left out of Approve All, lights no dot and is not signed from the Tasks panel.
 
 ## Tools / integrations
 
