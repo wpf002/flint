@@ -19,8 +19,8 @@ outside model (Claude) answers only as a frontier tier, never as a default: see
 | POST | `/generate` (eval, no memory) | yes | `{ prompt, eval: true, recall: false }` | as above, answered without reading long-term memory (`grounding.memory` is empty), echoed as `recall: false`. A boolean; otherwise, or without `eval: true`, 400. Used by apps/parity `tasks` on every task whose point isn't memory: the frontier competitors get exactly Flint's data, which leaves Will's memory out (src/eval-tools.ts) |
 | GET | `/eval/tools` | yes | — | `{ tools: string[] }`: every wired tool's name, so apps/parity `build-tasks` can check its templates' expected tools |
 | POST | `/eval/tool` | yes | `{ eval: true, name, args? }` | `{ ok, name, isError, text }`: runs ONE tool from a fixed read-only discovery allowlist (`DISCOVERY_TOOLS` in src/eval-tools.ts: `meridian.list_tickers`, `vantage.top_scores`, `bellwether.list_industries`, …) to fill apps/parity task slots. Any other tool is a 403 before any handler runs, so it can't write or create a proposal; 404 if the tool isn't wired, 502 if it throws. Audited in the action log |
-| POST | `/chat` | yes | `{ conversationId, message }` | SSE stream of `StreamEvent`s. Ahead of each brain's reply, a `meta` event says whether the reply stays on this Mac and which stored turn it is: `{ type: "meta", staysHere, turn }` (see "Goals in chat") |
-| POST | `/speak` | yes | `{ text, conversationId?, turnId? }` | The text as speech (`audio/mpeg`), from OpenAI. 409 with `fallback: "browser"` for a reply that stays on this Mac: the client speaks it with its own voice. 503 with no key, or with the cap spent |
+| POST | `/chat` | yes | `{ conversationId, message }` | SSE stream of `StreamEvent`s. Ahead of each brain's reply, a `meta` event says whether the reply stays on this Mac and which stored turn it is: `{ type: "meta", staysHere, turn }` (see "Goals in chat"). When the server's own speech is made on this Mac the event also carries `speechHere: true` (see "Voice") |
+| POST | `/speak` | yes | `{ text, conversationId?, turnId? }` | The text as speech, in the kind of audio the speech provider makes (`audio/mpeg` from OpenAI, which is the default; see "Voice"). From an outside service: 409 with `fallback: "browser"` for a reply that stays on this Mac (the client speaks it with its own voice), and 503 with no key, with the cap spent, or in Local mode. A provider on this Mac speaks every reply |
 | GET | `/spend` | yes | — | Paid API spend today and this month per vendor, against the caps (see "Spend caps") |
 | GET | `/inbox?lane=relevant\|quiet&before=<ISO>&limit=1..100` | yes | — | A page of the runtime's triage decisions, newest first (`InboxPage` in @flint/policy: `{ items, next }`; `next` is the `before` of the older page). See "The runtime's lanes" |
 | POST | `/inbox/:id/feedback` | yes | `{ feedback: "should_escalate" \| "should_be_quiet" \| "ok" }` | `{ ok: true }`: Will's label on a decision |
@@ -67,6 +67,7 @@ curl -s -X POST $URL/generate -H "Authorization: Bearer $FLINT_TOKEN" \
 | `FLINT_STYLE_VARIANT` | no | The frontier tiers' style guide: `v1` (`FLINT_STYLE_GUIDE`, today's), `v2` (`FLINT_STYLE_GUIDE_V2`) or `local-v1` (`FLINT_LOCAL_STYLE_GUIDE`). Unset: `v1`, as before. An unknown value is logged and ignored (`v1`). Set a variant live only after a judged parity A/B (`--flint-variant`) shows it wins. |
 | `FLINT_LOCAL_STYLE_VARIANT` | no | The same, for the local brain and the eval `localModel` override personas. Unset: `v1`, as before. In a window the guide would take more than half of, the main local model is given the compact guide (`local-v1`) instead: see "Local inference", Hardware tiers. |
 | `FLINT_EMBED_MODEL` | no | The embedding model (recall, the knowledge store, the tool router), in place of the one the hardware tier table names. A value that is not a model name is ignored and reported. |
+| `FLINT_STT_PROVIDER` / `FLINT_TTS_PROVIDER` | no | What turns Will's voice into text (`whisper-cpp` or `local`) and what speaks a reply (`openai`, `local`, `say` or `off`). Unset: `whisper-cpp` and `openai`, as before. See "Voice" for these and the settings each one reads (`FLINT_LOCAL_STT_*`, `FLINT_LOCAL_TTS_*`, `FLINT_SAY_VOICE`, `WHISPER_MODEL`, `FLINT_TTS_VOICE`). |
 | `FLINT_HISTORY_TURNS` / `FLINT_HISTORY_MAX_AGE_HOURS` | no | How much of a `/chat` conversation each new message carries: the last `FLINT_HISTORY_TURNS` complete turns (default 12) that started within `FLINT_HISTORY_MAX_AGE_HOURS` (default 48), whichever leaves fewer. Every turn stays stored in `~/.flint/memory/conversations.json`, and the memory extractor still reads all of them, but it keeps only durable facts about Will: what was said or decided in an older turn doesn't come back. So when turns are left out, the turn's context says how many, and the persona tells Flint to say so rather than reconstruct them. The tier classifier's "deep thread" rule counts the turns sent (8 or more). `0` means no earlier turns; anything that isn't a number >= 0 is logged and ignored (the default). |
 | `FLINT_MEMORY_BRAIN` / `FLINT_MEMORY_MODEL` | no | Which model learns from Will's chats, and which local model it uses: see "Memory extraction". Unset: the local model, `OLLAMA_MODEL`. |
 | `FLINT_EXTRACT_CANDIDATES` | no | `1` lets a model on this Mac suggest the goals Will sets in chat, each resting on his own quoted words and waiting for his approval (see "Goals and commitments from chat"). Unset: off. |
@@ -386,7 +387,7 @@ saved and survives restarts.
     own model runs is simply not known yet (Ollama has just started, or is restarting) the pass
     waits and skips nothing: the log says "waiting: the model server has not said that the memory
     model runs on this Mac", and it checks again in a minute and a half.
-  - *Speech.* The reply is never sent to the speech service. The server says so ahead of the
+  - *Speech.* The reply is never sent to an outside speech service. The server says so ahead of the
     reply (`{ type: "meta", staysHere: true, turn }`), and `/speak` refuses it by the turn it
     stored (409), whatever the client sends: see "Two promises".
   - *`FLINT_GOALS_TO_FRONTIER=on` lifts none of this.* That switch sends Will's goals, the turns
@@ -925,6 +926,158 @@ local model's state.
 - **Tools only when the server says so.** A model the table does not know is `unsupported` until
   Ollama's `/api/show` says it can call tools. A model Ollama says cannot is sent none: it used to
   be sent them and answer 400 on every turn.
+
+## Voice
+
+Two small interfaces (`src/voice.ts`): `SttProvider` turns a recording into text, `TtsProvider`
+turns text into audio. `/transcribe` and `/speak` call them, and which provider answers is a
+setting. **The defaults are what Flint did before there was a choice: whisper.cpp hears, on this
+Mac, and OpenAI speaks.** Nothing here changes either until a setting does.
+
+| | Provider | What it is | Where the words go |
+| --- | --- | --- | --- |
+| Hearing (`FLINT_STT_PROVIDER`) | `whisper-cpp` (default) | whisper.cpp's `whisper-cli`, run once per recording | this Mac |
+| | `local` | any OpenAI-compatible speech server (`POST …/audio/transcriptions`), such as whisper.cpp's own `whisper-server` | this Mac |
+| Speaking (`FLINT_TTS_PROVIDER`) | `openai` (default) | OpenAI's speech API | **OpenAI** |
+| | `local` | any OpenAI-compatible speech server (`POST …/audio/speech`) | this Mac |
+| | `say` | the Mac's own voice (`/usr/bin/say`, written to a file and sent back as m4a) | this Mac |
+| | `off` | no speech is made on the server: each device speaks with its own voice | nowhere |
+
+| Setting | Default | What it is |
+| --- | --- | --- |
+| `FLINT_STT_PROVIDER` | `whisper-cpp` | What hears. |
+| `WHISPER_BIN` / `WHISPER_MODEL` | `/opt/homebrew/bin/whisper-cli` / `~/.flint/models/ggml-base.en.bin` | whisper.cpp and its model, for `whisper-cpp`. |
+| `FLINT_LOCAL_STT_BASE_URL` | none | The transcription server's address, for `local` (`http://127.0.0.1:8178/v1`). |
+| `FLINT_LOCAL_STT_MODEL` | `whisper-1` | The model name sent to it. |
+| `FLINT_TTS_PROVIDER` | `openai` | What speaks. |
+| `FLINT_TTS_MODEL` / `FLINT_TTS_VOICE` | `tts-1` / `onyx` | OpenAI's model and voice, for `openai`. |
+| `FLINT_LOCAL_TTS_BASE_URL` | none | The speech server's address, for `local` (`http://127.0.0.1:8880/v1`). |
+| `FLINT_LOCAL_TTS_MODEL` / `FLINT_LOCAL_TTS_VOICE` | `tts-1` / `alloy` | The model and voice names sent to it. |
+| `FLINT_LOCAL_VOICE_API_KEY` | none | A key, for a speech server started with one. Never logged, never in a status. |
+| `FLINT_SAY_VOICE` | the Mac's own | A voice for `say`, by its name (`Samantha`, `Daniel`). |
+
+Every one is checked when Flint starts (`src/inference-config.ts`), and none can stop it. Each
+is listed in `apps/studio/settings.manifest`: which provider and which model or voice are put
+back by a rebuild, and a speech server's address and key are not (a rebuilt Mac hears with
+whisper.cpp and leaves speech to each device until they are set again).
+
+- **A refused setting never lands on a less private choice than the one that was meant.** A
+  speech provider Flint does not know is NO speech here (`off`), never OpenAI: the default is an
+  outside service, and a typo must not choose it. A transcription provider it does not know is
+  whisper.cpp, on this Mac. `local` with no address, or with one that is refused, is whisper.cpp
+  for hearing and `off` for speaking.
+- **A local speech server is on this Mac.** Its address is `127.0.0.1`, `localhost` or `[::1]`.
+  The one exception is the address of the local model server itself, when Will said that server
+  is his (`FLINT_LOCAL_ALLOW_REMOTE`, over https unless he also called its network private): the
+  switch vouches for that server and for no other machine, the same rule `OLLAMA_HOST` has. Any
+  other machine, and an address Node's env proxy would carry the request to, is refused. The
+  server is reached through the guarded fetch: its origin and its two paths only, and never a
+  redirect. A key is never sent over plain http to another machine.
+- **`say` is run by `execFile`**, with an absolute path and fixed arguments, never a shell. The
+  text is in a file only this user can read, never an argument, so text that starts with a
+  hyphen cannot become an option; the voice's name is held to a pattern before it is one; the
+  files are removed whatever happens. It always writes to a file: nothing is played on this
+  Mac's speakers.
+
+**Which replies an outside service may speak has not changed, and a voice on this Mac speaks
+them all** (`src/speech-route.ts`). OpenAI is never given a reply that stays on this Mac (409:
+a private turn's, any turn's from Local mode, one answered with Will's goals; see "Goals in
+chat"), and is not called at all in Local mode (503). A provider on this Mac (`say`, `local`)
+is asked neither question, because nothing it is given leaves. The clients follow the server:
+the console and the hands-free client (apps/voice) never send a reply that stays here to
+`/speak`, unless the `meta` event that names the reply also says `speechHere: true`, which the
+server sends only when its own speech is made on this Mac. With the defaults the event is byte
+for byte what it was. `/speak` answers with the kind of audio the provider made, and the
+hands-free client plays it as that kind.
+
+**The status says what speaks and what hears** (the status command, `GET /inference`, and two
+rows in Settings, Speech and Transcription): a name and a sentence each, never an address, a
+path or a key. At boot one line names both: `[voice] hearing=whisper-cpp (ggml-base.en.bin)
+speaking=openai (tts-1, onyx)`.
+
+**To try a voice on this Mac** (nothing below is the default, and each is undone by removing the
+setting and restarting Flint):
+
+- The Mac's own voice: set `FLINT_TTS_PROVIDER=say` (and `FLINT_SAY_VOICE=Daniel` for a voice
+  other than the Mac's usual one). Nothing to install.
+- whisper.cpp kept in memory, which is what makes it fast (see the numbers): run its own server
+  on this Mac, `whisper-server -m ~/.flint/models/ggml-small.en.bin --host 127.0.0.1 --port 8178
+  --inference-path /v1/audio/transcriptions`, and set `FLINT_STT_PROVIDER=local` and
+  `FLINT_LOCAL_STT_BASE_URL=http://127.0.0.1:8178/v1`. Flint does not start that server, and
+  with it down a recording is not transcribed: it wants a LaunchAgent of its own, which is not
+  part of this change.
+- A neural voice on this Mac: any server here that answers `POST /v1/audio/speech` as OpenAI's
+  does, with `FLINT_TTS_PROVIDER=local` and its address. None is installed, and none was tried.
+
+### The voice benchmark
+
+```bash
+pnpm --filter server voice-bench                      # measure what is on this Mac, print the tables
+pnpm --silent --filter server voice-bench -- --json   # the same, as JSON on stdout
+pnpm --filter server voice-bench -- --help            # the options
+```
+
+It measures the engines that are ALREADY on this Mac, through the same providers the two routes
+use (`src/voice-bench.ts`):
+
+- **Hearing.** Every whisper.cpp model in the folder of `WHISPER_MODEL`, two ways: one
+  `whisper-cli` run per clip (what Flint does today), and through whisper.cpp's own server,
+  which the command starts on `127.0.0.1` on a free port and stops when it is done (what the
+  `local` provider would use). For each: the time a clip takes, the real-time factor, and the
+  word error rate against the words that were said (`src/wer.ts`).
+- **Speaking.** The Mac's own voices, into files: the time to the first and to the last audio,
+  the real-time factor, and the speech heard back by whisper.cpp.
+
+What it never does:
+
+- **It records nobody.** The clips are synthetic: ten fixed sentences written for it, spoken
+  into files by `say` in three voices at two speeds.
+- **It plays nothing.** `say` is only ever run with a file to write to, and no player is run.
+- **It installs nothing.** For a model or an engine that is not here it prints the exact command
+  and what it takes on disk, for Will to run.
+- **It sends nothing off this Mac, and spends nothing**, unless OpenAI's speech is named with
+  `--tts say,openai` AND a cap is given with `--budget-usd`. Then the estimate is printed before
+  anything is sent (the ten sentences are under one cent on `tts-1`), and without a cap that
+  covers it the command stops before a clip is made.
+- **It changes no setting.**
+
+The clips, the speech and the results (`results.md`, `results.json`) are left in a dated folder
+under `~/.flint/eval/voice-bench`, or wherever `--out` says.
+
+How to read it: *median* and *slowest 5%* are the time one clip or one sentence takes, start to
+finish. *Real-time factor* is that time over the length of the audio: under 1 is faster than
+speech, 0.1 is ten times faster. *Word error rate* is the share of words heard wrong, missed or
+added. The clips are clean synthetic speech, so a real voice in a real room will do worse than
+these numbers; they compare the engines with each other, and say nothing final about any of them.
+
+Measured on the Studio (Apple M5 Max, 64 GB), 13 October 2026, 60 clips, 161.5 seconds of audio:
+
+| Hearing | Model | Median | Slowest 5% | Real-time factor | Word error rate |
+| --- | --- | --- | --- | --- | --- |
+| whisper.cpp, one run per clip (today) | `ggml-base.en.bin` (today's) | 200 ms | 227 ms | 0.075 | 0.9% (6 of 654 words) |
+| whisper.cpp as a server on this Mac | `ggml-base.en.bin` | 52 ms | 83 ms | 0.021 | 1.2% (8 of 654) |
+| whisper.cpp, one run per clip | `ggml-small.en.bin` | 313 ms | 354 ms | 0.118 | 0.0% (0 of 654) |
+| whisper.cpp as a server on this Mac | `ggml-small.en.bin` | 78 ms | 88 ms | 0.029 | 0.0% (0 of 654) |
+
+| Speaking | Voice | To first audio | Slowest 5% | Real-time factor | Heard back |
+| --- | --- | --- | --- | --- | --- |
+| the Mac's own voice (`say`) | the usual one | 721 ms | 750 ms | 0.246 | 0.9% word error rate |
+| | Samantha | 844 ms | 874 ms | 0.287 | 0.9% |
+| | Daniel | 696 ms | 760 ms | 0.230 | 0.0% |
+| | Karen | 599 ms | 655 ms | 0.207 | 2.8% |
+
+`say` hands back a whole file, so its first audio is its last. OpenAI's speech was not measured:
+it is a paid service, and the run had no cap. No default was changed on the strength of these.
+
+Known limits:
+
+- *Synthetic clips only, so far.* No real voice, no room, no microphone: the accuracy numbers
+  are a ceiling. For clips Will records, `--clips <folder>` hears them in place of the synthetic
+  ones: each `name.wav` (or m4a, mp3) beside a `name.txt` holding the words said. They are read
+  where they are and never copied. Keep them outside the repo.
+- *`say` is not a neural voice,* and it is spoken whole before a byte is sent. No neural voice is
+  installed on this Mac, so none was measured.
+- *The local transcription server is not started by Flint.* See above.
 
 ## When the frontier keeps failing
 
@@ -1594,8 +1747,8 @@ Six more things follow the block, so a goal's words don't leave by another door:
   turn stored without it can never have read one, even when a marked turn finishes between the
   moment an ask is built and the moment it reads its history. Tests: test/goals-carry.test.ts,
   test/goals-history.test.ts.
-- **Spoken replies stay here.** `/speak` is OpenAI's speech service, so a reply that stays on
-  this Mac is never sent to it. Ahead of each reply the chat stream's `meta` event says whether
+- **Spoken replies stay here.** `/speak` is OpenAI's speech service unless Will chose a voice on
+  this Mac ("Voice"), so a reply that stays on this Mac is never sent to it. Ahead of each reply the chat stream's `meta` event says whether
   it stays here and which stored turn it is; the console then speaks it with the browser's own
   voice, and the hands-free client (apps/voice) with the Mac's `say`. The server refuses on
   its side too: `/speak` takes the conversation and the turn, and answers 409 with
@@ -1805,6 +1958,11 @@ return `ok`.
 pnpm --filter server test           # the unit tests, and the process test with them
 pnpm --filter server test:process   # the process test alone
 ```
+
+Voice is tested without a sound: `test/voice.test.ts` and `test/voice.integration.test.ts` (each
+provider, with the programs and the network replaced; a mocked OpenAI-compatible speech server on
+loopback), `test/speech-route.test.ts` (which provider is given which reply), `test/wer.test.ts`
+and `test/voice-bench.test.ts` (the benchmark, whole, on stand-ins: no program runs).
 
 **The process test** (`test/process/`) starts the real `src/index.ts` as a process of its own,
 on a scratch HOME and free ports, against loopback stand-ins: a model server on Ollama's own API,

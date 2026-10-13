@@ -72,6 +72,12 @@ export type TtsEngine = (typeof TTS_ENGINES)[number];
 export interface BenchArgs {
   /** Where the clips, the spoken files and the results go. */
   out?: string;
+  /**
+   * A folder of clips to hear in place of the synthetic ones: `<name>.wav`
+   * (or m4a, mp3, aiff, flac) beside `<name>.txt`, which holds the words said.
+   * They are read where they are and never copied.
+   */
+  clips?: string;
   /** Where whisper.cpp's models are looked for (`ggml-*.bin`). */
   modelsDir?: string;
   voices?: string[];
@@ -87,6 +93,7 @@ export interface BenchArgs {
 export const USAGE = [
   'pnpm --filter server voice-bench -- [options]',
   '  --out <folder>         where the clips, the speech and results go (default: a dated folder under ~/.flint/eval/voice-bench)',
+  '  --clips <folder>       hear your own clips in place of the synthetic ones: name.wav (or m4a, mp3) beside name.txt, the words said',
   '  --models-dir <folder>  where whisper.cpp models are (default: the folder of WHISPER_MODEL, or ~/.flint/models)',
   `  --voices A,B           the say voices the clips are spoken in (default: the first three this Mac has of ${CLIP_VOICES.join(', ')})`,
   `  --rates 175,220        words a minute (default: ${CLIP_RATES.join(', ')})`,
@@ -112,10 +119,11 @@ export function parseBenchArgs(argv: readonly string[]): BenchArgs | { error: st
     if (a === '--') continue;
     if (a === '--json') args.json = true;
     else if (a === '--help' || a === '-h') args.help = true;
-    else if (a === '--out' || a === '--models-dir') {
+    else if (a === '--out' || a === '--models-dir' || a === '--clips') {
       const v = argv[++i];
       if (v === undefined || v === '' || v.startsWith('--') || v.includes('\0') || v.length > 1024) return { error: `${a} takes a folder` };
       if (a === '--out') args.out = v;
+      else if (a === '--clips') args.clips = v;
       else args.modelsDir = v;
     } else if (a === '--voices') {
       const v = list(argv[++i]);
@@ -293,7 +301,7 @@ export interface Hint {
 export interface BenchResult {
   when: string;
   machine: { chip: string; memoryGb: number; os: string };
-  clips: { count: number; seconds: number; voices: string[]; rates: number[]; sentences: number };
+  clips: { count: number; seconds: number; voices: string[]; rates: number[]; sentences: number; /** They are clips somebody recorded, not synthetic ones. */ own?: true };
   stt: SttRow[];
   tts: TtsRow[];
   /** What the paid provider would cost and whether it was called. */
@@ -363,6 +371,8 @@ export interface BenchDeps {
   writeFile: (path: string, data: Buffer | string) => void;
   mkdir: (path: string) => void;
   exists: (path: string) => boolean;
+  /** Remove one file this run made. */
+  remove: (path: string) => void;
   /** The names in a folder; [] when it cannot be read. */
   list: (dir: string) => string[];
   join: (...parts: string[]) => string;
@@ -424,6 +434,58 @@ async function makeClips(deps: BenchDeps, dir: string, voices: readonly string[]
   return clips;
 }
 
+/** The voice a clip of Will's own is filed under, in the results. */
+export const OWN_CLIPS = 'your clips';
+/** The most clips taken from a folder, and the longest transcript read for one. */
+const MAX_OWN_CLIPS = 500;
+const MAX_TRANSCRIPT_CHARS = 4000;
+
+/**
+ * Clips somebody recorded: each audio file in the folder that has a text file
+ * of the same name beside it, holding the words that were said. They are read
+ * where they are. To learn how long one is it is made into a WAV in the output
+ * folder, measured, and that WAV is removed at once: his voice is not copied.
+ */
+async function ownClips(deps: BenchDeps, dir: string, scratch: string, notes: string[]): Promise<Clip[]> {
+  const clips: Clip[] = [];
+  const audio = deps
+    .list(dir)
+    .filter((n) => /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,80}\.(wav|m4a|mp3|aiff|flac)$/i.test(n))
+    .sort()
+    .slice(0, MAX_OWN_CLIPS);
+  let untitled = 0;
+  let unread = 0;
+  deps.mkdir(scratch);
+  for (const name of audio) {
+    const stem = name.replace(/\.[A-Za-z0-9]+$/, '');
+    const words = deps.join(dir, `${stem}.txt`);
+    if (!deps.exists(words)) {
+      untitled++;
+      continue;
+    }
+    const file = deps.join(dir, name);
+    const wav = deps.join(scratch, `measure-${clips.length + unread}.wav`);
+    try {
+      const text = deps.readFile(words).toString('utf8').replace(/\s+/g, ' ').trim().slice(0, MAX_TRANSCRIPT_CHARS);
+      await toWav(deps, file, wav);
+      const seconds = wavSeconds(deps.readFile(wav));
+      if (text && seconds && seconds > 0.2) clips.push({ name: stem, text, file, seconds, voice: OWN_CLIPS, rate: 0 });
+      else unread++;
+    } catch {
+      unread++;
+    } finally {
+      try {
+        deps.remove(wav);
+      } catch {
+        /* it was never made */
+      }
+    }
+  }
+  if (untitled > 0) notes.push(`${untitled} clips had no text file beside them saying what was said, so they were left out.`);
+  if (unread > 0) notes.push(`${unread} clips could not be read and were left out.`);
+  return clips;
+}
+
 async function hear(deps: BenchDeps, stt: SttProvider, engine: SttEngine, model: string, clips: readonly Clip[], loadMs?: number): Promise<SttRow> {
   const times: number[] = [];
   const scored: Array<WordErrors & { voice: string; rate: number }> = [];
@@ -454,7 +516,8 @@ async function hear(deps: BenchDeps, stt: SttProvider, engine: SttEngine, model:
   }
   const by = <K extends 'voice' | 'rate'>(key: K): Record<string, number | undefined> => {
     const out: Record<string, number | undefined> = {};
-    for (const v of new Set(scored.map((s) => String(s[key])))) out[v] = wordErrorRate(scored.filter((s) => String(s[key]) === v));
+    // (A clip somebody recorded has no speaking rate: it is under its own heading, by voice.)
+    for (const v of new Set(scored.map((s) => String(s[key])))) if (!(key === 'rate' && v === '0')) out[v] = wordErrorRate(scored.filter((s) => String(s[key]) === v));
     return out;
   };
   const spent = times.reduce((a, b) => a + b, 0);
@@ -591,9 +654,14 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
   // ---- the clips
   let clips: Clip[] = [];
   let voices: string[] = [];
-  const rates = args.rates ?? [...CLIP_RATES];
+  const own = args.clips !== undefined;
+  const rates = own ? [] : (args.rates ?? [...CLIP_RATES]);
   if (!haveSay) {
     notes.push("This machine has no `say`, so no clips were made and nothing could be measured. The benchmark runs on a Mac.");
+  } else if (own) {
+    deps.log('Reading your clips where they are (nothing is played, and none is copied).');
+    clips = await ownClips(deps, args.clips!, deps.join(out, 'clips'), notes);
+    if (clips.length === 0) notes.push('No clip with a text file beside it was found in that folder, so nothing was heard.');
   } else {
     let installed: string[] = [];
     try {
@@ -658,8 +726,8 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
   const tts: TtsRow[] = [];
   const speech = deps.join(out, 'speech');
   if (haveSay && args.tts.includes('say')) {
-    // The Mac's usual voice, and each voice the clips were spoken in.
-    for (const voice of [undefined, ...voices]) {
+    // The Mac's usual voice, and each voice the clips were spoken in (or the ones named, with clips of his own).
+    for (const voice of [undefined, ...(own ? (args.voices ?? []) : voices)]) {
       deps.log(`Speaking with this Mac's own voice${voice ? `, ${voice}` : ''}, into files.`);
       const provider = buildVoice({ stt: { name: 'whisper-cpp', local: true, bin, model: usualModel }, tts: { name: 'say', local: true, ...(voice ? { voice } : {}) } }, { env, run: deps.run }).tts;
       tts.push(await speakAll(deps, provider, 'say', speech, hearBack ? { hearBack } : {}));
@@ -677,7 +745,7 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
   return {
     when: deps.when,
     machine: deps.machine,
-    clips: { count: clips.length, seconds: Math.round(clips.reduce((n, c) => n + c.seconds, 0) * 10) / 10, voices, rates: [...rates], sentences: SENTENCES.length },
+    clips: { count: clips.length, seconds: Math.round(clips.reduce((n, c) => n + c.seconds, 0) * 10) / 10, voices, rates: [...rates], sentences: SENTENCES.length, ...(own ? { own: true as const } : {}) },
     stt,
     tts,
     paid,
@@ -707,7 +775,9 @@ export function renderBench(r: BenchResult): string {
   lines.push('# Voice benchmark', '');
   lines.push(`Run ${r.when} on ${r.machine.chip}, ${r.machine.memoryGb} GB, macOS ${r.machine.os}.`);
   lines.push(
-    `Clips: ${r.clips.count} synthetic clips, ${r.clips.seconds} seconds in all (${r.clips.sentences} fixed sentences, spoken into files by the Mac's own voices${r.clips.voices.length ? ` ${r.clips.voices.join(', ')}` : ''}${r.clips.rates.length ? ` at ${r.clips.rates.join(' and ')} words a minute` : ''}). Nobody was recorded, nothing was played, and nothing left this Mac.`,
+    r.clips.own
+      ? `Clips: ${r.clips.count} of your own clips, ${r.clips.seconds} seconds in all, each scored against the text file beside it. They were read where they are: none was copied, nothing was played, and nothing left this Mac.`
+      : `Clips: ${r.clips.count} synthetic clips, ${r.clips.seconds} seconds in all (${r.clips.sentences} fixed sentences, spoken into files by the Mac's own voices${r.clips.voices.length ? ` ${r.clips.voices.join(', ')}` : ''}${r.clips.rates.length ? ` at ${r.clips.rates.join(' and ')} words a minute` : ''}). Nobody was recorded, nothing was played, and nothing left this Mac.`,
     '',
   );
   lines.push('## Hearing (speech to text)', '');
@@ -746,7 +816,9 @@ export function renderBench(r: BenchResult): string {
   lines.push(
     '- Median and slowest 5% are the time one clip or one sentence takes, start to finish.',
     '- Real-time factor is the time spent over the length of the audio. Under 1 is faster than speech; 0.1 is ten times faster.',
-    '- Word error rate is the share of words heard wrong, missed or added, against the sentence that was said. Lower is better. The clips are clean synthetic speech, so real rooms and real voices will do worse than this.',
+    r.clips.own
+      ? '- Word error rate is the share of words heard wrong, missed or added, against the words in the text file beside each clip. Lower is better.'
+      : '- Word error rate is the share of words heard wrong, missed or added, against the sentence that was said. Lower is better. The clips are clean synthetic speech, so real rooms and real voices will do worse than this.',
     '- First call is the first use after a start, which reads the model from disk. It is not in the other numbers.',
     '',
   );

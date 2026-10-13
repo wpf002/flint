@@ -188,6 +188,7 @@ function rig(over: { env?: Record<string, string>; models?: string[]; missing?: 
     writeFile: (p, data) => writeFileSync(p, data),
     mkdir: (p) => void mkdirSync(p, { recursive: true }),
     exists: (p) => !missing.has(p) && (p === SAY || p === WHISPER || p === WHISPER_SERVER || existsSync(p)),
+    remove: (p) => rmSync(p, { force: true }),
     list: (d) => {
       try {
         return readdirSync(d);
@@ -215,9 +216,10 @@ describe('the arguments', () => {
   });
 
   it('each option is read, and a list is made of names with commas between them', () => {
-    expect(parseBenchArgs(['--out', '/tmp/x', '--models-dir', '/m', '--voices', 'Samantha, Eddy (English (US))', '--rates', '175,220,175', '--stt', 'local', '--tts', 'say,openai', '--budget-usd', '0.25', '--json'])).toEqual({
+    expect(parseBenchArgs(['--out', '/tmp/x', '--models-dir', '/m', '--clips', '/c', '--voices', 'Samantha, Eddy (English (US))', '--rates', '175,220,175', '--stt', 'local', '--tts', 'say,openai', '--budget-usd', '0.25', '--json'])).toEqual({
       out: '/tmp/x',
       modelsDir: '/m',
+      clips: '/c',
       voices: ['Samantha', 'Eddy (English (US))'],
       rates: [175, 220],
       stt: ['local'],
@@ -441,6 +443,39 @@ describe('a whole run, on stand-ins', () => {
       expect(src, file).not.toMatch(/import \{[^}]*\bexec\b[^}]*\} from 'node:child_process'/);
       expect(src.replace(/command: [^\n]*|modelCommand = [^\n]*/g, ''), file).not.toMatch(/\bcurl\b|\bbrew\b|\bdocker\b|ollama pull|pip3? install/);
     }
+  });
+
+  // Will's own clips, when he has some: a folder of recordings, each beside a text file of the words said.
+  it('--clips: a folder of recorded clips is heard in place of the synthetic ones, scored against the text beside each, read where it is and never copied', async () => {
+    const mine = join(dir, 'my-clips');
+    mkdirSync(mine);
+    writeFileSync(join(mine, 'kitchen.wav'), fakeWav('Turn off the lights in the kitchen.', 3));
+    writeFileSync(join(mine, 'kitchen.txt'), 'Turn off the lights in the kitchen.\n');
+    writeFileSync(join(mine, 'airport.m4a'), fakeWav('how long to the airport', 4));
+    writeFileSync(join(mine, 'airport.txt'), '  How long   does it take to the airport?  ');
+    writeFileSync(join(mine, 'no-words.wav'), fakeWav('nothing beside this one'));
+    writeFileSync(join(mine, 'broken.wav'), 'not audio');
+    writeFileSync(join(mine, 'broken.txt'), 'something');
+    writeFileSync(join(mine, 'notes.md'), 'not a clip');
+    const r = rig();
+    const result = await runBench(args({ out: r.out, clips: mine, stt: ['whisper-cpp'], tts: [] }), r.deps);
+    expect(result.clips).toEqual({ count: 2, seconds: 7, voices: [], rates: [], sentences: 10, own: true });
+    const [base] = result.stt;
+    // 15 words said (7 and 8); the airport clip was heard without "does it take" (3 missing).
+    expect(base).toMatchObject({ engine: 'whisper-cpp', model: 'ggml-base.en.bin', n: 2, audioSeconds: 7, words: 15, errors: 3, byVoice: { 'your clips': 0.2 }, byRate: {} });
+    expect(result.notes).toEqual(['1 clips had no text file beside them saying what was said, so they were left out.', '1 clips could not be read and were left out.']);
+    // No synthetic clip was made, and his own were not copied: the WAV each was measured by is gone.
+    expect(r.ran.filter((x) => x.file === SAY && x.args.includes('-o'))).toEqual([]);
+    expect(readdirSync(join(r.out, 'clips'))).toEqual([]);
+    expect(readdirSync(mine).sort()).toEqual(['airport.m4a', 'airport.txt', 'broken.txt', 'broken.wav', 'kitchen.txt', 'kitchen.wav', 'no-words.wav', 'notes.md']);
+    const page = renderBench(result);
+    expect(page).toContain('Clips: 2 of your own clips, 7 seconds in all, each scored against the text file beside it. They were read where they are: none was copied, nothing was played, and nothing left this Mac.');
+    expect(page).not.toContain('synthetic');
+    // An empty folder, or one with nothing usable: said, and nothing heard.
+    const none = rig();
+    const empty = await runBench(args({ out: none.out, clips: join(dir, 'nowhere'), stt: ['whisper-cpp'], tts: [] }), none.deps);
+    expect(empty.stt).toEqual([]);
+    expect(empty.notes).toContain('No clip with a text file beside it was found in that folder, so nothing was heard.');
   });
 
   it('the options choose what is measured, and voices this Mac does not have are said, not spoken', async () => {

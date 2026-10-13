@@ -5,6 +5,7 @@
  *   pnpm --filter server voice-bench                      measure what is on this Mac, print the tables
  *   pnpm --silent --filter server voice-bench -- --json   the same, as JSON on stdout
  *   pnpm --filter server voice-bench -- --out ~/Desktop/voice --voices Samantha,Daniel --rates 175
+ *   pnpm --filter server voice-bench -- --clips ~/Desktop/my-clips    hear clips you recorded (name.wav beside name.txt)
  *
  * It makes synthetic clips with the Mac's own `say` (into files: nothing is
  * played), transcribes them with every whisper.cpp model that is already on
@@ -25,7 +26,7 @@
  * not allowed.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { cpus, homedir, platform, release, tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
@@ -157,6 +158,7 @@ export async function main(argv: readonly string[], d: MainDeps): Promise<number
     writeFile: (p, data) => writeFileSync(p, data, { mode: 0o600 }),
     mkdir: (p) => void mkdirSync(p, { recursive: true, mode: 0o700 }),
     exists: (p) => existsSync(p),
+    remove: (p) => rmSync(p, { force: true }),
     list: (dir) => {
       try {
         return readdirSync(dir);
