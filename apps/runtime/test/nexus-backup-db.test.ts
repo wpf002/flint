@@ -465,6 +465,11 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       try {
         expect(Object.keys(await countRows(c, ['public', 'other'])).sort()).toEqual(['other.elsewhere', 'public."MemoryEntry"', 'public."Thread"']);
         expect(await countRows(c, ['other'])).toEqual({ 'other.elsewhere': 5 });
+        // What a set with limits sets each statement's time limit with is run before every statement of the
+        // counting: the list of tables, then each table's count.
+        let before = 0;
+        await countRows(c, ['public', 'other'], async () => void before++);
+        expect(before).toBe(4);
       } finally {
         await c.end();
       }
