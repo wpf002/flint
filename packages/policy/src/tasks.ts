@@ -12,10 +12,11 @@
  * The database proves the same things (migration p5_assets): a task goes out
  * only as the exact args of a card Will signed that is executing now, to an
  * asset he turned on with a card that signed what the asset is; it is accepted
- * only with its own successful check on record. These contracts keep a card
- * that could not apply from being filed, and normalize what is signed (lists
- * sorted, defaults filled in, times to the millisecond, money as a whole number)
- * so the database's equality checks hold.
+ * only with its result on record, its own successful check, and his card for
+ * that result. These contracts keep a card that could not apply from being
+ * filed, and normalize what is signed (lists sorted, defaults filled in, times
+ * to the millisecond, money as a whole number) so the database's equality
+ * checks hold.
  *
  * A task's title, spec and result are Will's words, or a model's. Nothing here
  * puts them in a reason, an error or a log: the fixed sentences below are what a
@@ -74,6 +75,13 @@ export const ACCEPT_TEMPLATE = 'task.accept.v1';
 /** Who writes a task's forecast, and the counter it is counted under (counted, never capped). */
 export const TASKS_WRITER = 'runtime:tasks';
 export const MEETS_BAR_COUNTER = 'task.meets_bar';
+/**
+ * The rule a task's forecast carries (Prediction.resolverSpec): whose it is to
+ * settle. The database takes a dispatch only with a forecast that names its
+ * task under this rule, and the ledger's own sweep leaves a prediction alone
+ * when it carries a rule it does not know, so only the task tick settles one.
+ */
+export const TASK_FORECAST_RULE = 'task_meets_bar';
 
 // ---- Pieces ---------------------------------------------------------------------------
 
@@ -83,10 +91,16 @@ export const AssetId = z.string().regex(/^[A-Za-z0-9_-]{1,40}$/);
 export const TaskId = z.string().regex(/^tk[A-Za-z0-9]{16,32}$/);
 /** The id of the task a draft adds: sending the same form twice makes the same task. */
 export const taskIdOf = (draftKey: string): string => `tk${draftKey}`;
-const words = (max: number) => z.string().min(1).max(max).refine((s) => /\S/.test(s), 'blank');
+/** A NUL, or half of a surrogate pair: Postgres stores neither, in text or in jsonb. */
+const UNSTORABLE = /\u0000|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+/** Can the database store this text as it is? A writer cleans a model's words first; Will's own are refused, never changed under his signature. */
+export const isStorable = (s: string): boolean => !UNSTORABLE.test(s);
+const words = (max: number) => z.string().min(1).max(max).refine((s) => /\S/.test(s), 'blank').refine(isStorable, 'holds a character that cannot be stored');
 export const TaskTitle = words(200);
 /** Sorted and without repeats: a list's order means nothing here, and its digest must not depend on it. */
 const sorted = (xs: readonly string[]): string[] => [...new Set(xs)].sort();
+export const TaskForecastSpec = z.object({ taskId: TaskId, rule: z.literal(TASK_FORECAST_RULE) }).strict();
+export type TaskForecastSpec = z.infer<typeof TaskForecastSpec>;
 /** The items a task is about, by id: at most 12. */
 export const TASK_ITEMS_MAX = 12;
 const Items = (min: number) => z.array(EntityId).min(min).max(TASK_ITEMS_MAX).transform(sorted);
@@ -313,7 +327,8 @@ const Sensitivity = z.enum(['ops', 'personal', 'financial']);
 
 /**
  * asset.enable: what the asset is, signed (the database compares each field
- * with the asset's row, and the list of what it can do in order).
+ * with the asset's row, and the list of what it can do in order). `entityId`
+ * is the tracked item it stands for, or null: always said, never left out.
  */
 export const AssetEnableArgs = z
   .object({
@@ -324,6 +339,7 @@ export const AssetEnableArgs = z
     capabilities: z.array(z.string().regex(/^[a-z][a-z0-9_]{0,39}$/)).max(20),
     dispatchAction: z.string().regex(/^[a-z][a-z0-9_.]{0,79}$/),
     spends: z.boolean(),
+    entityId: EntityId.nullable(),
   })
   .strict()
   .refine((a) => a.dispatchAction === dispatchActionOf(a.kind), { message: 'an asset of this kind is handed work under its own action', path: ['dispatchAction'] });
@@ -360,11 +376,24 @@ export const TaskDispatchArgs = z
   });
 export type TaskDispatchArgs = z.infer<typeof TaskDispatchArgs>;
 
+/**
+ * How a task names its result: `out:` and the start of its output's digest. The
+ * digest is the database's own, computed as the output is written and read
+ * back; the database checks a task only with that output on record.
+ */
+export const OutputRef = z.string().regex(/^out:[0-9a-f]{12,64}$/);
+export const outputRefOf = (sha256: string): string => `out:${sha256.slice(0, 16)}`;
+
 /** Who checked a bar: Flint's rules, or the local model that judged Will's own check. */
 const CheckedBy = z.string().regex(/^(flint:rule|ollama:[A-Za-z0-9._:/-]{1,80})$/);
-/** task.check_bar (the accept card): the task and what its check found, as ids and counts only. */
+/**
+ * task.check_bar (the accept card): the task, the result it accepts and that it
+ * met its bar (the database compares both with the task's row, and takes the
+ * card only if Will signed it after the result was handed in), then what the
+ * check found, as counts only.
+ */
 export const TaskAcceptArgs = z
-  .object({ taskId: TaskId, checks: z.number().int().min(1).max(10), met: z.number().int().min(0).max(10), by: CheckedBy })
+  .object({ taskId: TaskId, outputRef: OutputRef, metBar: z.literal(true), checks: z.number().int().min(1).max(10), met: z.number().int().min(0).max(10), by: CheckedBy })
   .strict()
   .refine((a) => a.met === a.checks, { message: 'only a result that passed every check is offered', path: ['met'] });
 export type TaskAcceptArgs = z.infer<typeof TaskAcceptArgs>;
@@ -430,6 +459,8 @@ export const TASK_SAYS = {
   notChecked: 'Flint hasn’t checked its result yet.',
   notOverride: 'That is already how it ended.',
   decided: 'You already decided this result.',
+  superseded: 'You signed something newer about this, so this card didn’t run. Ask for it again if you still want it.',
+  forgotten: 'You had Flint forget what this was about, so it didn’t run.',
   reviewerFirst: 'Turn on Local Reviews first.',
   reviewerStays: 'Reviews are required, so this stays on.',
 } as const;

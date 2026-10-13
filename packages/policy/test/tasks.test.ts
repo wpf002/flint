@@ -5,42 +5,47 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  ASSET_KINDS,
   Acceptance,
+  ASSET_KINDS,
   AssetEnableArgs,
   AssetsPage,
   CHECK_NAMES,
   CHECK_OPS,
+  dispatchActionOf,
+  evaluateChecks,
+  isStorable,
+  isTaskCard,
+  isTaskDispatch,
+  isTaskSignedAction,
   NewTaskBody,
+  OutputRef,
+  outputRefOf,
   ReviewEnforceArgs,
-  TASK_FAILURES,
+  ruleChecks,
+  specItems,
+  specTainted,
   TASK_FAILURE_SAYS,
+  TASK_FAILURES,
+  TASK_FORECAST_RULE,
   TASK_OUTPUTS,
   TASK_REASONS,
   TASK_SAYS,
   TASK_SIGNED_ACTIONS,
-  TASK_STATUSES,
   TASK_STATUS_SAYS,
+  TASK_STATUSES,
   TASK_TEMPLATE_IDS,
   TaskAcceptArgs,
   TaskAnswer,
   TaskCancelArgs,
-  TaskDispatchArgs,
-  TaskOverrideArgs,
-  TaskSpec,
-  TasksPage,
-  dispatchActionOf,
-  evaluateChecks,
-  isTaskCard,
-  isTaskDispatch,
-  isTaskSignedAction,
-  ruleChecks,
-  specItems,
-  specTainted,
   taskCodeOf,
+  TaskDispatchArgs,
+  TaskForecastSpec,
   taskIdOf,
   taskLine,
+  TaskOverrideArgs,
   taskSayOf,
+  TasksPage,
+  TaskSpec,
   type TaskCheck,
   type TaskStanding,
 } from '../src/tasks';
@@ -239,21 +244,47 @@ describe('the cards', () => {
   });
 
   it('the other cards are ids, counts and a switch: nothing else is taken', () => {
-    const asset = { assetId: 'as-ci-watcher-v1', kind: 'ci_runner', externalRef: 'github:ci:v1', name: 'CI Watcher', capabilities: ['watch_ci'], dispatchAction: 'task.dispatch.ci_runner', spends: false };
+    const asset = { assetId: 'as-ci-watcher-v1', kind: 'ci_runner', externalRef: 'github:ci:v1', name: 'CI Watcher', capabilities: ['watch_ci'], dispatchAction: 'task.dispatch.ci_runner', spends: false, entityId: null };
     expect(AssetEnableArgs.safeParse(asset).success).toBe(true);
+    // The item it stands for is always said (null for none): the database compares it with the asset's row.
+    expect(AssetEnableArgs.safeParse({ ...asset, entityId: 'en1' }).success).toBe(true);
+    expect(AssetEnableArgs.safeParse((({ entityId: _none, ...rest }) => rest)(asset)).success).toBe(false);
+    expect(AssetEnableArgs.safeParse({ ...asset, entityId: 'not an id' }).success).toBe(false);
     expect(AssetEnableArgs.safeParse({ ...asset, dispatchAction: 'task.dispatch.local_worker' }).success).toBe(false);
     expect(AssetEnableArgs.safeParse({ ...asset, capabilities: ['Run Anything'] }).success).toBe(false);
     expect(AssetEnableArgs.safeParse({ ...asset, enabled: true }).success).toBe(false);
     expect(ReviewEnforceArgs.safeParse({ gate: 'proposal', enforced: true }).success).toBe(true);
     expect(ReviewEnforceArgs.safeParse({ gate: 'task', enforced: true }).success).toBe(false);
-    expect(TaskAcceptArgs.safeParse({ taskId: TASK, checks: 3, met: 3, by: 'flint:rule' }).success).toBe(true);
-    expect(TaskAcceptArgs.safeParse({ taskId: TASK, checks: 3, met: 2, by: 'flint:rule' }).success).toBe(false);
-    expect(TaskAcceptArgs.safeParse({ taskId: TASK, checks: 3, met: 3, by: 'will' }).success).toBe(false);
-    expect(TaskAcceptArgs.safeParse({ taskId: TASK, checks: 3, met: 3, by: 'flint:rule', title: 'x' }).success).toBe(false);
+    // The accept card names the result it accepts, by the start of its output's digest, and that it met its bar.
+    const accept = { taskId: TASK, outputRef: outputRefOf('ab12'.repeat(16)), metBar: true, checks: 3, met: 3, by: 'flint:rule' };
+    expect(accept.outputRef).toBe('out:ab12ab12ab12ab12');
+    expect(TaskAcceptArgs.safeParse(accept).success).toBe(true);
+    expect(TaskAcceptArgs.safeParse({ ...accept, met: 2 }).success).toBe(false);
+    expect(TaskAcceptArgs.safeParse({ ...accept, by: 'will' }).success).toBe(false);
+    expect(TaskAcceptArgs.safeParse({ ...accept, title: 'x' }).success).toBe(false);
+    expect(TaskAcceptArgs.safeParse({ ...accept, metBar: false }).success).toBe(false);
+    for (const outputRef of ['out:ab12', 'job:ab12ab12ab12ab12', 'out:AB12AB12AB12AB12', `out:${'a'.repeat(65)}`, null]) expect(TaskAcceptArgs.safeParse({ ...accept, outputRef }).success, String(outputRef)).toBe(false);
+    for (const key of ['outputRef', 'metBar']) expect(TaskAcceptArgs.safeParse(Object.fromEntries(Object.entries(accept).filter(([k]) => k !== key))).success, key).toBe(false);
+    for (const n of [12, 16, 64]) expect(OutputRef.safeParse(`out:${'0'.repeat(n)}`).success, String(n)).toBe(true);
     expect(TaskCancelArgs.safeParse({ taskId: TASK }).success).toBe(true);
     expect(TaskCancelArgs.safeParse({ taskId: TASK, reason: 'x' }).success).toBe(false);
     expect(TaskOverrideArgs.safeParse({ taskId: TASK, to: 'accepted' }).success).toBe(true);
     expect(TaskOverrideArgs.safeParse({ taskId: TASK, to: 'cancelled' }).success).toBe(false);
+  });
+
+  it('a task\'s forecast names its task and its rule, and nothing else', () => {
+    expect(TaskForecastSpec.parse({ taskId: TASK, rule: TASK_FORECAST_RULE })).toEqual({ taskId: TASK, rule: 'task_meets_bar' });
+    for (const bad of [{ taskId: TASK }, { rule: 'task_meets_bar' }, { taskId: TASK, rule: 'goal_done_by' }, { taskId: 'task1', rule: 'task_meets_bar' }, { taskId: TASK, rule: 'task_meets_bar', owner: 'runtime:tasks' }]) {
+      expect(TaskForecastSpec.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it('text that the database cannot store is refused where Will signs it, never changed', () => {
+    for (const s of ['plain words', 'an emoji \u{1F600} is a whole pair', 'tab\tand newline\n are fine']) expect(isStorable(s), s).toBe(true);
+    for (const s of ['a nul \u0000 inside', 'half a pair \uD83D at the end', '\uDE00 the other half first']) expect(isStorable(s), JSON.stringify(s)).toBe(false);
+    expect(TaskSpec.safeParse({ template: 'draft_note', params: { about: 'What to write\u0000' } }).success).toBe(false);
+    expect(TaskSpec.safeParse({ template: 'sort_items', params: { items: ['e1'], labels: ['Now', 'Later\uD83D'] } }).success).toBe(false);
+    expect(TaskDispatchArgs.safeParse(dispatch({ title: 'Watch a CI Run\u0000' })).success).toBe(false);
   });
 
   it('the panel\'s wire is strict too', () => {
