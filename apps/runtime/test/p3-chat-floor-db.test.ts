@@ -89,11 +89,11 @@ describe.skipIf(NO_DB)('a goal from chat rests on a signed card, or on a rule Wi
   const finish = (pid: string) => app(`UPDATE "Proposal" SET status = 'executed', result = '{}'::jsonb, "executedAt" = now() WHERE id = $1`, [pid]);
   /** A goal from chat as the runtime writes one (its own card's title and quote), or as told. */
   const flintGoal = (q: Q, src: string, over: Record<string, unknown> = {}, extra = '') => {
-    const v: Record<string, unknown> = { id: gidOf(src), title: TITLE, description: QUOTE, owner: 'will', origin: 'flint', sensitivity: 'personal', tainted: false, sourceRef: src, horizonAt: null, successCriteria: [], ...over };
+    const v: Record<string, unknown> = { id: gidOf(src), title: TITLE, description: QUOTE, owner: 'will', origin: 'flint', sensitivity: 'personal', tainted: false, sourceRef: src, horizonAt: null, successCriteria: [], nexusProjectId: null, ...over };
     return q(
-      `INSERT INTO "Goal" (id, title, description, owner, origin, sensitivity, tainted, "sourceRef", "horizonAt", "successCriteria", "updatedAt")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, now()) ${extra}`,
-      [v.id, v.title, v.description, v.owner, v.origin, v.sensitivity, v.tainted, v.sourceRef, v.horizonAt, JSON.stringify(v.successCriteria)],
+      `INSERT INTO "Goal" (id, title, description, owner, origin, sensitivity, tainted, "sourceRef", "horizonAt", "successCriteria", "nexusProjectId", "updatedAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, now()) ${extra}`,
+      [v.id, v.title, v.description, v.owner, v.origin, v.sensitivity, v.tainted, v.sourceRef, v.horizonAt, JSON.stringify(v.successCriteria), v.nexusProjectId],
     );
   };
   const goalRow = async (gid: string) => (await owner(`SELECT status, origin, title, description, "sourceRef", "approvalId" FROM "Goal" WHERE id = $1`, [gid])).rows[0] as Record<string, unknown> | undefined;
@@ -170,7 +170,7 @@ describe.skipIf(NO_DB)('a goal from chat rests on a signed card, or on a rule Wi
       const src = source();
       await card('goal.propose', proposeArgs(src));
       const gid = gidOf(src);
-      for (const over of [{ owner: 'flint' }, { tainted: true }, { sensitivity: 'financial' }, { id: `go${HEX('a').slice(0, 32)}` }, { sourceRef: `chat:${HEX('b')}` }]) {
+      for (const over of [{ owner: 'flint' }, { tainted: true }, { sensitivity: 'financial' }, { nexusProjectId: 'nexus-project-1' }, { id: `go${HEX('a').slice(0, 32)}` }, { sourceRef: `chat:${HEX('b')}` }]) {
         const shown = (over as { id?: string }).id ?? gid;
         expect(await failure(flintGoal(app, src, over)), JSON.stringify(over)).toEqual(['42501', SHAPE(shown), null]);
       }
@@ -306,6 +306,10 @@ describe.skipIf(NO_DB)('a goal from chat rests on a signed card, or on a rule Wi
       const elsewhere = await card('goal.propose', proposeArgs(src, { sourceRef: source() }), { stage: 'pending' });
       expect(await code(flintGoal(app, src, row))).toBe('42501');
       await app(`UPDATE "Proposal" SET status = 'rejected', error = 'Synthetic end' WHERE id = $1`, [elsewhere.pid]);
+      // One filed as a plain tool call, not as a goal's card (its digest is then never checked by the database).
+      const plain = await card('goal.propose', proposeArgs(src), { stage: 'pending', kind: 'tool_call' });
+      expect(await code(flintGoal(app, src, row))).toBe('42501');
+      await app(`UPDATE "Proposal" SET status = 'rejected', error = 'Synthetic end' WHERE id = $1`, [plain.pid]);
       // The right one, turned down.
       const turnedDown = await card('goal.propose', proposeArgs(src), { stage: 'pending' });
       await app(`UPDATE "Proposal" SET status = 'rejected', error = 'Synthetic end' WHERE id = $1`, [turnedDown.pid]);

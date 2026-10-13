@@ -485,18 +485,46 @@ is the hash of that conversation, turn and quote.
 A new suggestion that shares two content words with an active goal's title asks
 for that goal's review, as a watched item's change does, within its 12 a day.
 
-**Nothing from chat runs without a card yet.** `promotion-table --phase p3c` is
-the table that would let them land without asking (see "Ending the trial
-week"), and for now it refuses with one sentence: "Suggestions from chat stay
-cards for now: the database does not yet hold a goal Flint adds from chat to a
-card you signed." The database's quote rule covers a card, not a goal added
-without one. Until a small migration adds that floor (one constant in
-`src/goals/candidates.ts` flips with it), the command files nothing, and the
-intake files a card whatever a rule says: a rule that reached the table some
-other way still lets nothing from chat run on its own. With the floor in
-place and the table signed, the intake adds them under the rule's caps and its
-own (3 and 10 a day, whatever cap a rule carries), and a goal it adds is still
-only a suggestion.
+**What runs without a card rests on the database.** A goal Flint takes from
+chat is written only when the database itself can tie it to your signature
+(the `p3_chat_goal_floor` migration, a guard on every new goal whose origin is
+Flint):
+
+- **its own card:** a "Suggest a Goal from Chat" card you approved, being
+  carried out now, naming this goal and this source. The goal's title is the
+  card's title and its description the card's quote; the card's approval is
+  used once, for this goal;
+- **Make It a Goal:** your signed start of a suggestion whose own card still
+  waits, with the title and description you signed;
+- **a rule you signed:** the later table's row for goals (below), live and
+  unscoped, with nothing holding it back, and the intake's audit entry for
+  this goal already written. The entry carries the digest of what was added,
+  and the database checks the row against it. The description must be a quote
+  by the card's measure (12 to 300 characters).
+
+Anything else is refused, with an error that names the goal's id and nothing
+it holds. The guard is on new rows only: a goal proposed before it is listed,
+started and dismissed as before. It is not on the migration owner's role (a
+repair by hand), and a restore loads rows before any guard exists.
+
+The runtime asks the database whether that guard is there each time it would
+add a goal without a card, and each time the later table is asked for. It is a
+question, never a constant: after a rollback, or a restore of an older backup,
+the same runtime files a card for every suggestion and the table refuses with
+one sentence: "Suggestions from chat stay cards for now: the database does not
+yet hold a goal Flint adds from chat to a card you signed." The database has
+the last word after that too: if it refuses an add (a rule that ended a moment
+ago, its own limit), nothing is written and the suggestion is filed as a card.
+
+Under the rule a goal lands as a suggestion, 3 a day at most by the runtime's
+count (whatever cap a rule carries). The database counts as well, by its own
+clock: never more than twice the day's limit in any 24 hours, which is the
+most an honest count allows across a midnight. Past that it lets none in, so
+a counter that fails cannot fill Suggested.
+
+**A commitment is always a card.** The database has no such guard under a
+commitment, so the intake files a card for each one whatever a rule says, and
+the later table never offers the commitments row.
 
 The Suggested tab reads each row against the panel's contract and leaves out
 one that does not fit (a title stored before a rule tightened, say), with a
@@ -587,20 +615,18 @@ a fresh one is filed beside it. If a card with exactly these rules is already
 waiting and this command did not file it, or it carries other words than the
 command's, the command stops and names that card, for you to reject first.
 
-`--phase p3c` is a second, later table, for what Flint takes from your chats
-(see "Suggestions from chat"). It is refused for now, with the sentence quoted
-there, until the database holds a goal from chat to a signed card. When that
-lands: it lets a goal land in Suggested without asking, 3 a day at most. The
-commitments row (unconfirmed, 10 a day at most) is offered only when Flint
-suggested a commitment in the 14 days it looks at, so with commitments
-switched off on the server the table is goals alone. It needs the first of
-those cards to be 14 days old, and some of them filed within those 14 days.
-Its card is "Let Flint Suggest Goals from Chat" (or "Let Flint Take Goals and
-Commitments from Chat" with both rows), and its details count what you did
-with the suggestions: "Since Oct 1, Flint suggested 9 goals and 4 commitments
-from chat: you approved 6, made 2 into goals yourself, rejected 3, and 2
-expired." A suggested goal is never active until you start it with your
-signature.
+`--phase p3c` is a second, later table, for the goals Flint takes from your
+chats (see "Suggestions from chat"). It lets a goal land in Suggested without
+asking, 3 a day at most. It is goals alone: the commitments row is never
+offered, however many were suggested, because the database has no guard under
+a commitment added without a card. It needs the first goal suggestion's card
+to be 14 days old, and some of them filed within those 14 days; a commitment's
+card is not its evidence. Its card is "Let Flint Suggest Goals from Chat", and
+its details count what you did with the goal suggestions: "Since Oct 1, Flint
+suggested 9 goals from chat: you approved 4, made 2 into goals yourself,
+rejected 2, and 1 expired." A suggested goal is never active until you start
+it with your signature. Against a database without the guard under goals from
+chat, the command files nothing and says so in one sentence.
 
 **What the command checks is evidence. Your signature is the boundary.** The
 command reads rows the runtime itself writes: health checks, reviews, cards.
@@ -696,12 +722,14 @@ they are. This is also the first step of rolling P3 back.
   nothing removes one. That is why commitments have their own switch on the
   server (`FLINT_EXTRACT_COMMITMENTS`), off: turn it on when a panel lists them
   and a route forgets one.
-- **The database's floor under a goal from chat** is still to add: a small
-  migration that holds a proposed goal whose source is a chat to a card you
-  signed (or to a signed rule and your quoted words), as `proposal_quote_check`
-  holds the card. Until it lands `promotion-table --phase p3c` refuses and the
-  intake always files a card (`CHAT_FLOOR_IN_DATABASE` in
-  `src/goals/candidates.ts`; the migration flips it).
+- **A guard under commitments from chat** is still to add, before their row
+  is ever offered: the database would have to hold an unconfirmed commitment
+  to its own signed card or to a signed rule, as it now holds a goal
+  (`p3_chat_goal_floor`). It needs a signed-card check for a card that is not
+  a goal's, a record of that approval's one use, and a rule on the world
+  model's own table. Until then a commitment is always a card
+  (`ALONE_WITH_FLOOR` in `src/goals/candidates.ts`, `P3C_OFFERED` in
+  `src/governance/promotion.ts`).
 - **A later part** must add a way to forget a goal's words (a signed
   `goal.forget`). Goals, plans, steps and reviews have no forget path yet.
 
@@ -720,9 +748,15 @@ they are. This is also the first step of rolling P3 back.
 - **One sentence is one suggestion.** A goal and a commitment in the same
   sentence come to one card, whichever the model named first.
 - **What a signed rule adds leaves no card.** Once you sign the later table, a
-  suggestion is added with an audit entry (its source, the day you said it, the
-  rule that let it) and no card to read. The P3 report counts those apart, and
-  its seventh criterion rests on the cards.
+  goal is added with an audit entry (its source, the day you said it, the rule
+  that let it, the digest of what was added) and no card to read. The P3
+  report counts those apart, and its seventh criterion rests on the cards.
+- **Under the rule, the audit entry is the runtime's own.** The database
+  checks that the entry is there and that the row matches its digest, but the
+  runtime writes both. Against a runtime gone wrong, what holds is the rule
+  you signed, the shape of the row (yours, personal, untainted, named by its
+  source, a quote's length) and the database's count. What it says you said is
+  the runtime's word, as on a card it is the server's.
 - **A commitment's words last a week.** Your quote is kept beside the
   commitment for 7 days, then cleared with the rest of the kept text; the
   commitment and the day Flint read stay. Forgetting the commitment clears its
@@ -826,6 +860,14 @@ A goal card still waiting expires on its own. One you approve while P3 is
 rolled back isn't carried out ("not carried out by the runtime") and stays
 approved. Any later deploy of P3 code applies the migration again. Claude runs
 `down.sql` only with your OK, after the dump.
+
+The guard under goals from chat is a database update of its own
+(`20261014000200_p3_chat_goal_floor`), newer than P5's: in any rollback it is
+undone first. Its `down.sql` takes away two triggers and their function, and
+loses nothing: no table, no row, and the record of which approvals were used
+stays. It needs no older runtime. The runtime sees the guard is gone, files a
+card for every suggestion again, and refuses the later table. A rule you
+already signed stays signed and does nothing while the guard is away.
 
 ## Predictions (P4)
 
