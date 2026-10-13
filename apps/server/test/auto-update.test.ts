@@ -16,7 +16,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -423,15 +423,19 @@ describe('auto_deploy.sh retries a failed deploy', () => {
     renameSync(`${origin}.away`, origin);
     tick();
     expect(Date.now() - at()!).toBeLessThan(60_000);
-    // A state folder it cannot write to never stops a deploy.
+    // A time it cannot leave never stops a deploy. Here the file's place is taken by a link to a folder that is
+    // not there, so writing it fails outright (as it does when the state folder cannot be written to).
     rmSync(mark);
-    mkdirSync(mark);
-    chmodSync(mark, 0o500);
+    symlinkSync(join(tmp, 'no-such-folder', 'deploy-tick'), mark);
     push('v2');
     const t = tick();
     expect(t.status).toBe(0);
     expect(t.ran).toEqual(['server']);
-    chmodSync(mark, 0o700);
+    expect(t.out).toContain('deployed ');
+    // Nothing was written through the link, and no time was left.
+    expect(existsSync(join(tmp, 'no-such-folder'))).toBe(false);
+    expect(existsSync(mark)).toBe(false);
+    rmSync(mark);
   });
 
   it('a pause a database restore left when it was killed is lifted; one whose restore is still running holds', () => {
