@@ -1945,8 +1945,14 @@ versions, see entry 6 of [docs/RECOVERY.md](../../docs/RECOVERY.md).
 
 - One database update, `20261015000000_p7_resilience`: one record for each
   backup file (a unique index), and a backup kind named for a host Nexus has
-  left is renamed. No new table, column or queue. It stops, with nothing
-  changed, if a file is already recorded twice.
+  left is renamed. No new table, column or queue. If a file was recorded more
+  than once (the offsite step used to write a new record each time the same
+  dump was sent again), the update keeps one record of it, a good one before a
+  failed one and then the newest, and removes the others. It cannot stop on
+  them. No backup file is touched.
+- The nightly jobs record a backup the same way whether or not that update has
+  been applied yet. They run from the checkout as soon as it is updated, which
+  can be before the runtime's own deploy.
 - Every dump of the database is taken without large objects. Flint keeps
   nothing in them, and one that the backup role could not read would have
   stopped every later backup.
@@ -1978,8 +1984,9 @@ rollback:
 
 1. First deploy a runtime from before P7. P7's nightly jobs write one record
    for each backup file and rely on the index that `down.sql` drops.
-2. Then take a dump and run `down.sql` by hand. Nothing is lost: every record
-   stays, and the renamed kind gets its earlier name back.
+2. Then take a dump and run `down.sql` by hand. Every record stays, and the
+   renamed kind gets its earlier name back. A second record of one file that
+   the update removed is not brought back.
 
 Any later deploy of P7 code applies the migration again. Claude runs `down.sql`
 only with your OK, after the dump.

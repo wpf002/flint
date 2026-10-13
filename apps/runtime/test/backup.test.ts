@@ -8,7 +8,9 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmdirSync, rmSync, statSync, utimesSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NO_DB, URLS, freshDb, withClient } from './db';
+import { MIGRATIONS, NO_DB, URLS, freshDb, migrateUp, withClient } from './db';
+import { createDb } from '../src/db';
+import { fileBackup, fileFailure } from '../src/backup/record';
 import { execFileSync, spawnSync } from 'node:child_process';
 import type pg from 'pg';
 import { createHash, randomBytes } from 'node:crypto';
@@ -368,15 +370,23 @@ describe('the encrypted copies offsite', () => {
       const warned: string[] = [];
       const db = {
         backupRun: {
-          // One record for each copy (record.ts): a copy written again under its name is the same row, saying what is there now.
-          upsert: async ({ where, create, update }: { where: { kind_location_path: { path: string } }; create: Row; update: Partial<Row> }) => {
-            const data = create;
+          // One record for each copy (record.ts): it looks for the copy's row, then changes it or makes it. A copy
+          // written again under its name is the same row, saying what is there now.
+          findFirst: async ({ where }: { where: { path: string } }) => {
+            const at = rows.findIndex((r) => r.path === where.path);
+            return at === -1 ? null : { id: String(at) };
+          },
+          create: async ({ data }: { data: Row }) => {
             // When the row is written the copy is whole and under its name, and nothing has been pruned yet.
             steps.push(`row (copy there: ${existsSync(data.path)}, partial: ${existsSync(`${data.path}.partial`)}, manifest: ${existsSync(f.manifest)})`);
-            const at = rows.findIndex((r) => r.path === where.kind_location_path.path);
-            if (at === -1) rows.push(data);
-            else rows[at] = { ...rows[at]!, ...update };
+            rows.push(data);
             return data;
+          },
+          update: async ({ where, data }: { where: { id: string }; data: Partial<Row> }) => {
+            const row = rows[Number(where.id)]!;
+            steps.push(`row (copy there: ${existsSync(row.path)}, partial: ${existsSync(`${row.path}.partial`)}, manifest: ${existsSync(f.manifest)})`);
+            rows[Number(where.id)] = { ...row, ...data };
+            return rows[Number(where.id)];
           },
           findMany: async () => (steps.push('rows read'), rows.map((r) => ({ path: r.path }))),
         },
@@ -476,6 +486,78 @@ describe('the encrypted copies offsite', () => {
       const err = await j.run().then(() => undefined, (e: unknown) => e);
       expect(String(err)).toMatch(/no local dump to send/);
       expect(needsSetup(err)).toBe(false);
+    });
+  });
+
+  // The nightly jobs run from the checkout as soon as it is updated: that can be before the runtime's deploy has
+  // applied the update that gives each file one record (and for as long as that deploy is held).
+  describe.skipIf(NO_DB)('on a database one update behind, which has no one-record index yet (flint_test)', () => {
+    const P7 = '20261015000000_p7_resilience';
+    const sql = (file: string) => readFileSync(join(MIGRATIONS, P7, file), 'utf8');
+
+    it('the offsite step records its copy, once, with or without the index; and the update settles what was recorded twice', async () => {
+      const urls = await freshDb();
+      const owner = <T>(fn: (c: pg.Client) => Promise<T>) => withClient(urls.owner, fn);
+      const indexed = () => owner(async (c) => (await c.query(`SELECT to_regclass('public."BackupRun_kind_location_path_key"') IS NOT NULL AS t`)).rows[0].t as boolean);
+      const db = createDb(urls.app);
+      try {
+        await owner((c) => c.query(sql('down.sql')));
+        expect(await indexed()).toBe(false);
+        const f = fixture();
+        const warned: string[] = [];
+        const config: OffsiteConfig = { ageRecipient: RECIPIENT, offsiteDir: f.offsite, offsiteManifest: f.manifest, dumpDir: f.dumps, tools: { ...tools, age: f.age } };
+        const copy = join(f.offsite, `${night(1)}.age`);
+        const rowsOf = (path: string) => db.backupRun.findMany({ where: { path }, orderBy: { startedAt: 'asc' }, select: { status: true, startedAt: true, location: true } });
+        writeFileSync(join(f.dumps, night(1)), 'PLAINTEXT 1');
+        // The first night, and the next (no new dump, so the same copy is sent again): the job succeeds both times.
+        expect(await sendOffsite(db, config, new Date('2026-10-12T07:15:00Z'), (l) => warned.push(l))).toMatchObject({ bytes: SEALED.length, pruned: 0 });
+        expect(await sendOffsite(db, config, new Date('2026-10-13T07:15:00Z'), (l) => warned.push(l))).toMatchObject({ bytes: SEALED.length, pruned: 0 });
+        expect(warned).toEqual([]);
+        // One record of the copy, saying what is there now.
+        expect(await rowsOf(copy)).toEqual([{ status: 'ok', location: 'icloud', startedAt: new Date('2026-10-13T07:15:00Z') }]);
+        // A failure is recorded only where nothing is, here too.
+        expect(await fileFailure(db, { kind: 'pg_dump_flint', location: 'icloud', path: copy, startedAt: new Date('2026-10-14T07:15:00Z') })).toBe(false);
+        expect(await fileFailure(db, { kind: 'pg_dump_flint', location: 'local', path: '/b/never-written.dump', startedAt: new Date('2026-10-14T07:15:00Z') })).toBe(true);
+        expect(await fileFailure(db, { kind: 'pg_dump_flint', location: 'local', path: '/b/never-written.dump', startedAt: new Date('2026-10-15T07:15:00Z') })).toBe(false);
+
+        // What an older Flint left: the same copy recorded on two nights, and a failure beside a good record.
+        const row = (id: string, path: string, status: string, at: string, location = 'icloud') => owner((c) => c.query(
+          `INSERT INTO "BackupRun" ("id", "kind", "location", "path", "encrypted", "status", "startedAt") VALUES ($1, 'pg_dump_flint', $2, $3, $4, $5, $6)`, [id, location, path, location === 'icloud', status, at]));
+        await row('twice-old', '/o/twice.dump.age', 'ok', '2026-10-01T07:15:00Z');
+        await row('twice-new', '/o/twice.dump.age', 'ok', '2026-10-02T07:15:00Z');
+        await row('good-old', '/o/mixed.dump.age', 'ok', '2026-10-03T07:15:00Z');
+        await row('bad-new', '/o/mixed.dump.age', 'failed', '2026-10-04T07:15:00Z');
+        // The same path here and offsite is two files, not one twice.
+        await row('same-path-local', '/o/twice.dump.age', 'ok', '2026-09-30T07:15:00Z', 'local');
+        // The update does not stop on them: it keeps one record of each file and goes on.
+        await migrateUp(urls.owner);
+        expect(await indexed()).toBe(true);
+        const left = await owner(async (c) => (await c.query(`SELECT "id" FROM "BackupRun" WHERE "path" LIKE '/o/%' ORDER BY 1`)).rows.map((r) => r.id as string));
+        // The newest of two good records; the good one, though older, before a failure; and both files of one path.
+        expect(left).toEqual(['good-old', 'same-path-local', 'twice-new']);
+        expect(await rowsOf(copy)).toHaveLength(1);
+        // With the index there the job goes on exactly as before.
+        expect(await sendOffsite(db, config, new Date('2026-10-16T07:15:00Z'), (l) => warned.push(l))).toMatchObject({ bytes: SEALED.length });
+        expect(await rowsOf(copy)).toEqual([{ status: 'ok', location: 'icloud', startedAt: new Date('2026-10-16T07:15:00Z') }]);
+        expect(warned).toEqual([]);
+      } finally {
+        await db.$disconnect();
+        await migrateUp(urls.owner);
+      }
+    });
+
+    it('two writers at once make one record when the index is there: the second finds the first’s row', async () => {
+      const urls = await freshDb();
+      const db = createDb(urls.app);
+      try {
+        const w = { kind: 'flint_tar' as const, location: 'local' as const, path: '/b/flint-20261012-0215.tar.gz' };
+        await Promise.all(Array.from({ length: 6 }, (_, i) => fileBackup(db, { ...w, bytes: 100 + i, startedAt: new Date(Date.UTC(2026, 9, 12, 7, 15, i)) })));
+        expect(await db.backupRun.count({ where: { path: w.path } })).toBe(1);
+        expect((await Promise.all(Array.from({ length: 4 }, () => fileFailure(db, { ...w, path: '/b/flint-20261013-0215.tar.gz', startedAt: new Date() })))).filter(Boolean)).toHaveLength(1);
+        expect(await db.backupRun.count({ where: { path: '/b/flint-20261013-0215.tar.gz' } })).toBe(1);
+      } finally {
+        await db.$disconnect();
+      }
     });
   });
 

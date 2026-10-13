@@ -5,22 +5,24 @@
 -- is, where it is and its file.
 --  - The third kind was named for a host Nexus has left. No row uses it; the
 --    name is put right before anything is filed under it.
---  - Two rows for one file would stop the index below. They are counted first,
---    and the migration stops there with nothing changed.
--- No new table, column, queue or grant. Reversed by down.sql in this directory.
+--  - Two rows for one file would stop the index below, and a migration that
+--    stops leaves a deploy that cannot go on. Until now the offsite step wrote
+--    a new row each time the same dump was sent again. So the migration settles
+--    them itself: for each file it keeps one row, a good record before a failed
+--    one and then the newest, and removes the others. The file itself is not
+--    touched, and the row that stays says what is there now.
+-- No new table, column, queue or grant. Reversed by down.sql in this directory
+-- (which does not bring removed rows back: they were second records of a file).
 
-DO $$
-DECLARE
-  n bigint;
-BEGIN
-  SELECT count(*) INTO n FROM (SELECT 1 FROM "BackupRun" GROUP BY "kind", "location", "path" HAVING count(*) > 1) AS twice;
-  IF n > 0 THEN
-    RAISE EXCEPTION 'p7_resilience: % recorded more than once, under the same kind, location and path; nothing was changed',
-      CASE WHEN n = 1 THEN '1 backup file is' ELSE n || ' backup files are' END
-      USING HINT = 'Keep the newest record of each and remove the others, then deploy again.';
-  END IF;
-END;
-$$;
+DELETE FROM "BackupRun" b
+USING (
+  SELECT "id", row_number() OVER (
+    PARTITION BY "kind", "location", "path"
+    ORDER BY ("status" = 'ok') DESC, "startedAt" DESC, "id" DESC
+  ) AS n
+  FROM "BackupRun"
+) AS ranked
+WHERE ranked."id" = b."id" AND ranked.n > 1;
 
 ALTER TABLE "BackupRun" DROP CONSTRAINT "BackupRun_kind_check";
 UPDATE "BackupRun" SET "kind" = 'nexus_dump' WHERE "kind" = 'nexus_railway_dump';

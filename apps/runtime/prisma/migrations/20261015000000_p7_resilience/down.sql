@@ -1,5 +1,6 @@
--- Reverses p7_resilience. Nothing is lost: the records stay, and a kind is given
--- its earlier name back. Run it only after deploying a runtime from before this
+-- Reverses p7_resilience. The records stay, and a kind is given its earlier name
+-- back. (A second record of one file that the migration removed is not brought
+-- back: the file was never touched, and its one record stands.) Run it only after deploying a runtime from before this
 -- migration: this one's nightly jobs write one record for each file and rely on
 -- the index to say so. It also removes its own row from _prisma_migrations, so
 -- the next deploy re-applies it. Every statement tolerates a half-applied state,
