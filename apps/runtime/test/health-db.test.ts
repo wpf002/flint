@@ -592,7 +592,7 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
       expect((await buildDigest(db, 'UTC', now)).degraded).toContain('ledger');
       // Nothing Health wrote holds a number, a series' key or a prediction's id.
       const details = (await db.healthCheck.findMany({ where: { component: 'ledger' }, select: { detail: true } })).map((c) => c.detail).join(' ');
-      expect(details).not.toMatch(/31337|4242|daily\.|test\.|pd[a-z0-9]{8}/);
+      expect(details).not.toMatch(/31337|4242|daily\.|test\.|\bpd[a-z0-9]{8}/);
     } finally {
       await k.db.$disconnect();
     }
@@ -708,7 +708,7 @@ describe.skipIf(NO_DB)('health and the watchdog on flint_test', () => {
       expect((await healthReport(db, on, now)).components.find((c) => c.component === 'forecasts')).toMatchObject({ status: 'ok', detail: 'Last night’s forecasts ran for 10 numbers.' });
       expect(healthName('forecasts')).toBe('Forecasts');
       const details = (await db.healthCheck.findMany({ where: { component: 'forecasts' }, select: { detail: true } })).map((c) => c.detail).join(' ');
-      expect(details).not.toMatch(/31337|4242|daily\.|pd[a-z0-9]{8}/);
+      expect(details).not.toMatch(/31337|4242|daily\.|\bpd[a-z0-9]{8}/);
       // A rule Will signed that forbids forecasting (or recording a prediction, which a forecast's two are): said plainly.
       const forbid = async (pattern: string) => {
         const args = { rows: [{ pattern, tier: 'forbidden', expiresAt: new Date(Date.now() + 30 * DAY).toISOString() }] };

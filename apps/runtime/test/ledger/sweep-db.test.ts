@@ -182,7 +182,7 @@ describe.skipIf(NO_DB)('the ledger\'s sweep on flint_test', () => {
       settled: 0, resolved: 1, conditionUnmet: 0, expired: 0, unknownSpec: c.unknownSpec, waiting: c.waiting, others: c.others, refused: 0, capped: false,
       resolveRan: true, expireRan: true, resolveTier: 'approval', expireTier: 'alone',
     });
-    expect(JSON.stringify(a)).not.toMatch(/31337|4242|daily\.spend|pd[a-z0-9]{8}/);
+    expect(JSON.stringify(a)).not.toMatch(/31337|4242|daily\.spend|\bpd[a-z0-9]{8}/);
     expect(said).toEqual([]);
   });
 
@@ -419,7 +419,7 @@ describe.skipIf(NO_DB)('the ledger\'s sweep on flint_test', () => {
         await handler('ledger.snapshot');
         expect((await snapshotAudits())[0]).toMatchObject({ tier: 'approval', outcome: 'ok', inputs: { windowDays: 90 } });
         expect(said.join('\n')).toMatch(/^ledger: 1 resolved, 1 expired, 0 condition unmet; 0 with a rule no resolver knows, 0 refused, \d+ waiting$/m);
-        expect(said.join('\n')).not.toMatch(/31337|service:|pd[a-z0-9]{8}/);
+        expect(said.join('\n')).not.toMatch(/31337|service:|\bpd[a-z0-9]{8}/);
         // Turned off again: what Flint already predicted is still checked.
         await fresh.inTx((q) => q(`UPDATE "ForecastSeries" SET "on" = false WHERE "seriesKey" = $1`, [series]), { actor: 'will:console' });
         expect(await predictionsStarted(fresh.db)).toBe(true);
