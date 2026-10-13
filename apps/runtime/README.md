@@ -2266,7 +2266,7 @@ What Flint does and does not do to Nexus:
 - The weekly test restores into a scratch database, `nexus_restore_test`, and
   drops it. It never opens the Nexus database.
 - Nothing about Nexus can hold up Flint's own night. Nexus's steps run after
-  every one of Flint's own, and each has a time limit.
+  every one of Flint's own, and each ends within an hour whatever happens.
 - The dump is a file only you can read. It leaves this Mac only encrypted to
   your backup key. No model ever reads it.
 - Nexus's own backup job is not touched. It still runs.
@@ -2334,17 +2334,26 @@ could only switch to, or only hand to itself). It is refused if any of them:
 - holds any right on a table but reading it: adding, changing or removing
   rows, emptying it, referencing it, hanging a trigger on it or maintaining
   it, on the whole table or on one column;
-- may advance a sequence.
+- may advance a sequence;
+- owns or may use a foreign server or a foreign data wrapper;
+- owns a large object or may change one;
+- may hand any right of its own on to another login, reading included.
 
-Rights given to everyone count as the login's own.
+Rights given to everyone count as the login's own. Such a right is not the
+login's to give up, so Flint says it differently: Nexus gives every login that
+right, and the change is on Nexus's side. A database carried over from before
+Postgres 15 is the usual case, where every login may make things in the
+`public` schema. Until Nexus takes the right back from everyone, Flint backs
+nothing up there.
 
 What no check of rights can rule out, because Postgres gives it to every
 login that may connect: a read-only login can still call a function Nexus
 opened to everyone (one that runs with its owner's rights could then write),
-make temporary tables, and takes ordinary read locks while it dumps. Flint
-calls no function of Nexus's and makes no table there. The read locks are
-why the dump gives up after 15 seconds if something in Nexus holds a table
-locked, and tries again the next night.
+make temporary tables, make a large object of its own, send a notification
+with `NOTIFY`, and takes ordinary read locks while it dumps. Flint calls no
+function of Nexus's, makes no table or large object there and sends no
+notification. The read locks are why the dump gives up after 15 seconds if
+something in Nexus holds a table locked, and tries again the next night.
 
 ### What runs each night
 
@@ -2369,12 +2378,19 @@ while the address is set:
 - Each file is recorded once, under the kind `nexus_dump`. A file written
   again is the same record.
 - With `FLINT_OFFSITE_DIR` set, the copies go into a `nexus` folder inside it.
-- Each step has a time limit: 20 minutes for the dump and for the copy, 30 for
-  the restore test. Past it the tool is stopped, the step fails, and nothing
-  half-written is left. The dump also gives up after 15 seconds waiting on a
-  lock someone holds in Nexus.
+- Each step ends within 60 minutes, whatever its parts add up to. Inside a
+  step every limit is per tool and per statement: 20 minutes for one run of
+  `pg_dump` and for each statement before it (the check of the login, each
+  table's count), 20 for each run of `age` (the dump, then its row counts),
+  30 for one run of `pg_restore` and for each statement of the comparison.
+  Each part gets its own limit or what is left of the hour, whichever is
+  less.
+- Past a limit the tool is stopped along with anything it started, the step
+  fails at that moment, and nothing half-written is left. The dump also gives
+  up after 15 seconds waiting on a lock someone holds in Nexus.
 - Only one Nexus restore test runs at a time. A second one waits up to two
-  minutes for the first, then says so and ends.
+  minutes for the first, then says so and ends. A scratch database an earlier
+  test left behind is replaced, with any session still on it.
 - If Nexus ever holds large objects, the backup says how many it left out.
 - If the address cannot be used (it does not name a database on this Mac, or
   it names Flint's own), none of the three steps runs and none files a card.

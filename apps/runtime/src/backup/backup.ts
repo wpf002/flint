@@ -22,7 +22,7 @@
  * restores into, and that the login which reads Nexus must not be able to
  * change it (readOnly, below).
  */
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, createReadStream, createWriteStream, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
@@ -108,7 +108,10 @@ export class ToolFailed extends Error {
   }
 }
 
-/** A step's tool ran past the time its set allows (StepLimits) and was stopped. Another night may go better: not a setup problem. */
+/**
+ * A step's tool, or the step as a whole, ran past the time its set allows
+ * (StepLimits) and was stopped. Another night may go better: not a setup problem.
+ */
 export class TookTooLong extends Error {
   constructor(readonly tool: string, readonly ms: number) {
     const n = ms >= 60_000 ? Math.round(ms / 60_000) : Math.max(1, Math.round(ms / 1000));
@@ -117,35 +120,88 @@ export class TookTooLong extends Error {
 }
 
 /**
+ * Stop a tool that heads a process group of its own (spawn's `detached`), and
+ * with it everything it started: a helper it forked would otherwise live on,
+ * holding the pipes this side reads and the file it was writing.
+ *
+ * Only while the tool itself has not been seen to end. Until then its number
+ * is its own and its group's; afterwards the system may give that number to
+ * another process, and a signal sent to it would stop a stranger.
+ */
+function stopGroup(child: ChildProcess): void {
+  if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    // No group by its number yet (it had only just been started): the tool alone, then.
+    child.kill('SIGKILL');
+  }
+}
+
+/** The signals that end this process from outside. */
+const ENDINGS = ['SIGTERM', 'SIGINT', 'SIGHUP'] as const;
+
+/**
+ * A tool in a group of its own is no longer stopped along with this process by
+ * whoever stops it (launchd ends a job's own group, Ctrl-C the terminal's). So
+ * while one runs, this process's end is its end too: when it exits, and on the
+ * signals that end it. Returns what takes that watch off again.
+ */
+function endsWithThis(child: ChildProcess): () => void {
+  const stop = (): void => stopGroup(child);
+  const onSignal = (signal: NodeJS.Signals): void => {
+    stop();
+    off();
+    // With nobody else listening for it, the signal does what it would have done.
+    if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+  };
+  const off = (): void => {
+    process.off('exit', stop);
+    for (const s of ENDINGS) process.off(s, onSignal);
+  };
+  process.on('exit', stop);
+  for (const s of ENDINGS) process.on(s, onSignal);
+  return off;
+}
+
+/**
  * Run pg_dump or pg_restore. A tool that cannot be started at all (not there, not
  * runnable) is a fault and is passed on as it is; one that ran and failed is a
- * ToolFailed, which says what kind of failure and names no data. With
- * `timeoutMs`, one still running then is killed outright and the run fails as
- * TookTooLong.
+ * ToolFailed, which says what kind of failure and names no data.
+ *
+ * With `timeoutMs` the tool heads a process group of its own. One still running
+ * then is killed outright with everything it started, and the run fails as
+ * TookTooLong at that moment: it does not wait for the tool's pipes to close,
+ * which a helper the tool left behind could hold open for as long as it liked.
+ * Without it the tool is run exactly as it always was.
  */
 export function run(bin: string, args: string[], password: string, opts: { stdoutFile?: string; timeoutMs?: number } = {}): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin', PGPASSWORD: password, PGCONNECT_TIMEOUT: '10' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const limited = opts.timeoutMs !== undefined;
+    const child = spawn(bin, args, { env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin', PGPASSWORD: password, PGCONNECT_TIMEOUT: '10' }, stdio: ['ignore', 'pipe', 'pipe'], ...(limited ? { detached: true } : {}) });
     const tool = bin.split('/').pop() ?? 'tool';
+    const untie = limited ? endsWithThis(child) : undefined;
     let err = '';
-    let late = false;
+    let settled = false;
+    const settle = (failure?: unknown): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(clock);
+      untie?.();
+      if (failure === undefined) resolve();
+      else reject(failure);
+    };
     const clock = opts.timeoutMs === undefined ? undefined : setTimeout(() => {
-      late = true;
-      child.kill('SIGKILL');
+      stopGroup(child);
+      child.stdout.destroy();
+      child.stderr.destroy();
+      settle(new TookTooLong(tool, opts.timeoutMs!));
     }, opts.timeoutMs);
     child.stderr.on('data', (d) => (err = (err + d).slice(-8000)));
     if (opts.stdoutFile) child.stdout.pipe(createWriteStream(opts.stdoutFile, { mode: 0o600 }));
     else child.stdout.resume();
-    child.on('error', (e) => {
-      clearTimeout(clock);
-      reject(e);
-    });
-    child.on('close', (code) => {
-      clearTimeout(clock);
-      if (late) reject(new TookTooLong(tool, opts.timeoutMs!));
-      else if (code === 0) resolve();
-      else reject(new ToolFailed(tool, code, toolError(err)));
-    });
+    child.on('error', settle);
+    child.on('close', (code) => settle(code === 0 ? undefined : new ToolFailed(tool, code, toolError(err))));
   });
 }
 
@@ -178,22 +234,77 @@ export interface BackupSet {
   limits?: StepLimits;
 }
 
+/**
+ * Each of these but the last is per tool and per statement: a limit on ONE
+ * tool's run or ONE statement. A step has several of each: a dump counts every
+ * table with a statement of its own before pg_dump runs, an offsite copy runs
+ * age twice (the dump, then its row counts), and a restore test waits,
+ * restores and then counts. `stepMs` is the limit on a whole step, whatever
+ * its parts add up to (StepClock).
+ */
 export interface StepLimits {
   /** How long pg_dump waits for a lock someone holds in that database, before it gives up (its --lock-wait-timeout). */
   lockWaitMs: number;
-  /** The most the dump, the encrypted copy and the restore test may each take: past it the tool is stopped and the step fails. */
+  /** The most one run of pg_dump may take, and any one statement before it (the check of the login, each table's count). */
   dumpMs: number;
+  /** The most one run of age may take. */
   offsiteMs: number;
+  /** The most one run of pg_restore may take, and any one statement of the comparison after it. */
   drillMs: number;
   /** How long a restore test waits for another one that is using the same scratch database, before it says so and ends. */
   drillWaitMs: number;
+  /**
+   * The most a whole step may take: the backup, the offsite copy or the restore
+   * test, from its first statement to its last. Each tool and statement in it
+   * is given its own limit or what is left of this one, whichever is less, so
+   * a step can never outlast the night however many parts it has.
+   */
+  stepMs: number;
+}
+
+/**
+ * One step's time, counted from when it began (StepLimits.stepMs). Each part
+ * of the step asks it how long that part may take.
+ */
+export class StepClock {
+  private readonly ends: number;
+  constructor(private readonly ms: number, readonly what: string) {
+    this.ends = Date.now() + ms;
+  }
+  /** Whether the step's time is up. (A timer may fire a moment before its time: the last few milliseconds count as up.) */
+  get over(): boolean {
+    return Date.now() >= this.ends - 20;
+  }
+  /** The step ran too long: said of the step itself, whichever part it was in. */
+  late(): TookTooLong {
+    return new TookTooLong(this.what, this.ms);
+  }
+  /** What one part may take, in whole milliseconds: its own limit, or what is left of the step's when that is less. With nothing left the step ends here. */
+  left(ms: number): number {
+    const left = Math.floor(this.ends - Date.now());
+    if (left <= 0) throw this.late();
+    return Math.max(1, Math.min(Math.trunc(ms), left));
+  }
+}
+
+/** The clock for one step of a set that has limits; none for Flint's own set, whose steps run as they always have. */
+export const stepClock = (set: BackupSet, what: string): StepClock | undefined => (set.limits ? new StepClock(set.limits.stepMs, what) : undefined);
+
+/** Run a step under its clock. Once the step's time is up, whatever ended it is said as the step having run too long. */
+export async function withinStep<T>(clock: StepClock | undefined, step: () => Promise<T>): Promise<T> {
+  if (!clock) return step();
+  try {
+    return await step();
+  } catch (err) {
+    throw clock.over ? clock.late() : err;
+  }
 }
 
 export const FLINT_SET: BackupSet = { prefix: 'flint', schemas: ['public'], scratch: 'flint_restore_test', kind: 'pg_dump_flint' };
 /** Nexus keeps everything in `public` (its own migrations make no other schema). */
 export const NEXUS_SET: BackupSet = {
   prefix: 'nexus', schemas: ['public'], scratch: 'nexus_restore_test', kind: 'nexus_dump', readOnly: true,
-  limits: { lockWaitMs: 15_000, dumpMs: 20 * 60_000, offsiteMs: 20 * 60_000, drillMs: 30 * 60_000, drillWaitMs: 2 * 60_000 },
+  limits: { lockWaitMs: 15_000, dumpMs: 20 * 60_000, offsiteMs: 20 * 60_000, drillMs: 30 * 60_000, drillWaitMs: 2 * 60_000, stepMs: 60 * 60_000 },
 };
 
 /** A set's names are built into file patterns and statements, so each is held to its shape first. */
@@ -214,8 +325,14 @@ export async function sha256File(path: string): Promise<string> {
   return h.digest('hex');
 }
 
-/** Row counts of every table in the named schemas (`public` for Flint: its partitions are counted through their parent). */
-export async function countRows(c: pg.Client, schemas: readonly string[] = FLINT_SET.schemas): Promise<Record<string, number>> {
+/**
+ * Row counts of every table in the named schemas (`public` for Flint: its
+ * partitions are counted through their parent). `each`, when given, is run
+ * before every statement here (a set with limits sets that statement's time
+ * limit with it); Flint's own counting passes none.
+ */
+export async function countRows(c: pg.Client, schemas: readonly string[] = FLINT_SET.schemas, each?: () => Promise<unknown>): Promise<Record<string, number>> {
+  await each?.();
   const tables = await c.query<{ name: string }>(`
     SELECT format('%I.%I', n.nspname, c.relname) AS name
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -223,6 +340,7 @@ export async function countRows(c: pg.Client, schemas: readonly string[] = FLINT
     ORDER BY 1`, [[...schemas]]);
   const out: Record<string, number> = {};
   for (const { name } of tables.rows) {
+    await each?.();
     out[name] = Number((await c.query<{ n: string }>(`SELECT count(*) AS n FROM ${name}`)).rows[0]!.n);
   }
   return out;
@@ -273,18 +391,47 @@ export const WRITE_RIGHTS = {
   sequence: 'it owns a sequence or may advance one',
   routine: 'it owns a function',
   type: 'it owns a type',
+  foreign: 'it owns or may use a foreign server or a foreign data wrapper',
+  largeObject: 'it owns a large object or may change one',
+  grantOption: 'it may hand a right of its own on to another login',
   owner: 'it owns something in the database',
 } as const;
 export type WriteRight = keyof typeof WRITE_RIGHTS;
 
 /**
+ * The kinds a database can give to every login at once (Postgres's PUBLIC),
+ * each as what every login may then do. A right held this way is not the
+ * backup login's to give up: the database's own side takes it back from
+ * everyone, or it stays (openRights).
+ */
+export const EVERYONE_RIGHTS = {
+  createInDatabase: 'make schemas in the database',
+  schema: 'make things in a schema',
+  table: 'change, lock or hang a trigger on a table or a view',
+  column: 'change a column of a table',
+  sequence: 'advance a sequence',
+  foreign: 'use a foreign server or a foreign data wrapper',
+  largeObject: 'change a large object',
+} as const satisfies Partial<Record<WriteRight, string>>;
+export type EveryoneRight = keyof typeof EVERYONE_RIGHTS;
+
+/**
  * The login may change the database it is asked to back up. Never tried again
  * as it is: its setup needs fixing (needsSetup, below). `rights` says which
- * kinds of right were found (WRITE_RIGHTS), never whose or on what.
+ * kinds of right were found (WRITE_RIGHTS), never whose or on what; `everyone`
+ * says which of those kinds the database gives to every login (EVERYONE_RIGHTS),
+ * so what is said about it can say whose change it is.
  */
 export class NotReadOnly extends Error {
-  constructor(readonly rights: readonly WriteRight[] = []) {
-    super(`the login that reads this database holds a right to change it, so nothing was backed up${rights.length ? ` (${rights.map((r) => WRITE_RIGHTS[r]).join('; ')})` : ''}`);
+  readonly everyone: readonly EveryoneRight[];
+  constructor(readonly rights: readonly WriteRight[] = [], everyone: readonly WriteRight[] = []) {
+    const open = rights.filter((r): r is EveryoneRight => r in EVERYONE_RIGHTS && everyone.includes(r));
+    super(`the login that reads this database holds a right to change it, so nothing was backed up${rights.length ? ` (${rights.map((r) => ((open as readonly WriteRight[]).includes(r) ? `every login may ${EVERYONE_RIGHTS[r as EveryoneRight]}` : WRITE_RIGHTS[r])).join('; ')})` : ''}`);
+    this.everyone = open;
+  }
+  /** The kinds found that are the login's own to give up: every kind but the ones the database gives to everyone. */
+  get own(): WriteRight[] {
+    return this.rights.filter((r) => !(this.everyone as readonly WriteRight[]).includes(r));
   }
 }
 
@@ -318,42 +465,89 @@ const READ_ONLY_ROLES = ['pg_read_all_data', 'pg_monitor', 'pg_read_all_settings
  *    locks, rewrites and reindexes);
  *  - INSERT, UPDATE or REFERENCES on any one column;
  *  - owning a sequence, or USAGE or UPDATE on one (either moves it on);
+ *  - owning a foreign server or a foreign data wrapper, or USAGE on one (which
+ *    is leave to point the database at another one);
+ *  - owning a large object, or UPDATE on one;
+ *  - a right of any kind that it may hand on to another login (WITH GRANT
+ *    OPTION), reading included: handing it on changes who may do what;
  *  - owning a function, a type, or anything else in the database (the
- *    server's record of who owns what covers large objects, extensions,
- *    operators and the rest).
- * Rights given to everyone (PUBLIC) count as the login's own.
+ *    server's record of who owns what covers extensions, operators and the
+ *    rest).
+ * Rights given to everyone (PUBLIC) count as the login's own; openRights says
+ * which kinds are held that way.
  *
  * What this does NOT rule out, because Postgres gives it to every login that
  * can connect: calling a function its owner opened to everyone (one that runs
- * with its owner's rights can then write), making temporary tables, and the
- * ordinary read locks a dump takes while it runs.
+ * with its owner's rights can then write), making temporary tables, making a
+ * large object of its own, sending a notification (NOTIFY), and the ordinary
+ * read locks a dump takes while it runs.
  */
 export async function writeRights(c: pg.Client): Promise<WriteRight[]> {
-  const { rows } = await c.query<Record<WriteRight, boolean | null>>(`
-    WITH me AS (
+  return rightsOf(c, `
       SELECT g.oid, g.rolname, g.rolsuper, g.rolbypassrls, g.rolcreaterole, g.rolreplication
         FROM pg_roles g
-       WHERE pg_has_role(current_user, g.oid, 'MEMBER') OR pg_has_role(current_user, g.oid, 'MEMBER WITH ADMIN OPTION')
+       WHERE pg_has_role(current_user, g.oid, 'MEMBER') OR pg_has_role(current_user, g.oid, 'MEMBER WITH ADMIN OPTION')`, 'me.oid');
+}
+
+/**
+ * Which kinds of right to change the database it gives to every login
+ * (PUBLIC): the same questions as writeRights, asked of everyone instead of
+ * the login. CREATE in schema public is one, in a database carried over from
+ * before Postgres 15. Such a right is no login's own to give up.
+ */
+export async function openRights(c: pg.Client): Promise<EveryoneRight[]> {
+  // Postgres's name for everyone, as its own has_..._privilege functions take it; 0 is how its records write it.
+  const held = await rightsOf(c, `SELECT 0::oid AS oid, 'public'::name AS rolname, false AS rolsuper, false AS rolbypassrls, false AS rolcreaterole, false AS rolreplication`, `'public'::name`);
+  return held.filter((k): k is EveryoneRight => k in EVERYONE_RIGHTS);
+}
+
+/**
+ * The questions themselves, asked of the roles `me` selects (each with its oid,
+ * name and attributes). `who` is how one of them is named to Postgres's own
+ * has_..._privilege functions: its oid, or the name `public`.
+ */
+async function rightsOf(c: pg.Client, me: string, who: string): Promise<WriteRight[]> {
+  const { rows } = await c.query<Record<WriteRight, boolean | null>>(`
+    WITH me AS (${me}
     ), db AS (
-      SELECT d.oid, d.datdba FROM pg_database d WHERE d.datname = current_database()
+      SELECT d.oid, d.datdba, d.datacl FROM pg_database d WHERE d.datname = current_database()
     ), nsp AS (
-      SELECT n.oid, n.nspowner FROM pg_namespace n WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+      SELECT n.oid, n.nspowner, n.nspacl FROM pg_namespace n WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+    ), given AS (
+      -- Every right on record in this database that its holder may hand on.
+                SELECT x.grantee FROM db, aclexplode(db.datacl) x WHERE x.is_grantable
+      UNION ALL SELECT x.grantee FROM nsp, aclexplode(nsp.nspacl) x WHERE x.is_grantable
+      UNION ALL SELECT x.grantee FROM pg_class r JOIN nsp ON nsp.oid = r.relnamespace, aclexplode(r.relacl) x WHERE x.is_grantable
+      UNION ALL SELECT x.grantee FROM pg_attribute a JOIN pg_class r ON r.oid = a.attrelid JOIN nsp ON nsp.oid = r.relnamespace, aclexplode(a.attacl) x WHERE x.is_grantable
+      UNION ALL SELECT x.grantee FROM pg_proc p JOIN nsp ON nsp.oid = p.pronamespace, aclexplode(p.proacl) x WHERE x.is_grantable
+      UNION ALL SELECT x.grantee FROM pg_type t JOIN nsp ON nsp.oid = t.typnamespace, aclexplode(t.typacl) x WHERE x.is_grantable
+      UNION ALL SELECT x.grantee FROM pg_language l, aclexplode(l.lanacl) x WHERE x.is_grantable
+      UNION ALL SELECT x.grantee FROM pg_largeobject_metadata m, aclexplode(m.lomacl) x WHERE x.is_grantable
+      UNION ALL SELECT x.grantee FROM pg_foreign_server f, aclexplode(f.srvacl) x WHERE x.is_grantable
+      UNION ALL SELECT x.grantee FROM pg_foreign_data_wrapper w, aclexplode(w.fdwacl) x WHERE x.is_grantable
     )
     SELECT
       EXISTS (SELECT 1 FROM me WHERE rolsuper OR rolbypassrls OR rolcreaterole OR rolreplication) AS "attribute",
       EXISTS (SELECT 1 FROM me WHERE rolname ~ '^pg_' AND rolname <> 'pg_database_owner' AND rolname <> ALL ($1::text[])) AS "role",
       EXISTS (SELECT 1 FROM db JOIN me ON me.oid = db.datdba) AS "ownsDatabase",
-      EXISTS (SELECT 1 FROM db, me WHERE has_database_privilege(me.oid, db.oid, 'CREATE')) AS "createInDatabase",
-      EXISTS (SELECT 1 FROM nsp, me WHERE nsp.nspowner = me.oid OR has_schema_privilege(me.oid, nsp.oid, 'CREATE')) AS "schema",
+      EXISTS (SELECT 1 FROM db, me WHERE has_database_privilege(${who}, db.oid, 'CREATE')) AS "createInDatabase",
+      EXISTS (SELECT 1 FROM nsp, me WHERE nsp.nspowner = me.oid OR has_schema_privilege(${who}, nsp.oid, 'CREATE')) AS "schema",
       EXISTS (SELECT 1 FROM pg_class r JOIN nsp ON nsp.oid = r.relnamespace, me
                WHERE r.relkind IN ('r', 'p', 'v', 'm', 'f')
-                 AND (r.relowner = me.oid OR has_table_privilege(me.oid, r.oid, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, MAINTAIN'))) AS "table",
+                 AND (r.relowner = me.oid OR has_table_privilege(${who}, r.oid, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, MAINTAIN'))) AS "table",
       EXISTS (SELECT 1 FROM pg_class r JOIN nsp ON nsp.oid = r.relnamespace, me
-               WHERE r.relkind IN ('r', 'p', 'v', 'm', 'f') AND has_any_column_privilege(me.oid, r.oid, 'INSERT, UPDATE, REFERENCES')) AS "column",
+               WHERE r.relkind IN ('r', 'p', 'v', 'm', 'f') AND has_any_column_privilege(${who}, r.oid, 'INSERT, UPDATE, REFERENCES')) AS "column",
       EXISTS (SELECT 1 FROM pg_class r JOIN nsp ON nsp.oid = r.relnamespace, me
-               WHERE r.relkind = 'S' AND (r.relowner = me.oid OR has_sequence_privilege(me.oid, r.oid, 'USAGE, UPDATE'))) AS "sequence",
+               WHERE r.relkind = 'S' AND (r.relowner = me.oid OR has_sequence_privilege(${who}, r.oid, 'USAGE, UPDATE'))) AS "sequence",
       EXISTS (SELECT 1 FROM pg_proc p JOIN nsp ON nsp.oid = p.pronamespace JOIN me ON me.oid = p.proowner) AS "routine",
       EXISTS (SELECT 1 FROM pg_type t JOIN nsp ON nsp.oid = t.typnamespace JOIN me ON me.oid = t.typowner) AS "type",
+      (EXISTS (SELECT 1 FROM pg_foreign_server f, me WHERE f.srvowner = me.oid OR has_server_privilege(${who}, f.oid, 'USAGE'))
+        OR EXISTS (SELECT 1 FROM pg_foreign_data_wrapper w, me WHERE w.fdwowner = me.oid OR has_foreign_data_wrapper_privilege(${who}, w.oid, 'USAGE'))) AS "foreign",
+      -- (Postgres 17 has no has_..._privilege for a large object: its own list of who may do what is read instead. 0 there is everyone.)
+      EXISTS (SELECT 1 FROM pg_largeobject_metadata m, me
+               WHERE m.lomowner = me.oid
+                  OR EXISTS (SELECT 1 FROM aclexplode(m.lomacl) x WHERE x.privilege_type = 'UPDATE' AND x.grantee IN (me.oid, 0))) AS "largeObject",
+      EXISTS (SELECT 1 FROM given JOIN me ON me.oid = given.grantee) AS "grantOption",
       EXISTS (SELECT 1 FROM pg_shdepend s JOIN db ON db.oid = s.dbid JOIN me ON me.oid = s.refobjid
                WHERE s.refclassid = 'pg_authid'::regclass AND s.deptype = 'o') AS "owner"`, [[...READ_ONLY_ROLES]]);
   const said = rows[0];
@@ -367,9 +561,18 @@ export async function canWrite(c: pg.Client): Promise<boolean> {
   return (await writeRights(c)).length > 0;
 }
 
-/** One consistent dump plus its counts. The file appears only when complete. */
+/**
+ * One consistent dump plus its counts. The file appears only when complete.
+ * For a set with limits the whole of it is one step under one clock, and each
+ * statement and the tool is given its own limit or what is left of the step's.
+ */
 export async function dumpDatabase(backupUrl: string, outDir: string, tools: Tools, now: Date, of: BackupSet = FLINT_SET): Promise<DumpResult> {
   const set = checkedSet(of);
+  const clock = stepClock(set, 'the backup');
+  return withinStep(clock, () => dumpWithin(clock, backupUrl, outDir, tools, now, set));
+}
+
+async function dumpWithin(clock: StepClock | undefined, backupUrl: string, outDir: string, tools: Tools, now: Date, set: BackupSet): Promise<DumpResult> {
   mkdirSync(outDir, { recursive: true, mode: 0o700 });
   chmodSync(outDir, 0o700);
   const t = targetOf(backupUrl);
@@ -379,19 +582,24 @@ export async function dumpDatabase(backupUrl: string, outDir: string, tools: Too
   await c.connect();
   try {
     await c.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    const limits = clock && set.limits;
+    // No one statement here outlasts its own limit, nor all of them the step's: the limit is set again before each.
+    // (Waiting on a lock ends sooner: client().) It sets no snapshot: the transaction's is still its first query's.
+    const paced = limits ? () => c.query(`SET LOCAL statement_timeout = ${clock.left(limits.dumpMs)}`) : undefined;
     if (set.readOnly) {
+      await paced?.();
       const rights = await writeRights(c);
-      if (rights.length) throw new NotReadOnly(rights);
+      if (rights.length) throw new NotReadOnly(rights, await openRights(c));
     }
-    // No one statement of the counting outlasts the step's own limit. (Waiting on a lock ends sooner: client().)
-    if (set.limits) await c.query(`SET LOCAL statement_timeout = ${Math.trunc(set.limits.dumpMs)}`);
+    await paced?.();
     const snapshot = (await c.query<{ s: string }>('SELECT pg_export_snapshot() AS s')).rows[0]!.s;
-    const counts = await countRows(c, set.schemas);
+    const counts = await countRows(c, set.schemas, paced);
     // Said, never dumped: what is left out of this database's backup.
+    await paced?.();
     const largeObjects = set.readOnly ? Number((await c.query<{ n: string }>('SELECT count(*) AS n FROM pg_largeobject_metadata')).rows[0]!.n) : undefined;
     // In a database others are changing, pg_dump gives up on a lock someone holds instead of waiting on it all night.
-    const patient = set.limits ? [`--lock-wait-timeout=${Math.trunc(set.limits.lockWaitMs)}`] : [];
-    await run(tools.pgDump, [...DUMP_FORMAT, ...patient, `--snapshot=${snapshot}`, '-h', t.host, '-p', String(t.port), '-U', t.user, '-d', t.database, '-f', partial], t.password, set.limits ? { timeoutMs: set.limits.dumpMs } : {});
+    const patient = limits ? [`--lock-wait-timeout=${Math.trunc(limits.lockWaitMs)}`] : [];
+    await run(tools.pgDump, [...DUMP_FORMAT, ...patient, `--snapshot=${snapshot}`, '-h', t.host, '-p', String(t.port), '-U', t.user, '-d', t.database, '-f', partial], t.password, limits ? { timeoutMs: clock.left(limits.dumpMs) } : {});
     await c.query('COMMIT');
     chmodSync(partial, 0o600);
     renameSync(partial, final);
@@ -462,8 +670,11 @@ const AGE_HEADER = Buffer.from('age-encryption.org/v1\n');
 function seal(age: string, recipient: string, src: string, dest: string, timeoutMs?: number): Promise<{ bytes: number; sha256: string }> {
   return new Promise((resolve, reject) => {
     // No -o: age writes the ciphertext to its stdout, which is a pipe here, never a terminal.
-    const child = spawn(age, ['-r', recipient, src], { env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin' }, stdio: ['ignore', 'pipe', 'pipe'] });
-    // Past its set's limit it is stopped where it stands (end kills it), and what it had written goes with it (encryptTo).
+    // With a limit it heads a process group of its own (as a limited pg_dump does: run), so it is stopped with whatever it started.
+    const limited = timeoutMs !== undefined;
+    const child = spawn(age, ['-r', recipient, src], { env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin' }, stdio: ['ignore', 'pipe', 'pipe'], ...(limited ? { detached: true } : {}) });
+    const untie = limited ? endsWithThis(child) : undefined;
+    // Past its set's limit it is stopped where it stands (end stops it), and what it had written goes with it (encryptTo).
     const clock = timeoutMs === undefined ? undefined : setTimeout(() => end(new TookTooLong('age', timeoutMs)), timeoutMs);
     const hash = createHash('sha256');
     /** The first bytes, held until they are seen to begin an age file; undefined once the file is open. */
@@ -480,8 +691,10 @@ function seal(age: string, recipient: string, src: string, dest: string, timeout
       if (settled) return;
       settled = true;
       clearTimeout(clock);
+      untie?.();
       if (failure) {
-        child.kill(failure instanceof TookTooLong ? 'SIGKILL' : undefined);
+        if (limited) stopGroup(child);
+        else child.kill();
         out?.destroy();
       }
       try {
@@ -676,6 +889,14 @@ export class DrillBusy extends Error {
 }
 
 /**
+ * What a restore test of a set with limits locks for as long as it has its
+ * scratch database (pg_advisory_lock(hashtext(this)), on the restore login's
+ * own connection). Anything else that makes or drops a database of that name
+ * takes the same lock, in the same database, first.
+ */
+export const drillLockKey = (set: BackupSet): string => `restore test ${set.scratch}`;
+
+/**
  * Restore `dump` into its set's scratch database (flint_restore_test, or
  * nexus_restore_test) as a role that may create databases (flint_restore),
  * compare counts with the counts taken at dump time, and drop it. `adminUrl`
@@ -688,27 +909,35 @@ export class DrillBusy extends Error {
  * own check of this code, say) waits its turn, and says so if the wait is too
  * long, instead of dropping the database under the first. Its pg_restore is
  * stopped if it runs past the set's limit, and the scratch database is then
- * dropped with whatever is still connected to it. Flint's own test runs as it
- * always has.
+ * dropped with whatever is still connected to it (WITH (FORCE): a session the
+ * restore login itself left there, from a run that was stopped, must not keep
+ * the database or fail every later test). The whole of it is one step under
+ * one clock; dropping what it made has a minute of its own after that.
+ * Flint's own test runs as it always has.
  */
 export async function restoreDrill(dump: string, adminUrl: string, tools: Tools, of: BackupSet = FLINT_SET): Promise<DrillResult> {
   const set = checkedSet(of);
+  const clock = stepClock(set, 'the restore test');
+  return withinStep(clock, () => drillWithin(clock, dump, adminUrl, tools, set));
+}
+
+async function drillWithin(clock: StepClock | undefined, dump: string, adminUrl: string, tools: Tools, set: BackupSet): Promise<DrillResult> {
   const expected = JSON.parse(readFileSync(`${dump}.counts.json`, 'utf8')) as Record<string, number>;
   const admin = targetOf(adminUrl);
   // Its shape is checked (checkedSet), and it is quoted all the same.
   const name = `"${set.scratch}"`;
   if (admin.database === set.scratch) throw new Error('the restore login’s own database is the scratch database');
   const scratch: PgTarget = { ...admin, database: set.scratch };
-  const limits = set.limits;
+  const limits = clock && set.limits;
   /** The restore and the comparison, once the scratch database is there. */
   const restoreAndCompare = async (): Promise<DrillResult> => {
-    await run(tools.pgRestore, ['--no-owner', '--no-privileges', '--exit-on-error', '-h', scratch.host, '-p', String(scratch.port), '-U', scratch.user, '-d', scratch.database, dump], scratch.password, limits ? { timeoutMs: limits.drillMs } : {});
+    await run(tools.pgRestore, ['--no-owner', '--no-privileges', '--exit-on-error', '-h', scratch.host, '-p', String(scratch.port), '-U', scratch.user, '-d', scratch.database, dump], scratch.password, limits ? { timeoutMs: clock.left(limits.drillMs) } : {});
     const r = client(scratch);
     await r.connect();
     let restored: Record<string, number>;
     try {
-      if (limits) await r.query(`SET statement_timeout = ${Math.trunc(limits.drillMs)}`);
-      restored = await countRows(r, set.schemas);
+      // Each statement of the comparison has its own limit, or what is left of the step's.
+      restored = await countRows(r, set.schemas, limits ? () => r.query(`SET statement_timeout = ${clock.left(limits.drillMs)}`) : undefined);
     } finally {
       await r.end();
     }
@@ -723,20 +952,24 @@ export async function restoreDrill(dump: string, adminUrl: string, tools: Tools,
     const c = client(admin);
     await c.connect();
     try {
-      await c.query(`SET lock_timeout = ${Math.trunc(limits.drillWaitMs)}`);
+      await c.query(`SET lock_timeout = ${clock.left(limits.drillWaitMs)}`);
       try {
-        await c.query('SELECT pg_advisory_lock(hashtext($1))', [`restore test ${set.scratch}`]);
+        await c.query('SELECT pg_advisory_lock(hashtext($1))', [drillLockKey(set)]);
       } catch (err) {
         if ((err as { code?: unknown } | null)?.code === '55P03') throw new DrillBusy();
         throw err;
       }
       await c.query('SET lock_timeout = 15000');
+      await c.query(`SET statement_timeout = ${clock.left(limits.drillMs)}`);
+      // FORCE: whatever is still connected to a scratch database an earlier run left (its own stray session) goes with it.
       await c.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
       await c.query(`CREATE DATABASE ${name}`);
       try {
         return await restoreAndCompare();
       } finally {
+        // The step's time may be up by now: dropping what it made has a minute of its own.
         // FORCE: a pg_restore that was stopped may still be connected for a moment, and must not keep the database there.
+        await c.query('SET statement_timeout = 60000').catch(() => {});
         await c.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`).catch(() => {});
       }
     } finally {

@@ -20,7 +20,7 @@ import { existsSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import type { BackupConfig } from '../config.js';
 import type { Db } from '../db.js';
-import { encryptTo, FLINT_SET, NeedsSetup, newestDump, pruneOffsite, type BackupSet } from './backup.js';
+import { encryptTo, FLINT_SET, NeedsSetup, newestDump, pruneOffsite, stepClock, withinStep, type BackupSet } from './backup.js';
 import { fileBackup } from './record.js';
 
 /** How many encrypted copies stay offsite (the studio's own backup keeps 7 there too). */
@@ -39,20 +39,29 @@ export async function sendOffsite(
   of: OffsiteOf = { set: FLINT_SET, action: 'backup.offsite' },
 ): Promise<{ bytes: number; sha256: string; pruned: number }> {
   const { set, action } = of;
+  // A set with limits (Nexus's): the whole step has a clock of its own, and each run of age its limit or what is left of the step's.
+  const clock = stepClock(set, 'the offsite copy');
+  return withinStep(clock, () => send(db, b, now, warn, set, action, () => (clock && set.limits ? clock.left(set.limits.offsiteMs) : undefined)));
+}
+
+async function send(
+  db: Pick<Db, 'backupRun'>, b: OffsiteConfig, now: Date, warn: (line: string) => void, set: BackupSet, action: string, limit: () => number | undefined,
+): Promise<{ bytes: number; sha256: string; pruned: number }> {
   if (!b.ageRecipient) throw new NeedsSetup('no age recipient: put Will\'s public key in ~/.flint/backup-age-recipient');
   if (b.offsiteProblem) throw new NeedsSetup(b.offsiteProblem);
   if (!b.offsiteDir) throw new NeedsSetup('nowhere to send it: iCloud Drive is not on this Mac and FLINT_OFFSITE_DIR is not set');
   const dump = newestDump(b.dumpDir, set.prefix);
   if (!dump) throw new Error('no local dump to send');
-  // A set with limits (Nexus's): age is stopped if it runs past them, and nothing half-written stays offsite.
-  const limit = set.limits?.offsiteMs;
-  const e = await encryptTo(dump, b.ageRecipient, b.tools, b.offsiteDir, limit);
+  // With a limit, age is stopped if it runs past it, and nothing half-written stays offsite.
+  const e = await encryptTo(dump, b.ageRecipient, b.tools, b.offsiteDir, limit());
   // One record for each copy: a dump sent again (last night's backup failed, so the newest dump is the one
   // already sent) is the same file under the same name, and its record now says what is there.
   await fileBackup(db, { kind: set.kind, location: 'icloud', path: e.path, bytes: e.bytes, sha256: e.sha256, startedAt: now });
   const counts = `${dump}.counts.json`;
   if (existsSync(counts)) {
-    await encryptTo(counts, b.ageRecipient, b.tools, b.offsiteDir, limit).catch((err: unknown) =>
+    const { ageRecipient, offsiteDir } = b;
+    // (The limit is asked for inside the try: with no time left it is the counts that are not sent, and the copy stands.)
+    await (async () => encryptTo(counts, ageRecipient, b.tools, offsiteDir, limit()))().catch((err: unknown) =>
       warn(`${action}: the copy is written, but its row counts were not sent: ${err instanceof Error ? err.message : String(err)}`),
     );
   }

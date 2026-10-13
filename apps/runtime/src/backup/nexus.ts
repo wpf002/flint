@@ -25,7 +25,7 @@
  * address is set and Nexus will not let it read.
  */
 import { nexusUrlProblem, runtimeEnv, type NexusBackupConfig } from '../config.js';
-import { NotReadOnly, ToolFailed, WRITE_RIGHTS, client, targetOf, writeRights } from './backup.js';
+import { EVERYONE_RIGHTS, NotReadOnly, ToolFailed, WRITE_RIGHTS, client, openRights, targetOf, writeRights } from './backup.js';
 import { stageEnv } from './bootstrap.js';
 
 /** The name Nexus's database has on this Mac unless `nexus-setup` is told another. */
@@ -36,6 +36,9 @@ const SETUP = '  cd ~/flint && pnpm --filter @flint/runtime nexus-setup';
 
 /** A login or database name that needs no quoting, so a command can be printed with it as it is. */
 const plain = (name: string | undefined): name is string => !!name && /^[a-z_][a-z0-9_]{0,62}$/.test(name);
+
+/** What every login may do in Nexus, of the kinds found, as one sentence. */
+const everyoneMay = (err: NotReadOnly): string => `Every login there may ${err.everyone.map((r) => EVERYONE_RIGHTS[r]).join('; ')}.`;
 
 /** What kind of refusal an error from Postgres, or from one of its tools, is. Its own words are never passed on. */
 function refusal(err: unknown): 'writes' | 'login' | 'no-database' | 'not-let-in' | undefined {
@@ -66,6 +69,11 @@ function refusal(err: unknown): 'writes' | 'login' | 'no-database' | 'not-let-in
  * to connect or read get this advice: a restore test that was refused (in its
  * scratch database, as the restore login) gets a sentence of its own, and the
  * offsite copy none.
+ *
+ * A right to change Nexus that Nexus gives to every login (CREATE in schema
+ * public, in a database carried over from before Postgres 15) is said as
+ * that: it is not the login's to give up, and setting the address again would
+ * change nothing. The change is on Nexus's side.
  */
 export function nexusHelp(err: unknown, nexus: Pick<NexusBackupConfig, 'backupUrl' | 'problem'>, step: 'backup' | 'offsite' | 'drill' = 'backup'): string[] {
   if (nexus.problem) {
@@ -90,12 +98,22 @@ export function nexusHelp(err: unknown, nexus: Pick<NexusBackupConfig, 'backupUr
     // Not an address: the problem above would have said so.
   }
   switch (refusal(err)) {
-    case 'writes':
+    case 'writes': {
+      const found = err as NotReadOnly;
+      // Every kind found is one Nexus gives to everyone: no other login would do, and the address is not what is wrong.
+      if (found.everyone.length && !found.own.length) {
+        return [
+          'Nexus gives every login a right to change it, so Flint backed nothing up.',
+          everyoneMay(found),
+          'Flint reads Nexus only through a login with no right to change it. The change is on Nexus’s side: once that right is taken back from everyone there, the backup runs again.',
+        ];
+      }
       return [
         'The login in the Nexus address holds a right to change Nexus, so Flint backed nothing up.',
         'Flint reads Nexus only through a login with no right to change it. Set the address again with this command:',
         SETUP,
       ];
+    }
     case 'login':
       return ['The login in the Nexus address was refused. Its password may have changed.', 'Set the address again with this command:', SETUP];
     case 'no-database':
@@ -163,17 +181,25 @@ export async function nexusSetup(o: { backupEnv: string; database: string; say: 
     try {
       await c.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
       const rights = await writeRights(c);
-      if (rights.length) throw new NotReadOnly(rights);
+      if (rights.length) throw new NotReadOnly(rights, await openRights(c));
     } finally {
       await c.end().catch(() => {});
     }
   } catch (err) {
     const lines = nexusHelp(err, { backupUrl: url });
-    if (err instanceof NotReadOnly) {
+    if (err instanceof NotReadOnly && err.everyone.length && !err.own.length) {
+      // Nothing of the login's own: the right is one Nexus gives to every login, so it is Nexus's side that changes.
+      say('Nexus gives every login a right to change it, so Flint will not read it yet. Nothing was changed.');
+      say(everyoneMay(err));
+      say('The change is on Nexus’s side: once that right is taken back from everyone there, run this again.');
+    } else if (err instanceof NotReadOnly) {
       // Here the login is Flint's own backup login, so setting the address again would change nothing.
       say('Flint’s backup login holds a right to change the Nexus database, so Flint will not use it there. Nothing was changed.');
-      say(`What it holds: ${err.rights.map((r) => WRITE_RIGHTS[r]).join('; ')}.`);
-      say('Take that away from it, then run this again.');
+      say(`What it holds: ${err.own.map((r) => WRITE_RIGHTS[r]).join('; ')}.`);
+      if (err.everyone.length) {
+        say(`Nexus also gives every login a right to change it. ${everyoneMay(err)}`);
+        say('Take the first away from Flint’s login. The second is a change on Nexus’s side, for everyone. Then run this again.');
+      } else say('Take that away from it, then run this again.');
     } else if (lines.length) {
       for (const line of lines) say(line);
       say('Nothing was changed.');
