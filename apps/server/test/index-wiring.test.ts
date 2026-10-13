@@ -171,14 +171,16 @@ describe('index.ts wiring', () => {
     expect(made).toContain('kind: memoryPlan.kind,');
     expect(made).toContain('...goalsChat.extractor({ brain: extractBrain, tainted: (cid, tid) => convTaint.isTainted(cid, tid) }),');
     expect(made).toContain('...candidateOptions(process.env, {');
-    // The same kind the extractor was built with: on the frontier the options are empty, whatever the setting says.
-    expect(made).toContain('kind: memoryPlan.kind, candidates: new GoalCandidates({ runtime: runtimeLink }),');
+    // The same kind and the very brain the extractor was built with: on the frontier the options are empty, and on
+    // the local wire the locality rule is asked about this brain, not about a setting.
+    expect(made).toContain('kind: memoryPlan.kind, brain: extractBrain, candidates: new GoalCandidates({ runtime: runtimeLink }),');
+    expect(made).toContain('tz: serverZone(process.env, (m) => console.error(m)),');
     expect(src.match(/candidateOptions\(/g)).toHaveLength(1);
     expect(src.match(/new MemoryExtractor\(/g)).toHaveLength(1);
     // index.ts neither reads the setting nor names the runtime's route: both live in ./goal-candidates.
-    expect(src).not.toMatch(/process\.env\.FLINT_EXTRACT_CANDIDATES|env\.FLINT_EXTRACT_CANDIDATES/);
+    expect(src).not.toMatch(/env\.FLINT_EXTRACT_(CANDIDATES|COMMITMENTS)/);
     expect(src).not.toContain('goals/candidates');
-    expect(src).toContain("import { GoalCandidates, candidateOptions } from './goal-candidates';");
+    expect(src).toContain("import { GoalCandidates, candidateOptions, serverZone } from './goal-candidates';");
   });
 
   it('the local brain is an Ollama model whatever keys are set: index.ts never builds an Anthropic client itself', () => {

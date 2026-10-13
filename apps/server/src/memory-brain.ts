@@ -32,7 +32,7 @@ import { OllamaProvider, isFlintError, isOllamaCloudModel } from '@flint/core';
 import type { ChatLoad } from './chat-load';
 import { creditExhausted } from './frontier-breaker';
 import { LOCAL_MODEL_MAX_LEN, LOCAL_MODEL_RE, liveOllamaOptions } from './local-model';
-import { FACTS_SCHEMA, MemoryBrainError, SUGGESTIONS_SCHEMA, factsReply, suggestionsReply, type BrainFailure, type ExtractBrain, type FactEntry } from './memory-extract';
+import { FACTS_SCHEMA, MemoryBrainError, factsReply, suggestSchema, suggestionsReply, type BrainFailure, type ExtractBrain, type FactEntry, type Suggesting } from './memory-extract';
 
 type Env = Record<string, string | undefined>;
 
@@ -255,7 +255,7 @@ export function localExtractBrain(m: LocalMemoryModel, deps: LocalBrainDeps = {}
 async function askLocal(
   m: LocalMemoryModel,
   deps: LocalBrainDeps,
-  input: { system: string; prompt: string; suggestions?: boolean },
+  input: { system: string; prompt: string; suggestions?: Suggesting },
   maxTokens: number,
 ): Promise<{ facts: FactEntry[]; suggestions?: unknown[] }> {
   const chatActive = deps.chatActive ?? (() => false);
@@ -307,8 +307,9 @@ async function askLocal(
           model: m.model,
           system: input.system,
           messages: [{ id: 'memory-extract', role: 'user', content: input.prompt, timestamp: Date.now() }],
-          // Asked for goals and commitments too (FLINT_EXTRACT_CANDIDATES): the reply is held to the schema with them. Otherwise exactly what it was.
-          responseFormat: { type: 'json_schema', name: 'memory_facts', schema: (input.suggestions ? SUGGESTIONS_SCHEMA : FACTS_SCHEMA) as unknown as Record<string, unknown> },
+          // Asked for suggestions too (FLINT_EXTRACT_CANDIDATES): the reply is held to the schema with them (goals alone, or
+          // goals and commitments). Otherwise exactly what it was.
+          responseFormat: { type: 'json_schema', name: 'memory_facts', schema: (input.suggestions ? suggestSchema(input.suggestions) : FACTS_SCHEMA) as unknown as Record<string, unknown> },
           maxTokens,
           signal: ac.signal,
         });

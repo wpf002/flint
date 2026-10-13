@@ -105,7 +105,7 @@ import { stampUiVersion, uiVersionOf } from './ui-version';
 import { TrainingLogger } from './training';
 import { LocalPersonaCache, chooseLocalBrain, keepPickingLocal, localDefaultNote, overridePersonaCache, parseLocalModelRequest, type LocalBrain, type OverridePersona } from './local-model';
 import { MemoryExtractor } from './memory-extract';
-import { GoalCandidates, candidateOptions } from './goal-candidates';
+import { GoalCandidates, candidateOptions, serverZone } from './goal-candidates';
 import { chooseMemoryBrain, frontierExtractBrain, liveChat, memoryBrainSetting } from './memory-brain';
 import {
   SpendLedger,
@@ -832,12 +832,13 @@ async function main(): Promise<void> {
       // A turn that stays on this Mac is skipped too when the extractor's brain may not read it, and what a brain
       // that may read it learns from it is marked (./goals-chat extractor).
       ...goalsChat.extractor({ brain: extractBrain, tainted: (cid, tid) => convTaint.isTainted(cid, tid) }),
-      // The goals Will sets and the things he says he will do (./goal-candidates; FLINT_EXTRACT_CANDIDATES=1, off by
-      // default): asked of the local model alone, each held to his own quoted words, and handed to the runtime on
-      // this Mac, which files the card he signs. On the frontier this adds nothing: its prompt never changes.
+      // The goals Will sets (./goal-candidates; FLINT_EXTRACT_CANDIDATES=1, off by default; the things he says he
+      // will do need FLINT_EXTRACT_COMMITMENTS=1 as well): asked only of a model on this Mac (asked of this very
+      // brain at every pass), each held to his own quoted words, and handed to the runtime on this Mac, which
+      // files the card he signs. On the frontier this adds nothing: its prompt never changes.
       ...candidateOptions(process.env, {
-        kind: memoryPlan.kind, candidates: new GoalCandidates({ runtime: runtimeLink }),
-        tz: process.env.FLINT_TZ?.trim() || process.env.FLINT_USER_TZ?.trim() || 'America/Chicago', log: (m) => console.error(m),
+        kind: memoryPlan.kind, brain: extractBrain, candidates: new GoalCandidates({ runtime: runtimeLink }),
+        tz: serverZone(process.env, (m) => console.error(m)), log: (m) => console.error(m),
       }),
     }).start();
   };

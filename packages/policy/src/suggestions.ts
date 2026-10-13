@@ -43,22 +43,45 @@ export const SUGGESTION_TEXT_MIN = 3;
 export const SUGGESTION_TEXT_MAX = 120;
 /** A chat older than this is not suggested from: an extractor that re-reads history must not bring back last year's plans. */
 export const SUGGESTION_MAX_AGE_DAYS = 30;
+/** A day further ahead than this (ten years) is not a day anyone named: the server drops the suggestion, and the runtime refuses it. */
+export const SUGGESTION_MAX_DAYS_AHEAD = 3660;
 
 /**
- * Text as a quote is compared with it, the same on both sides: NFC, curly and
- * prime quote marks straightened, every run of whitespace one space, trimmed.
- * Case and every word are kept: a word added, dropped or changed fails the match.
+ * Text as Will is shown it: NFC, every run of whitespace one space, trimmed.
+ * Every other character is as he typed it (his apostrophes and quote marks
+ * stay his). What a card quotes is in this form.
+ */
+export function showSaid(s: string): string {
+  return s.normalize('NFC').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Text as a quote is compared with it, the same on both sides: showSaid, with
+ * curly and prime quote marks straightened. Each mark becomes one mark, so the
+ * result is as long as showSaid's and a place in one is the same place in the
+ * other. Case and every word are kept: a word added, dropped or changed fails
+ * the match.
  */
 export function normalizeSaid(s: string): string {
-  return s
-    .normalize('NFC')
-    .replace(/[‘’‚‛′´]/g, "'")
-    .replace(/[“”„‟″]/g, '"')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return showSaid(s)
+    .replace(/[\u2018\u2019\u201A\u201B\u2032\u00B4]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F\u2033]/g, '"');
 }
 
 const WORD = /[\p{L}\p{N}]/u;
+
+/** Where `needle` first sits in `hay` as whole words (both normalised), or -1. */
+function whereHeld(hay: string, needle: string): number {
+  if (!needle) return -1;
+  const startsWord = WORD.test(needle[0]!);
+  const endsWord = WORD.test(needle[needle.length - 1]!);
+  for (let i = hay.indexOf(needle); i !== -1; i = hay.indexOf(needle, i + 1)) {
+    const before = hay[i - 1];
+    const after = hay[i + needle.length];
+    if ((!startsWord || before === undefined || !WORD.test(before)) && (!endsWord || after === undefined || !WORD.test(after))) return i;
+  }
+  return -1;
+}
 
 /**
  * Is `quote` in what Will wrote, word for word? Both are normalised
@@ -66,34 +89,70 @@ const WORD = /[\p{L}\p{N}]/u;
  * ("my card" is not in "my cardiologist").
  */
 export function saidHolds(said: string, quote: string): boolean {
-  const hay = normalizeSaid(said);
+  return whereHeld(normalizeSaid(said), normalizeSaid(quote)) !== -1;
+}
+
+/**
+ * The whole sentence, or sentences, of what Will wrote that hold `quote`, in
+ * his own characters (showSaid): what a card quotes, so that a "not" a few
+ * words before the model's excerpt is always on it. A sentence starts at the
+ * top of a line, or after a full stop, a question mark, an exclamation mark or
+ * an ellipsis that is followed by anything but a lower-case letter ("e.g. so"
+ * does not end one). Undefined when the quote is not in his words, or when the
+ * sentences that hold it run past `max` characters: a sentence that cannot be
+ * shown whole is not quoted in part.
+ */
+export function saidSentences(said: string, quote: string, max: number = SUGGESTION_QUOTE_MAX): string | undefined {
+  const lines = said.split(/[\r\n]+/).map(showSaid).filter(Boolean);
+  const shown = lines.join(' ');
+  const hay = normalizeSaid(shown);
   const needle = normalizeSaid(quote);
-  if (!needle) return false;
-  const startsWord = WORD.test(needle[0]!);
-  const endsWord = WORD.test(needle[needle.length - 1]!);
-  for (let i = hay.indexOf(needle); i !== -1; i = hay.indexOf(needle, i + 1)) {
-    const before = hay[i - 1];
-    const after = hay[i + needle.length];
-    if ((!startsWord || before === undefined || !WORD.test(before)) && (!endsWord || after === undefined || !WORD.test(after))) return true;
+  const at = whereHeld(hay, needle);
+  if (at === -1) return undefined;
+  const starts = new Set<number>([0]);
+  let pos = 0;
+  for (const l of lines) {
+    starts.add(pos);
+    pos += l.length + 1;
   }
-  return false;
+  for (const m of shown.matchAll(/[.!?\u2026]+["'\u2019\u201D)\]]*\s(?!\p{Ll})/gu)) starts.add(m.index + m[0].length);
+  const sorted = [...starts].sort((x, y) => x - y);
+  const end = at + needle.length;
+  const from = sorted.filter((x) => x <= at).pop() ?? 0;
+  const to = sorted.find((x) => x >= end) ?? shown.length;
+  const out = shown.slice(from, to).trim();
+  return chars(out) <= max ? out : undefined;
 }
 
 /** Characters as the database counts them (char_length: code points, not UTF-16 units). */
-const chars = (s: string): number => [...s].length;
+function chars(s: string): number {
+  return [...s].length;
+}
 
-/** Words as they are kept: already in normal form (a text that is not never went through the check), of a set length, with a letter in them. */
-const kept = (min: number, max: number) =>
-  z
-    .string()
-    .refine((s) => normalizeSaid(s) === s, 'not in normal form')
-    .refine((s) => chars(s) >= min && chars(s) <= max, `not ${min} to ${max} characters`)
-    .refine((s) => /\p{L}/u.test(s), 'no words');
-
-/** Will's own words, quoted: 12 to 300 characters. */
-export const SuggestionQuote = kept(SUGGESTION_QUOTE_MIN, SUGGESTION_QUOTE_MAX);
-/** The goal or the promise in a few words (the local model's, shown to Will as its title). */
-export const SuggestionText = kept(SUGGESTION_TEXT_MIN, SUGGESTION_TEXT_MAX);
+/**
+ * Will's own words, quoted: 12 to 300 characters as the database counts them,
+ * in the form he is shown them (showSaid: one that is not never went through
+ * the check), with a letter in them and no control character.
+ */
+export const SuggestionQuote = z
+  .string()
+  .refine((s) => showSaid(s) === s, 'not in the shown form')
+  .refine((s) => chars(s) >= SUGGESTION_QUOTE_MIN && chars(s) <= SUGGESTION_QUOTE_MAX, `not ${SUGGESTION_QUOTE_MIN} to ${SUGGESTION_QUOTE_MAX} characters`)
+  .refine((s) => !/\p{Cc}/u.test(s), 'holds a control character')
+  .refine((s) => /\p{L}/u.test(s), 'no words');
+/**
+ * The goal or the promise in a few words (the local model's, shown to Will as
+ * its title). Its length is counted as a goal's title is (GoalTitle: 120
+ * UTF-16 units at most), so every one that is accepted can be a goal's title.
+ * No control or format character: a title never carries a direction override
+ * or a zero-width mark, which a card would show as something it is not.
+ */
+export const SuggestionText = z
+  .string()
+  .refine((s) => normalizeSaid(s) === s, 'not in normal form')
+  .refine((s) => s.length >= SUGGESTION_TEXT_MIN && s.length <= SUGGESTION_TEXT_MAX, `not ${SUGGESTION_TEXT_MIN} to ${SUGGESTION_TEXT_MAX} characters`)
+  .refine((s) => !/[\p{Cc}\p{Cf}]/u.test(s), 'holds a control or format character')
+  .refine((s) => /\p{L}/u.test(s), 'no words');
 /** A calendar day, and a real one. */
 export const DayOnly = z
   .string()
@@ -139,6 +198,14 @@ export const SUGGESTION_ARGS = { 'goal.propose': GoalProposeArgs, 'world.commitm
 /** The source of a suggestion: the same conversation, turn and quote is always the same one. */
 export function suggestionSourceRef(conversationId: string, turnId: string, quote: string): string {
   return `chat:${createHash('sha256').update(`${conversationId}\u0000${turnId}\u0000${normalizeSaid(quote)}`).digest('hex')}`;
+}
+/**
+ * The turn a suggestion came from, by kind: `chat-turn:` and a sha256 over the
+ * conversation, the turn and the kind. Once Will has turned a suggestion down,
+ * nothing else of that kind is taken from that turn, however it is quoted.
+ */
+export function suggestionTurnRef(conversationId: string, turnId: string, kind: SuggestionKind): string {
+  return `chat-turn:${createHash('sha256').update(`${conversationId}\u0000${turnId}\u0000${kind}`).digest('hex')}`;
 }
 /** The id of the goal a suggestion becomes, made from its source: filed twice, it is the same goal. */
 export function suggestionGoalId(sourceRef: string): string {

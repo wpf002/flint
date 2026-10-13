@@ -6,9 +6,12 @@
  *    error, the suggestion is dropped and counted: nothing is written to disk
  *    to wait (no spool), and nothing is retried. A runtime that is not on this
  *    Mac is sent nothing.
- *  - The setting: FLINT_EXTRACT_CANDIDATES=1 turns it on, for the local model
- *    only. Off, or on the frontier, the extractor is given nothing and no call
- *    is made.
+ *  - The settings: FLINT_EXTRACT_CANDIDATES=1 turns goals on, and
+ *    FLINT_EXTRACT_COMMITMENTS=1 commitments as well. Only for a model on this
+ *    Mac, by the server's own locality rule, asked at every pass: a
+ *    cloud-backed name or an Ollama on another machine is asked for facts
+ *    alone, files nothing, and the log says the feature is waiting. Off, or on
+ *    the frontier, the extractor is given nothing and no call is made.
  *  - The whole path, with stubs on real sockets: a turn answered with Will's
  *    goals is mined by the local model and its suggestion reaches the runtime;
  *    nothing about it reaches a stub that speaks Anthropic's wire. With the
@@ -30,12 +33,12 @@ import { CHAT_SUGGESTION_ACTIONS, ChatCandidate } from '@flint/policy';
 import { ActionQueue } from '../src/actions';
 import { calculateTool } from '../src/calculate';
 import { deepResearchTool } from '../src/deep-research';
-import { GoalCandidates, candidateOptions, candidatesSetting } from '../src/goal-candidates';
+import { GoalCandidates, WAITING, candidateOptions, candidatesSetting, commitmentsSetting, serverZone } from '../src/goal-candidates';
 import { GoalsChat } from '../src/goals-chat';
 import { GOALS_TURN } from '../src/goals-now';
 import { KnowledgeStore, rememberTool } from '../src/knowledge';
 import { chooseMemoryBrain, frontierExtractBrain } from '../src/memory-brain';
-import { MemoryExtractor, SUGGEST_PROMPT, type ChatSuggestion } from '../src/memory-extract';
+import { MemoryExtractor, SUGGEST_GOALS_PROMPT, SUGGEST_PROMPT, type ChatSuggestion } from '../src/memory-extract';
 import { isSafeTool } from '../src/policy';
 import { RuntimeProposals } from '../src/runtime-proposals';
 import { gateBuiltins, type TierEvent } from '../src/tier-gate';
@@ -150,7 +153,7 @@ describe('the candidates client', () => {
     // The module cannot write one: it never opens a file.
     const source = readFileSync(join(__dirname, '..', 'src', 'goal-candidates.ts'), 'utf8');
     expect(source).not.toMatch(/node:fs|writeFile|appendFile|mkdir/);
-    // What it imports: the contract, the runtime link's type, the extractor's types and the loopback rule. No file, no spool.
+    // What it imports: the contract, the runtime link's type, the extractor's types and the locality rules. No file, no spool.
     expect([...source.matchAll(/from '([^']+)'/g)].map((m) => m[1])).toEqual(['@flint/policy', './audit-sink', './memory-extract', './policy']);
   });
 
@@ -194,17 +197,81 @@ describe('FLINT_EXTRACT_CANDIDATES', () => {
     const logs: string[] = [];
     const filed: ChatSuggestion[] = [];
     const candidates = { file: async (s: ChatSuggestion) => (filed.push(s), 'filed' as const) } as unknown as GoalCandidates;
-    const o = (kind: 'local' | 'frontier') => ({ kind, candidates, tz: 'America/Chicago', log: (m: string) => void logs.push(m) });
+    const brain = { provider: 'ollama', model: 'qwen2.5:14b', baseURL: HERE };
+    const o = (kind: 'local' | 'frontier', here = true) => ({ kind, brain, candidates, tz: 'America/Chicago', log: (m: string) => void logs.push(m), here: () => here });
     expect(candidateOptions({}, o('local'))).toEqual({});
     expect(candidateOptions({ FLINT_EXTRACT_CANDIDATES: '0' }, o('local'))).toEqual({});
     expect(logs).toEqual([]);
     expect(candidateOptions({ FLINT_EXTRACT_CANDIDATES: '1' }, o('frontier'))).toEqual({});
     expect(logs).toEqual(['[memory-extract] FLINT_EXTRACT_CANDIDATES=1 needs the local model (FLINT_MEMORY_BRAIN=local): no goals or commitments are suggested from chat']);
+    // On, goals alone: commitments are off until their own switch is on.
     const on = candidateOptions({ FLINT_EXTRACT_CANDIDATES: '1' }, o('local'));
-    expect(on).toMatchObject({ candidates: true, tz: 'America/Chicago' });
+    expect(on).toMatchObject({ commitments: false, tz: 'America/Chicago' });
+    expect(typeof on.candidates).toBe('function');
+    expect((on.candidates as () => boolean)()).toBe(true);
     expect(await on.onCandidate!(suggestion())).toBe('filed');
     expect(filed).toHaveLength(1);
-    expect(logs[1]).toMatch(/^\[memory-extract\] goals and commitments Will sets in chat are suggested/);
+    expect(logs[1]).toBe('[memory-extract] goals Will sets in chat are suggested (commitments are off: FLINT_EXTRACT_COMMITMENTS) (FLINT_EXTRACT_CANDIDATES=1): each rests on his own quoted words and waits for his approval');
+    // Both on.
+    logs.length = 0;
+    expect(candidateOptions({ FLINT_EXTRACT_CANDIDATES: '1', FLINT_EXTRACT_COMMITMENTS: '1' }, o('local'))).toMatchObject({ commitments: true });
+    expect(logs).toEqual(['[memory-extract] goals and commitments Will sets in chat are suggested (FLINT_EXTRACT_CANDIDATES=1): each rests on his own quoted words and waits for his approval']);
+    // Commitments alone turn nothing on, and say so.
+    logs.length = 0;
+    expect(candidateOptions({ FLINT_EXTRACT_COMMITMENTS: '1' }, o('local'))).toEqual({});
+    expect(logs).toEqual(['[memory-extract] FLINT_EXTRACT_COMMITMENTS=1 does nothing without FLINT_EXTRACT_CANDIDATES=1: nothing is suggested from chat']);
+    expect(commitmentsSetting({ FLINT_EXTRACT_COMMITMENTS: 'yes' }, () => {})).toBe(false);
+  });
+
+  it('asks the locality rule about the extractor’s own brain, at every pass, and says when the answer changes', () => {
+    const logs: string[] = [];
+    let here = false;
+    const seen: unknown[] = [];
+    const brain = { provider: 'ollama', model: 'mine', baseURL: HERE };
+    const on = candidateOptions({ FLINT_EXTRACT_CANDIDATES: '1' }, {
+      kind: 'local', brain, candidates: {} as GoalCandidates, tz: 'UTC', log: (m) => void logs.push(m), here: (b) => (seen.push(b), here),
+    });
+    // At boot it is asked once, about the brain it was given: not here, so the feature is waiting.
+    expect(seen).toEqual([brain]);
+    expect(logs).toEqual([WAITING]);
+    expect(WAITING).toContain('is waiting for a model on this Mac');
+    const ask = on.candidates as () => boolean;
+    expect(ask()).toBe(false);
+    expect(ask()).toBe(false);
+    expect(logs).toHaveLength(1);
+    here = true;
+    expect(ask()).toBe(true);
+    expect(logs).toHaveLength(2);
+    expect(logs[1]).toContain('goals Will sets in chat are suggested');
+    here = false;
+    expect(ask()).toBe(false);
+    expect(logs[2]).toBe(WAITING);
+    expect(seen).toHaveLength(5);
+    // By default the question is the server's one locality rule: an Ollama on another machine, a cloud model, a
+    // model nobody has listed, another provider, no brain at all, are all "not here".
+    const real = (b: { provider: string; model: string; baseURL?: string } | undefined) =>
+      (candidateOptions({ FLINT_EXTRACT_CANDIDATES: '1' }, { kind: 'local', brain: b, candidates: {} as GoalCandidates, tz: 'UTC', log: () => {} }).candidates as () => boolean)();
+    listed(HERE, ['qwen2.5:14b', { name: 'mine', remote_host: 'https://ollama.com' }]);
+    expect(real({ provider: 'ollama', model: 'qwen2.5:14b', baseURL: HERE })).toBe(true);
+    expect(real({ provider: 'ollama', model: 'mine', baseURL: HERE })).toBe(false);
+    expect(real({ provider: 'ollama', model: 'qwen2.5:14b', baseURL: 'http://10.0.0.5:11434' })).toBe(false);
+    expect(real({ provider: 'ollama', model: 'not-listed:7b', baseURL: HERE })).toBe(false);
+    expect(real({ provider: 'ollama', model: 'glm-4.6:cloud', baseURL: HERE })).toBe(false);
+    expect(real({ provider: 'anthropic', model: 'claude-test' })).toBe(false);
+    expect(real(undefined)).toBe(false);
+    cleanup();
+  });
+
+  it('the server reads Will’s zone as the runtime does, and falls back on a name that is no zone instead of failing', () => {
+    const logs: string[] = [];
+    const log = (m: string) => void logs.push(m);
+    expect(serverZone({ FLINT_TZ: 'America/New_York', FLINT_USER_TZ: 'UTC' }, log)).toBe('America/New_York');
+    expect(serverZone({ FLINT_USER_TZ: 'Europe/Lisbon' }, log)).toBe('Europe/Lisbon');
+    expect(serverZone({}, log)).toBe('America/Chicago');
+    expect(logs).toEqual([]);
+    for (const bad of ['Mars/Phobos', 'CST6CDT ']) expect(serverZone({ FLINT_TZ: bad }, log), bad).toMatch(/^(America\/Chicago|CST6CDT)$/);
+    expect(serverZone({ FLINT_TZ: 'Mars/Phobos' }, log)).toBe('America/Chicago');
+    expect(logs.at(-1)).toBe('[memory-extract] FLINT_TZ or FLINT_USER_TZ is not a time zone; days are read in America/Chicago');
   });
 });
 
@@ -229,8 +296,12 @@ describe('the whole path, on real sockets: a turn that stays here is mined local
   const PLAIN_SAID = `${CANARY} I will send Dana the draft contract on Friday without fail`;
   const NOW = Date.now();
 
-  /** The server's memory wiring, as main() does it, with every outside address a stub that records what it is sent. */
-  async function wired(env: Record<string, string>) {
+  /**
+   * The server's memory wiring, as main() does it, with every outside address a stub that records what it is sent.
+   * `alias`: what this Mac's Ollama says of the model (a cloud-backed name carries a remote host). `elsewhere`: the
+   * extractor's Ollama is named at another machine's address (its requests are routed to the stub).
+   */
+  async function wired(env: Record<string, string>, o: { alias?: string; elsewhere?: boolean } = {}) {
     const store = tmpStore();
     // Two finished turns: one answered with Will's goals (it stays on this Mac), one ordinary.
     await storedTurn(store, { conversationId: 'console-1', id: 'turn_goals', context: GOALS_TURN, user: GOALS_SAID, assistant: 'Noted.', at: NOW - 120_000 });
@@ -239,7 +310,7 @@ describe('the whole path, on real sockets: a turn that stays here is mined local
     const runtime = await stub(() => ({ status: 201, body: { outcome: 'filed' } }));
     const ollama = await stub((req, body) => {
       // What runs on it, when the server asks (./ollama-locality): this model, here.
-      if (req.url === '/api/tags') return { status: 200, body: { models: [{ name: 'qwen2.5:14b', model: 'qwen2.5:14b' }] } };
+      if (req.url === '/api/tags') return { status: 200, body: { models: [{ name: 'qwen2.5:14b', model: 'qwen2.5:14b', ...(o.alias ? { remote_host: o.alias, remote_model: 'big-model' } : {}) }] } };
       const prompt = String((JSON.parse(body) as { messages?: Array<{ content?: string }> }).messages?.map((m) => m.content).join('\n') ?? '');
       const suggestions = [
         ...(prompt.includes('sailing course') ? [{ turn: 1, kind: 'goal', quote: 'I want to finish the sailing course before the summer', text: 'finish the sailing course', dueOn: '' }] : []),
@@ -254,44 +325,92 @@ describe('the whole path, on real sockets: a turn that stays here is mined local
         content: [{ type: 'text', text: JSON.stringify({ facts: [], suggestions: [{ turn: 1, kind: 'commitment', quote: 'I will send Dana the draft contract on Friday', text: 'send Dana the draft contract', dueOn: '' }] }) }] },
     }));
     closers.push(runtime.close, ollama.close, anthropic.close);
-    listed(ollama.url, ['qwen2.5:14b']);
+    listed(ollama.url, [o.alias ? { name: 'qwen2.5:14b', remote_host: o.alias } : 'qwen2.5:14b']);
+    // An Ollama named at another machine's address: what the extractor would send there lands on the stub.
+    const away = 'http://10.0.0.5:11434';
+    const routed = (async (url: string | URL | Request, init?: RequestInit) => fetch(String(url).replace(away, ollama.url), init)) as typeof fetch;
     const goalsChat = new GoalsChat({ memory: store, blocks: { world: false, goals: true, goalsToFrontier: false }, runtime: () => ({ url: runtime.url, token: TOKEN }), log: () => {} });
     const frontier = new Flint({ provider: new AnthropicProvider({ apiKey: 'sk-test-key', baseURL: anthropic.url, maxRetries: 0 }), model: 'claude-test' });
     const logs: string[] = [];
-    const localEnv = { OLLAMA_HOST: ollama.url, OLLAMA_MODEL: 'qwen2.5:14b', ...env };
-    const plan = chooseMemoryBrain(localEnv, { frontier: frontierExtractBrain((input) => frontier.generate(input)), log: (m) => void logs.push(m) });
+    const localEnv = { OLLAMA_HOST: o.elsewhere ? away : ollama.url, OLLAMA_MODEL: 'qwen2.5:14b', ...env };
+    const plan = chooseMemoryBrain(localEnv, { frontier: frontierExtractBrain((input) => frontier.generate(input)), log: (m) => void logs.push(m), ...(o.elsewhere ? { fetch: routed } : {}) });
     if (plan.kind === 'none') throw new Error(plan.why);
     const candidates = new GoalCandidates({ runtime: () => ({ url: runtime.url, token: TOKEN }) });
     const extractBrain = plan.kind === 'local' ? { provider: 'ollama', model: plan.model.model, baseURL: plan.model.baseURL } : { provider: 'anthropic', model: 'claude-test' };
     const ex = new MemoryExtractor(store, new KnowledgeStore(join(dir, 'knowledge.json'), downEmbedder), plan.brain, join(dir, 'extract-state.json'), {
       kind: plan.kind,
       ...goalsChat.extractor({ brain: extractBrain, tainted: () => false }),
-      ...candidateOptions(localEnv, { kind: plan.kind, candidates, tz: 'UTC', log: (m) => void logs.push(m) }),
+      ...candidateOptions(localEnv, { kind: plan.kind, brain: extractBrain, candidates, tz: 'UTC', log: (m) => void logs.push(m) }),
     });
     await ex.run();
     // The model's own calls: what the Ollama was asked to answer (not the listing of what runs on it).
     const chats = ollama.requests.filter((r) => r.path === '/api/chat');
     expect(ollama.requests.filter((r) => r.path !== '/api/chat' && r.path !== '/api/tags')).toEqual([]);
-    return { runtime, ollama, chats, anthropic, candidates, ex, logs };
+    return { runtime, ollama, chats, anthropic, candidates, ex, logs, extractBrain };
   }
 
   it('on the local model: both turns are mined, each suggestion reaches the runtime on this Mac, and the Anthropic stub is never called', async () => {
-    const w = await wired({ FLINT_EXTRACT_CANDIDATES: '1' });
+    const w = await wired({ FLINT_EXTRACT_CANDIDATES: '1', FLINT_EXTRACT_COMMITMENTS: '1' });
     // The turn that stays here is in a call of its own, and the local model was asked for suggestions in both.
     expect(w.chats).toHaveLength(2);
     for (const r of w.chats) expect(r.body).toContain(JSON.stringify(SUGGEST_PROMPT).slice(1, 60));
     expect(w.chats.filter((r) => r.body.includes('sailing course'))).toHaveLength(1);
-    // The runtime got both, with the server's token, quoted from the right turn.
+    // The runtime got both, with the server's token, quoted from the right turn: his whole sentence each time.
     expect(w.runtime.requests.map((r) => [r.method, r.path, r.auth])).toEqual([['POST', '/v1/goals/candidates', `Bearer ${TOKEN}`], ['POST', '/v1/goals/candidates', `Bearer ${TOKEN}`]]);
     const bodies = w.runtime.requests.map((r) => JSON.parse(r.body) as Record<string, unknown>);
-    expect(bodies.map((b) => [b.kind, b.conversationId, b.turnId, b.quote]).sort()).toEqual([
-      ['commitment', 'console-2', 'turn_plain', 'I will send Dana the draft contract on Friday'],
-      ['goal', 'console-1', 'turn_goals', 'I want to finish the sailing course before the summer'],
+    expect(bodies.map((b) => [b.kind, b.conversationId, b.turnId, b.quote, b.text]).sort()).toEqual([
+      ['commitment', 'console-2', 'turn_plain', PLAIN_SAID, 'Send Dana the draft contract'],
+      ['goal', 'console-1', 'turn_goals', GOALS_SAID, 'Finish the sailing course'],
     ]);
     for (const b of bodies) expect(ChatCandidate.safeParse(b).success).toBe(true);
     expect(w.candidates.counts).toMatchObject({ filed: 2, held: 0, unreachable: 0 });
     expect(w.ex.lastStats).toMatchObject({ suggested: 2, suggestionsKept: 2, suggestionsFiled: 2 });
     // Nothing went anywhere else.
+    expect(w.anthropic.requests).toEqual([]);
+  });
+
+  it('goals alone (commitments have their own switch): the model is asked for goals only, and no commitment reaches the runtime', async () => {
+    const w = await wired({ FLINT_EXTRACT_CANDIDATES: '1' });
+    expect(w.chats).toHaveLength(2);
+    for (const r of w.chats) {
+      expect(r.body).toContain(JSON.stringify(SUGGEST_GOALS_PROMPT).slice(1, 60));
+      expect(r.body).not.toMatch(/commitment/);
+    }
+    // The stub Ollama answers with a commitment for the plain turn anyway: it is dropped, never sent on.
+    expect(w.runtime.requests.map((r) => (JSON.parse(r.body) as { kind: string }).kind)).toEqual(['goal']);
+    expect(w.ex.lastStats.rejected['suggestion-kind']).toBe(1);
+    expect(w.candidates.counts).toMatchObject({ filed: 1 });
+    expect(w.anthropic.requests).toEqual([]);
+  });
+
+  it('a local model that runs elsewhere suggests nothing: a cloud-backed name on this Mac’s Ollama is asked for facts alone, and the log says the feature is waiting', async () => {
+    const w = await wired({ FLINT_EXTRACT_CANDIDATES: '1', FLINT_EXTRACT_COMMITMENTS: '1' }, { alias: 'https://ollama.com' });
+    // It is still the "local" brain by its setting: that is not what decides.
+    expect(w.extractBrain).toMatchObject({ provider: 'ollama', model: 'qwen2.5:14b' });
+    // The turn that stays here is not sent to it at all; the plain turn is, for facts, with no suggestion lines.
+    expect(w.chats).toHaveLength(1);
+    expect(w.chats[0]!.body).toContain('draft contract');
+    expect(w.chats[0]!.body).not.toContain('sailing course');
+    expect(w.chats[0]!.body).not.toContain('suggestions');
+    // The stub answered with a suggestion all the same: it is not read, and the runtime is told nothing.
+    expect(w.runtime.requests).toEqual([]);
+    expect(w.ex.asks()).toBeUndefined();
+    expect(w.ex.lastStats).toMatchObject({ skippedTainted: 1, suggested: 0, suggestionsKept: 0 });
+    expect(w.candidates.counts).toEqual({ filed: 0, known: 0, refused: 0, capped: 0, unreachable: 0, held: 0 });
+    expect(w.logs).toContain(WAITING);
+    expect(w.logs.some((l) => l.includes('are suggested'))).toBe(false);
+  });
+
+  it('nor does an Ollama on another machine: asked for facts alone, nothing filed, and the log says the feature is waiting', async () => {
+    const w = await wired({ FLINT_EXTRACT_CANDIDATES: '1', FLINT_EXTRACT_COMMITMENTS: '1' }, { elsewhere: true });
+    expect(w.extractBrain).toMatchObject({ provider: 'ollama', baseURL: 'http://10.0.0.5:11434' });
+    expect(w.chats).toHaveLength(1);
+    expect(w.chats[0]!.body).toContain('draft contract');
+    expect(w.chats[0]!.body).not.toContain('sailing course');
+    expect(w.chats[0]!.body).not.toContain('suggestions');
+    expect(w.runtime.requests).toEqual([]);
+    expect(w.ex.lastStats).toMatchObject({ skippedTainted: 1, suggested: 0 });
+    expect(w.logs).toContain(WAITING);
     expect(w.anthropic.requests).toEqual([]);
   });
 
@@ -331,8 +450,9 @@ describe('the whole path, on real sockets: a turn that stays here is mined local
     const candidates = new GoalCandidates({ runtime: () => ({ url: gone.url, token: TOKEN }) });
     let calls = 0;
     const brain = { generate: async () => (calls += 1, { facts: [], suggestions: [{ turn: 1, kind: 'commitment', quote: 'I will send Dana the draft contract on Friday', text: 'send Dana the draft contract', dueOn: '' }] }) };
+    listed(HERE, ['qwen2.5:14b']);
     const ex = new MemoryExtractor(store, new KnowledgeStore(join(dir, 'knowledge.json'), downEmbedder), brain, join(dir, 'extract-state.json'), {
-      ...candidateOptions({ FLINT_EXTRACT_CANDIDATES: '1' }, { kind: 'local', candidates, tz: 'UTC', log: () => {} }),
+      ...candidateOptions({ FLINT_EXTRACT_CANDIDATES: '1', FLINT_EXTRACT_COMMITMENTS: '1' }, { kind: 'local', brain: { provider: 'ollama', model: 'qwen2.5:14b', baseURL: HERE }, candidates, tz: 'UTC', log: () => {}, here: () => true }),
     });
     await ex.run();
     expect(ex.lastStats).toMatchObject({ suggested: 1, suggestionsKept: 1, suggestionsFiled: 0, turnsSent: 1 });
