@@ -8,7 +8,7 @@
  *   GET  /goals/:id                             -> runtime GET /v1/goals/:id
  *   POST /goals {draftKey, args}                -> a new goal's card
  *   POST /goals/linkable {q}                    -> items a check may watch (a POST: what Will types never lands in a request log)
- *   POST /goals/:id/edit|timing|done|abandon|resume|plan {args}   -> that card
+ *   POST /goals/:id/edit|timing|done|abandon|resume|start|plan {args}   -> that card (start: Make It a Goal, for one Flint suggested from a chat)
  *   POST /goals/:id/pause|dismiss               -> unsigned
  *   POST /goals/:id/review                      -> Review Now: unsigned (part 3; the runtime runs the review on its local model)
  *   POST /goals/:id/criteria/:cid {met}         -> unsigned
@@ -181,7 +181,7 @@ async function forward<T extends z.ZodTypeAny>(res: ServerResponse, deps: GoalsD
   return reply(res, 200, answer.data);
 }
 
-const CARD = /^\/goals\/([^/]+)\/(edit|timing|done|abandon|resume|plan)$/;
+const CARD = /^\/goals\/([^/]+)\/(edit|timing|done|abandon|resume|start|plan)$/;
 const PLAIN = /^\/goals\/([^/]+)\/(pause|dismiss|review)$/;
 const MARK = /^\/goals\/([^/]+)\/criteria\/([^/]+)$/;
 const STEP = /^\/goals\/([^/]+)\/steps\/([^/]+)$/;

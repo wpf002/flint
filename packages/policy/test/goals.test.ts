@@ -359,7 +359,18 @@ describe('the goals panel’s wire (P3 part 2)', () => {
   });
 
   it('each card route takes that card’s args; resuming brings no plan; the plain writes are strict', () => {
-    expect(Object.values(GOAL_CARD_VERBS).sort()).toEqual([...GOAL_SIGNED_ACTIONS].sort());
+    // Each signed action has its route; goal.activate has two (resume, and start: a suggestion made a goal, part 5).
+    expect([...new Set(Object.values(GOAL_CARD_VERBS))].sort()).toEqual([...GOAL_SIGNED_ACTIONS].sort());
+    expect(Object.keys(GOAL_CARD_VERBS).sort()).toEqual(['abandon', 'done', 'edit', 'plan', 'resume', 'start', 'timing']);
+    expect(Object.keys(GOAL_CARD_BODIES).sort()).toEqual(Object.keys(GOAL_CARD_VERBS).sort());
+    // Start: one Flint suggested, as Will's own goal: it may bring a first plan, and is never his own new goal's route.
+    const suggested = { origin: 'flint' };
+    expect(GOAL_CARD_BODIES.start.safeParse({ args: activate(suggested) }).success).toBe(true);
+    expect(GOAL_CARD_BODIES.start.safeParse({ args: activate({ ...suggested, plan: { ops: [{ op: 'add', key: 's1', step: { ordinal: 1, title: 'S', kind: 'will_task' } }] }, successCriteria: [crit('c1', { kind: 'steps', keys: ['s1'] })] }) }).success).toBe(true);
+    for (const over of [{}, { origin: 'flint', owner: 'flint' }, { origin: 'flint', tainted: true }, { origin: 'flint', sensitivity: 'financial' }, { origin: 'flint', nexusProjectId: 'p1' }]) {
+      expect(GOAL_CARD_BODIES.start.safeParse({ args: activate(over) }).success, JSON.stringify(over)).toBe(false);
+    }
+    expect(GOAL_CARD_BODIES.start.safeParse({ args: activate(suggested), x: 1 }).success).toBe(false);
     expect(GOAL_CARD_BODIES.done.safeParse({ args: { goalId: 'gotest0001', goalTitle: 'T' } }).success).toBe(true);
     expect(GOAL_CARD_BODIES.done.safeParse({ args: { goalId: 'gotest0001', goalTitle: 'T' }, x: 1 }).success).toBe(false);
     expect(GOAL_CARD_BODIES.resume.safeParse({ args: activate() }).success).toBe(true);
@@ -389,6 +400,13 @@ describe('the goals panel’s wire (P3 part 2)', () => {
     expect(GoalsPage.safeParse({ tab: 'active', goals: [row], waiting: [], reviews: 'off' }).success).toBe(true);
     expect(GoalsPage.safeParse({ tab: 'active', goals: [{ ...row, extra: 1 }], waiting: [], reviews: 'off' }).success).toBe(false);
     expect(GoalsPage.safeParse({ tab: 'active', goals: [{ ...row, title: 'x'.repeat(121) }], waiting: [], reviews: 'off' }).success).toBe(false);
+    // The Suggested tab's rows (part 5): an answer without them still reads (an older runtime), and each row is strict.
+    expect(GoalsPage.parse({ tab: 'suggested', goals: [], waiting: [], reviews: 'off' }).suggestions).toEqual([]);
+    const said = { goalId: 'gotest0001', title: 'Run a half marathon', quote: 'I want to run a half marathon by spring', saidAt: '2026-10-08T15:00:00.000Z', dueOn: '2027-03-20', waiting: true };
+    expect(GoalsPage.safeParse({ tab: 'suggested', goals: [], waiting: [], reviews: 'off', suggestions: [said, { ...said, saidAt: null, dueOn: null, waiting: false }] }).success).toBe(true);
+    for (const bad of [{ ...said, extra: 1 }, { ...said, quote: '' }, { ...said, dueOn: 'next spring' }, { ...said, saidAt: '2026-10-08' }, { ...said, goalId: 'x' }, { ...said, title: '' }]) {
+      expect(GoalsPage.safeParse({ tab: 'suggested', goals: [], waiting: [], reviews: 'off', suggestions: [bad] }).success, JSON.stringify(bad)).toBe(false);
+    }
     expect(Linkable.safeParse({ items: [{ entityId: 'en1', kind: 'pull_request', label: 'wpf002/flint #57', status: 'active', title: null, conditions: [] }] }).success).toBe(true);
   });
 });
