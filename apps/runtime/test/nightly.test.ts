@@ -9,7 +9,10 @@ import { NO_DB, freshDb, withClient, type TestUrls } from './db';
 import { enrollTestKey } from './sign';
 import { createDb, type Db } from '../src/db';
 import { jobFailedNote } from '@flint/policy';
-import { attempt, gate, offerNextCard, tellFailure } from '../src/backup/nightly';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { attempt, gate, offerNextCard, tellFailure, tellStopped } from '../src/backup/nightly';
 import { NeedsSetup } from '../src/backup/backup';
 import { approveProposal, completeProposal, createProposal } from '../src/governance/proposals';
 import { runInternal } from '../src/governance/internal';
@@ -19,8 +22,8 @@ describe('a nightly job that fails (what cli.ts runs, by execution)', () => {
     // It ran: its own account of itself, and nothing to set up.
     expect(await attempt(async () => ({ detail: { bytes: 3 } }))).toEqual({ ok: true, setup: false, mismatch: false, detail: { bytes: 3 } });
     // The restore drill finished and found a difference: a failure, but not a setup one.
-    expect(await attempt(async () => ({ ok: false, mismatch: true, error: 'row counts differ in 2 table(s)', detail: { tables: 30, mismatches: 2 } }))).toEqual({
-      ok: false, error: 'row counts differ in 2 table(s)', setup: false, mismatch: true, detail: { tables: 30, mismatches: 2 },
+    expect(await attempt(async () => ({ ok: false, mismatch: true, error: 'row counts differ in 2 tables', detail: { tables: 30, mismatches: 2 } }))).toEqual({
+      ok: false, error: 'row counts differ in 2 tables', setup: false, mismatch: true, detail: { tables: 30, mismatches: 2 },
     });
     // What it throws is its failure: needsSetup says which kind.
     const thrown = async (err: unknown) => attempt(async () => { throw err; });
@@ -56,6 +59,41 @@ describe('a nightly job that fails (what cli.ts runs, by execution)', () => {
       ['Backup Failed', 'Last night’s database backup didn’t finish. It won’t work until its setup is fixed.'],
       [later.title, later.body],
     ]);
+  });
+});
+
+describe('a nightly job that stopped before it could ask what it may do', () => {
+  it('tellStopped: Will is told once a night, in words that promise nothing about its next run, and the three jobs do not each say it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'flint-stopped-'));
+    const mark = join(dir, 'nightly-stopped');
+    const told: Array<[string, string]> = [];
+    const env = (now: Date) => ({ icloud: true, tz: 'America/Chicago', now, mark, notify: async (title: string, body: string) => void told.push([title, body]) });
+    try {
+      const night = new Date('2026-10-12T07:15:00Z'); // 2:15 AM in Chicago
+      expect(await tellStopped('backup', env(night))).toEqual({ title: 'Backup Failed', body: 'Last night’s database backup didn’t finish. Flint couldn’t reach its database. Check Health in Settings.' });
+      // The offsite copy and the restore test run straight after, and stop on the same trouble: nothing more is said.
+      expect(await tellStopped('offsite', env(new Date(night.getTime() + 5_000)))).toBeUndefined();
+      expect(await tellStopped('drill', env(new Date(night.getTime() + 9_000)))).toBeUndefined();
+      expect(told).toHaveLength(1);
+      expect(readFileSync(mark, 'utf8')).toBe('2026-10-12\n');
+      // The next night it is said again, once.
+      const next = await tellStopped('offsite', env(new Date(night.getTime() + 86_400_000)));
+      expect(next).toEqual(jobFailedNote('backup.offsite', { next: 'stopped', icloud: true }));
+      expect(next!.body).toBe('Last night’s encrypted copy to iCloud didn’t finish. Flint couldn’t reach its database. Check Health in Settings.');
+      expect(told).toHaveLength(2);
+      // A mark that cannot be read, or says something else, never silences it.
+      writeFileSync(mark, 'not a day');
+      expect(await tellStopped('backup', env(new Date(night.getTime() + 86_400_000 + 1000)))).toBeDefined();
+      // A mark that cannot be written costs nothing but a second note.
+      const nowhere = { ...env(new Date(night.getTime() + 3 * 86_400_000)), mark: join(dir, 'no-such-folder', 'mark') };
+      expect(await tellStopped('backup', nowhere)).toBeDefined();
+      expect(await tellStopped('backup', nowhere)).toBeDefined();
+      // And when Will cannot be told, that is the caller's to know: it does not pretend to have told him.
+      await expect(tellStopped('backup', { ...env(new Date(night.getTime() + 5 * 86_400_000)), notify: async () => { throw new Error('the server is not answering'); } })).rejects.toThrow('the server is not answering');
+      expect(readFileSync(mark, 'utf8')).not.toBe('2026-10-17\n');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

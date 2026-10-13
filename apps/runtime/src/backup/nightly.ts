@@ -21,14 +21,28 @@ export async function gate(db: Db, cmd: Command, tz: string, rp: WebAuthnRelying
   return cardGate(db, { action: ACTION[cmd], job: cmd, templateId: `nightly.${cmd}` }, tz, rp, now);
 }
 
+/** A nightly job's card: the action it asks for, the job's own name, and the card's template. */
+export interface CardJob {
+  action: string;
+  job: string;
+  templateId: string;
+  /** What the card says beside its day: numbers the run itself worked out (how much a cleanup would remove). */
+  args?: Readonly<Record<string, number>>;
+  /** What it does cannot be undone (it deletes): the card says so, and asks on its own. */
+  destructive?: boolean;
+  /** Why it is asking, when the usual sentence does not fit. */
+  reason?: string;
+}
+
 /**
  * The nightly card for any job that runs at APPROVAL until promoted (backups,
- * the drill, retention): run under the cap once promoted; otherwise run on a
- * card Will approved, or offer tonight's card and wait.
+ * the drill, retention, removing old backups): run under the cap once
+ * promoted; otherwise run on a card Will approved, or offer tonight's card and
+ * wait.
  */
 export async function cardGate(
   db: Db,
-  job: { action: string; job: string; templateId: string },
+  job: CardJob,
   tz: string,
   rp: WebAuthnRelyingParty | undefined,
   now: Date,
@@ -68,7 +82,7 @@ export async function cardGate(
  * Also filed straight after a run on a card has failed (cli.ts), so the note
  * that says "approve its next card" points at a card that is there.
  */
-export async function offerCard(db: Db, job: { action: string; job: string; templateId: string }, tz: string, rp: WebAuthnRelyingParty | undefined, now: Date): Promise<void> {
+export async function offerCard(db: Db, job: CardJob, tz: string, rp: WebAuthnRelyingParty | undefined, now: Date): Promise<void> {
   const { action } = job;
   const cmd = job.job;
   // Flint's day, not UTC's: a card offered at 23:30 Chicago time is that night's.
@@ -76,11 +90,12 @@ export async function offerCard(db: Db, job: { action: string; job: string; temp
   const pending = await db.proposal.findMany({ where: { action, origin: `runtime:${cmd}`, status: 'pending', expiresAt: { gt: now } }, orderBy: { createdAt: 'desc' } });
   const tonight = pending.find((p) => (p.args as { day?: unknown } | null)?.day === day);
   if (!tonight) {
+    const from = { source: 'template' as const, ref: job.templateId, tainted: false };
     await createProposal(db, {
-      kind: 'tool_call', origin: `runtime:${cmd}`, templateId: job.templateId, action, args: { day },
-      argsProvenance: { day: { source: 'template', ref: job.templateId, tainted: false } },
-      tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: cmd === 'drill' ? 7 * 24 * 60 + 120 : 26 * 60,
-      reason: `It waits for your approval each ${cmd === 'drill' ? 'week' : 'night'} until you let it run on its own.`,
+      kind: 'tool_call', origin: `runtime:${cmd}`, templateId: job.templateId, action, args: { ...job.args, day },
+      argsProvenance: { ...Object.fromEntries(Object.keys(job.args ?? {}).map((k) => [k, from])), day: from },
+      tainted: false, sensitivity: 'ops', destructive: job.destructive === true, consequential: false, ttlMinutes: cmd === 'drill' ? 7 * 24 * 60 + 120 : 26 * 60,
+      reason: job.reason ?? `It waits for your approval each ${cmd === 'drill' ? 'week' : 'night'} until you let it run on its own.`,
     }, 'runtime');
   }
   for (const old of pending) {

@@ -4,9 +4,11 @@
  *   pnpm --filter @flint/runtime backup   [--auto]   pg_dump, 14 kept, BackupRun row
  *   pnpm --filter @flint/runtime offsite  [--auto]   age-encrypted copy off the box (iCloud Drive, 7 kept)
  *   pnpm --filter @flint/runtime drill    [--auto]   restore the newest dump and compare
- *   pnpm --filter @flint/runtime prune    [--auto]   remove old copies taken before database updates
- *                                                    (the newest 10 and the last 30 days are kept, and
- *                                                    always the running release's); says what goes first
+ *   pnpm --filter @flint/runtime prune    [--remove]  list the old copies taken before database updates
+ *                                                    that may go (the newest 10 and the last 30 days are
+ *                                                    kept, and always the running release's); removes
+ *                                                    them only with --remove. `prune --auto` is the
+ *                                                    nightly job's: it waits for a card until promoted
  *   pnpm --filter @flint/runtime p2-report            P2's exit criteria, measured now (JSON)
  *   pnpm --filter @flint/runtime p25-report [--source google_calendar|apple_calendar]
  *                                                    P2.5's exit criteria for a calendar, measured now (JSON)
@@ -63,8 +65,8 @@ import { Refused } from './governance/proposals.js';
 import { SOURCES } from '@flint/policy';
 import { createDb } from './db.js';
 import { appendAudit } from './governance/audit.js';
-import { ACTION, attempt, cardGate, gate, tellFailure, tellStopped, type Command } from './backup/nightly.js';
-import { planPrune, prune } from './backup/prune.js';
+import { ACTION, attempt, gate, tellFailure, tellStopped, type Command } from './backup/nightly.js';
+import { PRUNE_ACTION, pruneJob, pruneLines } from './backup/prune-job.js';
 import { fileFailure } from './backup/record.js';
 import { completeProposal } from './governance/proposals.js';
 import { dumpDatabase, dumpPathAt, newestDump, pruneDumps, restoreDrill } from './backup/backup.js';
@@ -120,50 +122,26 @@ async function loginToGoogle(): Promise<void> {
 
 /**
  * `prune`: remove the old copies of the database that deploys took before a
- * migration (backup/prune.ts says which stay). What would go is said first, by
- * count and size, never by name. With nothing to remove it ends there: no card
- * is filed for nothing. Run by hand it is Will acting. With --auto it is Flint:
- * the action ships at APPROVAL, so it waits for a card he approves (one a
- * night, only on a night there is something to remove), until he promotes it.
+ * migration (backup/prune.ts says which stay; backup/prune-job.ts who may
+ * remove them). By hand it lists what would go and removes it only with
+ * --remove, in sentences. With --auto it is the nightly job's, and what it
+ * prints is a line for the job's log.
  */
-async function pruneOldBackups(auto: boolean): Promise<void> {
+async function pruneOldBackups(argv: readonly string[]): Promise<void> {
+  const unknown = argv.filter((a) => a !== '--auto' && a !== '--remove');
+  if (unknown.length || (argv.includes('--auto') && argv.includes('--remove'))) throw new Error('usage: cli.ts prune [--remove] | prune --auto');
+  const mode = argv.includes('--auto') ? 'auto' : argv.includes('--remove') ? 'remove' : 'list';
   const config = loadRuntimeConfig();
-  const now = new Date();
-  const plan = planPrune(config.home, now);
-  const megabytes = (bytes: number) => Math.max(1, Math.round(bytes / 1e6));
-  if (plan.held) {
-    console.log('backup.prune: not run (the running release could not be told, so nothing is removed)');
-    return;
-  }
-  if (!plan.remove.length) {
-    console.log(`backup.prune: nothing to remove (${plan.kept} kept)`);
-    return;
-  }
-  console.log(`backup.prune: ${plan.remove.length} old update backup(s) would be removed, ${megabytes(plan.bytes)} MB; ${plan.kept} are kept`);
   const db = createDb(config.databaseUrl);
-  const action = 'backup.prune';
-  const actor = auto ? 'runtime' : 'will:cli';
   try {
-    let proposalId: string | undefined;
-    if (auto) {
-      const g = await cardGate(db, { action, job: 'prune', templateId: 'nightly.prune' }, config.tz, config.rp, now);
-      if (!g.go) {
-        console.log(`${action}: not run (${g.why})`);
-        return;
-      }
-      proposalId = g.proposalId;
+    const o = await pruneJob(db, { home: config.home, tz: config.tz, rp: config.rp, now: new Date(), mode });
+    if (mode === 'auto') {
+      const counts = JSON.stringify({ would: o.would, removed: o.removed, megabytes: o.megabytes, kept: o.kept, failed: o.failed });
+      console.log(`${PRUNE_ACTION}: ${o.did === 'removed' ? 'ok' : o.did === 'failed' ? 'FAILED' : `not run (${o.did === 'waiting' ? o.why : o.did === 'held' ? 'the running release could not be told' : 'nothing to remove'})`} ${counts}`);
+    } else {
+      for (const line of pruneLines(o)) console.log(line);
     }
-    const done = prune(plan);
-    const ok = done.failed.length === 0;
-    const detail = { removed: done.removed.length, megabytes: megabytes(done.bytes), kept: plan.kept, failed: done.failed.length };
-    if (proposalId) {
-      await completeProposal(db, proposalId, { ok, ...(ok ? {} : { error: `${done.failed.length} could not be removed` }), result: detail }, actor).catch((err: unknown) =>
-        console.error(`${action}: could not complete its proposal: ${err instanceof Error ? err.message : String(err)}`),
-      );
-    }
-    await appendAudit(db, [{ actor, context: auto ? 'autonomous' : 'console', kind: 'action', action, decision: 'act', outcome: ok ? 'ok' : 'failed', inputs: detail, ...(proposalId ? { correlationId: proposalId } : {}) }]);
-    console.log(`${action}: ${ok ? 'ok' : 'FAILED'} ${JSON.stringify(detail)}`);
-    if (!ok) process.exitCode = 1;
+    if (o.did === 'failed') process.exitCode = 1;
   } finally {
     await db.$disconnect();
   }
@@ -296,9 +274,9 @@ async function main(): Promise<void> {
     }
     return;
   }
-  if (process.argv[2] === 'prune') return pruneOldBackups(process.argv.includes('--auto'));
+  if (process.argv[2] === 'prune') return pruneOldBackups(process.argv.slice(3));
   const cmd = process.argv[2] as Command;
-  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | predictions-on [key]... | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | p3-report | promotion-table [--phase p1|p2|p25|p26|p3|p3c] [--drop <pattern>] | backup|offsite|drill|prune [--auto] | restore-production [--dump <file>] [--without-copy] [--without-fingerprint] [--check] | restore-production --compare | restore-production --repair | restore-empty --from-rebuild --dump <file>');
+  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | predictions-on [key]... | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | p3-report | promotion-table [--phase p1|p2|p25|p26|p3|p3c] [--drop <pattern>] | backup|offsite|drill [--auto] | prune [--remove] | prune --auto | restore-production [--dump <file>] [--without-copy] [--without-fingerprint] [--check] | restore-production --compare | restore-production --repair | restore-empty --from-rebuild --dump <file>');
   const auto = process.argv.includes('--auto');
   const b = loadBackupConfig();
   const db = createDb(b.config.databaseUrl);
@@ -345,7 +323,7 @@ async function main(): Promise<void> {
       const r = await restoreDrill(dump, b.restoreUrl, b.tools);
       const run = await db.backupRun.findFirst({ where: { path: dump }, orderBy: { startedAt: 'desc' } });
       if (run) await db.backupRun.update({ where: { id: run.id }, data: { restoreTestedAt: new Date(), restoreOk: r.ok, restoreDetail: { tables: r.tables, mismatches: r.mismatches } } });
-      return { ok: r.ok, mismatch: !r.ok, detail: { tables: r.tables, mismatches: r.mismatches.length }, ...(r.ok ? {} : { error: `row counts differ in ${r.mismatches.length} table(s)` }) };
+      return { ok: r.ok, mismatch: !r.ok, detail: { tables: r.tables, mismatches: r.mismatches.length }, ...(r.ok ? {} : { error: `row counts differ in ${r.mismatches.length === 1 ? '1 table' : `${r.mismatches.length} tables`}` }) };
     });
     const { ok, error, detail } = o;
     // A run that failed is on record beside the ones that worked (Health says "the last backup failed" from it,
