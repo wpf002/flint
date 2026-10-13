@@ -9,14 +9,15 @@
  * every place that files a card is listed here with its life, and a new one, or
  * a longer life, fails this test until someone has looked at the bound.
  *
- * The bound covers fourteen actions (COVERED, below). One card lives longer than
- * a week: the weekly restore test's, at 7 days and 2 hours. Its action is not
- * one of them, and nothing in the database holds it to the bound.
+ * The bound covers fourteen actions (COVERED, below). Two cards live longer
+ * than a week: the weekly restore tests', Flint's own and Nexus's, at 7 days
+ * and 2 hours. Their actions are not among them, and nothing in the database
+ * holds them to the bound.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { FORECAST_SIGNED_ACTIONS, GOAL_SIGNED_ACTIONS, TASK_SIGNED_ACTIONS } from '@flint/policy';
+import { FORECAST_SIGNED_ACTIONS, GOAL_SIGNED_ACTIONS, TASK_SIGNED_ACTIONS, WEEKLY_JOBS } from '@flint/policy';
 import { ACTION } from '../src/backup/nightly';
 import { CreateProposal } from '../src/governance/proposals';
 
@@ -45,8 +46,9 @@ const FILERS: Record<string, { minutes: number[]; files: string }> = {
   'apps/runtime/src/assets/service.ts': { minutes: [WEEK], files: 'asset.enable' },
   'apps/runtime/src/tasks/service.ts': { minutes: [WEEK, WEEK, WEEK], files: 'a task\'s dispatch card, task.cancel and task.bar_override' },
   'apps/runtime/src/tasks/check.ts': { minutes: [WEEK], files: 'task.check_bar (the accept card)' },
-  // The exception: restore.drill's card, a week and two hours (the restore test runs on Sundays only).
-  'apps/runtime/src/backup/nightly.ts': { minutes: [WEEK + 120, 26 * 60], files: 'backup.local, backup.offsite, restore.drill, maintenance.retention' },
+  // The exception: the weekly restore tests' cards, a week and two hours (they run on Sundays only): restore.drill, and
+  // Nexus's own, restore.drill.nexus (P7).
+  'apps/runtime/src/backup/nightly.ts': { minutes: [WEEK + 120, 26 * 60], files: 'backup.local, backup.offsite, restore.drill, maintenance.retention, backup.prune, and Nexus\'s three: backup.nexus, backup.nexus.offsite, restore.drill.nexus' },
 };
 
 function sources(dir: string, out: string[] = []): string[] {
@@ -104,7 +106,10 @@ describe('how long a card may wait', () => {
     expect(over).toEqual([['apps/runtime/src/backup/nightly.ts', WEEK + 120]]);
     // The actions that file's cards are for (nightly.ts ACTION, and the cleanup job's, jobs.ts): none is a covered one.
     const nightly = [...Object.values(ACTION), 'maintenance.retention'];
-    expect(nightly.sort()).toEqual(['backup.local', 'backup.offsite', 'maintenance.retention', 'restore.drill']);
+    expect(nightly.sort()).toEqual(['backup.local', 'backup.nexus', 'backup.nexus.offsite', 'backup.offsite', 'maintenance.retention', 'restore.drill', 'restore.drill.nexus']);
+    // Which of them get the long life is one list (WEEKLY_JOBS): the two restore tests, and nothing else.
+    expect([...WEEKLY_JOBS].sort()).toEqual(['restore.drill', 'restore.drill.nexus']);
+    expect(readFileSync(join(REPO, 'apps/runtime/src/backup/nightly.ts'), 'utf8')).toContain('ttlMinutes: WEEKLY_JOBS.has(action) ? 7 * 24 * 60 + 120 : 26 * 60,');
     for (const action of nightly) expect(COVERED as readonly string[], action).not.toContain(action);
   });
 

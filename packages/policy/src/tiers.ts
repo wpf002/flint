@@ -138,6 +138,15 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   // for a card each time there is something to remove, until Will promotes it. Only its own nightly job files
   // that card, and by hand it is Will's own command: never from chat (NEVER_FROM_CHAT below).
   'backup.prune': approval({ cap: { limit: 1, period: 'day' }, byName: true, note: 'deletes update backups past the newest 10 and 30 days; never the running release\'s' }),
+  // Nexus's own backup (P7): the same three steps for the Nexus database, which is on this Mac and is not
+  // Flint's. Flint only reads it, through a login the runtime checks holds no right to change it; the copy
+  // leaves this Mac only encrypted; the weekly test restores into a scratch database and never opens Nexus
+  // itself. Off until its address is set.
+  // Each is promoted by its own name only: a rule signed for the backups as a group, before these existed,
+  // does not cover them. Only their own nightly jobs file their cards: never from chat (NEVER_FROM_CHAT below).
+  'backup.nexus': approval({ cap: { limit: 1, period: 'day' }, byName: true, note: 'a dump of the Nexus database, which Flint only reads, onto this Mac' }),
+  'backup.nexus.offsite': approval({ cap: { limit: 1, period: 'day' }, egress: true, byName: true, note: 'the Nexus dump, age-encrypted, to iCloud' }),
+  'restore.drill.nexus': approval({ cap: { limit: 1, period: 'week' }, byName: true, note: 'the Nexus dump, into a scratch database' }),
   // Replacing the production database with a backup (P7). Never promoted, never
   // autonomous, and never from chat (CONSOLE_ONLY below): Will runs the command
   // himself and types the confirmation. It cannot wait on an approval card, because
@@ -248,6 +257,9 @@ export const AUTONOMOUS_ACTIONS: ReadonlySet<string> = new Set([
   'restore.drill',
   'backup.offsite',
   'backup.prune',
+  'backup.nexus',
+  'backup.nexus.offsite',
+  'restore.drill.nexus',
   'maintenance.retention',
   'maintenance.partitions',
   'triage.rule',
@@ -564,9 +576,11 @@ export const CONSOLE_ONLY: ReadonlySet<string> = new Set(['restore.production'])
  * Actions a chat turn can never ask for, whatever is said in it and whatever a
  * rule says: FORBIDDEN in chat, not merely waiting for approval. Removing old
  * backups deletes files; its card comes from its own nightly job, which counts
- * what would go, and from nowhere else.
+ * what would go, and from nowhere else. Nexus's backup reads a database that is
+ * not Flint's and sends a copy of it off this Mac: its three cards come from
+ * their own nightly jobs too.
  */
-export const NEVER_FROM_CHAT: ReadonlySet<string> = new Set(['backup.prune']);
+export const NEVER_FROM_CHAT: ReadonlySet<string> = new Set(['backup.prune', 'backup.nexus', 'backup.nexus.offsite', 'restore.drill.nexus']);
 
 /** Decide the tier of one action. Pure: same inputs, same answer. */
 export function resolveTier(action: string, ctx: TierContext): TierDecision {

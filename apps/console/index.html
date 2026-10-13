@@ -1144,7 +1144,10 @@ function showLane(lane){LANE=lane;LANE_NEXT=null;LANE_SEQ++;LANE_OLDER=false;
    name ("backup.offsite"), a file path, a command, an id or an aside in parentheses, whatever an older Flint
    stored: those details are in the logs. The jobs' names are @flint/policy's JOB_WORDS (a test keeps the two in
    step). A calendar or market note carries someone else's words, which stay as they were written. */
-var NOTE_JOBS={'backup.local':'Backup','backup.offsite':'Offsite Backup','restore.drill':'Restore Test','maintenance.retention':'Cleanup','backup.prune':'Backup Cleanup'};
+var NOTE_JOBS={'backup.local':'Backup','backup.offsite':'Offsite Backup','restore.drill':'Restore Test','maintenance.retention':'Cleanup','backup.prune':'Backup Cleanup',
+  'backup.nexus':'Nexus Backup','backup.nexus.offsite':'Nexus Offsite Backup','restore.drill.nexus':'Nexus Restore Test'};
+/* The jobs that run on Sundays only (@flint/policy WEEKLY_JOBS; a test keeps the two the same). */
+var NOTE_WEEKLY={'restore.drill':1,'restore.drill.nexus':1};
 var NOTE_OUTSIDE={calendar:1,signal:1};
 /* An internal name (lowercase parts joined by dots or underscores), an entity's ref (issue#24ehza), a file path. */
 var NOTE_NAME=/(^|[^A-Za-z0-9])([a-z][a-z0-9]*(?:[._][a-z0-9]+)+)/g,NOTE_REF=/[a-z_]{2,20}#[A-Za-z0-9]{1,12}\b/g,NOTE_PATH=/(^|[\s"'“(])~?\/[\w.~\/-]+/g;
@@ -1178,7 +1181,7 @@ var NOTE_NIGHT=86400000,NOTE_JOIN=1.25,NOTE_MAX=50;
 function noteAgain(n,cut){if(n.count<2)return '';if(!n.every)return 'It happened '+n.count+' times.';
   var live=Date.now()-n.ts<=n.every*1.5,more=cut&&n.first-cut<=n.every*NOTE_JOIN;
   return (live?'It has failed ':'It failed ')+(more?'at least ':'')+n.count+(n.every>NOTE_NIGHT?' weeks':' nights')+' in a row.'+(live&&n.count>=3?' It needs a look.':'');}
-function noteEvery(t){for(var k in NOTE_JOBS)if(t===NOTE_JOBS[k]+' Failed')return k==='restore.drill'?7*NOTE_NIGHT:NOTE_NIGHT;return 0;}
+function noteEvery(t){for(var k in NOTE_JOBS)if(t===NOTE_JOBS[k]+' Failed')return NOTE_WEEKLY[k]===1?7*NOTE_NIGHT:NOTE_NIGHT;return 0;}
 function pollNotifs(){if(!TOKEN)return;fetch(BASE+'/notifications',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d)return;document.getElementById('nbadge').hidden=!(d.unread>0);}).catch(function(){});}
 function loadNotifs(){var list=document.getElementById('nlist');if(!list.children.length){list.textContent='';list.appendChild(laneEmpty('Loading…',''));}
   fetch(BASE+'/notifications',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
@@ -1235,7 +1238,7 @@ var LANE_LINES={'ci_run.state':'A CI run changed.','pull_request.state':'A pull 
   'repo.meta':'A repo’s details changed.','deadline.due':'A milestone’s due date changed.','service.health':'A service’s health changed.','service.status':'A background service changed.',
   'service.railway':'A Railway service changed.','deployment.railway':'A Railway deploy changed.','deployment.status':'A deploy changed.','thread.state':'A Nexus thread changed.',
   'handoff.unaccepted_24h':'A Nexus handoff hasn’t been accepted in a day.','knowledge.fact':'Flint’s memory learned something.','account.level':'A vendor’s spending level changed.',
-  'backup.stale':'Backups are overdue.','drill.failed':'A restore test failed.','migrate.failed':'A database update failed.','service.down_30m':'A service has been down for 30 minutes.',
+  'backup.stale':'Backups are overdue.','nexus_backup.stale':'The Nexus backup is overdue.','drill.failed':'A restore test failed.','migrate.failed':'A database update failed.','service.down_30m':'A service has been down for 30 minutes.',
   'vendor.cap_100':'A vendor reached its spending cap.','source.circuit_open':'A source stopped after repeated failures.','source.circuit_closed':'A source is reading again.',
   'spend.threshold':'Spending reached a budget threshold.','route.error':'A request to Flint failed.'};
 var LANE_SOURCES={github:'GitHub',git:'Git',imessage:'iMessage',google_calendar:'Google Calendar',apple_calendar:'Apple Calendar',nexus:'Nexus',nexus_inbox:'Nexus',railway:'Railway',launchd:'Launchd',runtime:'Flint',server:'Flint'};
@@ -1313,11 +1316,11 @@ function laneEscalation(id,what,acts,es,btn){var bs=acts.querySelectorAll?acts.q
   }).catch(function(e){for(var i=0;i<bs.length;i++)bs[i].disabled=false;laneMsg(e.message,true);});}
 
 /* ---------- Settings: Health ---------- */
-var HEALTH_NAMES={postgres:'Database',bus:'Job Queue',server:'Server',ollama:'Local Model',backup:'Backups',offsite_backup:'Offsite Backup',restore_drill:'Restore Test',audit_intents:'Action Log',retention:'Cleanup',migrate_failed:'Updates',deploy_hold:'Automatic Updates',rebuild_rehearsal:'Rebuild Rehearsal',triage:'Triage',goals:'Goal Reviews',ledger:'Prediction Checks',forecasts:'Forecasts',tasks:'Tasks',runtime:'Runtime',standby_model:'Standby Model',files_backup:'Files Backup',offsite_drill:'Offsite Restore Test',disk:'Disk Space',remote_access:'Remote Access'};
+var HEALTH_NAMES={postgres:'Database',bus:'Job Queue',server:'Server',ollama:'Local Model',backup:'Backups',offsite_backup:'Offsite Backup',restore_drill:'Restore Test',audit_intents:'Action Log',retention:'Cleanup',migrate_failed:'Updates',deploy_hold:'Automatic Updates',rebuild_rehearsal:'Rebuild Rehearsal',triage:'Triage',goals:'Goal Reviews',ledger:'Prediction Checks',forecasts:'Forecasts',tasks:'Tasks',runtime:'Runtime',standby_model:'Standby Model',files_backup:'Files Backup',offsite_drill:'Offsite Restore Test',disk:'Disk Space',remote_access:'Remote Access',nexus_backup:'Nexus Backup'};
 /* Settings > Health in four groups, in this order, each with its components in theirs (@flint/policy HEALTH_GROUPS;
    a test keeps the two the same). A component named in none of them (each source, and any new one until it is
    placed) is shown under THIS MAC, so a row this page has not heard of is still shown. */
-var HEALTH_GROUPS=[['MODELS',['ollama','standby_model']],['BACKUPS',['backup','files_backup','offsite_backup','restore_drill','offsite_drill','rebuild_rehearsal']],
+var HEALTH_GROUPS=[['MODELS',['ollama','standby_model']],['BACKUPS',['backup','files_backup','nexus_backup','offsite_backup','restore_drill','offsite_drill','rebuild_rehearsal']],
   ['THIS MAC',['disk','deploy_hold','migrate_failed','postgres','server','runtime','bus','audit_intents','retention','triage','goals','ledger','forecasts','tasks']],['REMOTE ACCESS',['remote_access']]];
 var HEALTH_GROUP_OTHER='THIS MAC';
 function healthGroup(c){for(var i=0;i<HEALTH_GROUPS.length;i++)if(HEALTH_GROUPS[i][1].indexOf(c)>=0)return HEALTH_GROUPS[i][0];return HEALTH_GROUP_OTHER;}
@@ -1502,7 +1505,17 @@ var APPR={pending:[],approved:[],open:null,tab:'waiting',busy:false,signed:false
    The restore test's day is apprWhen's: its card is filed by a Sunday run, so on a Sunday past 2:15 it is a week away. */
 var APPR_NIGHTLY={'backup.local':["Run Tonight's Backup",'db','tonight at 2:15 AM'],'backup.offsite':["Run Tonight's Offsite Copy",'db','tonight at 2:15 AM'],'restore.drill':["Run This Week's Restore Test",'db','Sunday at 2:15 AM'],'maintenance.retention':["Run Tonight's Cleanup",'db','tonight at 3:10 AM'],
   /* Removing old backups is the last step of the 02:15 job. It deletes, so the runtime files its card as one that cannot be undone. */
-  'backup.prune':['Remove Old Backups','db','tonight at 2:15 AM']};
+  'backup.prune':['Remove Old Backups','db','tonight at 2:15 AM'],
+  /* Nexus's own backup (P7): the same three steps of the 02:15 job for the Nexus database, each with a card of its own. */
+  'backup.nexus':["Run Tonight's Nexus Backup",'db','tonight at 2:15 AM'],'backup.nexus.offsite':["Run Tonight's Nexus Offsite Copy",'db','tonight at 2:15 AM'],
+  'restore.drill.nexus':["Run This Week's Nexus Restore Test",'db','Sunday at 2:15 AM']};
+/* The nightly cards whose job runs on Sundays only (@flint/policy WEEKLY_JOBS; a test keeps the two the same). */
+var APPR_WEEKLY={'restore.drill':1,'restore.drill.nexus':1};
+/* What each of Nexus's cards does, as a sentence for its details: it is a database that is not Flint's, so the card
+   says what is read, and what the runtime checks of the login it reads through (never more than it checks). */
+var APPR_NEXUS={'backup.nexus':'Flint copies the Nexus database to this Mac. It only reads Nexus, through a login with no right to change its tables.',
+  'backup.nexus.offsite':'The newest Nexus backup is encrypted to your key before it leaves this Mac.',
+  'restore.drill.nexus':'Flint restores the newest Nexus backup into a scratch database and compares it. Nexus itself isn’t opened.'};
 /* What each source reads, and how often (its cadenceMs), as a sentence. */
 var APPR_SOURCES={launchd:'Your Mac’s background services are checked every 2 minutes.',health:'Flint’s services are checked every 5 minutes.',git:'Your repos are read every 5 minutes.',spend:'Spend is checked against your caps every minute.',deploy:'Deploy results are read every minute.',knowledge:'New facts in Flint’s memory are read every 10 minutes.',nexus_inbox:'Nexus handoffs to Flint are checked every 10 minutes.',nexus:'Your Nexus threads are read every 5 minutes.',github:'Your GitHub repos are read every 5 minutes.',railway:'Your Railway services are checked every 5 minutes.',google_calendar:'Your Google Calendar is read every 5 minutes.',apple_calendar:'Your Apple Calendar is read every 5 minutes and when it changes.'};
 /* Chat's runtime tools in words (the same titles as @flint/policy's ACTION_WORDS, which the notes use), and what each does, as a sentence. */
@@ -1557,7 +1570,8 @@ var APPR_RULES={'goal.review.local':['Goal Reviews','run',2],'goal.propose':['Go
   'notify.inapp':['In-App Notes','be posted',2],'notify.banner':['Banners','be shown',2],'notify.push':['Phone Pings','be sent',2],
   'health.check':['Health Checks','run',2],'health.report':['Health Reports','be sent',2],'digest.daily':['Daily Summary','be sent',1],'maintenance.retention':['Nightly Cleanup','run',1],
   'backup.local':['Backup','run',1,['1 a Day','once a day']],'backup.offsite':['Offsite Copy','be sent',1,['1 a Day','once a day']],'restore.drill':['Restore Test','run',1,['1 a Week','once a week']],
-  'backup.prune':['Backup Cleanup','run',1,['1 a Day','once a day']]};
+  'backup.prune':['Backup Cleanup','run',1,['1 a Day','once a day']],
+  'backup.nexus':['Nexus Backup','run',1,['1 a Day','once a day']],'backup.nexus.offsite':['Nexus Offsite Copy','be sent',1,['1 a Day','once a day']],'restore.drill.nexus':['Nexus Restore Test','run',1,['1 a Week','once a week']]};
 function apprRule(pat){return apprGet(APPR_RULES,pat)||null;}
 /* Names that are written their own way. ONE map for every place this panel makes words out of a stored name (a
    title, a label, a value, a sentence): GitHub is never "Github". It holds every name the lanes and the health
@@ -1813,6 +1827,8 @@ function apprDetails(p){p=p||{};var a=p.args&&typeof p.args==='object'&&!Array.i
     says.push('An update backup is the copy of the database Flint takes before an update changes it.');
     says.push('The one taken before the version that is running is always kept.');
     says.push('It runs '+apprWhen(f)+' if you approve it.');}
+  /* (When it runs is the line under the card's title already.) */
+  else if(apprGet(APPR_NEXUS,f)!==undefined)says.push(apprGet(APPR_NEXUS,f));
   else if(typeof APPR_PREDICT==='string'&&f===APPR_PREDICT){says.push(APPR_PREDICT_ALSO);
     /* Its numbers are listed by name under this sentence (apprPredictDetails), each with its second opinion. A number
        this page cannot name is counted there, and given here exactly as the card holds it: nothing signed is unseen. */
@@ -1891,7 +1907,7 @@ function apprReason(p){if(p.fullName==='goal.activate')return APPR_PROMPTS[p.rea
   if(p.fullName===APPR_PREDICT)return 'turn on predictions';
   var gw=apprGet(APPR_GOAL_WORDS,p.fullName);return gw?APPR_PROMPTS[gw[2]]:'approve: '+apprTitle(p);}
 /* When a nightly card's job runs: the restore test is "next Sunday" on a Sunday past 2:15 AM, never a time already gone. */
-function apprWhen(name){var n=apprGet(APPR_NIGHTLY,name);if(!n)return '';if(name!=='restore.drill')return n[2];var d=apprNow();
+function apprWhen(name){var n=apprGet(APPR_NIGHTLY,name);if(!n)return '';if(apprGet(APPR_WEEKLY,name)!==1)return n[2];var d=apprNow();
   if(d.getDay()!==0)return n[2];return d.getHours()*60+d.getMinutes()<135?'today at 2:15 AM':'next Sunday at 2:15 AM';}
 /* Each calendar by its name, for the person card's subtitle: the calendar its people came from, which Will signs
    (a card that names none is Google's, as every P2.5 card was). */
@@ -1951,7 +1967,10 @@ function apprTitle(p){var a=p.args||{};var n=function(x){return Array.isArray(x)
     if(kind==='approval')return 'Ask Before '+many.text;
     if(kind==='forbidden')return 'Stop '+many.text;
     if(kind!=='alone')return c===1?'Change 1 Rule':'Change '+c+' Rules';
-    if(rows.every(function(r){return /^(backup\.(local|offsite)$|restore\.)/.test(String(r.pattern||''));}))return 'Run Backups on Their Own';
+    /* Every rule is titled as it always was. Nexus's three are a group of their own: never said as Flint's own
+       backups, and never folded into them. */
+    if(rows.every(function(r){var pat=String(r.pattern||'');return /^(backup\.(local|offsite)$|restore\.)/.test(pat)&&apprGet(APPR_NEXUS,pat)===undefined;}))return 'Run Backups on Their Own';
+    if(rows.every(function(r){return apprGet(APPR_NEXUS,String(r.pattern||''))!==undefined;}))return 'Run Nexus Backups on Their Own';
     var pr=apprPromotes(rows);if(pr)return pr[0];
     return 'Let '+many.text+' Run on '+(many.one?'Its':'Their')+' Own';}
   if(p.fullName==='world.person.create')return 'Add '+n(a.people)+' '+(n(a.people)===1?'Person':'People')+' from Calendar';

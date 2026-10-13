@@ -101,13 +101,15 @@ export async function p2Report(db: Db, config: Pick<Config, 'tz' | 'home'>, now 
     values: { p95Ms: p95, recallFallbackRate: fallback, baselineP95Ms: baseline?.p95Ms ?? null, baselineFallback: baseline?.recallFallbackRate ?? null, ctxTokenDays: ctxDays },
   });
 
-  // 7. Health: checked in the last 10 minutes; a green restore drill in each of the last 4 weeks.
+  // 7. Health: checked in the last 10 minutes; a green restore drill in each of the last 4 weeks. (A drill of
+  // Flint's own database, from its dump on this Mac: a passing test of Nexus's dump, or the MacBook's of an offsite
+  // copy, is not one.)
   const last = await db.healthCheck.findFirst({ orderBy: { at: 'desc' }, select: { at: true } });
   const fresh = !!last && now.getTime() - last.at.getTime() <= 10 * 60_000;
   const drills: boolean[] = [];
   for (let w = 0; w < 4; w++) {
     const end = new Date(now.getTime() - w * 7 * DAY);
-    drills.push((await db.backupRun.count({ where: { restoreOk: true, restoreTestedAt: { gt: new Date(end.getTime() - 7 * DAY), lte: end } } })) > 0);
+    drills.push((await db.backupRun.count({ where: { kind: 'pg_dump_flint', location: 'local', restoreOk: true, restoreTestedAt: { gt: new Date(end.getTime() - 7 * DAY), lte: end } } })) > 0);
   }
   out.push({ n: 7, name: 'health: checked within 10 min; a green drill in each of 4 weeks', pass: fresh && drills.every(Boolean), detail: `last check ${last ? `${Math.round((now.getTime() - last.at.getTime()) / 60_000)} min ago` : 'never'}; green drills by week (newest first): ${drills.map((d) => (d ? 'yes' : 'no')).join(', ')}`, values: { fresh, drillWeeks: drills.filter(Boolean).length } });
 

@@ -1,8 +1,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadBackupConfig, loadConfig, loadRuntimeConfig, offsiteFolder, parseTokens, parseHealthExtra } from '../src/config';
+import { loadBackupConfig, loadConfig, loadRuntimeConfig, nexusBackupState, nexusBackupWanted, nexusUrlProblem, offsiteFolder, parseTokens, parseHealthExtra, runtimeEnv } from '../src/config';
 
 const DB = 'postgresql://flint_app:x@[::1]:5432/flint';
 const HOME = '/Users/test';
@@ -181,7 +182,7 @@ describe('runtime config', () => {
         writeFileSync(join(h, '.flint', 'runtime.env'), `DATABASE_URL=${DB}\n`, { mode: 0o600 });
         writeFileSync(join(h, '.flint', 'backup.env'), 'FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/flint\nFLINT_DB_RESTORE_URL=postgresql://flint_restore:x@[::1]:5432/postgres\n', { mode: 0o600 });
         process.env.HOME = h;
-        for (const k of ['RUNTIME_ENV_FILE', 'BACKUP_ENV_FILE', 'DATABASE_URL', 'FLINT_OFFSITE_DIR', 'FLINT_DB_BACKUP_URL', 'FLINT_DB_RESTORE_URL', 'FLINT_BACKUP_AGE_RECIPIENT']) delete process.env[k];
+        for (const k of ['RUNTIME_ENV_FILE', 'BACKUP_ENV_FILE', 'DATABASE_URL', 'FLINT_OFFSITE_DIR', 'FLINT_DB_BACKUP_URL', 'FLINT_DB_RESTORE_URL', 'FLINT_BACKUP_AGE_RECIPIENT', 'FLINT_NEXUS_BACKUP_URL']) delete process.env[k];
         return h;
       };
       // pg_dump and pg_restore are looked up where Homebrew puts them; without them there is no backup config to read.
@@ -214,6 +215,152 @@ describe('runtime config', () => {
         expect(none.offsiteDir).toBeUndefined();
         expect(none.offsiteProblem).toBeUndefined();
         expect(none.offsiteICloud).toBe(false);
+      });
+
+      // ---- Nexus's own backup (P7): off until FLINT_NEXUS_BACKUP_URL is set, and then only a database on this Mac ----
+      const FLINT_LINES = 'FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/flint\nFLINT_DB_RESTORE_URL=postgresql://flint_restore:x@[::1]:5432/postgres\n';
+      const withNexus = (h: string, value: string) => writeFileSync(join(h, '.flint', 'backup.env'), `${FLINT_LINES}FLINT_NEXUS_BACKUP_URL=${value}\n`, { mode: 0o600 });
+
+      it.skipIf(!tools)('Nexus’s backup is off until its address is set: nothing of it is in the config at all', () => {
+        const h = home(true);
+        expect(loadBackupConfig().nexus).toBeUndefined();
+        expect(nexusBackupWanted(h)).toBe(false);
+        withNexus(h, '');
+        expect(loadBackupConfig().nexus).toBeUndefined();
+        withNexus(h, '   ');
+        expect(loadBackupConfig().nexus).toBeUndefined();
+      });
+
+      it.skipIf(!tools)('set, its dumps and its encrypted copies go beside the database’s own, in folders of their own', () => {
+        const h = home(true);
+        withNexus(h, 'postgresql://flint_backup:x@[::1]:5432/nexus');
+        const b = loadBackupConfig();
+        expect(b.nexus).toEqual({
+          backupUrl: 'postgresql://flint_backup:x@[::1]:5432/nexus',
+          dumpDir: join(h, 'FlintBackups', 'nexus'),
+          offsiteDir: join(h, ...DRIVE, 'FlintBackups', 'nexus'),
+          offsiteManifest: join(h, 'FlintBackups', 'nexus', 'offsite-copies.txt'),
+        });
+        // Flint's own are as they were, and reading the config makes no folder.
+        expect(b).toMatchObject({ dumpDir: join(h, 'FlintBackups', 'pg'), offsiteDir: join(h, ...DRIVE, 'FlintBackups', 'pg'), backupUrl: 'postgresql://flint_backup:x@[::1]:5432/flint' });
+        expect(existsSync(b.nexus!.dumpDir) || existsSync(b.nexus!.offsiteDir!)).toBe(false);
+        // A folder Will set for the offsite copies: Nexus's go in a folder of their own inside it.
+        process.env.FLINT_OFFSITE_DIR = '/Volumes/Vault/flint';
+        expect(loadBackupConfig().nexus!.offsiteDir).toBe('/Volumes/Vault/flint/nexus');
+        delete process.env.FLINT_OFFSITE_DIR;
+        // With nowhere to send a copy, there is none for Nexus either.
+        const g = home(false);
+        withNexus(g, 'postgresql://flint_backup:x@[::1]:5432/nexus');
+        expect(loadBackupConfig().nexus!.offsiteDir).toBeUndefined();
+        // The environment, when it says, wins over the file, as for every setting here.
+        process.env.FLINT_NEXUS_BACKUP_URL = 'postgresql://flint_backup:x@127.0.0.1:5432/nexus_two';
+        expect(loadBackupConfig().nexus!.backupUrl).toBe('postgresql://flint_backup:x@127.0.0.1:5432/nexus_two');
+      });
+
+      it.skipIf(!tools)('an address that is not a database on this Mac is refused with why, in words that hold nothing of it, and Flint’s own backup still loads', () => {
+        const h = home(true);
+        const secret = 's3cret-pw';
+        const refused: Array<[string, string]> = [
+          [`postgresql://flint_backup:${secret}@db.example.com:5432/nexus`, 'must be a database on this Mac'],
+          [`postgresql://flint_backup:${secret}@10.0.0.5:5432/nexus`, 'must be a database on this Mac'],
+          [`postgresql://flint_backup:${secret}@127.0.0.1.example.com:5432/nexus`, 'must be a database on this Mac'],
+          [`postgresql://flint_backup:${secret}@[2001:db8::1]:5432/nexus`, 'must be a database on this Mac'],
+          [`https://flint_backup:${secret}@[::1]:5432/nexus`, 'must be a postgres URL'],
+          [`mysql://flint_backup:${secret}@localhost/nexus`, 'must be a postgres URL'],
+          [`flint_backup:${secret}@localhost/nexus`, 'is not a URL'],
+          [`not a url ${secret}`, 'is not a URL'],
+          [`postgresql://:${secret}@[::1]:5432/nexus`, 'must name the login that reads Nexus'],
+          [`postgresql://flint_backup:${secret}@[::1]:5432/`, 'must name the Nexus database'],
+          [`postgresql://flint_backup:${secret}@[::1]:5432/postgres`, 'must name the Nexus database'],
+          [`postgresql://flint_backup:${secret}@[::1]:5432/template1`, 'must name the Nexus database'],
+          [`postgresql://flint_backup:${secret}@[::1]:5432/nexus_restore_test`, 'must name the Nexus database'],
+          [`postgresql://flint_backup:${secret}@[::1]:5432/nexus%22%3B%20DROP`, 'must name the Nexus database'],
+          // Flint's own database, by any of this Mac's names and with the port left out or spelled out.
+          [`postgresql://flint_backup:${secret}@[::1]:5432/flint`, 'names Flint’s own database, which has its own backup'],
+          [`postgresql://flint_backup:${secret}@localhost/flint`, 'names Flint’s own database, which has its own backup'],
+        ];
+        for (const [value, why] of refused) {
+          withNexus(h, value);
+          const b = loadBackupConfig();
+          expect(b.nexus, value).toMatchObject({ problem: `FLINT_NEXUS_BACKUP_URL ${why}` });
+          expect(b.nexus!.backupUrl, value).toBeUndefined();
+          expect(JSON.stringify(b.nexus), value).not.toMatch(new RegExp(`${secret}|example|10\\.0|2001`));
+          // Flint's own backup is read from the same file and is not stopped by it.
+          expect(b.backupUrl).toBe('postgresql://flint_backup:x@[::1]:5432/flint');
+          expect(nexusUrlProblem(value, b.backupUrl)).toBe(why);
+        }
+        // Every way of naming this Mac is taken, and the same name on another server's port is not Flint's database.
+        for (const value of ['postgresql://flint_backup:x@[::1]:5432/nexus', 'postgres://flint_backup:x@127.0.0.1/nexus', 'postgresql://flint_backup:x@localhost:5433/flint', 'postgresql://flint_backup:p%40ss@[::1]/Nexus_2']) {
+          expect(nexusUrlProblem(value, 'postgresql://flint_backup:x@[::1]:5432/flint'), value).toBeUndefined();
+        }
+      });
+
+      it('the switch is one line in backup.env, read the same way by the runtime, the commands and the nightly script', () => {
+        const h = mkdtempSync(join(tmpdir(), 'rt-nexus-switch-'));
+        mkdirSync(join(h, '.flint'), { mode: 0o700 });
+        const file = join(h, '.flint', 'backup.env');
+        const script = readFileSync(join(__dirname, '..', 'backup-nightly.sh'), 'utf8');
+        const fn = /^nexus_on\(\) \{.*\}$/m.exec(script)?.[0];
+        expect(fn, 'the nightly script’s own check').toBeTruthy();
+        const nightly = () => spawnSync('/bin/zsh', ['-c', `DATA="$1"; ${fn}\nnexus_on`, 'zsh', join(h, '.flint')], { encoding: 'utf8' }).status === 0;
+        const url = 'postgresql://flint_backup:x@[::1]:5432/nexus';
+        const cases: Array<[string, boolean]> = [
+          [`FLINT_NEXUS_BACKUP_URL=${url}\n`, true],
+          [`A=1\nexport FLINT_NEXUS_BACKUP_URL=${url}\nB=2\n`, true],
+          [`FLINT_NEXUS_BACKUP_URL="${url}"\n`, true],
+          [`FLINT_NEXUS_BACKUP_URL='${url}'\n`, true],
+          [`FLINT_NEXUS_BACKUP_URL= ${url}\n`, true],
+          ['FLINT_NEXUS_BACKUP_URL=\n', false],
+          ['FLINT_NEXUS_BACKUP_URL=""\n', false],
+          ['FLINT_NEXUS_BACKUP_URL=   \n', false],
+          [`# FLINT_NEXUS_BACKUP_URL=${url}\n`, false],
+          [`XFLINT_NEXUS_BACKUP_URL=${url}\n`, false],
+          [`FLINT_NEXUS_BACKUP_URL_OLD=${url}\n`, false],
+          [' \n', false],
+          // Of two lines for it, the last one counts.
+          [`FLINT_NEXUS_BACKUP_URL=${url}\nFLINT_NEXUS_BACKUP_URL=\n`, false],
+          [`FLINT_NEXUS_BACKUP_URL=\nFLINT_NEXUS_BACKUP_URL=${url}\n`, true],
+          [`FLINT_NEXUS_BACKUP_URL=${url}`, true],
+        ];
+        for (const [text, wanted] of cases) {
+          writeFileSync(file, text, { mode: 0o600 });
+          expect(nexusBackupWanted(h, file), JSON.stringify(text)).toBe(wanted);
+          expect(nightly(), JSON.stringify(text)).toBe(wanted);
+          // ...and it is what the commands' own reading of the file gives.
+          expect(!!runtimeEnv(file, {}).FLINT_NEXUS_BACKUP_URL?.trim(), JSON.stringify(text)).toBe(wanted);
+        }
+        rmSync(file);
+        expect(nexusBackupWanted(h, file)).toBe(false);
+        expect(nightly()).toBe(false);
+        // For Settings > Health the runtime tells three things apart, and keeps none of the address: off, on, and
+        // set to something Flint cannot use (which the commands refuse with the same reason).
+        const flintLine = 'FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/flint\n';
+        const states: Array<[string, 'off' | 'on' | 'bad']> = [
+          [flintLine, 'off'],
+          [`${flintLine}FLINT_NEXUS_BACKUP_URL=\n`, 'off'],
+          [`${flintLine}FLINT_NEXUS_BACKUP_URL=${url}\n`, 'on'],
+          [`${flintLine}export FLINT_NEXUS_BACKUP_URL="${url}"\n`, 'on'],
+          [`${flintLine}FLINT_NEXUS_BACKUP_URL=postgresql://flint_backup:x@db.example.com:5432/nexus\n`, 'bad'],
+          [`${flintLine}FLINT_NEXUS_BACKUP_URL=nexus\n`, 'bad'],
+          [`${flintLine}FLINT_NEXUS_BACKUP_URL=postgresql://flint_backup:x@localhost:5432/flint\n`, 'bad'],
+          [`${flintLine}FLINT_NEXUS_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/postgres\n`, 'bad'],
+          // The last line for a name counts, for both names.
+          [`${flintLine}FLINT_NEXUS_BACKUP_URL=nexus\nFLINT_NEXUS_BACKUP_URL=${url}\n`, 'on'],
+          [`FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/nexus\n${flintLine}FLINT_NEXUS_BACKUP_URL=${url}\n`, 'on'],
+          [`${flintLine}FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/nexus\nFLINT_NEXUS_BACKUP_URL=${url}\n`, 'bad'],
+        ];
+        for (const [text, state] of states) {
+          writeFileSync(file, text, { mode: 0o600 });
+          expect(nexusBackupState(h, file), JSON.stringify(text)).toBe(state);
+          expect(nexusBackupWanted(h, file), JSON.stringify(text)).toBe(state !== 'off');
+          // ...and it is what the commands' own check of the same lines says.
+          const env = runtimeEnv(file, {});
+          const value = env.FLINT_NEXUS_BACKUP_URL?.trim();
+          expect(!value ? 'off' : nexusUrlProblem(value, env.FLINT_DB_BACKUP_URL) ? 'bad' : 'on', JSON.stringify(text)).toBe(state);
+        }
+        rmSync(file);
+        expect(nexusBackupState(h, file)).toBe('off');
+        rmSync(h, { recursive: true, force: true });
       });
     });
   });

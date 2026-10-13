@@ -34,9 +34,10 @@ import { ACTION, nextAfterFailure } from '../src/backup/nightly';
 import { digestBody, digestTitle, goalsSentence, questionsSentence } from '../src/digest';
 import { DEFERRAL_SAYS } from '../src/goals/batch';
 import { REVIEWS_STOPPED } from '../src/goals/late';
-import { BACKUP_HEALTH, DATABASE_HEALTH, FORECAST_HEALTH, GOAL_HEALTH, LEDGER_HEALTH, TASK_HEALTH, UPKEEP_HEALTH } from '../src/health/checks';
+import { BACKUP_HEALTH, DATABASE_HEALTH, FORECAST_HEALTH, GOAL_HEALTH, LEDGER_HEALTH, NEXUS_HEALTH, TASK_HEALTH, UPKEEP_HEALTH } from '../src/health/checks';
 import { MODEL_HEALTH, REMOTE_HEALTH, diskCheck, remoteAccessCheck } from '../src/health/machine';
 import { pruneLines } from '../src/backup/prune-job';
+import { NEXUS_OFF } from '../src/backup/nexus';
 import { ASSETS } from '../src/assets/registry';
 import { WAITING } from '../src/assets/view';
 import { SPEND_NEEDS_ESTIMATE, WHOLE_NUMBERS_ONLY } from '../src/governance/proposals';
@@ -87,7 +88,7 @@ describe('the runtime’s notes to Will', () => {
     expect(cli).not.toMatch(/notifyWill\([^)]*[`'"]/);
     expect(cli).not.toMatch(/jobFailedNote|needsSetup\(/);
     const jobs = Object.values(ACTION) as NightlyJob[];
-    expect(jobs.sort()).toEqual(['backup.local', 'backup.offsite', 'restore.drill']);
+    expect(jobs.sort()).toEqual(['backup.local', 'backup.nexus', 'backup.nexus.offsite', 'backup.offsite', 'restore.drill', 'restore.drill.nexus']);
     for (const job of jobs) {
       for (const next of ['retry', 'card', 'card_later', 'setup', 'stopped'] as const) {
         for (const icloud of [true, false]) {
@@ -354,8 +355,28 @@ describe('the runtime’s notes to Will', () => {
       ['deploy_hold', UPKEEP_HEALTH.neverChecked],
       ...[0, 59_000, 60_000, 45 * 60_000].map((ms): [string, string] => ['deploy_hold', UPKEEP_HEALTH.checked(ms)]),
       ...[61 * 60_000, 5 * 3_600_000, 47 * 3_600_000, 9 * 86_400_000].map((ms): [string, string] => ['deploy_hold', UPKEEP_HEALTH.notChecked(ms)]),
+      // Nexus's own backup (P7): its one line in Health, whichever of its three parts it speaks of.
+      ['nexus_backup', NEXUS_HEALTH.none], ['nexus_backup', NEXUS_HEALTH.failed], ['nexus_backup', NEXUS_HEALTH.offsiteNone], ['nexus_backup', NEXUS_HEALTH.offsiteFailed], ['nexus_backup', NEXUS_HEALTH.drillNone],
+      ['nexus_backup', NEXUS_HEALTH.address],
+      ...[0, 1, 30, 400].flatMap((h): Array<[string, string]> => [['nexus_backup', NEXUS_HEALTH.age(h)], ['nexus_backup', NEXUS_HEALTH.offsiteAge(h)]]),
+      ...['today', 'yesterday', '6 days ago'].map((w): [string, string] => ['nexus_backup', NEXUS_HEALTH.drillFailed(w)]),
+      ...[9, 13, 400].map((d): [string, string] => ['nexus_backup', NEXUS_HEALTH.drillLate(d)]),
     ];
-    expect(lines.length).toBeGreaterThan(55);
+    expect(lines.length).toBeGreaterThan(75);
+    // Every sentence Nexus Backup can say is one of those: its check puts none together where it is returned.
+    const nexusCheck = readFileSync(join(SRC, 'health', 'checks.ts'), 'utf8');
+    const nexusFn = nexusCheck.slice(nexusCheck.indexOf('async function nexusBackup('), nexusCheck.indexOf('async function filesOffsite('));
+    expect(nexusFn.length).toBeGreaterThan(500);
+    expect(nexusFn.match(/\bdetail: /g)).toHaveLength(5);
+    expect(nexusFn.match(/NEXUS_HEALTH\.\w+/g)!.sort()).toEqual(['age', 'drillFailed', 'drillLate', 'drillNone', 'failed', 'none', 'offsiteAge', 'offsiteFailed', 'offsiteNone'].map((k) => `NEXUS_HEALTH.${k}`));
+    // (The one sentence its check does not say itself: an address that cannot be used, said before the check is made.)
+    expect(Object.keys(NEXUS_HEALTH).sort()).toEqual(['address', 'age', 'drillFailed', 'drillLate', 'drillNone', 'failed', 'none', 'offsiteAge', 'offsiteFailed', 'offsiteNone']);
+    expect(nexusCheck.match(/NEXUS_HEALTH\.address/g)).toHaveLength(1);
+    expect(HEALTH_NAMES.nexus_backup).toBe('Nexus Backup');
+    expect(digestBody({ relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 }, ['nexus_backup'])).toContain('Nexus Backup');
+    // Its three jobs by name, as a failure's note says them, and the commands' own lines in Terminal.
+    expect([JOB_WORDS['backup.nexus'], JOB_WORDS['backup.nexus.offsite'], JOB_WORDS['restore.drill.nexus']]).toEqual(['Nexus Backup', 'Nexus Offsite Backup', 'Nexus Restore Test']);
+    for (const line of NEXUS_OFF.filter((l) => !l.startsWith('  '))) expect(line, line).toMatch(/^[A-Z].*[.:]$/);
     for (const [component, line] of lines) said(component, line!);
     // What each of the checks from a reading can say is one of the lines above: none is put together where it is returned.
     for (const r of [{ state: 'unknown' }, { state: 'ok' }, { state: 'ok', expiresAt: new Date(now.getTime() + 86_400_000) }, { state: 'down', why: 'offline' }] as const) said('remote_access', remoteAccessCheck(r, now).detail!);

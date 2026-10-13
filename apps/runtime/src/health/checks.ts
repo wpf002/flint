@@ -42,7 +42,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { localDay, redact, resolveTier, runsInShadow, HEALTH_STATUS, REVIEW_DOWN_MS, REVIEW_LATE_MS, TASK_ASSET_KINDS, type HealthReport } from '@flint/policy';
 import type { z } from 'zod';
-import type { Config } from '../config.js';
+import { nexusBackupState, type Config } from '../config.js';
 import type { Db } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
 import { revokedIn } from '../sources/apple/calendar.js';
@@ -220,9 +220,31 @@ export const BACKUP_HEALTH = {
   drillLate: (days: number) => `Your MacBook hasn’t tested an offsite copy in ${days < 14 ? count(days, 'day') : count(Math.floor(days / 7), 'week')}.`,
 } as const;
 
+/**
+ * What Nexus Backup says (P7). One line for Nexus's own backup, saying
+ * whichever of its three parts is worst off: the nightly dump on this Mac, its
+ * encrypted copy offsite (only once Will's key is here), and the weekly test
+ * that restores it into a scratch database.
+ */
+export const NEXUS_HEALTH = {
+  none: 'There’s no Nexus backup yet.',
+  failed: 'The last Nexus backup failed.',
+  age: (hours: number) => `The last Nexus backup is ${count(hours, 'hour')} old.`,
+  offsiteNone: 'The Nexus backup hasn’t gone offsite yet.',
+  offsiteFailed: 'The last Nexus backup didn’t go offsite.',
+  offsiteAge: (hours: number) => `The offsite copy of the Nexus backup is ${count(hours, 'hour')} old.`,
+  drillFailed: (when: string) => `The last Nexus restore test failed ${when}.`,
+  drillNone: 'No Nexus restore test has run yet.',
+  drillLate: (days: number) => `The last Nexus restore test was ${count(days, 'day')} ago.`,
+  /** The address set for it is not one Flint can use: none of its steps runs until it is set again. */
+  address: 'The Nexus backup’s address needs fixing. Nothing is backed up until it is set again.',
+} as const;
+
 /** A copy older than this is late (degraded); older than the next, missing (down). The nightly jobs run a day apart. */
 const LATE_HOURS = 26;
 const MISSING_HOURS = 36;
+/** A weekly restore test on this Mac, a day's grace (the same eight days Restore Test allows). */
+const DRILL_STALE_DAYS = 8;
 /** A weekly test, a day's grace. */
 export const OFFSITE_DRILL_STALE_DAYS = 8;
 /** The deploy job looks for an update every two minutes; a deploy's own checks can hold one look for a quarter of an hour. */
@@ -257,6 +279,58 @@ async function filesBackup(db: Backups, now: Date): Promise<ComponentCheck> {
     component, status: hours > MISSING_HOURS ? 'down' : hours > LATE_HOURS || failed ? 'degraded' : 'ok',
     detail: failed || !good ? BACKUP_HEALTH.filesFailed : BACKUP_HEALTH.filesAge(Math.round(hours)),
   };
+}
+
+/**
+ * Nexus's own backup, from its records (kind nexus_dump): the nightly dump on
+ * this Mac, its encrypted copy offsite, and the weekly restore test. Off until
+ * its address is set (the caller asks nexusBackupWanted): nothing of it runs
+ * then, and nothing is read here either.
+ *
+ *  - The dump: none yet is an issue, not a failure (it waits for its first
+ *    card); a run that failed since the last good one is said at once; a good
+ *    one over 26 hours old is late, and over 36 missing.
+ *  - The offsite copy counts only once Will's key is here, as Flint's own does.
+ *  - The test: a failure is down. None yet is said only once there has been a
+ *    dump to test for over a week, and a pass grows old after eight days.
+ * What is said is the worst of the three, and the dump's age when all is well.
+ */
+async function nexusBackup(db: Backups, home: string, tz: string, now: Date): Promise<ComponentCheck> {
+  const component = 'nexus_backup';
+  const hoursSince = (at: Date | undefined) => (at ? (now.getTime() - at.getTime()) / 3_600_000 : Infinity);
+  const good = await newestGood(db, 'nexus_dump', 'local');
+  const failed = await newerFailure(db, 'nexus_dump', 'local', good);
+  const hours = hoursSince(good);
+  const facts: ComponentCheck[] = [{
+    component,
+    status: !good && !failed ? 'degraded' : hours > MISSING_HOURS ? 'down' : hours > LATE_HOURS || failed ? 'degraded' : 'ok',
+    detail: failed ? NEXUS_HEALTH.failed : good ? NEXUS_HEALTH.age(Math.round(hours)) : NEXUS_HEALTH.none,
+  }];
+  // Its copy offsite and its test say nothing before there is a dump: the line above already says there is none.
+  if (good && offsiteWanted(home)) {
+    const sent = await newestGood(db, 'nexus_dump', 'icloud');
+    const unsent = await newerFailure(db, 'nexus_dump', 'icloud', sent);
+    const age = hoursSince(sent);
+    facts.push({
+      component, status: age > MISSING_HOURS ? 'down' : age > LATE_HOURS || unsent ? 'degraded' : 'ok',
+      detail: unsent ? NEXUS_HEALTH.offsiteFailed : sent ? NEXUS_HEALTH.offsiteAge(Math.round(age)) : NEXUS_HEALTH.offsiteNone,
+    });
+  }
+  if (good) {
+    const drill = await db.backupRun.findFirst({ where: { kind: 'nexus_dump', location: 'local', restoreTestedAt: { not: null } }, orderBy: { restoreTestedAt: 'desc' }, select: { restoreTestedAt: true, restoreOk: true } });
+    if (drill?.restoreTestedAt) {
+      const days = calendarDaysBetween(tz, drill.restoreTestedAt, now);
+      const when = days <= 0 ? 'today' : days === 1 ? 'yesterday' : `${count(days, 'day')} ago`;
+      if (drill.restoreOk === false) facts.push({ component, status: 'down', detail: NEXUS_HEALTH.drillFailed(when) });
+      else if ((now.getTime() - drill.restoreTestedAt.getTime()) / 86_400_000 > DRILL_STALE_DAYS) facts.push({ component, status: 'degraded', detail: NEXUS_HEALTH.drillLate(Math.max(days, DRILL_STALE_DAYS + 1)) });
+    } else {
+      // The first test is on the first Sunday after the first dump: said only when that Sunday has passed without one.
+      const first = (await db.backupRun.findFirst({ where: { kind: 'nexus_dump', location: 'local', status: 'ok' }, orderBy: { startedAt: 'asc' }, select: { startedAt: true } }))?.startedAt;
+      if (first && (now.getTime() - first.getTime()) / 86_400_000 > DRILL_STALE_DAYS) facts.push({ component, status: 'degraded', detail: NEXUS_HEALTH.drillNone });
+    }
+  }
+  // The worst of them; of two as bad as each other, the first (the dump before its copy, its copy before its test).
+  return facts.reduce((worst, f) => (HEALTH_RANK[f.status] > HEALTH_RANK[worst.status] ? f : worst));
 }
 
 /** The files archive's encrypted copy offsite; undefined until the files backup has written its first record. */
@@ -400,6 +474,15 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
     detail: backupFailed ? BACKUP_HEALTH.failed : backup ? `The last backup is ${count(Math.round(backupH), 'hour')} old.` : 'There’s no backup yet.',
   });
   out.push(await filesBackup(db, now));
+  // Nexus's own backup (P7): off until its address is set, and nothing of it is read while it is off. With an
+  // address Flint cannot use, none of its steps runs (and none files a card): that is said here, where it stays
+  // until the address is set again, whatever the last dump's age.
+  const nexus = nexusBackupState(d.config.home);
+  out.push(
+    nexus === 'off' ? { component: 'nexus_backup', status: 'disabled' }
+      : nexus === 'bad' ? { component: 'nexus_backup', status: 'down', detail: NEXUS_HEALTH.address }
+        : await nexusBackup(db, d.config.home, d.config.tz, now),
+  );
 
   // The encrypted copy off this Mac. The nightly job sends one only once Will's age key is here
   // (backup-nightly.sh), so without the key it is off, not failing. With it, a copy that is missing or
@@ -419,8 +502,9 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
   }
 
   // The latest drill only: one that failed and was then passed is passed.
-  // (The copies on this Mac: an offsite copy's test is the MacBook's, and has its own line below.)
-  const drill = await db.backupRun.findFirst({ where: { location: 'local', restoreTestedAt: { not: null } }, orderBy: { restoreTestedAt: 'desc' }, select: { restoreTestedAt: true, restoreOk: true } });
+  // (The copies on this Mac: an offsite copy's test is the MacBook's, and has its own line below. And Flint's own
+  // database only: a test of Nexus's dump is said on Nexus Backup's line, never here.)
+  const drill = await db.backupRun.findFirst({ where: { kind: 'pg_dump_flint', location: 'local', restoreTestedAt: { not: null } }, orderBy: { restoreTestedAt: 'desc' }, select: { restoreTestedAt: true, restoreOk: true } });
   const drillD = drill?.restoreTestedAt ? (now.getTime() - drill.restoreTestedAt.getTime()) / 86_400_000 : Infinity;
   // "today" and "yesterday" are Will's calendar days, not 24-hour spans: a 2:15 AM test is "today" all that day.
   const days = drill?.restoreTestedAt ? calendarDaysBetween(d.config.tz, drill.restoreTestedAt, now) : 0;

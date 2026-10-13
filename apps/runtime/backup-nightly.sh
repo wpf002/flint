@@ -6,10 +6,17 @@
 #     copy off the box (`offsite --auto`), into iCloud Drive's FlintBackups/pg
 #     unless FLINT_OFFSITE_DIR names another folder; the newest 7 are kept there;
 #   - on Sundays: the restore drill into a scratch database (`drill --auto`);
-#   - every night, last: old copies taken before database updates are removed
-#     (`prune-backups --auto`; the newest 10 and the last 30 days stay). It asks for
-#     a card only on a night there is something to remove. (Never `pnpm prune`: that
-#     is pnpm's own command, which removes packages.)
+#   - every night, the last of Flint's own steps: old copies taken before database
+#     updates are removed (`prune-backups --auto`; the newest 10 and the last 30
+#     days stay). It asks for a card only on a night there is something to remove.
+#     (Never `pnpm prune`: that is pnpm's own command, which removes packages.)
+#   - then, and only when Nexus's own backup is switched on (FLINT_NEXUS_BACKUP_URL
+#     is in ~/.flint/backup.env; `nexus-setup` puts it there): the same three steps
+#     for the Nexus database (`nexus-backup`, `nexus-offsite`, and on Sundays
+#     `nexus-drill`), each under its own action and its own card. They come after
+#     every one of Flint's own steps, so nothing about Nexus (a lock someone holds
+#     there, a slow night) can delay or stop Flint's own backup. Switched off, none
+#     of them is started at all.
 # Each goes through the tier engine. While its action is at APPROVAL it runs only
 # on a card Will approved (the console's Approvals; one card a night); once he has
 # promoted it, it runs on its own under its cap. A failure posts Will a note.
@@ -25,8 +32,20 @@ run() {
   pnpm --silent --filter @flint/runtime "$1" --auto || echo "$(ts) $1 did not complete (see above)" >&2
 }
 
+# Whether Nexus's backup is switched on: backup.env has an address for it (of two lines for it, the last one
+# counts, as for every setting there). Only whether it has a value is looked at; the value is never kept or
+# printed here (the runtime looks for the same line: config.ts, nexusBackupWanted).
+nexus_on() { [ -r "$DATA/backup.env" ] && grep -E "^(export[[:space:]]+)?FLINT_NEXUS_BACKUP_URL=" "$DATA/backup.env" | tail -1 | grep -Eq "=[[:space:]]*[\"']?[^[:space:]\"']"; }
+
+# Flint's own night, whole, first.
 run backup
 [ -s "$DATA/backup-age-recipient" ] && run offsite
 [ "${FLINT_DOW:-$(date +%u)}" = 7 ] && run drill
 run prune-backups
+# Nexus's, after it: whatever happens here, Flint's own steps have already finished.
+if nexus_on; then
+  run nexus-backup
+  [ -s "$DATA/backup-age-recipient" ] && run nexus-offsite
+  [ "${FLINT_DOW:-$(date +%u)}" = 7 ] && run nexus-drill
+fi
 exit 0

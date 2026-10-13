@@ -138,6 +138,15 @@ export const TEMPLATES = {
     fieldFreeTitle: 'Backups Have Stopped',
     fieldFreeBody: 'The last good database backup is more than 36 hours old.',
   }),
+  // The same rule for Nexus's own backup (P7), which is a database of its own with a note of its own: a stale
+  // Nexus backup never reads as Flint's.
+  nexus_backup_stale: t({
+    fields: z.object({ hoursSince: Count }).strict(),
+    title: () => 'Nexus Backups Have Stopped',
+    body: (f) => `The last good Nexus backup is ${f.hoursSince} hours old.`,
+    fieldFreeTitle: 'Nexus Backups Have Stopped',
+    fieldFreeBody: 'The last good Nexus backup is more than 36 hours old.',
+  }),
   drill_failed: t({
     fields: z.object({ mismatches: Count }).strict(),
     // Not "Restore Test Failed": that is the nightly job's own note (jobFailedNote), which says what happens

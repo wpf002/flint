@@ -7,7 +7,8 @@
 import { describe, it, expect } from 'vitest';
 import { resolveTier, forbiddenReason, CODE_TABLE, AUTONOMOUS_ACTIONS, CONSOLE_ONLY, NEVER_FROM_CHAT, type PolicyRow, type TierContext } from '../src/tiers';
 import { BACKUP_EVENT_REASONS, BackupEvent } from '../src/wire';
-import { jobFailedNote } from '../src/action-words';
+import { JOB_WORDS, WEEKLY_JOBS, jobFailedNote, ruleWords } from '../src/action-words';
+import { HEALTH_GROUPS, HEALTH_NAMES, healthGroup } from '../src/health-names';
 import { noteProblems } from '../src/notes';
 
 const chat: TierContext = { context: 'chat', tainted: false };
@@ -94,6 +95,85 @@ describe('P7: removing old backups', () => {
   it('any row still tightens it, a star included', () => {
     expect(resolveTier('backup.prune', { ...auto, policies: [row('backup.*', 'forbidden')], now: NOW })).toMatchObject({ tier: 'forbidden', rule: 'policy' });
     expect(resolveTier('backup.prune', { ...auto, policies: [row('backup.prune', 'alone'), row('backup.*', 'forbidden')], now: NOW }).tier).toBe('forbidden');
+  });
+});
+
+describe('P7: Nexus’s own backup', () => {
+  const THREE = ['backup.nexus', 'backup.nexus.offsite', 'restore.drill.nexus'] as const;
+
+  it('its three actions ship at APPROVAL, each under its own cap, and may run on their own only as nightly jobs', () => {
+    expect(CODE_TABLE['backup.nexus']).toMatchObject({ tier: 'approval', promotable: true, write: true, byName: true, cap: { limit: 1, period: 'day' } });
+    expect(CODE_TABLE['backup.nexus.offsite']).toMatchObject({ tier: 'approval', promotable: true, byName: true, egress: true, cap: { limit: 1, period: 'day' } });
+    expect(CODE_TABLE['restore.drill.nexus']).toMatchObject({ tier: 'approval', promotable: true, byName: true, cap: { limit: 1, period: 'week' } });
+    for (const a of THREE) {
+      expect(AUTONOMOUS_ACTIONS.has(a), a).toBe(true);
+      expect(resolveTier(a, auto), a).toMatchObject({ tier: 'approval', rule: 'code' });
+      // By hand it is Will at the keyboard: his own approval, unless a rule of his forbids it.
+      expect(resolveTier(a, { context: 'console', tainted: false }).tier, a).toBe('approval');
+    }
+    // The copy offsite is egress, like Flint's own.
+    expect(CODE_TABLE['backup.nexus']!.egress ?? false).toBe(false);
+    expect(CODE_TABLE['backup.offsite']!.egress).toBe(true);
+  });
+
+  it('a rule signed for the backups as a group, before these existed, does not promote them: only one that names each does', () => {
+    const groups = [row('backup.*', 'alone'), row('restore.*', 'alone'), row('restore.drill.*', 'alone'), row('backup.nexus.*', 'alone')];
+    for (const a of THREE) expect(resolveTier(a, { ...auto, policies: groups, now: NOW }), a).toMatchObject({ tier: 'approval', rule: 'code' });
+    // Flint's own are promoted by the same rows, as before.
+    expect(resolveTier('backup.local', { ...auto, policies: groups, now: NOW }).tier).toBe('alone');
+    expect(resolveTier('restore.drill', { ...auto, policies: groups, now: NOW }).tier).toBe('alone');
+    // Nor does a row that names one of Flint's own cover the Nexus action whose name begins the same way.
+    expect(resolveTier('restore.drill.nexus', { ...auto, policies: [row('restore.drill', 'alone')], now: NOW }).tier).toBe('approval');
+    expect(resolveTier('backup.nexus.offsite', { ...auto, policies: [row('backup.offsite', 'alone'), row('backup.nexus', 'alone')], now: NOW }).tier).toBe('approval');
+    for (const a of THREE) {
+      expect(resolveTier(a, { ...auto, policies: [...groups, row(a, 'alone')], now: NOW }), a).toMatchObject({ tier: 'alone', rule: 'policy', policyPattern: a, cap: { limit: 1, period: a === 'restore.drill.nexus' ? 'week' : 'day' } });
+      // Any row still tightens it, a group's included.
+      expect(resolveTier(a, { ...auto, policies: [row(a, 'alone'), row(a.startsWith('backup') ? 'backup.*' : 'restore.*', 'forbidden')], now: NOW }).tier, a).toBe('forbidden');
+    }
+  });
+
+  it('none of the three can be asked for from chat, whatever a rule says', () => {
+    for (const a of THREE) {
+      expect(NEVER_FROM_CHAT.has(a), a).toBe(true);
+      expect(resolveTier(a, chat), a).toMatchObject({ tier: 'forbidden', rule: 'forbidden', reason: `${a} is never asked for from chat` });
+      expect(resolveTier(a, { ...chat, policies: [row(a, 'alone')], now: NOW }).tier, a).toBe('forbidden');
+    }
+    // Flint's own three are as they were.
+    for (const a of ['backup.local', 'backup.offsite', 'restore.drill']) expect(resolveTier(a, chat).tier, a).toBe('approval');
+  });
+
+  it('each job has a name of its own for a note, and a failure’s note says which backup it was', () => {
+    expect([JOB_WORDS['backup.nexus'], JOB_WORDS['backup.nexus.offsite'], JOB_WORDS['restore.drill.nexus']]).toEqual(['Nexus Backup', 'Nexus Offsite Backup', 'Nexus Restore Test']);
+    expect([...WEEKLY_JOBS].sort()).toEqual(['restore.drill', 'restore.drill.nexus']);
+    expect(jobFailedNote('backup.nexus', { next: 'retry' })).toEqual({ title: 'Nexus Backup Failed', body: 'Last night’s Nexus backup didn’t finish. Flint tries again tonight.' });
+    expect(jobFailedNote('backup.nexus', { next: 'setup' })).toEqual({ title: 'Nexus Backup Failed', body: 'Last night’s Nexus backup didn’t finish. It won’t work until its setup is fixed.' });
+    expect(jobFailedNote('backup.nexus.offsite', { next: 'card', icloud: true })).toEqual({ title: 'Nexus Offsite Backup Failed', body: 'Last night’s encrypted copy of the Nexus backup to iCloud didn’t finish. It runs again once you approve its next card in Approvals.' });
+    expect(jobFailedNote('backup.nexus.offsite', { next: 'retry', icloud: false }).body).toBe('Last night’s encrypted offsite copy of the Nexus backup didn’t finish. Flint tries again tonight.');
+    // The weekly test: its next run, and its next card, are a week away.
+    expect(jobFailedNote('restore.drill.nexus', { next: 'retry', mismatch: true })).toEqual({ title: 'Nexus Restore Test Failed', body: 'This week’s practice restore of Nexus found a problem. Flint tries again next Sunday.' });
+    expect(jobFailedNote('restore.drill.nexus', { next: 'card_later' }).body).toBe('This week’s practice restore of Nexus didn’t finish. Its next card will be in Approvals next Sunday.');
+    // Flint's own notes are word for word what they were.
+    expect(jobFailedNote('backup.local', { next: 'retry' }).body).toBe('Last night’s database backup didn’t finish. Flint tries again tonight.');
+    expect(jobFailedNote('restore.drill', { next: 'retry', mismatch: true }).body).toBe('This week’s practice restore found a problem. Flint tries again next Sunday.');
+    for (const job of THREE) {
+      for (const next of ['retry', 'card', 'card_later', 'setup', 'stopped'] as const) {
+        for (const icloud of [true, false]) {
+          for (const mismatch of [true, false]) {
+            const note = jobFailedNote(job, { next, icloud, mismatch });
+            expect(noteProblems(note.title, note.body), `${note.title} / ${note.body}`).toEqual([]);
+            expect(note.title.length).toBeLessThanOrEqual(40);
+          }
+        }
+      }
+    }
+  });
+
+  it('Settings > Health names it Nexus Backup, among the backups', () => {
+    expect(HEALTH_NAMES.nexus_backup).toBe('Nexus Backup');
+    expect(healthGroup('nexus_backup')).toBe('BACKUPS');
+    expect(HEALTH_GROUPS.find((g) => g.header === 'BACKUPS')!.components).toEqual(['backup', 'files_backup', 'nexus_backup', 'offsite_backup', 'restore_drill', 'offsite_drill', 'rebuild_rehearsal']);
+    expect(ruleWords('backup.nexus')).toBe('Nexus Backup');
+    expect(ruleWords('restore.drill.nexus')).toBe('Nexus Restore Test');
   });
 });
 

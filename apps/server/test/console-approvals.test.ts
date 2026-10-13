@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
 import { laterDay, pinLocale, shownDay } from './console-dates';
-import { ACTION_WORDS, noteProblems } from '@flint/policy';
+import { ACTION_WORDS, WEEKLY_JOBS, noteProblems } from '@flint/policy';
 
 /** A rule's last day, and how the console shows it: a date with its year, whenever this runs. */
 const RULE_UNTIL = laterDay(3, 29);
@@ -517,6 +517,68 @@ describe('the console Approvals panel', () => {
       .toMatch(/^Until [A-Z][a-z]+ \d+(, \d{4})?, Flint deletes update backups past the newest 10 and the last 30 days\.$/);
     expect(rule([{ pattern: 'backup.local', tier: 'alone', expiresAt: until }, { pattern: 'backup.offsite', tier: 'alone', expiresAt: until }])).toBe('Run Backups on Their Own');
     expect(rule([{ pattern: 'backup.local', tier: 'alone', expiresAt: until }, { pattern: 'backup.prune', tier: 'alone', expiresAt: until }])).not.toBe('Run Backups on Their Own');
+  });
+
+  it('Nexus’s own backup has three cards: each says what it does, what it never changes, and when its job runs it', async () => {
+    const nexus = (id: string, fullName: string, status = 'pending') => card({
+      id, fullName, origin: `runtime:${id}`, status, args: { day: '2026-10-06' },
+      reason: `It waits for your approval each ${fullName === 'restore.drill.nexus' ? 'week' : 'night'} until you let it run on its own.`,
+    });
+    const three = (status?: string) => [nexus('nexus-backup', 'backup.nexus', status), nexus('nexus-offsite', 'backup.nexus.offsite', status), nexus('nexus-drill', 'restore.drill.nexus', status)];
+    answer = () => ({ status: 200, body: { signed: true, proposals: three() } });
+    await open();
+    const rows = ids.apprlist!.children[0]!.children;
+    expect(rows.map((r) => r.shown().replace(/1h$/, ''))).toEqual([
+      expect.stringContaining('Run Tonight\'s Nexus BackupIt runs tonight at 2:15 AM if you approve it.'),
+      'Run Tonight\'s Nexus Offsite CopyIt runs tonight at 2:15 AM if you approve it.',
+      'Run This Week\'s Nexus Restore TestIt runs Sunday at 2:15 AM if you approve it.',
+    ]);
+    for (const r of rows) expect(r.shown()).not.toMatch(/backup\.nexus|restore\.drill|nexus_dump|flint_backup|Can’t Be Undone/);
+    // They ride Approve All like Flint's own nightly cards: nothing here deletes, and nothing of Nexus is changed.
+    for (const p of three()) expect(run(`apprAlone(${JSON.stringify(p)})`), p.fullName as string).toBe(false);
+    // Show Details: what it does, in a sentence. (When it runs is the line under its title, said once.)
+    const details = (fullName: string) => (run(`apprDetails(${JSON.stringify(nexus('x', fullName))})`) as { says: string[]; facts: string[][]; refs: string[][] });
+    expect(details('backup.nexus').says).toEqual(['Flint copies the Nexus database to this Mac. It only reads Nexus, through a login with no right to change its tables.']);
+    // No card says more than the runtime checks: it never promises that Nexus cannot be changed.
+    for (const f of ['backup.nexus', 'backup.nexus.offsite', 'restore.drill.nexus']) expect(details(f).says.join(' ')).not.toMatch(/changes nothing|cannot change|can’t change|can change nothing/);
+    expect(details('backup.nexus.offsite').says).toEqual(['The newest Nexus backup is encrypted to your key before it leaves this Mac.']);
+    expect(details('restore.drill.nexus').says).toEqual(['Flint restores the newest Nexus backup into a scratch database and compares it. Nexus itself isn’t opened.']);
+    for (const f of ['backup.nexus', 'backup.nexus.offsite', 'restore.drill.nexus']) {
+      for (const line of details(f).says) expect(noteProblems('Nexus Backup', line), line).toEqual([]);
+      // What it signs is its day, shown as a date; nothing else is on the card.
+      expect(details(f).facts).toEqual([['Day', 'Oct 6']]);
+      expect(details(f).refs).toEqual([]);
+    }
+    // Approved, each says when its job runs it, with no Run Now (the server cannot run it).
+    answer = () => ({ status: 200, body: { signed: true, proposals: three('approved') } });
+    await open();
+    run("apprShow('approved')");
+    const done = ids.apprlist!.children[0]!.children;
+    expect(done.map((r) => r.shown())).toEqual([
+      'Run Tonight\'s Nexus BackupApproved. It runs tonight at 2:15 AM.',
+      'Run Tonight\'s Nexus Offsite CopyApproved. It runs tonight at 2:15 AM.',
+      'Run This Week\'s Nexus Restore TestApproved. It runs Sunday at 2:15 AM.',
+    ]);
+    for (const r of done) expect(() => r.button('Run Now')).toThrow();
+    // The weekly one is "next Sunday" on a Sunday past 2:15, like Flint's own restore test.
+    ctx.apprNow = () => new Date(2026, 9, 4, 15, 0);
+    expect(run(`apprWhen('restore.drill.nexus')`)).toBe('next Sunday at 2:15 AM');
+    expect(run(`apprWhen('backup.nexus')`)).toBe('tonight at 2:15 AM');
+    expect(Object.keys(run('APPR_WEEKLY') as Record<string, number>).sort()).toEqual([...WEEKLY_JOBS].sort());
+    // A rule that lets them run on their own is named for Nexus, and never as Flint's own backups; Flint's own
+    // three keep their title, and a Nexus rule among them is not folded in.
+    const until = '2027-03-28T00:00:00.000Z';
+    const rule = (patterns: string[]) => run(`apprTitle(${JSON.stringify(card({ fullName: 'policy.change', kind: 'policy', consequential: true, args: { rows: patterns.map((pattern) => ({ pattern, tier: 'alone', expiresAt: until })) } }))})`);
+    expect(rule(['backup.nexus', 'backup.nexus.offsite', 'restore.drill.nexus'])).toBe('Run Nexus Backups on Their Own');
+    expect(rule(['backup.local', 'backup.offsite', 'restore.drill'])).toBe('Run Backups on Their Own');
+    // Flint's own rules are titled exactly as before Nexus had any: every row a backup or anything under `restore.`.
+    for (const own of [['restore.drill'], ['restore.*'], ['restore.production'], ['backup.offsite', 'restore.*'], ['backup.local']]) expect(rule(own), own.join(' ')).toBe('Run Backups on Their Own');
+    for (const other of [['backup.local', 'backup.prune'], ['backup.*'], ['backup.local.more'], ['restore']]) expect(rule(other), other.join(' ')).not.toBe('Run Backups on Their Own');
+    expect(rule(['backup.local', 'backup.offsite', 'restore.drill', 'restore.drill.nexus'])).not.toMatch(/^Run (Nexus )?Backups on Their Own$/);
+    expect(rule(['backup.local', 'backup.nexus'])).not.toMatch(/^Run (Nexus )?Backups on Their Own$/);
+    for (const [pattern, words] of [['backup.nexus', 'Nexus Backup'], ['backup.nexus.offsite', 'Nexus Offsite Copy'], ['restore.drill.nexus', 'Nexus Restore Test']] as const) {
+      expect((run(`apprRule(${JSON.stringify(pattern)})`) as unknown[])[0]).toBe(words);
+    }
   });
 
   it('the restore test’s card never names a time already past: on the Sunday it was filed, it runs next Sunday', async () => {

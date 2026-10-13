@@ -7,8 +7,9 @@
  *    running) and the health endpoints (down), measured from the first of
  *    the consecutive down observations; once per outage.
  *  - Backups stopped: the last good local backup over 36 h old; once per last
- *    good backup.
- *  - The restore drill failed: the latest drill only; once per drill.
+ *    good backup. The same for Nexus's own backup while it is switched on.
+ *  - The restore drill failed: the latest drill of Flint's own database only;
+ *    once per drill.
  *  - A vendor at 100% of its cap; once per vendor a day, and not when the
  *    server already said so today.
  *  - A migration marked failed (~/.flint/runtime/migrate-failed); once per sha.
@@ -30,7 +31,7 @@ import { localDay, localDayBounds } from '@flint/policy';
 import type { Config } from '../config.js';
 import type { Db, Tx } from '../db.js';
 import { markProcessed, recordEvent, refreshUndecided, type Enqueue } from '../events/record.js';
-import { faultAt, offsiteFolder, runtimeEnv } from '../config.js';
+import { faultAt, nexusBackupWanted, offsiteFolder, runtimeEnv } from '../config.js';
 import { lastUpdateCheck, offsiteWanted, pausedMarkThere } from './checks.js';
 import { DISK_FULL_BYTES, EXPIRY_WARN_DAYS, daysUntil, type MachineReading } from './machine.js';
 
@@ -164,9 +165,19 @@ export async function watchdog(db: Db, config: Pick<Config, 'home' | 'tz'>, now:
   if (backup && now.getTime() - backup.startedAt.getTime() > BACKUP_STALE_MS) {
     out.push({ type: 'backup.stale', ref: `after:${backup.id}`, occurredAt: now, payload: { hoursSince: Math.floor((now.getTime() - backup.startedAt.getTime()) / 3_600_000) } });
   }
+  // The same rule for Nexus's own backup (P7), while it is switched on, as an event of its own: once per last
+  // good Nexus dump, whatever Flint's own backup is doing. Switched off nothing is looked at, and an old dump
+  // left from when it was on raises nothing.
+  if (nexusBackupWanted(config.home)) {
+    const nexus = await db.backupRun.findFirst({ where: { kind: 'nexus_dump', location: 'local', status: 'ok' }, orderBy: { startedAt: 'desc' }, select: { id: true, startedAt: true } });
+    if (nexus && now.getTime() - nexus.startedAt.getTime() > BACKUP_STALE_MS) {
+      out.push({ type: 'nexus_backup.stale', ref: `after:${nexus.id}`, occurredAt: now, payload: { hoursSince: Math.floor((now.getTime() - nexus.startedAt.getTime()) / 3_600_000) } });
+    }
+  }
 
-  // (The copies on this Mac: a test of an offsite copy is the MacBook's, and is not this one.)
-  const drill = await db.backupRun.findFirst({ where: { location: 'local', restoreTestedAt: { not: null } }, orderBy: { restoreTestedAt: 'desc' }, select: { id: true, restoreOk: true, restoreTestedAt: true, restoreDetail: true } });
+  // (The copies on this Mac: a test of an offsite copy is the MacBook's, and is not this one. And Flint's own
+  // database: a test of Nexus's dump that failed is the Nexus job's own note, and Nexus Backup's line in Health.)
+  const drill = await db.backupRun.findFirst({ where: { kind: 'pg_dump_flint', location: 'local', restoreTestedAt: { not: null } }, orderBy: { restoreTestedAt: 'desc' }, select: { id: true, restoreOk: true, restoreTestedAt: true, restoreDetail: true } });
   if (drill?.restoreOk === false) {
     const mismatches = (drill.restoreDetail as { mismatches?: unknown } | null)?.mismatches;
     out.push({ type: 'drill.failed', ref: drill.id, occurredAt: now, payload: { mismatches: Array.isArray(mismatches) ? mismatches.length : 0 } });

@@ -8,7 +8,7 @@
  * the passkey relying-party settings it re-verifies approvals against.
  */
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { isAbsolute, join, normalize } from 'node:path';
+import { dirname, isAbsolute, join, normalize } from 'node:path';
 import { z } from 'zod';
 import { zoneFrom } from '@flint/policy';
 
@@ -316,6 +316,70 @@ export interface BackupConfig {
   /** The key a dump's fingerprint file is sealed with (restore.ts, writeDumpHash). */
   fingerprintKey: string;
   tools: { pgDump: string; pgRestore: string; age?: string };
+  /** Nexus's own backup (P7). Absent: FLINT_NEXUS_BACKUP_URL is not set, so it is off and nothing of it runs. */
+  nexus?: NexusBackupConfig;
+}
+
+/**
+ * What backing up Nexus's database needs: the address Flint reads it through,
+ * and where its dumps and their encrypted copies go. The address is refused
+ * unless it is a Postgres database on this Mac (`problem` then says why, in
+ * words that never hold the address, which carries a password): Nexus's steps
+ * fail saying their setup needs fixing, and Flint's own backup is not touched
+ * by it.
+ */
+export interface NexusBackupConfig {
+  /** Undefined only when `problem` says why. */
+  backupUrl?: string;
+  problem?: string;
+  /** ~/FlintBackups/nexus. */
+  dumpDir: string;
+  /** Beside the database's own copies: iCloud Drive's FlintBackups/nexus, or a `nexus` folder in FLINT_OFFSITE_DIR. */
+  offsiteDir?: string;
+  offsiteManifest: string;
+}
+
+/** The databases a Nexus address may never name: Postgres's own, and (compared by name, below) Flint's. */
+const NOT_NEXUS = new Set(['postgres', 'template0', 'template1']);
+
+/**
+ * What is wrong with FLINT_NEXUS_BACKUP_URL, in a few words that never hold
+ * the value; undefined when it may be used. It must be a Postgres address on
+ * this Mac (loopback), with a login and a database, and that database is not
+ * Postgres's own, not the one Flint's own backup reads, and not a restore
+ * test's scratch database.
+ */
+export function nexusUrlProblem(value: string, flintBackupUrl?: string): string | undefined {
+  let u: URL;
+  try {
+    u = new URL(value.trim());
+  } catch {
+    return 'is not a URL';
+  }
+  if (!/^postgres(ql)?:$/.test(u.protocol)) return 'must be a postgres URL';
+  if (!['::1', '[::1]', '127.0.0.1', 'localhost'].includes(u.hostname)) return 'must be a database on this Mac';
+  let database: string;
+  let user: string;
+  try {
+    database = decodeURIComponent(u.pathname.slice(1));
+    user = decodeURIComponent(u.username);
+  } catch {
+    return 'is not a URL';
+  }
+  if (!user) return 'must name the login that reads Nexus';
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(database)) return 'must name the Nexus database';
+  if (NOT_NEXUS.has(database) || /_restore_test/.test(database)) return 'must name the Nexus database';
+  if (flintBackupUrl) {
+    try {
+      const f = new URL(flintBackupUrl);
+      const port = (x: URL) => x.port || '5432';
+      const local = (x: URL) => (['::1', '[::1]', '127.0.0.1', 'localhost'].includes(x.hostname) ? 'this-mac' : x.hostname);
+      if (decodeURIComponent(f.pathname.slice(1)) === database && port(f) === port(u) && local(f) === local(u)) return 'names Flint’s own database, which has its own backup';
+    } catch {
+      // Flint's own address is checked where it is used.
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -348,7 +412,7 @@ export function offsiteFolder(home: string, set: string | undefined): { dir?: st
 export function loadBackupConfig(): BackupConfig {
   const home = process.env.HOME ?? '';
   const env = runtimeEnv(process.env.RUNTIME_ENV_FILE ?? join(home, '.flint', 'runtime.env'));
-  const backupEnv = runtimeEnv(process.env.BACKUP_ENV_FILE ?? join(home, '.flint', 'backup.env'), {});
+  const backupEnv = runtimeEnv(backupEnvFile(home), {});
   const config = loadConfig(env);
   const B = z
     .object({
@@ -356,6 +420,8 @@ export function loadBackupConfig(): BackupConfig {
       FLINT_DB_RESTORE_URL: z.string().url(),
       FLINT_BACKUP_AGE_RECIPIENT: z.string().optional(),
       FLINT_OFFSITE_DIR: z.string().optional(),
+      // Checked on its own below: a mistake in it must stop Nexus's backup, never Flint's.
+      FLINT_NEXUS_BACKUP_URL: z.string().optional(),
     })
     .safeParse({ ...backupEnv, ...process.env });
   if (!B.success) throw new Error(`backup config is invalid: ${B.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
@@ -369,6 +435,21 @@ export function loadBackupConfig(): BackupConfig {
   if (!recipient && existsSync(recipientFile)) recipient = readFileSync(recipientFile, 'utf8').trim().split('\n')[0];
   const dumpDir = join(home, 'FlintBackups', 'pg');
   const offsite = offsiteFolder(home, B.data.FLINT_OFFSITE_DIR);
+  const nexusUrl = B.data.FLINT_NEXUS_BACKUP_URL?.trim();
+  let nexus: NexusBackupConfig | undefined;
+  if (nexusUrl) {
+    const why = nexusUrlProblem(nexusUrl, B.data.FLINT_DB_BACKUP_URL);
+    const nexusDir = join(home, 'FlintBackups', 'nexus');
+    // Its encrypted copies go beside the database's own: FlintBackups/nexus next to FlintBackups/pg in iCloud
+    // Drive, or a `nexus` folder inside the folder Will set.
+    const nexusOffsite = offsite.dir ? (B.data.FLINT_OFFSITE_DIR?.trim() ? join(offsite.dir, 'nexus') : join(dirname(offsite.dir), 'nexus')) : undefined;
+    nexus = {
+      ...(why ? { problem: `FLINT_NEXUS_BACKUP_URL ${why}` } : { backupUrl: nexusUrl }),
+      dumpDir: nexusDir,
+      ...(nexusOffsite ? { offsiteDir: nexusOffsite } : {}),
+      offsiteManifest: join(nexusDir, 'offsite-copies.txt'),
+    };
+  }
   return {
     config,
     backupUrl: B.data.FLINT_DB_BACKUP_URL,
@@ -381,7 +462,45 @@ export function loadBackupConfig(): BackupConfig {
     offsiteManifest: join(dumpDir, 'offsite-copies.txt'),
     fingerprintKey: fingerprintKeyFile(home),
     tools: { pgDump, pgRestore, ...(age ? { age } : {}) },
+    ...(nexus ? { nexus } : {}),
   };
+}
+
+/** Where the backup commands' own settings are: ~/.flint/backup.env (0600), or the file BACKUP_ENV_FILE names. */
+export const backupEnvFile = (home: string = process.env.HOME ?? ''): string => process.env.BACKUP_ENV_FILE ?? join(home, '.flint', 'backup.env');
+
+/**
+ * Whether Nexus's backup is switched on, as the runtime's service needs to
+ * know it for Settings > Health: `off` when ~/.flint/backup.env (or
+ * BACKUP_ENV_FILE) has no FLINT_NEXUS_BACKUP_URL, or an empty one; `on` when
+ * it has one Flint can use; `bad` when it has one Flint cannot (not a
+ * database on this Mac, or Flint's own: nexusUrlProblem), so that nothing is
+ * being backed up and nothing will be until it is set again.
+ *
+ * The lines are read the way the backup commands read them (runtimeEnv):
+ * `NAME=value`, with or without `export` and quotes, and of two lines for one
+ * name the last counts. The address is looked at here and then dropped: only
+ * one of the three words leaves this function, and the service keeps no login.
+ */
+export function nexusBackupState(home: string, file: string = backupEnvFile(home)): 'off' | 'on' | 'bad' {
+  let text: string;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch {
+    return 'off';
+  }
+  const last = (name: string): string | undefined => {
+    const lines = text.match(new RegExp(`^(?:export[ \\t]+)?${name}=.*$`, 'gm'));
+    return lines?.[lines.length - 1]?.replace(/^[^=]*=/, '').trim().replace(/^(["'])(.*)\1$/, '$2').trim();
+  };
+  const value = last('FLINT_NEXUS_BACKUP_URL');
+  if (!value) return 'off';
+  return nexusUrlProblem(value, last('FLINT_DB_BACKUP_URL')) ? 'bad' : 'on';
+}
+
+/** Whether Nexus's backup is switched on at all (an address is set, usable or not). */
+export function nexusBackupWanted(home: string, file: string = backupEnvFile(home)): boolean {
+  return nexusBackupState(home, file) !== 'off';
 }
 
 /**

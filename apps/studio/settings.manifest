@@ -221,6 +221,9 @@ backup.env  FLINT_DB_RESTORE_URL                  generate  bootstrap-db
 backup.env  FLINT_OFFSITE_DIR                     restore   homepath
 backup.env  FLINT_BACKUP_CATCHUP                  restore   onoff
 backup.env  FLINT_BACKUP_AGE_RECIPIENT            reenter   Backup-Key
+# Where Flint reads Nexus's database for its backup (P7). It holds the backup login's password, which a rebuild
+# makes anew, so it is never saved: `nexus-setup` works it out again on the rebuilt Mac.
+backup.env  FLINT_NEXUS_BACKUP_URL                reenter   Nexus-Backup
 
 # ---- the local model's LaunchAgent: com.flint.ollama ---------------------------------------
 ollama.plist  HOME                                derive    rebuild

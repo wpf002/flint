@@ -4,6 +4,15 @@
  *   pnpm --filter @flint/runtime backup   [--auto]   pg_dump, 14 kept, BackupRun row
  *   pnpm --filter @flint/runtime offsite  [--auto]   age-encrypted copy off the box (iCloud Drive, 7 kept)
  *   pnpm --filter @flint/runtime drill    [--auto]   restore the newest dump and compare
+ *   pnpm --filter @flint/runtime nexus-setup [--database <name>]
+ *                                                    switch Nexus's own backup on (P7): work its address out
+ *                                                    from Flint's backup address, check that the login is let
+ *                                                    in and holds no right to change Nexus, and save it
+ *   pnpm --filter @flint/runtime nexus-backup  [--auto]  the same dump of the Nexus database (~/FlintBackups/nexus)
+ *   pnpm --filter @flint/runtime nexus-offsite [--auto]  its age-encrypted copy off the box (7 kept)
+ *   pnpm --filter @flint/runtime nexus-drill   [--auto]  restore the newest Nexus dump into a scratch database
+ *                                                    and compare; the Nexus database itself is never opened.
+ *                                                    All three do nothing until the address is set.
  *   pnpm --filter @flint/runtime prune-backups [--remove]
  *                                                    list the old copies taken before database updates
  *                                                    that may go (the newest 10 and the last 30 days are
@@ -54,7 +63,7 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
-import { loadBackupConfig, loadRuntimeConfig } from './config.js';
+import { backupEnvFile, loadBackupConfig, loadRuntimeConfig } from './config.js';
 import { p2Report } from './report/exit.js';
 import { p25Report } from './report/p25.js';
 import { p3Report } from './report/p3.js';
@@ -68,12 +77,13 @@ import { Refused } from './governance/proposals.js';
 import { SOURCES } from '@flint/policy';
 import { createDb } from './db.js';
 import { appendAudit } from './governance/audit.js';
-import { ACTION, attempt, gate, tellFailure, tellStopped, type Command } from './backup/nightly.js';
+import { ACTION, STEP, attempt, forNexus, gate, tellFailure, tellStopped, type Command } from './backup/nightly.js';
+import { NEXUS_OFF, nexusHelp, nexusSetup, nexusSetupArgs } from './backup/nexus.js';
 import { PRUNE_ACTION, pruneJob, pruneLines, pruneMode } from './backup/prune-job.js';
-import { fileFailure } from './backup/record.js';
+import { fileBackup, fileFailure } from './backup/record.js';
 import { completeProposal } from './governance/proposals.js';
-import { dumpDatabase, dumpPathAt, newestDump, pruneDumps, restoreDrill } from './backup/backup.js';
-import { sendOffsite } from './backup/offsite.js';
+import { FLINT_SET, NEXUS_SET, dumpDatabase, dumpPathAt, newestDump, pruneDumps, restoreDrill } from './backup/backup.js';
+import { sendOffsite, type OffsiteConfig } from './backup/offsite.js';
 import { notifyWill } from './notify.js';
 import { scopedFetch } from './policy/egress.js';
 import { googleLogin, TOKEN_ENDPOINTS } from './sources/google/oauth.js';
@@ -277,13 +287,44 @@ async function main(): Promise<void> {
     return;
   }
   if (process.argv[2] === 'prune') return pruneOldBackups(process.argv.slice(3));
+  if (process.argv[2] === 'nexus-setup') {
+    const { database } = nexusSetupArgs(process.argv.slice(3));
+    const ok = await nexusSetup({ backupEnv: backupEnvFile(), database, say: (line) => console.log(line) });
+    if (!ok) process.exitCode = 1;
+    return;
+  }
   const cmd = process.argv[2] as Command;
-  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | predictions-on [key]... | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | p3-report | promotion-table [--phase p1|p2|p25|p26|p3|p3c] [--drop <pattern>] | backup|offsite|drill [--auto] | prune [--remove] | prune --auto | restore-production [--dump <file>] [--without-copy] [--without-fingerprint] [--check] | restore-production --compare | restore-production --repair | restore-empty --from-rebuild --dump <file>');
+  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | predictions-on [key]... | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | p3-report | promotion-table [--phase p1|p2|p25|p26|p3|p3c] [--drop <pattern>] | backup|offsite|drill [--auto] | nexus-setup [--database <name>] | nexus-backup|nexus-offsite|nexus-drill [--auto] | prune [--remove] | prune --auto | restore-production [--dump <file>] [--without-copy] [--without-fingerprint] [--check] | restore-production --compare | restore-production --repair | restore-empty --from-rebuild --dump <file>');
   const auto = process.argv.includes('--auto');
   const b = loadBackupConfig();
+  const action = ACTION[cmd];
+  // Which database this is for, and so which files, names and records are its own.
+  const nexus = forNexus(cmd);
+  const step = STEP[cmd];
+  const set = nexus ? NEXUS_SET : FLINT_SET;
+  if (nexus && !b.nexus) {
+    // Off: nothing of Nexus's backup runs, no card is filed, and neither database is opened.
+    if (auto) console.log(`${action}: not run (off: no address is set for the Nexus database)`);
+    else {
+      for (const line of NEXUS_OFF) console.log(line);
+      process.exitCode = 1;
+    }
+    return;
+  }
+  if (nexus && b.nexus!.problem) {
+    // An address that cannot be used (not on this Mac, not Postgres, Flint's own database): none of Nexus's
+    // steps runs, and none asks for a card it could not act on. Said here, with what to run; Settings > Health
+    // says it too, for as long as it lasts (health/checks.ts). Neither database is opened.
+    console.log(`${action}: not run (${b.nexus!.problem})`);
+    for (const line of nexusHelp(undefined, b.nexus!, step)) console.log(line);
+    if (!auto) process.exitCode = 1;
+    return;
+  }
+  const where = nexus
+    ? { dumpDir: b.nexus!.dumpDir, offsiteDir: b.nexus!.offsiteDir, offsiteManifest: b.nexus!.offsiteManifest }
+    : { dumpDir: b.dumpDir, offsiteDir: b.offsiteDir, offsiteManifest: b.offsiteManifest };
   const db = createDb(b.config.databaseUrl);
   const now = new Date();
-  const action = ACTION[cmd];
   const actor = auto ? 'runtime' : 'will:cli';
   const context = auto ? 'autonomous' : 'console';
   // How Will is told, for a failure and for a run that stopped before it began.
@@ -291,6 +332,10 @@ async function main(): Promise<void> {
     tz: b.config.tz, rp: b.config.rp, now,
     notify: (title, body) => notifyWill(b.config, title, body),
   } satisfies Parameters<typeof tellFailure>[3];
+  /** What went wrong with Nexus's own setup, for the lines after the FAILED one (nexusHelp); nothing else is kept of it. */
+  let refused: unknown;
+  /** How many large objects a Nexus dump left out (no dump includes them); said after the dump when there are any. */
+  let left = 0;
   try {
     let proposalId: string | undefined;
     if (auto) {
@@ -309,32 +354,48 @@ async function main(): Promise<void> {
     // The job's own work. Whatever it throws is its failure, classified once (attempt): one another try
     // could change, or one that stays until its setup is fixed.
     const o = await attempt(async () => {
-      if (cmd === 'backup') {
-        const d = await dumpDatabase(b.backupUrl, b.dumpDir, b.tools, now);
-        // The dump's fingerprint, kept beside it: a restore can check the file when the database cannot be asked.
-        writeDumpHash(d.path, d.sha256, b.fingerprintKey);
-        const pruned = pruneDumps(b.dumpDir, 14);
-        await db.backupRun.create({
-          data: { kind: 'pg_dump_flint', location: 'local', path: d.path, bytes: BigInt(d.bytes), sha256: d.sha256, encrypted: false, status: 'ok', startedAt: now, finishedAt: new Date() },
-        });
-        return { detail: { bytes: d.bytes, sha256: d.sha256, tables: Object.keys(d.counts).length, pruned: pruned.length } };
+      try {
+        if (step === 'backup') {
+          const d = await dumpDatabase(nexus ? b.nexus!.backupUrl! : b.backupUrl, where.dumpDir, b.tools, now, set);
+          // The dump's fingerprint, kept beside it: a restore can check the file when the database cannot be asked.
+          writeDumpHash(d.path, d.sha256, b.fingerprintKey);
+          const pruned = pruneDumps(where.dumpDir, 14, set.prefix);
+          if (nexus) await fileBackup(db, { kind: set.kind, location: 'local', path: d.path, bytes: d.bytes, sha256: d.sha256, startedAt: now });
+          else {
+            await db.backupRun.create({
+              data: { kind: 'pg_dump_flint', location: 'local', path: d.path, bytes: BigInt(d.bytes), sha256: d.sha256, encrypted: false, status: 'ok', startedAt: now, finishedAt: new Date() },
+            });
+          }
+          left = d.largeObjects ?? 0;
+          return { detail: { bytes: d.bytes, sha256: d.sha256, tables: Object.keys(d.counts).length, pruned: pruned.length, ...(d.largeObjects === undefined ? {} : { largeObjects: d.largeObjects }) } };
+        }
+        if (step === 'offsite') {
+          // The same key and the same offsite place as Flint's own copy; this set's own folders, names and list.
+          const cfg: OffsiteConfig = {
+            ...(b.ageRecipient ? { ageRecipient: b.ageRecipient } : {}), ...(b.offsiteProblem ? { offsiteProblem: b.offsiteProblem } : {}),
+            ...(where.offsiteDir ? { offsiteDir: where.offsiteDir } : {}), offsiteManifest: where.offsiteManifest, dumpDir: where.dumpDir, tools: b.tools,
+          };
+          return { detail: await sendOffsite(db, cfg, now, undefined, { set, action }) };
+        }
+        const dump = newestDump(where.dumpDir, set.prefix);
+        if (!dump) throw new Error('no dump to restore');
+        const r = await restoreDrill(dump, b.restoreUrl, b.tools, set);
+        const run = await db.backupRun.findFirst({ where: { path: dump, kind: set.kind, location: 'local' }, orderBy: { startedAt: 'desc' } });
+        if (run) await db.backupRun.update({ where: { id: run.id }, data: { restoreTestedAt: new Date(), restoreOk: r.ok, restoreDetail: { tables: r.tables, mismatches: r.mismatches } } });
+        return { ok: r.ok, mismatch: !r.ok, detail: { tables: r.tables, mismatches: r.mismatches.length }, ...(r.ok ? {} : { error: `row counts differ in ${r.mismatches.length === 1 ? '1 table' : `${r.mismatches.length} tables`}` }) };
+      } catch (err) {
+        refused = err;
+        throw err;
       }
-      if (cmd === 'offsite') return { detail: await sendOffsite(db, b, now) };
-      const dump = newestDump(b.dumpDir);
-      if (!dump) throw new Error('no dump to restore');
-      const r = await restoreDrill(dump, b.restoreUrl, b.tools);
-      const run = await db.backupRun.findFirst({ where: { path: dump }, orderBy: { startedAt: 'desc' } });
-      if (run) await db.backupRun.update({ where: { id: run.id }, data: { restoreTestedAt: new Date(), restoreOk: r.ok, restoreDetail: { tables: r.tables, mismatches: r.mismatches } } });
-      return { ok: r.ok, mismatch: !r.ok, detail: { tables: r.tables, mismatches: r.mismatches.length }, ...(r.ok ? {} : { error: `row counts differ in ${r.mismatches.length === 1 ? '1 table' : `${r.mismatches.length} tables`}` }) };
     });
     const { ok, error, detail } = o;
     // A run that failed is on record beside the ones that worked (Health says "the last backup failed" from it,
     // without waiting for the last good one to grow old). Only for a file that has no record: a failure never
     // takes a good record's place. The database may be why it failed, so this is tried and no more.
-    if (!ok && cmd !== 'drill') {
-      const newest = cmd === 'offsite' ? newestDump(b.dumpDir) : undefined;
-      const path = cmd === 'backup' ? dumpPathAt(b.dumpDir, now) : newest && b.offsiteDir ? join(b.offsiteDir, `${basename(newest)}.age`) : undefined;
-      if (path) await fileFailure(db, { kind: 'pg_dump_flint', location: cmd === 'backup' ? 'local' : 'icloud', path, startedAt: now }).catch(() => undefined);
+    if (!ok && step !== 'drill') {
+      const newest = step === 'offsite' ? newestDump(where.dumpDir, set.prefix) : undefined;
+      const path = step === 'backup' ? dumpPathAt(where.dumpDir, now, set.prefix) : newest && where.offsiteDir ? join(where.offsiteDir, `${basename(newest)}.age`) : undefined;
+      if (path) await fileFailure(db, { kind: set.kind, location: step === 'backup' ? 'local' : 'icloud', path, startedAt: now }).catch(() => undefined);
     }
     if (proposalId) {
       // Recording the proposal's end must not cost the job's own audit row or the failure notice.
@@ -344,8 +405,14 @@ async function main(): Promise<void> {
     }
     await appendAudit(db, [{ actor, context, kind: 'action', action, decision: 'act', outcome: ok ? 'ok' : 'failed', inputs: detail, ...(error ? { reasoning: error.slice(0, 1000) } : {}), ...(proposalId ? { correlationId: proposalId } : {}) }]);
     console.log(`${action}: ${ok ? 'ok' : `FAILED: ${error}`} ${JSON.stringify(detail)}`);
+    if (ok && left > 0) console.log(left === 1 ? 'Nexus holds 1 large object. No backup includes it, so it was left out.' : `Nexus holds ${left} large objects. No backup includes them, so they were left out.`);
     if (!ok) {
       process.exitCode = 1;
+      // Nexus would not let Flint read it: what is wrong and the commands that put it right, in the job's log and
+      // in Terminal alike. Only the backup's own failures get that advice; a restore test that was refused in its
+      // scratch database gets a sentence of its own (nexusHelp). The owner's side runs the commands; Flint never
+      // changes Nexus.
+      if (nexus) for (const line of nexusHelp(refused, b.nexus!, step)) console.log(line);
       // The error itself is in the FAILED line above (stdout, the LaunchAgent's out.log) and the audit. The note
       // says what happened and what happens next, in Will's words, and promises only what is true (tellFailure):
       //  - a failure another try cannot change says its setup needs fixing;

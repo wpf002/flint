@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
-import { HEALTH_GROUPS, HEALTH_GROUP_OTHER, HEALTH_NAMES, JOB_WORDS, SERVICE_SHORT, SERVICE_WORDS, SOURCE_NAMES, healthGroup, jobFailedNote, noteProblems, serviceWords, titleCase } from '@flint/policy';
+import { HEALTH_GROUPS, HEALTH_GROUP_OTHER, HEALTH_NAMES, JOB_WORDS, WEEKLY_JOBS, SERVICE_SHORT, SERVICE_WORDS, SOURCE_NAMES, healthGroup, jobFailedNote, noteProblems, serviceWords, titleCase } from '@flint/policy';
 
 const html = readFileSync(join(__dirname, '..', '..', 'console', 'index.html'), 'utf8');
 const lanesJs = /<script id="lanes-js">([\s\S]*?)<\/script>/.exec(html)![1]!;
@@ -288,6 +288,8 @@ describe('the console Activity panel: lanes', () => {
     expect(line('nexus', 'thread.state')).toBe('A Nexus thread changed.');
     expect(line('knowledge', 'knowledge.fact')).toBe('Flint’s memory learned something.');
     expect(line('runtime', 'backup.stale')).toBe('Backups are overdue.');
+    // Nexus's own stale backup is an event of its own, with a line of its own: it never reads as Flint's.
+    expect(line('runtime', 'nexus_backup.stale')).toBe('The Nexus backup is overdue.');
     expect(line('runtime', 'source.circuit_open')).toBe('A source stopped after repeated failures.');
     expect(line('google_calendar', 'person.seen')).toBe('Someone is on an event you accepted or organized.');
     expect(line('google_calendar', 'deadline.state')).toBe('A deadline on your calendar changed.');
@@ -635,6 +637,10 @@ describe('the console Activity panel: notifications', () => {
 
   it('names the jobs as @flint/policy does and title-cases as it does, so a note reads the same where it is written and where it is shown', () => {
     expect(JSON.parse(JSON.stringify(run('NOTE_JOBS')))).toEqual(JOB_WORDS);
+    // The jobs that run on Sundays only, so a note of theirs that repeats is counted in weeks: Flint's restore test and Nexus's.
+    expect(Object.keys(JSON.parse(JSON.stringify(run('NOTE_WEEKLY'))) as Record<string, number>).sort()).toEqual([...WEEKLY_JOBS].sort());
+    expect([run(`noteEvery('Nexus Restore Test Failed')`), run(`noteEvery('Restore Test Failed')`)]).toEqual([run('7*NOTE_NIGHT'), run('7*NOTE_NIGHT')]);
+    expect([run(`noteEvery('Nexus Backup Failed')`), run(`noteEvery('Nexus Offsite Backup Failed')`)]).toEqual([run('NOTE_NIGHT'), run('NOTE_NIGHT')]);
     for (const [action, words] of Object.entries(JOB_WORDS)) expect(run(`noteTitle(${JSON.stringify(`${action} failed`)})`)).toBe(`${words} Failed`);
     for (const t of [
       'backups waiting for you', 'on your calendar tue oct 6, all day', 'new issue: the login page', 'the iCloud copy of GitHub and CI at 2:15', 'école of ödeme', 'something to look at',

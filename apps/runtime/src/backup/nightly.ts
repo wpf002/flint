@@ -6,16 +6,28 @@
  * claimed by it; older pending cards are withdrawn. The drill runs on Sundays
  * only (backup-nightly.sh), so its card lives a week and two hours: approved
  * any time that week, the next Sunday's run claims it.
+ *
+ * Nexus's backup (P7) is the same three steps under its own three actions,
+ * each with a card of its own: `nexus-backup`, `nexus-offsite`, `nexus-drill`.
  */
-import { CAP_WORDS, jobFailedNote, localDay, resolveTier, type JobFailure, type NightlyJob, type WebAuthnRelyingParty } from '@flint/policy';
+import { CAP_WORDS, WEEKLY_JOBS, jobFailedNote, localDay, resolveTier, type JobFailure, type NightlyJob, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db } from '../db.js';
 import { activePolicies, claimProposal, createProposal, rejectProposal } from '../governance/proposals.js';
 import { claim } from '../governance/counters.js';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { needsSetup } from './backup.js';
 
-export type Command = 'backup' | 'offsite' | 'drill';
-export const ACTION: Record<Command, NightlyJob> = { backup: 'backup.local', offsite: 'backup.offsite', drill: 'restore.drill' };
+export type Command = 'backup' | 'offsite' | 'drill' | 'nexus-backup' | 'nexus-offsite' | 'nexus-drill';
+export const ACTION: Record<Command, NightlyJob> = {
+  backup: 'backup.local', offsite: 'backup.offsite', drill: 'restore.drill',
+  'nexus-backup': 'backup.nexus', 'nexus-offsite': 'backup.nexus.offsite', 'nexus-drill': 'restore.drill.nexus',
+};
+/** What a command does, whichever database it is for. */
+export const STEP: Record<Command, 'backup' | 'offsite' | 'drill'> = {
+  backup: 'backup', offsite: 'offsite', drill: 'drill', 'nexus-backup': 'backup', 'nexus-offsite': 'offsite', 'nexus-drill': 'drill',
+};
+/** The commands that back up Nexus's database, not Flint's. */
+export const forNexus = (cmd: Command): boolean => cmd.startsWith('nexus-');
 
 export async function gate(db: Db, cmd: Command, tz: string, rp: WebAuthnRelyingParty | undefined, now: Date): Promise<{ go: boolean; proposalId?: string; why: string }> {
   return cardGate(db, { action: ACTION[cmd], job: cmd, templateId: `nightly.${cmd}` }, tz, rp, now);
@@ -94,8 +106,8 @@ export async function offerCard(db: Db, job: CardJob, tz: string, rp: WebAuthnRe
     await createProposal(db, {
       kind: 'tool_call', origin: `runtime:${cmd}`, templateId: job.templateId, action, args: { ...job.args, day },
       argsProvenance: { ...Object.fromEntries(Object.keys(job.args ?? {}).map((k) => [k, from])), day: from },
-      tainted: false, sensitivity: 'ops', destructive: job.destructive === true, consequential: false, ttlMinutes: cmd === 'drill' ? 7 * 24 * 60 + 120 : 26 * 60,
-      reason: job.reason ?? `It waits for your approval each ${cmd === 'drill' ? 'week' : 'night'} until you let it run on its own.`,
+      tainted: false, sensitivity: 'ops', destructive: job.destructive === true, consequential: false, ttlMinutes: WEEKLY_JOBS.has(action) ? 7 * 24 * 60 + 120 : 26 * 60,
+      reason: job.reason ?? `It waits for your approval each ${WEEKLY_JOBS.has(action) ? 'week' : 'night'} until you let it run on its own.`,
     }, 'runtime');
   }
   for (const old of pending) {
