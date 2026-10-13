@@ -34,6 +34,7 @@ import { createDb, type Db } from '../src/db';
 import { loadConfig, nexusBackupState, nexusBackupWanted, runtimeEnv, type Config } from '../src/config';
 import { DrillBusy, FLINT_SET, NEXUS_SET, NotReadOnly, TookTooLong, canWrite, checkedSet, client, countRows, dumpDatabase, encryptTo, needsSetup, newestDump, pruneDumps, pruneOffsite, restoreDrill, targetOf, type BackupSet, type Tools } from '../src/backup/backup';
 import { NEXUS_OFF, nexusHelp, nexusSetup, nexusSetupArgs } from '../src/backup/nexus';
+import { sendOffsite } from '../src/backup/offsite';
 import { fileBackup, fileFailure } from '../src/backup/record';
 import { checkDump, RestoreRefused } from '../src/backup/restore';
 import { ACTION, STEP, forNexus, gate } from '../src/backup/nightly';
@@ -485,7 +486,7 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       try {
         const out = join(dir, 'locked');
         const began = Date.now();
-        const err = await dumpDatabase(nexusUrl, out, tools, new Date(), { ...SET, limits: { ...NEXUS_SET.limits!, lockWaitMs: 1000, dumpMs: 60_000 } }).then(() => undefined, (e: unknown) => e);
+        const err = await dumpDatabase(nexusUrl, out, tools, new Date(), { ...SET, limits: { ...NEXUS_SET.limits!, lockWaitMs: 1000, dumpMs: 20_000 } }).then(() => undefined, (e: unknown) => e);
         expect(err).toBeInstanceOf(Error);
         // (pg_dump's own wait on a lock is a time limit on the statement that takes it.)
         expect((err as Error).message).toBe('pg_dump exited 1: canceling statement due to statement timeout');
@@ -495,7 +496,7 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
         expect(needsSetup(err)).toBe(false);
         // And were the wait itself to hang, the step's own time limit stops the tool where it stands.
         const late = join(dir, 'late');
-        const stopped = await dumpDatabase(nexusUrl, late, tools, new Date(), { ...SET, limits: { ...NEXUS_SET.limits!, lockWaitMs: 600_000, dumpMs: 1500 } }).then(() => undefined, (e: unknown) => e);
+        const stopped = await dumpDatabase(nexusUrl, late, tools, new Date(), { ...SET, limits: { ...NEXUS_SET.limits!, lockWaitMs: 40_000, dumpMs: 1500 } }).then(() => undefined, (e: unknown) => e);
         expect(stopped).toBeInstanceOf(TookTooLong);
         expect((stopped as Error).message).toBe('pg_dump was stopped because it ran longer than 2 seconds');
         expect(readdirSync(late)).toEqual([]);
@@ -520,6 +521,18 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       expect(copy).toBeInstanceOf(TookTooLong);
       expect((copy as Error).message).toBe('age was stopped because it ran longer than 1 second');
       expect(readdirSync(sent)).toEqual([]);
+      // The offsite step itself hands age its set's limit: stopped the same way, with no copy and no record of one.
+      const recorded: unknown[] = [];
+      const noDb = { backupRun: { findFirst: async () => null, findMany: async () => [], create: async (a: unknown) => recorded.push(a), update: async (a: unknown) => recorded.push(a) } } as unknown as Parameters<typeof sendOffsite>[0];
+      const step = await sendOffsite(
+        noDb, { ageRecipient: `age1${'q'.repeat(58)}`, offsiteDir: sent, offsiteManifest: join(dir, 'offsite-copies.txt'), dumpDir: join(dir, 'nexus'), tools: { ...tools, age: join(bin, 'age') } },
+        new Date(), () => {}, { set: { ...SET, limits: { ...NEXUS_SET.limits!, offsiteMs: 700 } }, action: 'backup.nexus.offsite' },
+      ).then(() => undefined, (e: unknown) => e);
+      expect(step).toBeInstanceOf(TookTooLong);
+      expect(readdirSync(sent)).toEqual([]);
+      expect(recorded).toEqual([]);
+      // Flint's own offsite step has no such limit: its age is run as it always was.
+      expect(FLINT_SET.limits).toBeUndefined();
       const test = await restoreDrill(dump, URLS!.restore!, { ...tools, pgRestore: join(bin, 'pg_restore') }, { ...SET, limits: { ...NEXUS_SET.limits!, drillMs: 700 } }).then(() => undefined, (e: unknown) => e);
       expect(test).toBeInstanceOf(TookTooLong);
       expect((test as Error).message).toBe('pg_restore was stopped because it ran longer than 1 second');

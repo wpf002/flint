@@ -428,9 +428,9 @@ export class NeedsSetup extends Error {}
 
 /** Whether a nightly job failed for a reason that stays until someone fixes its setup. */
 export function needsSetup(err: unknown): boolean {
+  // (A tool stopped for taking too long, and a restore test held up by another one, are not: neither says
+  // anything below takes for a setup problem, and another night may go better.)
   if (err instanceof NeedsSetup || err instanceof NotReadOnly) return true;
-  // Stopped for taking too long, or held up by another restore test: another night may go better.
-  if (err instanceof TookTooLong || err instanceof DrillBusy) return false;
   const e = err as { code?: unknown; message?: unknown } | null;
   const message = String(e?.message ?? '');
   // The restore drill's own scratch database missing is not Will's setup: the drill makes and drops it each
