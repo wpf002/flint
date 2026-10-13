@@ -37,7 +37,7 @@ import type { Db } from '../db.js';
 import { createProposal, Refused } from './proposals.js';
 import { PolicyArgs } from './internal.js';
 import { chatSuggestions, daysNotRunning, firstReviewAt, overdueNow, reviewCounts, reviewsNow, windowStart } from '../goals/measures.js';
-import { CHAT_FLOOR_IN_DATABASE, CHAT_FLOOR_SAYS } from '../goals/candidates.js';
+import { CHAT_FLOOR_SAYS, chatFloorInDatabase } from '../goals/candidates.js';
 
 /**
  * What P1 asks Will to promote (the plan's P1 table): chat's reads of the world
@@ -105,13 +105,17 @@ export const P3_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number }
  * commitment lands unconfirmed, 10 a day at most (the numbers the candidates
  * intake files under while each card still waits for him: @flint/policy
  * SUGGESTIONS_PER_DAY; a test keeps the two the same). It takes two weeks of
- * those cards, not one.
+ * those cards, not one. Only the goal's row is ever offered (P3C_OFFERED): the
+ * database holds a goal from chat to a signed card or rule, and has no such
+ * floor under a commitment, so a commitment stays a card.
  */
 export const P3C_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number }> = [
   { pattern: 'goal.propose', dailyCap: 3 },
   { pattern: 'world.commitment.from_chat', dailyCap: 10 },
 ];
-/** p3c's evidence: two weeks of chat's suggestion cards. */
+/** The rows of that table the command offers: what the database has a floor under. */
+export const P3C_OFFERED: ReadonlySet<string> = new Set(['goal.propose']);
+/** p3c's evidence: two weeks of chat's goal suggestion cards. */
 export const P3C_SHADOW_DAYS = 14;
 
 /**
@@ -303,32 +307,25 @@ const PHASES: Record<Phase, PhaseOf> = {
     template: 'p3c.promotion',
     label: 'P3 chat',
     lets: (patterns) => (patterns.includes('world.commitment.from_chat') ? 'Flint take goals and commitments from your chats' : 'Flint suggest goals from your chats'),
-    // Commitments have their own switch on the server (off by default). The table offers their row only when
-    // Flint suggested one in the weeks it counts: with nothing suggested there is nothing to promote.
-    offered: async (db, now, tz) => {
-      const c = await chatSuggestions(db, { since: windowStart(tz, now, P3C_SHADOW_DAYS), actions: ['world.commitment.from_chat'] });
-      return new Set(c.filed ? ['goal.propose', 'world.commitment.from_chat'] : ['goal.propose']);
-    },
-    evidence: 'chat suggestions',
+    // Goals only: a commitment is never added without a card (the database has no floor under one), so its row
+    // is never offered, however many were suggested.
+    offered: async () => P3C_OFFERED,
+    evidence: 'goal suggestions from chat',
     shadowDays: P3C_SHADOW_DAYS,
-    says: /^Since [A-Z][a-z]{2} \d{1,2}, Flint suggested \d+ goals?(?: and \d+ commitments?)? from chat: you approved \d+, made \d+ into goals yourself, rejected \d+, and \d+ expired\.$/,
-    // The first thing chat suggested: Will has signed or rejected each one since.
-    first: async (db) => (await db.proposal.findFirst({ where: { action: { in: [...CHAT_SUGGESTION_ACTIONS] } }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }))?.createdAt,
+    says: /^Since [A-Z][a-z]{2} \d{1,2}, Flint suggested \d+ goals? from chat: you approved \d+, made \d+ into goals yourself, rejected \d+, and \d+ expired\.$/,
+    // The first goal chat suggested: Will has signed or rejected each one since.
+    first: async (db) => (await db.proposal.findFirst({ where: { action: { in: [...P3C_OFFERED] } }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }))?.createdAt,
     // Two weeks of suggestions means there were some: the 14 whole local days before today, and today. The
     // card that opened the gate is 14 days old, so it is inside that window; one much older, with nothing
-    // since, is not two weeks of evidence. The sentence counts the same cards.
+    // since, is not two weeks of evidence. The sentence counts the same cards: the goal's, the row it signs.
     covered: async () => undefined,
     measured: async () => '',
     weighed: async (db, now, tz) => {
       const since = windowStart(tz, now, P3C_SHADOW_DAYS);
-      const g = await chatSuggestions(db, { since, actions: ['goal.propose'] });
-      const c = await chatSuggestions(db, { since, actions: ['world.commitment.from_chat'] });
-      if (!g.filed && !c.filed) return { gap: `Flint suggested nothing from chat in the last ${P3C_SHADOW_DAYS} days` };
+      const g = await chatSuggestions(db, { since, actions: [...P3C_OFFERED] });
+      if (!g.filed) return { gap: `Flint suggested no goal from chat in the last ${P3C_SHADOW_DAYS} days` };
       // Making a suggestion a goal himself is a yes, counted as one (it sets the suggestion's own card aside).
-      return {
-        measured: `Since ${dayWords(tz, since)}, Flint suggested ${count(g.filed, 'goal')}${c.filed ? ` and ${count(c.filed, 'commitment')}` : ''} from chat: `
-          + `you approved ${g.executed + c.executed}, made ${g.made} into goals yourself, rejected ${g.rejected + c.rejected}, and ${g.expired + c.expired} expired.`,
-      };
+      return { measured: `Since ${dayWords(tz, since)}, Flint suggested ${count(g.filed, 'goal')} from chat: you approved ${g.executed}, made ${g.made} into goals yourself, rejected ${g.rejected}, and ${g.expired} expired.` };
     },
   },
 };
@@ -363,12 +360,13 @@ function sameRules(theirs: Array<Record<string, unknown>>, mine: readonly Promot
   });
 }
 
-export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: readonly string[]; now?: Date; tz: string; /** Test seam: the database's floor under goals from chat is in place. Never set outside a test. */ chatFloor?: boolean }) {
+export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: readonly string[]; now?: Date; tz: string }) {
   const now = opts.now ?? new Date();
   const phase = PHASES[opts.phase ?? 'p2'];
-  // Nothing from chat runs without a card until the database holds what it adds to one (goals/candidates.ts
-  // CHAT_FLOOR_IN_DATABASE): until then this table is not filed at all, however many weeks have been lived.
-  if (opts.phase === 'p3c' && !(opts.chatFloor ?? CHAT_FLOOR_IN_DATABASE)) throw new Refused(409, CHAT_FLOOR_SAYS);
+  // Nothing from chat runs without a card unless the database itself holds what it adds to a signed card or rule
+  // (goals/candidates.ts chatFloorInDatabase, asked of the database now): without that guard this table is not
+  // filed at all, however many weeks have been lived.
+  if (opts.phase === 'p3c' && !(await chatFloorInDatabase(db))) throw new Refused(409, CHAT_FLOOR_SAYS);
   const first = await phase.first(db);
   const need = phase.shadowDays ?? SHADOW_DAYS;
   if (!first || now.getTime() - first.getTime() < need * DAY) {
