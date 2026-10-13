@@ -979,7 +979,9 @@ a bare name, a relative path) is refused with a sentence, and the usual program 
 used: a recording is never failed for a setting.
 
 **A program or a model that is named and is not there is refused when Flint starts**, by the
-name of the setting and never by its path, and the usual one is used. This is the line saved
+name of the setting and never by its path, and the usual one is used. A program that is there
+and may not be run (a file with no execute permission) is not there, for this: it fails every
+recording just as a missing one does. This is the line saved
 long ago: because nothing read these settings from the settings file before, one may name a
 model that has since gone, and applying it would fail every recording. It is the same wherever
 the value comes from, the settings file or the environment. When neither the one that was named
@@ -988,7 +990,9 @@ nor the usual one is on this Mac, `/transcribe` answers 503 with a sentence sayi
 500 of a program that could not start. The program and the model are looked for at each
 recording, so a model put in place while Flint runs is used by the next one. The Transcription
 row in Settings follows the same look, taken when the status is built: `Flint can't turn speech
-into text until its transcription model is on this Mac.`
+into text until its transcription model is on this Mac.` The console drops a failed
+`/transcribe` quietly today (the microphone button stops, and nothing is said), so the sentence
+is seen in Settings and by API clients, not under the input bar.
 
 - **A refused setting never lands on a less private choice than the one that was meant.** A
   speech provider Flint does not know is NO speech here (`off`), never OpenAI: the default is an
@@ -1016,10 +1020,16 @@ into text until its transcription model is on this Mac.`
   files are removed whatever happens. It always writes to a file: nothing is played on this
   Mac's speakers.
 - **`say` is held to a line.** Each reply is a program of its own, so two run at a time and
-  eight more may wait. One past that is answered 429 at once, with a sentence, and the device
-  speaks it itself (not 503, which a client reads as "stop asking for ten minutes"). A client
-  that hangs up takes its reply with it: one that is waiting leaves the line, and one that is
-  being spoken has its `say` stopped and its files removed.
+  forty more may wait: the console asks sentence by sentence, as fast as a reply streams in, and
+  forty holds a whole long reply. One past that is answered 429 at once, with a sentence, and
+  the device speaks it itself (not 503, which a client reads as "stop asking for ten minutes").
+  A client that hangs up takes its reply with it: one that is waiting leaves the line, and one
+  that is being spoken has its `say` stopped and its files removed.
+- **One reply, one voice.** Once the console has spoken a sentence of a reply with the device's
+  own voice (the server refused it, was busy, or failed), it speaks the rest of that reply with
+  the device's voice and asks the server for no more of it, even for a sentence whose audio had
+  already come back. A reply changes voice at most once, and never back. The hands-free client
+  asks for a reply in one request, so it has always been one voice.
 
 **Which replies an outside service may speak has not changed, and a voice on this Mac speaks
 them all** (`src/speech-route.ts`). OpenAI is never given a reply that stays on this Mac (409:

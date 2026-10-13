@@ -11,7 +11,7 @@
  * stays here to `/speak`. (The server still refuses it there, by the stored
  * turn. This is the other half: what the client is told.)
  *
- * Five servers, each on its own scratch HOME, against loopback stand-ins
+ * Seven servers, each on its own scratch HOME, against loopback stand-ins
  * (./stubs, and a speech server here), fenced so that nothing else can be
  * reached (./guard.mjs). OpenAI is the fence: a request for it is a lookup of
  * `api.openai.com` that the guard stops and records, so "OpenAI saw nothing"
@@ -25,23 +25,33 @@
  *             there (one saved long ago, which nothing read until now), with
  *             the usual model in its usual place;
  *  - `none`:  the same stale name, in the environment this time, and no usual
- *             model either: nothing on this Mac can transcribe.
+ *             model either: nothing on this Mac can transcribe;
+ *  - `noexec`: a WHISPER_BIN that is there and may not be run (chmod 644);
+ *  - `say`:   FLINT_TTS_PROVIDER=say, on a Mac only (below).
  * (The default server, with no voice setting anywhere, is `modes` in
  * ./behaviour.test.ts: its `meta` event is held to exactly its three keys
  * there.)
  *
- * No program that makes a sound is run. The one program a server here starts
- * is a stand-in for whisper.cpp (a script that prints a line), and on a Mac
- * `afconvert`, which turns one file into another.
+ * No program that makes a sound is run. The programs a server here starts
+ * are a stand-in for whisper.cpp (a script that prints a line), on a Mac
+ * `afconvert`, which turns one file into another, and, for the `say` server
+ * alone, the Mac's own `say`. That one cannot be a stand-in: the server runs
+ * it by its full path (/usr/bin/say), never by a name a PATH could answer.
+ * It is always run with `-o`, a file to write, in a folder that is this
+ * test's own (the server's TMPDIR): with `-o` it writes that file and plays
+ * nothing. The test counts the `say` processes whose file is in that folder,
+ * and no others.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { SPEECH_OFF } from '../../src/speech-route';
 import { startCloudStub, startOllamaStub, type CloudStub, type OllamaStub } from './stubs';
-import { scratch, startServer, type Reply, type Running } from './rig';
+import { scratch, sleep, startServer, type Reply, type Running } from './rig';
 
 const MAIN = 'main-model:30b';
 const MODELS = { [MAIN]: { loaded: true, contextLength: 16384 }, 'nomic-embed-text': { family: 'nomic-bert' } };
@@ -135,12 +145,15 @@ interface Booted {
   cloud: CloudStub;
   srv: Running;
 }
-const runs = { off: scratch('voice-off'), local: scratch('voice-local'), saved: scratch('voice-saved'), stale: scratch('voice-stale'), none: scratch('voice-none') };
+const runs = { off: scratch('voice-off'), local: scratch('voice-local'), saved: scratch('voice-saved'), stale: scratch('voice-stale'), none: scratch('voice-none'), noexec: scratch('voice-noexec'), say: scratch('voice-say') };
 let off: Booted;
 let local: Booted & { speech: Awaited<ReturnType<typeof startSpeechStub>> };
 let saved: Booted & { whisperRan: string; whisperBin: string };
-let stale: Booted & { whisperRan: string };
+let stale: Booted & { whisperRan: string; whisperBin: string };
 let none: Booted & { whisperRan: string };
+let noexec: Booted & { whisperRan: string };
+/** The `say` server, on a Mac: `tmp` is its TMPDIR, the one folder its `say` writes in. (A short path: the server's own start listens on a socket under it.) */
+let say: (Booted & { tmp: string }) | undefined;
 /** A path that names nothing: a model that was there once. */
 const GONE = '/nonexistent/old/ggml-gone.bin';
 
@@ -197,7 +210,7 @@ beforeAll(async () => {
       { path: ['secrets.env'], text: `WHISPER_MODEL=${GONE}\nWHISPER_BIN=${whisperBin}\n` },
       { path: ['models', 'ggml-base.en.bin'], text: 'a stand-in for the usual model file\n' },
     ]);
-    return { ...b, whisperRan };
+    return { ...b, whisperRan, whisperBin };
   };
   // The same stale name in the ENVIRONMENT, and no usual model under this HOME: nothing can transcribe.
   const startNone = async () => {
@@ -205,17 +218,31 @@ beforeAll(async () => {
     const b = await boot(runs.none.dir, { WHISPER_MODEL: GONE, WHISPER_BIN: whisperBin });
     return { ...b, whisperRan };
   };
-  [off, local, saved, stale, none] = await Promise.all([boot(runs.off.dir, { FLINT_TTS_PROVIDER: 'off' }), startLocal(), startSaved(), startStale(), startNone()]);
+  // A program that is there and may not be run: a file with no execute permission.
+  const startNoexec = async () => {
+    const { whisperBin, whisperRan } = whisperStandIn(runs.noexec.dir, 'This is never printed.');
+    chmodSync(whisperBin, 0o644);
+    const b = await boot(runs.noexec.dir, { WHISPER_BIN: whisperBin }, [{ path: ['models', 'ggml-base.en.bin'], text: 'a stand-in for the usual model file\n' }]);
+    return { ...b, whisperRan };
+  };
+  const startSay = async () => {
+    if (!ON_A_MAC) return undefined;
+    const tmp = mkdtempSync(join(tmpdir(), 'vs-'));
+    const b = await boot(runs.say.dir, { FLINT_TTS_PROVIDER: 'say', TMPDIR: tmp });
+    return { ...b, tmp };
+  };
+  [off, local, saved, stale, none, noexec, say] = await Promise.all([boot(runs.off.dir, { FLINT_TTS_PROVIDER: 'off' }), startLocal(), startSaved(), startStale(), startNone(), startNoexec(), startSay()]);
 });
 
 afterAll(async () => {
-  for (const b of [off, local, saved, stale, none]) {
+  for (const b of [off, local, saved, stale, none, noexec, say]) {
     if (!b) continue;
     await b.srv.stop();
     await b.ollama.close();
     await b.cloud.close();
   }
   await local?.speech.close();
+  if (say) rmSync(say.tmp, { recursive: true, force: true });
   for (const r of Object.values(runs)) r.cleanup();
 });
 
@@ -409,6 +436,43 @@ describe('the real server, as a process: a saved WHISPER_MODEL that names a file
   });
 });
 
+// The re-review: a program that is there and may not be run was taken for one that could be. Every recording was
+// a 500, and the Transcription row said all was well.
+describe('the real server, as a process: a transcription program that is there and cannot be run (chmod 644)', () => {
+  it('at start it is refused by the name of the setting, and the usual program is what Flint uses', async () => {
+    const log = noexec.srv.log();
+    expect(log).toContain('[inference] WHISPER_BIN is the path of a program that is not there, or that cannot be run; using the usual transcription program');
+    const st = (await noexec.srv.get('/inference')).json as { notices: string[]; problems: Array<Record<string, unknown>> };
+    expect(st.problems).toEqual([{ key: 'WHISPER_BIN', reason: 'the path of a program that is not there, or that cannot be run', kind: 'missing' }]);
+    expect(st.notices).toContain("The transcription program named in Flint's setup isn't on this Mac, so Flint uses the usual one.");
+    expect(log + JSON.stringify(st)).not.toContain(runs.noexec.dir);
+    // (No recording is sent here: the usual program is the machine's own, and a test does not run it.)
+    expect(existsSync(noexec.whisperRan)).toBe(false);
+  });
+
+  it('while Flint runs: a recording gets the sentence a missing program gets, the row says the same, and nothing is run; made runnable again, the next one is transcribed', async () => {
+    // The `stale` server's program is its stand-in, which can be run. Its permission is taken away here.
+    chmodSync(stale.whisperBin, 0o644);
+    try {
+      rmSync(stale.whisperRan, { force: true });
+      const before = stale.srv.log().length;
+      for (let i = 0; i < 2; i++) {
+        expect(await transcribe(stale.srv, silence())).toEqual({ status: 503, json: { error: 'Flint can’t turn speech into text: its transcription program isn’t on this Mac.' } });
+      }
+      expect(existsSync(stale.whisperRan)).toBe(false);
+      expect(stale.srv.log().slice(before)).not.toMatch(/transcribe|EACCES|    at |Error/);
+      const st = (await stale.srv.get('/inference')).json as { voice: { transcription: Record<string, unknown> }; lines: string[] };
+      expect(st.voice.transcription).toMatchObject({ sentence: "Flint can't turn speech into text until its transcription program is on this Mac." });
+      expect(st.lines).toContain("Transcription is set to whisper-cpp (ggml-base.en.bin). Flint can't turn speech into text until its transcription program is on this Mac.");
+    } finally {
+      chmodSync(stale.whisperBin, 0o755);
+    }
+    const back = (await stale.srv.get('/inference')).json as { voice: { transcription: Record<string, unknown> } };
+    expect(back.voice.transcription).toMatchObject({ sentence: 'Your voice is turned into text on this Mac.' });
+    if (ON_A_MAC) expect(await transcribe(stale.srv, silence())).toEqual({ status: 200, json: { text: 'Heard with the usual model.' } });
+  });
+});
+
 describe('the real server, as a process: the same stale name in the environment, and no usual model either', () => {
   it('it is refused at start all the same: where the value came from changes nothing', async () => {
     expect(none.srv.log()).toContain('[inference] WHISPER_MODEL is the path of a file that is not there; using the usual transcription model');
@@ -459,4 +523,94 @@ describe('the real server, as a process: the same stale name in the environment,
       rmSync(usual, { force: true });
     }
   });
+});
+
+// The re-review's test gap: what happens to a `say` when its client hangs up was held by the text of index.ts
+// alone. Here the real server speaks with the Mac's own voice (into files, in this test's own folder: nothing is
+// played), and a client really hangs up.
+describe.runIf(ON_A_MAC)('the real server, as a process: the Mac’s own voice, a client that hangs up, and the line', () => {
+  /** The `say` processes that are writing in this test's own folder, by their command lines. Any other `say` on the machine is not this test's. */
+  const saying = (): string[] => {
+    try {
+      return execFileSync('/usr/bin/pgrep', ['-fl', `/usr/bin/say -o ${say!.tmp}/`], { encoding: 'utf8' }).split('\n').filter((l) => l.includes('/usr/bin/say -o '));
+    } catch {
+      return []; // pgrep exits 1 when there is none
+    }
+  };
+  const folders = (): string[] => readdirSync(say!.tmp).filter((n) => n.startsWith('flint-say-'));
+  const until = async (ok: () => boolean, ms = 5_000): Promise<boolean> => {
+    for (const end = Date.now() + ms; Date.now() < end; ) {
+      if (ok()) return true;
+      await sleep(25);
+    }
+    return ok();
+  };
+  const ask = (text: string, signal?: AbortSignal): Promise<Response> =>
+    fetch(`${say!.srv.base}/speak`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${say!.srv.token}` }, body: JSON.stringify({ text }), ...(signal ? { signal } : {}) });
+
+  it('it says so when it starts, and every reply is said to be spoken here', async () => {
+    expect(say!.srv.log()).toContain('speaking=say');
+    const t = await turns(say!.srv, 'say');
+    expect([t.ordinary.meta.speechHere, t.kept.meta.speechHere]).toEqual([true, true]);
+  });
+
+  it('a client that hangs up while its reply is being spoken leaves no say process and no folder, and the server speaks the next reply', async () => {
+    const before = say!.srv.log().length;
+    const gone = new AbortController();
+    // A reply long enough to be still in the making when the client leaves.
+    const asked = ask('word '.repeat(700), gone.signal).then((r) => `answered ${r.status}`, (e: Error) => `client: ${e.name}`);
+    expect(await until(() => saying().length === 1 && folders().length === 1), 'its say was started, in a folder of its own').toBe(true);
+    // Its file is one in this test's own folder, written with -o: nothing is played.
+    expect(saying()[0]).toMatch(new RegExp(`/usr/bin/say -o ${say!.tmp}/flint-say-[^/ ]+/speech\\.m4a --file-format=m4af --data-format=aac -f ${say!.tmp}/flint-say-[^/ ]+/text\\.txt$`));
+    gone.abort();
+    expect(await asked).toBe('client: AbortError');
+    expect(await until(() => saying().length === 0 && folders().length === 0), 'the say was stopped and its folder removed').toBe(true);
+    // Nothing failed, and nothing is said of it: the reply was dropped because its client left.
+    expect(say!.srv.log().slice(before)).not.toMatch(/\[speak\]|tts failed|    at /);
+    const next = await ask('Hello there.');
+    expect([next.status, next.headers.get('content-type')]).toEqual([200, 'audio/mp4']);
+    expect((await next.arrayBuffer()).byteLength).toBeGreaterThan(1000);
+    expect([saying(), folders()]).toEqual([[], []]);
+  });
+
+  it('twenty replies at once: every one is spoken, never more than two say at a time, and nothing is left behind', async () => {
+    let peak = 0;
+    let watching = true;
+    const watch = (async () => {
+      while (watching) {
+        peak = Math.max(peak, saying().length);
+        await sleep(20);
+      }
+    })();
+    const all = await Promise.all(
+      Array.from({ length: 20 }, async (_, i) => {
+        const r = await ask(`Yes, number ${i}.`);
+        return { status: r.status, type: r.headers.get('content-type'), bytes: (await r.arrayBuffer()).byteLength };
+      }),
+    );
+    watching = false;
+    await watch;
+    // The line holds them all (two running, forty waiting): not one was handed back to the device.
+    expect(all.map((r) => r.status)).toEqual(Array.from({ length: 20 }, () => 200));
+    for (const r of all) expect([r.type, r.bytes > 1000]).toEqual(['audio/mp4', true]);
+    expect(peak).toBeGreaterThanOrEqual(1);
+    expect(peak).toBeLessThanOrEqual(2);
+    expect(await until(() => saying().length === 0 && folders().length === 0)).toBe(true);
+  }, 60_000);
+
+  it('past the line a reply is handed back at once (429), and replies that hang up while they wait leave it: no say is started for them', async () => {
+    const gone = new AbortController();
+    // Sixty long replies at once: two are being spoken, forty wait, and the other eighteen are refused at once.
+    const asked = Array.from({ length: 60 }, () => ask('word '.repeat(400), gone.signal).then((r) => r.status, (e: Error) => e.name));
+    const quick = await Promise.race([Promise.all(asked.slice(42)), sleep(4_000).then(() => 'slow' as const)]);
+    expect(quick).toEqual(Array.from({ length: 18 }, () => 429));
+    expect(saying().length).toBeLessThanOrEqual(2);
+    // Every one of the forty-two hangs up.
+    gone.abort();
+    expect(await Promise.all(asked.slice(0, 42))).toEqual(Array.from({ length: 42 }, () => 'AbortError'));
+    expect(await until(() => saying().length === 0 && folders().length === 0)).toBe(true);
+    // The line is free again: the next reply is spoken, and nothing was looked up or sent anywhere in any of it.
+    expect((await ask('Hello again.')).status).toBe(200);
+    expect(blocked(say!.srv)).toEqual([]);
+  }, 60_000);
 });
