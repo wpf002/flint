@@ -733,6 +733,17 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
     });
 
     it('each Nexus step has one limit over all its parts: a part well inside its own limit still ends when the step’s time is up', async () => {
+      // A step stopped at its limit hands back its error first and drops its scratch database a moment after (the
+      // drop has time of its own). Asked the instant the step returned, the scratch was sometimes still listed, and
+      // the deploy gate failed on it (2026-10-13). So wait for the drop, within a bound, and then say what is left.
+      const scratchGone = async (): Promise<string[]> => {
+        let left = await databases(`${SET.scratch}%`);
+        for (let i = 0; i < 120 && left.length; i++) {
+          await new Promise((r) => setTimeout(r, 250));
+          left = await databases(`${SET.scratch}%`);
+        }
+        return left;
+      };
       const folder = join(dir, 'whole');
       mkdirSync(folder);
       writeFileSync(join(folder, 'pg_dump'), '#!/bin/zsh\nexec sleep 20\n', { mode: 0o755 });
@@ -804,7 +815,7 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       } finally {
         await other.end();
       }
-      expect(await databases(`${SET.scratch}%`)).toEqual([]);
+      expect(await scratchGone()).toEqual([]);
       expect(spawnSync('/usr/bin/pgrep', ['-f', folder], { encoding: 'utf8' }).stdout.trim()).toBe('');
       // The restore test, held up in its comparison: the restore itself is done, and a session left on the scratch
       // database holds one restored table locked. The count of it ends with the step (not after the 15 seconds a lock
@@ -823,7 +834,7 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
         expect(held).toBeInstanceOf(TookTooLong);
         expect((held as Error).message).toBe('the restore test was stopped because it ran longer than 3 seconds');
         expect(Date.now() - began).toBeLessThan(9000);
-        expect(await databases(`${SET.scratch}%`)).toEqual([]);
+        expect(await scratchGone()).toEqual([]);
       }
       // With the real limits the same steps pass: nothing of this is in their way.
       expect((await restoreDrill(dump, URLS!.restore!, tools, SET)).ok).toBe(true);
