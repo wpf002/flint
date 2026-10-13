@@ -192,7 +192,9 @@ function rig(over: { env?: Record<string, string>; models?: string[]; missing?: 
     readFile: (p) => readFileSync(p),
     writeFile: (p, data) => writeFileSync(p, data),
     mkdir: (p) => void mkdirSync(p, { recursive: true }),
-    exists: (p) => !missing.has(p) && (p === SAY || p === WHISPER || p === WHISPER_SERVER || existsSync(p)),
+    // The three programs are stand-ins; any other file is there only when it is one of this test's own. (Nothing
+    // of the machine the tests run on is looked at: whisper.cpp may or may not be installed on it.)
+    exists: (p) => !missing.has(p) && (p === SAY || p === WHISPER || p === WHISPER_SERVER || (p.startsWith(dir) && existsSync(p))),
     remove: (p) => rmSync(p, { force: true }),
     list: (d) => {
       try {
@@ -567,6 +569,17 @@ describe('a whole run, on stand-ins', () => {
     expect([d.clips.count, d.stt, d.tts]).toEqual([0, [], []]);
     expect(d.notes[0]).toMatch(/no `say`/);
     expect(linux.ran).toEqual([]);
+  });
+
+  it('a model a setting names that is not there is refused, as the server refuses it: the usual folder is what is measured', async () => {
+    const r = rig({ env: { WHISPER_MODEL: '/nonexistent/old/ggml-gone.bin' } });
+    const result = await runBench(args({ out: r.out, voices: ['Samantha'], rates: [175], stt: ['whisper-cpp'], tts: [] }), r.deps);
+    // The two models in the usual folder, the usual one first; nothing of the stale path is run or named.
+    expect(result.stt.map((s) => [s.engine, s.model, s.failed])).toEqual([
+      ['whisper-cpp', 'ggml-base.en.bin', 0],
+      ['whisper-cpp', 'ggml-small.en.bin', 0],
+    ]);
+    expect(JSON.stringify(result) + JSON.stringify(r.ran)).not.toMatch(/nonexistent|ggml-gone/);
   });
 
   it('a local speech server that is already set up is measured as it is, through Flint’s own settings', async () => {

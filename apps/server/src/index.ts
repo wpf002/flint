@@ -34,7 +34,7 @@ import { RuntimeEvents, chatTurnEvent, routeOf, thresholdEventId } from './runti
 import { WorldNow, estimateTokens } from './world-now';
 import { GoalsChat, SPEECH_STAYS_HERE, embedderHere, keptText, recallForAnyBrain, toolsKeptHere } from './goals-chat';
 import { speak, speechMadeHere } from './speech-route';
-import { buildVoice, voiceLine, type Voice } from './voice';
+import { CannotTranscribe, buildVoice, voiceLine, type Voice } from './voice';
 import { readContextBlocks } from './context-blocks';
 import { brainOf } from './policy';
 import { inboxRoutes } from './inbox-routes';
@@ -1328,6 +1328,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     try {
       return json(res, 200, { text: (await ctx.voice.stt.transcribe(buf)).text });
     } catch (e) {
+      // Nothing on this Mac can transcribe (no program, or no model): a sentence saying so. Nothing was run and
+      // nothing failed, so there is no reference to look up.
+      if (e instanceof CannotTranscribe) return json(res, 503, { error: e.message });
       return json(res, 500, { error: 'transcription failed', ref: errorRef('transcribe', e) });
     }
   }

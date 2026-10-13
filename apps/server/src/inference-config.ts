@@ -47,7 +47,10 @@
  * was silently ignored; they are read here, after it, so such a line now
  * applies. A path may start with `~/` (neither that file nor a LaunchAgent
  * expands it): it is this home folder. Any other path that is not a full one
- * is refused, and the usual one is used: a recording is never failed for it.
+ * is refused, and so is one that names a file that is not there when Flint
+ * starts (a line saved long ago, which nothing read until now): the usual
+ * program or model is used, wherever the value came from. A recording is
+ * never failed for a setting.
  *
  * A voice setting that is refused never lands on a less private choice than
  * the one that was meant: a speech provider Flint does not know is no speech
@@ -324,7 +327,7 @@ export type ConfigKey = keyof typeof SCHEMAS | 'FLINT_LOCAL_BASE_URL' | 'OLLAMA_
  * that runs on Ollama's servers, a key that would have travelled in the clear,
  * or simply a value the key does not take.
  */
-export type ProblemKind = UrlProblem | 'invalid' | 'cloud_model' | 'in_the_clear' | 'unset' | 'other_machine' | 'proxied';
+export type ProblemKind = UrlProblem | 'invalid' | 'cloud_model' | 'in_the_clear' | 'unset' | 'other_machine' | 'proxied' | 'missing';
 
 /** A value that was set and refused: the key, why in words, and the class of the refusal. Never the value. */
 export interface ConfigProblem {
@@ -455,7 +458,22 @@ const SPEECH_URL_REASONS: Record<UrlProblem, string> = {
  * Read every key. `warn` gets one line per refused value; the same facts are
  * in `problems` for the status command. Nothing here throws.
  */
-export function readInferenceConfig(env: Env, warn: (msg: string) => void = () => {}, opts: { execArgv?: readonly string[]; home?: string } = {}): InferenceConfig {
+export function readInferenceConfig(
+  env: Env,
+  warn: (msg: string) => void = () => {},
+  opts: {
+    execArgv?: readonly string[];
+    home?: string;
+    /**
+     * Is there a file at this path? Handed in by whoever starts the server
+     * (./inference buildInference: the real file system), so that a program or
+     * a model that is named and not there is refused here, at start. Left out,
+     * no file is looked for: this function reads the environment and nothing
+     * else.
+     */
+    fileExists?: (path: string) => boolean;
+  } = {},
+): InferenceConfig {
   const problems: ConfigProblem[] = [];
   const refuse = (key: ConfigKey, reason: string, outcome: string, kind: ProblemKind = 'invalid'): void => {
     problems.push({ key, reason, kind });
@@ -553,7 +571,8 @@ export function readInferenceConfig(env: Env, warn: (msg: string) => void = () =
   /**
    * A path to a program or a model file: a full path, with `~/` read as this home folder (neither the settings
    * file nor a LaunchAgent expands it, and a path whisper.cpp cannot open would fail every recording). Any other
-   * path that is not a full one (`~someone/...`, a bare name) is refused, and the usual one is used.
+   * path that is not a full one (`~someone/...`, a bare name) is refused, and the usual one is used. So is one
+   * that names a file that is not there (`opts.fileExists`): said by the setting's name, never by its path.
    */
   const home = opts.home ?? homedir();
   const filePath = (key: 'WHISPER_BIN' | 'WHISPER_MODEL', outcome: string): string | undefined => {
@@ -562,6 +581,10 @@ export function readInferenceConfig(env: Env, warn: (msg: string) => void = () =
     const full = r.value.startsWith('~/') ? join(home, r.value.slice(2)) : r.value;
     if (!isAbsolute(full)) {
       refuse(key, 'not a full path (one that starts with / or with ~/)', outcome);
+      return undefined;
+    }
+    if (opts.fileExists && !opts.fileExists(full)) {
+      refuse(key, 'the path of a file that is not there', outcome, 'missing');
       return undefined;
     }
     return full;

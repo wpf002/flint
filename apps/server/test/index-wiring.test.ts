@@ -592,6 +592,11 @@ describe('index.ts wiring', () => {
     expect(src).not.toMatch(/api\.openai\.com\/v1\/audio|afconvert|whisper-cli|WHISPER_BIN|WHISPER_MODEL|FLINT_TTS_|execFile/);
     expect(src.match(/ctx\.voice\.(stt|tts)\b/g)).toEqual(['ctx.voice.stt', 'ctx.voice.tts', 'ctx.voice.tts', 'ctx.voice.tts']);
     expect(between("url === '/transcribe'", "url === '/speak'")).toContain('return json(res, 200, { text: (await ctx.voice.stt.transcribe(buf)).text });');
+    // Nothing on this Mac can transcribe (no program, or no model): the provider's own sentence, as a 503, and no
+    // reference to a failure, because nothing was run. Anything else is the failure it always was.
+    expect(between("url === '/transcribe'", "url === '/speak'")).toMatch(
+      /\} catch \(e\) \{\s*(\/\/[^\n]*\s*)*if \(e instanceof CannotTranscribe\) return json\(res, 503, \{ error: e\.message \}\);\s*return json\(res, 500, \{ error: 'transcription failed', ref: errorRef\('transcribe', e\) \}\);/,
+    );
     // The providers are built once, at boot, from what config decided, and the boot line names them.
     expect(src).toContain('const voice = buildVoice(inference.voicePlan, { env: process.env, connectTimeoutMs: inference.cfg.local.connectTimeoutMs });');
     expect(src).toContain('console.error(voiceLine(inference.voicePlan));');

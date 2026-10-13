@@ -978,6 +978,16 @@ handed `~/...` fails every recording). Any other path that is not a full one (`~
 a bare name, a relative path) is refused with a sentence, and the usual program or model is
 used: a recording is never failed for a setting.
 
+**A program or a model that is named and is not there is refused when Flint starts**, by the
+name of the setting and never by its path, and the usual one is used. This is the line saved
+long ago: because nothing read these settings from the settings file before, one may name a
+model that has since gone, and applying it would fail every recording. It is the same wherever
+the value comes from, the settings file or the environment. When neither the one that was named
+nor the usual one is on this Mac, `/transcribe` answers 503 with a sentence saying so
+(`Flint can’t turn speech into text: the transcription model isn’t on this Mac.`), and not the
+500 of a program that could not start. The program and the model are looked for at each
+recording, so a model put in place while Flint runs is used by the next one.
+
 - **A refused setting never lands on a less private choice than the one that was meant.** A
   speech provider Flint does not know is NO speech here (`off`), never OpenAI: the default is an
   outside service, and a typo must not choose it. A transcription provider it does not know is

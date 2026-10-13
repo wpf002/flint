@@ -34,7 +34,7 @@
  * Kept free of index.ts so it is unit-testable (index.ts runs main() on import).
  */
 import { execFile } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, platform as osPlatform, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SAY_VOICE_RE, type InferenceConfig, type LocalUrlOk, type SttProviderKind, type TtsProviderKind } from './inference-config';
@@ -186,14 +186,48 @@ export function openAiSpeech(v: Pick<InferenceConfig['voice'], 'openaiModel' | '
 /** A file's name, for a log or a status: never the folder it is in. */
 export const fileNameOf = (path: string): string => path.replace(/^.*[\\/]/, '');
 
-/** Speech-to-text with whisper.cpp, on this Mac (the same pipeline the CLI voice mode uses). */
-export function whisperCppStt(opts: { bin: string; model: string; run?: Run }): SttProvider {
+/** Is there a file at this path (a link to one counts)? Never throws. */
+export function isFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Nothing on this Mac can turn the recording into text: whisper.cpp, or its
+ * model, is not there. Not a failure of a run: nothing was run. Its message
+ * is a sentence for whoever asked (`/transcribe` answers 503 with it), and
+ * names no path.
+ */
+export class CannotTranscribe extends Error {
+  constructor(readonly what: 'program' | 'model') {
+    super(what === 'program' ? 'Flint can’t turn speech into text: the transcription program isn’t on this Mac.' : 'Flint can’t turn speech into text: the transcription model isn’t on this Mac.');
+    this.name = 'CannotTranscribe';
+  }
+}
+
+/**
+ * Speech-to-text with whisper.cpp, on this Mac (the same pipeline the CLI
+ * voice mode uses).
+ *
+ * Before anything is run or written, the program and the model are looked
+ * for: when one is not there, the recording is not transcribed and the
+ * caller is told so in a sentence (`CannotTranscribe`), and not with the
+ * error of a program that could not start. It is looked for each time, so a
+ * model put there while Flint runs is used by the next recording.
+ */
+export function whisperCppStt(opts: { bin: string; model: string; run?: Run; exists?: (path: string) => boolean }): SttProvider {
   const run = opts.run ?? runFile;
+  const exists = opts.exists ?? isFile;
   return {
     name: 'whisper-cpp',
     local: true,
     model: fileNameOf(opts.model),
     async transcribe(audio) {
+      if (!exists(opts.bin)) throw new CannotTranscribe('program');
+      if (!exists(opts.model)) throw new CannotTranscribe('model');
       const dir = mkdtempSync(join(tmpdir(), 'flint-stt-'));
       try {
         const inFile = join(dir, 'in');
@@ -488,6 +522,8 @@ export interface BuildVoiceDeps {
   connectTimeoutMs?: number;
   /** Injectable TCP connect check (tests: no real socket). */
   connect?: (host: string, port: number, ms: number) => Promise<void>;
+  /** Is there a file at this path? For whisper.cpp and its model, looked for before each recording. Default: the real file system. */
+  fileExists?: (path: string) => boolean;
 }
 
 /** Build the providers a plan names. A local speech server is reached through the guarded fetch: its origin only, its two paths only, never a redirect. */
@@ -505,7 +541,7 @@ export function buildVoice(plan: VoicePlan, deps: BuildVoiceDeps): Voice {
   const stt =
     s.name === 'local'
       ? openAiCompatStt({ baseURL: s.server.baseURL, model: s.model, fetch: guard(s.server), ...(s.apiKey ? { apiKey: s.apiKey } : {}), ...run })
-      : whisperCppStt({ bin: s.bin, model: s.model, ...run });
+      : whisperCppStt({ bin: s.bin, model: s.model, ...run, ...(deps.fileExists ? { exists: deps.fileExists } : {}) });
   const t = plan.tts;
   const tts =
     t.name === 'openai'

@@ -42,7 +42,7 @@ import { brainIsLocal, brainOf, setPlaceRules, type MediaFlags } from './policy'
 import { turnStaysHere, type StayRoute } from './private-turns';
 import { paidToolSpecs, type BrainChooser, type BudgetView, type PaidToolSpec } from './spend';
 import { carriesKeptText, isEvalTurn, isPrivateRequest, isPrivateTurn, isStaysHereRequest, isStaysHereTurn, markPrivateRequest, markStaysHereRequest } from './turn-taint';
-import { planVoice, type VoicePlan } from './voice';
+import { isFile, planVoice, type VoicePlan } from './voice';
 import type { TurnFacts } from './hybrid-rules';
 
 type Env = Record<string, string | undefined>;
@@ -757,6 +757,13 @@ export interface BuildInferenceDeps {
    */
   observeOnly?: boolean;
   /**
+   * Is there a file at this path? For the program and the model a setting
+   * names (./inference-config): one that is not there when Flint starts is
+   * refused, and the usual one is used. Default: the real file system. A test
+   * hands one in.
+   */
+  fileExists?: (path: string) => boolean;
+  /**
    * Have the server at an address asked what runs on it, when its word is more
    * than two seconds old. Default: the server's own record
    * (./ollama-locality fresh). A test hands one in.
@@ -782,7 +789,7 @@ export interface BuildInferenceDeps {
  */
 export async function buildInference(deps: BuildInferenceDeps): Promise<Inference> {
   const log = deps.log ?? (() => {});
-  const cfg = readInferenceConfig(deps.env, log);
+  const cfg = readInferenceConfig(deps.env, log, { fileExists: deps.fileExists ?? isFile });
   const mode = new ModeStore({ file: deps.modeFile, envMode: cfg.mode, envSource: cfg.modeSource, log });
   // The machine, once, behind the boot: which tier it is in, and so which model to prefer when none is named.
   // Detection cannot throw and is cut off by the clock (./hardware); a failure of an injected one is "no accelerator".

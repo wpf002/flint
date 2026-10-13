@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { readInferenceConfig } from '../src/inference-config';
 import {
   AUDIO_TYPES,
+  CannotTranscribe,
   MAX_SPEECH_BYTES,
   MAX_TRANSCRIPT_BYTES,
   SAY_AT_ONCE,
@@ -12,6 +14,7 @@ import {
   TTS_MAX_CHARS,
   audioTypeOf,
   buildVoice,
+  isFile,
   macSayTts,
   offTts,
   openAiCompatStt,
@@ -72,6 +75,8 @@ function fetcher(answer: (url: string, init: RequestInit) => Response | Promise<
   return { f, sent };
 }
 const audio = (body: string, type = 'audio/mpeg'): Response => new Response(body, { status: 200, headers: { 'content-type': type } });
+/** A stand-in for the file system: the program and the model are there. (No test here runs a real program, so none needs a real file.) */
+const THERE = (): boolean => true;
 const headers = (init: RequestInit): Record<string, string> => init.headers as Record<string, string>;
 
 // ---------------------------------------------------------------------------
@@ -79,7 +84,7 @@ const headers = (init: RequestInit): Record<string, string> => init.headers as R
 describe('whisper.cpp, on this Mac: what Flint has always done, moved behind the seam unchanged', () => {
   it('converts the recording to the WAV whisper reads, runs whisper-cli on it, and hands back the text on one line', async () => {
     const { run, ran } = runner({ whisperSays: '\n  Hello   there,\n Flint. \n' });
-    const stt = whisperCppStt({ bin: '/opt/homebrew/bin/whisper-cli', model: '/models/ggml-base.en.bin', run });
+    const stt = whisperCppStt({ bin: '/opt/homebrew/bin/whisper-cli', model: '/models/ggml-base.en.bin', run, exists: THERE });
     expect(await stt.transcribe(Buffer.from('m4a-recording'))).toEqual({ text: 'Hello there, Flint.' });
     expect(ran).toHaveLength(2);
     const [convert, whisper] = ran as [Ran, Ran];
@@ -96,12 +101,12 @@ describe('whisper.cpp, on this Mac: what Flint has always done, moved behind the
 
   it('the recording lives in a directory only this user can read, and is gone afterwards, also when whisper fails', async () => {
     const ok = runner({ whisperSays: 'x' });
-    await whisperCppStt({ bin: '/w', model: '/m', run: ok.run }).transcribe(Buffer.from('a'));
+    await whisperCppStt({ bin: '/w', model: '/m', run: ok.run, exists: THERE }).transcribe(Buffer.from('a'));
     const dir = dirname(ok.ran[0]!.args[0]!);
     expect(ok.ran[0]!.files[ok.ran[0]!.args[0]!]!.dirMode).toBe(0o700);
     expect(existsSync(dir)).toBe(false);
     const bad = runner({ fail: 'afconvert' });
-    await expect(whisperCppStt({ bin: '/w', model: '/m', run: bad.run }).transcribe(Buffer.from('a'))).rejects.toThrow('afconvert failed');
+    await expect(whisperCppStt({ bin: '/w', model: '/m', run: bad.run, exists: THERE }).transcribe(Buffer.from('a'))).rejects.toThrow('afconvert failed');
     expect(existsSync(dirname(bad.ran[0]!.args[0]!))).toBe(false);
   });
 
@@ -140,6 +145,7 @@ describe('WHISPER_BIN and WHISPER_MODEL are full paths: a leading ~/ is this hom
     const ran: string[][] = [];
     const { stt } = buildVoice(planVoice(readInferenceConfig(env, undefined, { home: '/Users/will' }), env, { platform: 'darwin', home: '/Users/will' }), {
       env,
+      fileExists: THERE,
       run: async (file, args) => {
         ran.push([file, ...args]);
         if (file === '/usr/bin/afconvert') writeFileSync(args[1]!, 'RIFF');
@@ -182,6 +188,123 @@ describe('WHISPER_BIN and WHISPER_MODEL are full paths: a leading ~/ is this hom
     const fine = read({ WHISPER_MODEL: '/Users/josé/Library/Application Support/models/ggml-base.en.bin' });
     expect(fine.cfg.problems).toEqual([]);
     expect(fine.plan.stt).toMatchObject({ model: '/Users/josé/Library/Application Support/models/ggml-base.en.bin' });
+  });
+});
+
+// The stale line. main read WHISPER_BIN and WHISPER_MODEL before it read the settings file, so a line for one of
+// them saved there was never used, and may name a file that has since gone. Read after the file, such a line
+// applied, and every recording failed with a 500. A program or a model that is named and is not there when Flint
+// starts is refused now, and the usual one is used: wherever the value came from.
+describe('a WHISPER_BIN or WHISPER_MODEL that names a file that is not there is refused at start, and the usual one is used', () => {
+  const HOME = '/Users/will';
+  const USUAL = { bin: '/opt/homebrew/bin/whisper-cli', model: `${HOME}/.flint/models/ggml-base.en.bin` };
+  const read = (env: Record<string, string>, there: readonly string[]) => {
+    const warned: string[] = [];
+    const asked: string[] = [];
+    const cfg = readInferenceConfig(env, (m) => warned.push(m), { home: HOME, fileExists: (p) => (asked.push(p), there.includes(p)) });
+    return { cfg, warned, asked, plan: planVoice(cfg, env, { platform: 'darwin', home: HOME }) };
+  };
+
+  it('a model that is not there: refused by the name of the setting, never by its path, and the usual model is used', () => {
+    const { cfg, plan, warned } = read({ WHISPER_MODEL: '/nonexistent/old/ggml-gone.bin' }, [USUAL.bin, USUAL.model]);
+    expect(plan.stt).toEqual({ name: 'whisper-cpp', local: true, ...USUAL });
+    expect(cfg.problems).toEqual([{ key: 'WHISPER_MODEL', reason: 'the path of a file that is not there', kind: 'missing' }]);
+    expect(warned).toEqual(['[inference] WHISPER_MODEL is the path of a file that is not there; using the usual transcription model']);
+    expect(JSON.stringify(cfg.problems) + warned.join('') + voiceLine(plan)).not.toMatch(/nonexistent|ggml-gone|\/old\//);
+    expect(voiceLine(plan)).toContain('hearing=whisper-cpp (ggml-base.en.bin)');
+  });
+
+  it('the program likewise; and both at once are two refusals', () => {
+    const one = read({ WHISPER_BIN: '/gone/bin/whisper-cli' }, [USUAL.bin, USUAL.model]);
+    expect(one.plan.stt).toMatchObject(USUAL);
+    expect(one.cfg.problems).toEqual([{ key: 'WHISPER_BIN', reason: 'the path of a file that is not there', kind: 'missing' }]);
+    expect(one.warned).toEqual(['[inference] WHISPER_BIN is the path of a file that is not there; using the usual transcription program']);
+    const both = read({ WHISPER_BIN: '/gone/whisper-cli', WHISPER_MODEL: '/gone/ggml-small.en.bin' }, []);
+    expect(both.cfg.problems.map((x) => [x.key, x.kind])).toEqual([['WHISPER_BIN', 'missing'], ['WHISPER_MODEL', 'missing']]);
+    // The plan names the usual ones whether or not they are there: what is there is looked for again at each recording.
+    expect(both.plan.stt).toMatchObject(USUAL);
+  });
+
+  it('one that is there is used as it is set, and it is the FULL path that is looked for: ~/ is the home folder first', () => {
+    const kept = read({ WHISPER_BIN: '/x/whisper-cli', WHISPER_MODEL: '~/models/ggml-small.en.bin' }, ['/x/whisper-cli', `${HOME}/models/ggml-small.en.bin`]);
+    expect(kept.cfg.problems).toEqual([]);
+    expect(kept.plan.stt).toMatchObject({ bin: '/x/whisper-cli', model: `${HOME}/models/ggml-small.en.bin` });
+    expect(kept.asked.sort()).toEqual(['/x/whisper-cli', `${HOME}/models/ggml-small.en.bin`].sort());
+    // Written with ~ and not there under the home folder: refused as missing, and the path with ~ is never the one asked about.
+    const gone = read({ WHISPER_MODEL: '~/models/ggml-small.en.bin' }, []);
+    expect(gone.cfg.problems.map((x) => x.kind)).toEqual(['missing']);
+    expect(gone.asked).toEqual([`${HOME}/models/ggml-small.en.bin`]);
+  });
+
+  it('nothing is looked for when nothing is set, when the value was refused for its shape, or when no file check is handed in', () => {
+    expect(read({}, []).asked).toEqual([]);
+    expect(read({}, []).cfg.problems).toEqual([]);
+    const shape = read({ WHISPER_MODEL: 'models/ggml-base.en.bin', WHISPER_BIN: '/x/whisper\u001b-cli' }, []);
+    expect(shape.asked).toEqual([]);
+    expect(shape.cfg.problems.map((x) => x.kind)).toEqual(['invalid', 'invalid']);
+    // readInferenceConfig by itself reads the environment and nothing else.
+    expect(readInferenceConfig({ WHISPER_MODEL: '/nonexistent/old/ggml-gone.bin' }, undefined, { home: HOME }).problems).toEqual([]);
+  });
+
+  it('isFile, the check the server hands in: a file and a link to one are there; a folder, a broken link and nothing are not', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'flint-isfile-'));
+    try {
+      writeFileSync(join(dir, 'model.bin'), 'weights');
+      symlinkSync(join(dir, 'model.bin'), join(dir, 'link.bin'));
+      symlinkSync(join(dir, 'nowhere.bin'), join(dir, 'broken.bin'));
+      expect([isFile(join(dir, 'model.bin')), isFile(join(dir, 'link.bin'))]).toEqual([true, true]);
+      expect([isFile(dir), isFile(join(dir, 'broken.bin')), isFile(join(dir, 'missing.bin')), isFile('')]).toEqual([false, false, false, false]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ...and when neither the one that was named nor the usual one is there, a recording gets a sentence saying so:
+// not the 500 of a program that could not start, with a reference to a stack in the log.
+describe('whisper.cpp or its model is not on this Mac: a recording is answered with a sentence, and nothing is run', () => {
+  it('no program, or no model: CannotTranscribe, by a sentence that names no path; nothing is run and nothing is written', async () => {
+    for (const [there, what, sentence] of [
+      [['/m/ggml-base.en.bin'], 'program', 'Flint can’t turn speech into text: the transcription program isn’t on this Mac.'],
+      [['/w/whisper-cli'], 'model', 'Flint can’t turn speech into text: the transcription model isn’t on this Mac.'],
+      [[], 'program', 'Flint can’t turn speech into text: the transcription program isn’t on this Mac.'],
+    ] as Array<[string[], string, string]>) {
+      const { run, ran } = runner({ whisperSays: 'x' });
+      const before = readdirSync(tmpdir()).filter((n) => n.startsWith('flint-stt-')).length;
+      const stt = whisperCppStt({ bin: '/w/whisper-cli', model: '/m/ggml-base.en.bin', run, exists: (p) => there.includes(p) });
+      const err = (await stt.transcribe(Buffer.from('a private recording')).catch((e: Error) => e)) as CannotTranscribe;
+      expect(err).toBeInstanceOf(CannotTranscribe);
+      expect([err.what, err.message]).toEqual([what, sentence]);
+      expect(err.message).not.toMatch(/\/w\/|\/m\/|ggml|whisper-cli/);
+      expect(ran).toEqual([]);
+      expect(readdirSync(tmpdir()).filter((n) => n.startsWith('flint-stt-')).length).toBe(before);
+    }
+  });
+
+  it('it is looked for at each recording: a model put there while Flint runs is used by the next one', async () => {
+    const { run } = runner({ whisperSays: 'heard' });
+    const there = new Set(['/w/whisper-cli']);
+    const stt = whisperCppStt({ bin: '/w/whisper-cli', model: '/m/ggml-base.en.bin', run, exists: (p) => there.has(p) });
+    await expect(stt.transcribe(Buffer.from('a'))).rejects.toBeInstanceOf(CannotTranscribe);
+    there.add('/m/ggml-base.en.bin');
+    expect(await stt.transcribe(Buffer.from('a'))).toEqual({ text: 'heard' });
+    there.delete('/w/whisper-cli');
+    await expect(stt.transcribe(Buffer.from('a'))).rejects.toMatchObject({ what: 'program' });
+  });
+
+  it('with no check handed in it is the real file system that is asked: a program that is not there is not run', async () => {
+    const { run, ran } = runner({ whisperSays: 'x' });
+    await expect(whisperCppStt({ bin: '/nonexistent/bin/whisper-cli', model: '/nonexistent/ggml.bin', run }).transcribe(Buffer.from('a'))).rejects.toBeInstanceOf(CannotTranscribe);
+    expect(ran).toEqual([]);
+  });
+
+  it('buildVoice hands the check on, to the provider the plan names', async () => {
+    const env = { WHISPER_BIN: '/x/whisper-cli', WHISPER_MODEL: '/x/ggml-small.en.bin' };
+    const plan = planVoice(readInferenceConfig(env, undefined, { home: '/h' }), env, { platform: 'darwin', home: '/h' });
+    const asked: string[] = [];
+    const { stt } = buildVoice(plan, { env, run: runner().run, fileExists: (p) => (asked.push(p), false) });
+    await expect(stt.transcribe(Buffer.from('a'))).rejects.toMatchObject({ what: 'program' });
+    expect(asked).toEqual(['/x/whisper-cli']);
   });
 });
 

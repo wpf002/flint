@@ -623,9 +623,13 @@ export function problemSentence(p: ConfigProblem, o: { inUse: boolean; modeSourc
     case 'FLINT_TTS_VOICE':
       return "The OpenAI speech model or voice named in Flint's setup isn't a valid name, so Flint uses its usual one.";
     case 'WHISPER_BIN':
-      return "The transcription program named in Flint's setup isn't a path Flint can use, so Flint uses the usual one.";
+      return p.kind === 'missing'
+        ? "The transcription program named in Flint's setup isn't on this Mac, so Flint uses the usual one."
+        : "The transcription program named in Flint's setup isn't a path Flint can use, so Flint uses the usual one.";
     case 'WHISPER_MODEL':
-      return "The transcription model named in Flint's setup isn't a path Flint can use, so Flint uses the usual one.";
+      return p.kind === 'missing'
+        ? "The transcription model named in Flint's setup isn't on this Mac, so Flint uses the usual one."
+        : "The transcription model named in Flint's setup isn't a path Flint can use, so Flint uses the usual one.";
     case 'FLINT_LOCAL_VOICE_API_KEY':
       return p.kind === 'in_the_clear' ? "The speech server's key isn't sent, because the server's address isn't encrypted." : "The speech server's key isn't valid, so no key is sent.";
     default:

@@ -777,6 +777,32 @@ describe('which brain is on this Mac, as the facade answers it', () => {
     expect(inference.brainIsLocal(fake('ollama'), 'no-address')).toBe(false);
   });
 
+  // A program or a model a voice setting names is looked for when Flint starts (./voice isFile, the real file
+  // system, unless a test hands a check in): one that is not there is refused, and the usual one is used.
+  it('a WHISPER_MODEL that names a file that is not there is refused at start, on the real file system; one that is there is used', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'flint-inference-'));
+    dirs.push(dir);
+    writeFileSync(join(dir, 'ggml-small.en.bin'), 'a stand-in for a model file');
+    const start = async (env: Record<string, string>, fileExists?: (p: string) => boolean) => {
+      const lines: string[] = [];
+      const inference = await buildInference({ env: { OLLAMA_HOST: 'http://127.0.0.1:9', ...env }, modeFile: join(dir, 'm.json'), fetch: offline, detect, pick: { capMs: 200 }, observeOnly: true, log: (l) => lines.push(l), ...(fileExists ? { fileExists } : {}) });
+      built.push(inference);
+      return { inference, lines };
+    };
+    const stale = await start({ WHISPER_MODEL: join(dir, 'ggml-gone.bin') });
+    expect(stale.inference.cfg.problems).toEqual([{ key: 'WHISPER_MODEL', reason: 'the path of a file that is not there', kind: 'missing' }]);
+    expect(stale.lines).toContain('[inference] WHISPER_MODEL is the path of a file that is not there; using the usual transcription model');
+    expect(stale.lines.join('\n')).not.toContain('ggml-gone');
+    expect(stale.inference.voicePlan.stt).toMatchObject({ name: 'whisper-cpp' });
+    expect((stale.inference.voicePlan.stt as { model: string }).model).toMatch(/\/\.flint\/models\/ggml-base\.en\.bin$/);
+    const kept = await start({ WHISPER_MODEL: join(dir, 'ggml-small.en.bin') });
+    expect(kept.inference.cfg.problems).toEqual([]);
+    expect(kept.inference.voicePlan.stt).toMatchObject({ model: join(dir, 'ggml-small.en.bin') });
+    // A check that is handed in is the one that is asked.
+    const told = await start({ WHISPER_MODEL: join(dir, 'ggml-small.en.bin') }, () => false);
+    expect(told.inference.cfg.problems.map((p) => [p.key, p.kind])).toEqual([['WHISPER_MODEL', 'missing']]);
+  });
+
   it('a stand-in brain (nothing settled) is not local: it has no server it may be asked on', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'flint-inference-'));
     dirs.push(dir);

@@ -706,7 +706,8 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
   const env = deps.env;
   /** What this run has to say about itself, for the results: what was left out, and why. */
   const remarks: string[] = [];
-  const cfg = readInferenceConfig(env, undefined, { home: deps.home });
+  // (A program or a model that a setting names and that is not there is refused, as the server refuses it: the usual one is measured.)
+  const cfg = readInferenceConfig(env, undefined, { home: deps.home, fileExists: deps.exists });
   const plan = planVoice(cfg, env, { platform: deps.platform, home: deps.home });
   // whisper.cpp and its model, where the server itself reads them (WHISPER_BIN, WHISPER_MODEL, as config takes them).
   const { bin, model: usualModel } = whisperPaths(cfg.voice, deps.home);
@@ -770,7 +771,7 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
       const model = deps.join(modelsDir, file);
       if (args.stt.includes(PROVIDER)) {
         deps.log(`Transcribing with ${ENGINE}, ${file}.`);
-        const provider = buildVoice({ stt: { name: PROVIDER, local: true, bin, model }, tts: { name: 'off', local: true, why: 'set' } }, { env, run: deps.run }).stt;
+        const provider = buildVoice({ stt: { name: PROVIDER, local: true, bin, model }, tts: { name: 'off', local: true, why: 'set' } }, { env, run: deps.run, fileExists: deps.exists }).stt;
         stt.push(await hear(deps, provider, PROVIDER, file, clips));
         hearBack ??= { stt: provider, label: `${ENGINE} ${file}` };
       }
@@ -785,12 +786,12 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
           // Through config and the guarded fetch, as Flint would reach it: FLINT_STT_PROVIDER=local at that address.
           // (The usual model name is sent: the server answers with the one model it was started with, whatever it is asked for.)
           const serverEnv = { ...env, FLINT_STT_PROVIDER: 'local', FLINT_LOCAL_STT_BASE_URL: server.baseURL, FLINT_LOCAL_STT_MODEL: undefined };
-          const local = planVoice(readInferenceConfig(serverEnv, undefined, { home: deps.home }), serverEnv, { platform: deps.platform, home: deps.home });
+          const local = planVoice(readInferenceConfig(serverEnv, undefined, { home: deps.home, fileExists: deps.exists }), serverEnv, { platform: deps.platform, home: deps.home });
           if (local.stt.name !== 'local') {
             remarks.push('The local transcription server could not be reached through Flint’s own settings, so it was not measured.');
             continue;
           }
-          const provider = buildVoice(local, { env: serverEnv, run: deps.run, ...(deps.fetch ? { fetch: deps.fetch } : {}) }).stt;
+          const provider = buildVoice(local, { env: serverEnv, run: deps.run, fileExists: deps.exists, ...(deps.fetch ? { fetch: deps.fetch } : {}) }).stt;
           stt.push(await hear(deps, provider, 'local', file, clips, server.loadMs));
         } finally {
           await server.stop();
@@ -803,7 +804,7 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
   // A local transcription server Will already runs, when one is set: measured as it is.
   if (clips.length > 0 && args.stt.includes('local') && plan.stt.name === 'local') {
     deps.log('Transcribing with the local speech server that is set up.');
-    stt.push(await hear(deps, buildVoice(plan, { env, run: deps.run, ...(deps.fetch ? { fetch: deps.fetch } : {}) }).stt, 'local', plan.stt.model, clips));
+    stt.push(await hear(deps, buildVoice(plan, { env, run: deps.run, fileExists: deps.exists, ...(deps.fetch ? { fetch: deps.fetch } : {}) }).stt, 'local', plan.stt.model, clips));
   }
 
   // ---- speaking
@@ -813,17 +814,17 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
     // The Mac's usual voice, and each voice the clips were spoken in (or the ones named, with clips of his own).
     for (const voice of [undefined, ...(own ? (args.voices ?? []) : voices)]) {
       deps.log(`Speaking with this Mac's own voice${voice ? `, ${voice}` : ''}, into files.`);
-      const provider = buildVoice({ stt: { name: PROVIDER, local: true, bin, model: usualModel }, tts: { name: 'say', local: true, ...(voice ? { voice } : {}) } }, { env, run: deps.run }).tts;
+      const provider = buildVoice({ stt: { name: PROVIDER, local: true, bin, model: usualModel }, tts: { name: 'say', local: true, ...(voice ? { voice } : {}) } }, { env, run: deps.run, fileExists: deps.exists }).tts;
       tts.push(await speakAll(deps, provider, 'say', speech, hearBack ? { hearBack } : {}));
     }
   }
   if (args.tts.includes('local') && plan.tts.name === 'local') {
     deps.log('Speaking with the local speech server that is set up, into files.');
-    tts.push(await speakAll(deps, buildVoice(plan, { env, run: deps.run, ...(deps.fetch ? { fetch: deps.fetch } : {}) }).tts, 'local', speech, hearBack ? { hearBack } : {}));
+    tts.push(await speakAll(deps, buildVoice(plan, { env, run: deps.run, fileExists: deps.exists, ...(deps.fetch ? { fetch: deps.fetch } : {}) }).tts, 'local', speech, hearBack ? { hearBack } : {}));
   }
   let spent: PaidSpent | undefined;
   if (paid.asked && paid.run) {
-    const provider = buildVoice({ stt: { name: PROVIDER, local: true, bin, model: usualModel }, tts: { name: 'openai', local: false, ...openai, hasKey: true } }, { env, run: deps.run, ...(deps.fetch ? { fetch: deps.fetch } : {}) }).tts;
+    const provider = buildVoice({ stt: { name: PROVIDER, local: true, bin, model: usualModel }, tts: { name: 'openai', local: false, ...openai, hasKey: true } }, { env, run: deps.run, fileExists: deps.exists, ...(deps.fetch ? { fetch: deps.fetch } : {}) }).tts;
     const row = await speakAll(deps, provider, 'openai', speech, { ...(hearBack ? { hearBack } : {}), capUsd: paid.budgetUsd, estimateUsd: paid.estimateUsd });
     tts.push(row);
     // Said again when it is over, with what was really sent: nothing else keeps a record of it.

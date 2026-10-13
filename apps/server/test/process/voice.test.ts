@@ -11,7 +11,7 @@
  * stays here to `/speak`. (The server still refuses it there, by the stored
  * turn. This is the other half: what the client is told.)
  *
- * Three servers, each on its own scratch HOME, against loopback stand-ins
+ * Five servers, each on its own scratch HOME, against loopback stand-ins
  * (./stubs, and a speech server here), fenced so that nothing else can be
  * reached (./guard.mjs). OpenAI is the fence: a request for it is a lookup of
  * `api.openai.com` that the guard stops and records, so "OpenAI saw nothing"
@@ -20,7 +20,12 @@
  *  - `local`: a speech server on this Mac for speaking and for hearing, with
  *             a key of its own, and OpenAI's key set as well;
  *  - `saved`: no voice setting in the environment at all, and the four older
- *             ones in ~/.flint/secrets.env, the model's path written with ~.
+ *             ones in ~/.flint/secrets.env, the model's path written with ~;
+ *  - `stale`: a line in ~/.flint/secrets.env that names a model that is not
+ *             there (one saved long ago, which nothing read until now), with
+ *             the usual model in its usual place;
+ *  - `none`:  the same stale name, in the environment this time, and no usual
+ *             model either: nothing on this Mac can transcribe.
  * (The default server, with no voice setting anywhere, is `modes` in
  * ./behaviour.test.ts: its `meta` event is held to exactly its three keys
  * there.)
@@ -30,7 +35,7 @@
  * `afconvert`, which turns one file into another.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
@@ -130,10 +135,24 @@ interface Booted {
   cloud: CloudStub;
   srv: Running;
 }
-const runs = { off: scratch('voice-off'), local: scratch('voice-local'), saved: scratch('voice-saved') };
+const runs = { off: scratch('voice-off'), local: scratch('voice-local'), saved: scratch('voice-saved'), stale: scratch('voice-stale'), none: scratch('voice-none') };
 let off: Booted;
 let local: Booted & { speech: Awaited<ReturnType<typeof startSpeechStub>> };
 let saved: Booted & { whisperRan: string; whisperBin: string };
+let stale: Booted & { whisperRan: string };
+let none: Booted & { whisperRan: string };
+/** A path that names nothing: a model that was there once. */
+const GONE = '/nonexistent/old/ggml-gone.bin';
+
+/** A stand-in for whisper.cpp in a run's own folder: it writes down what it was run with, and prints a line. Its interpreter is this one. */
+function whisperStandIn(dir: string, says: string): { whisperBin: string; whisperRan: string } {
+  const whisperRan = join(dir, 'whisper-ran.json');
+  const whisperBin = join(dir, 'bin', 'whisper-cli');
+  mkdirSync(join(dir, 'bin'), { recursive: true });
+  writeFileSync(whisperBin, [`#!${process.execPath}`, `require('node:fs').writeFileSync(${JSON.stringify(whisperRan)}, JSON.stringify(process.argv.slice(2)));`, `process.stdout.write(${JSON.stringify(`\n  ${says}\n`)});`, ''].join('\n'));
+  chmodSync(whisperBin, 0o755);
+  return { whisperBin, whisperRan };
+}
 
 async function boot(dir: string, env: Record<string, string>, seed?: Array<{ path: string[]; text: string }>): Promise<Booted> {
   const ollama = await startOllamaStub(structuredClone(MODELS));
@@ -162,12 +181,7 @@ beforeAll(async () => {
     return { ...b, speech };
   };
   const startSaved = async () => {
-    // A stand-in for whisper.cpp: it writes down what it was run with, and prints a line. Its interpreter is this one.
-    const whisperRan = join(runs.saved.dir, 'whisper-ran.json');
-    const whisperBin = join(runs.saved.dir, 'bin', 'whisper-cli');
-    mkdirSync(join(runs.saved.dir, 'bin'), { recursive: true });
-    writeFileSync(whisperBin, [`#!${process.execPath}`, `require('node:fs').writeFileSync(${JSON.stringify(whisperRan)}, JSON.stringify(process.argv.slice(2)));`, "process.stdout.write('\\n  Heard by the   saved program.\\n');", ''].join('\n'));
-    chmodSync(whisperBin, 0o755);
+    const { whisperBin, whisperRan } = whisperStandIn(runs.saved.dir, 'Heard by the   saved program.');
     // No voice setting is in the environment: all four are lines of the settings file, and the model's path starts with ~.
     const b = await boot(runs.saved.dir, {}, [
       { path: ['secrets.env'], text: `# saved settings\nFLINT_TTS_VOICE=nova\nFLINT_TTS_MODEL="tts-1-hd"\nWHISPER_MODEL=~/.flint/models/ggml-small.en.bin\nWHISPER_BIN=${whisperBin}\n` },
@@ -175,11 +189,27 @@ beforeAll(async () => {
     ]);
     return { ...b, whisperRan, whisperBin };
   };
-  [off, local, saved] = await Promise.all([boot(runs.off.dir, { FLINT_TTS_PROVIDER: 'off' }), startLocal(), startSaved()]);
+  // The stale line, in the settings file: the program is the stand-in, the model it names is not there, and the
+  // usual model is where it always is.
+  const startStale = async () => {
+    const { whisperBin, whisperRan } = whisperStandIn(runs.stale.dir, 'Heard with the   usual model.');
+    const b = await boot(runs.stale.dir, {}, [
+      { path: ['secrets.env'], text: `WHISPER_MODEL=${GONE}\nWHISPER_BIN=${whisperBin}\n` },
+      { path: ['models', 'ggml-base.en.bin'], text: 'a stand-in for the usual model file\n' },
+    ]);
+    return { ...b, whisperRan };
+  };
+  // The same stale name in the ENVIRONMENT, and no usual model under this HOME: nothing can transcribe.
+  const startNone = async () => {
+    const { whisperBin, whisperRan } = whisperStandIn(runs.none.dir, 'This is never printed.');
+    const b = await boot(runs.none.dir, { WHISPER_MODEL: GONE, WHISPER_BIN: whisperBin });
+    return { ...b, whisperRan };
+  };
+  [off, local, saved, stale, none] = await Promise.all([boot(runs.off.dir, { FLINT_TTS_PROVIDER: 'off' }), startLocal(), startSaved(), startStale(), startNone()]);
 });
 
 afterAll(async () => {
-  for (const b of [off, local, saved]) {
+  for (const b of [off, local, saved, stale, none]) {
     if (!b) continue;
     await b.srv.stop();
     await b.ollama.close();
@@ -351,5 +381,70 @@ describe('the real server, as a process: the four older voice settings, saved in
     // The ordinary reply is sent (the fence stops the one lookup, and that attempt is the proof it was made).
     expect((await speak(saved.srv, t.ordinary.said)).status).not.toBe(409);
     expect(blocked(saved.srv).map((e) => [e.kind, e.hostname])).toEqual([['dns-blocked', 'api.openai.com']]);
+  });
+});
+
+// A line saved long ago. main read WHISPER_MODEL before it read the settings file, so a line for it there was never
+// used and may name a file that has since gone. Read after the file, it applied, and every recording was a 500. A
+// model (or a program) that is named and is not there when Flint starts is refused, by the name of the setting, and
+// the usual one is used; wherever the value came from.
+describe('the real server, as a process: a saved WHISPER_MODEL that names a file that is not there', () => {
+  it('it is refused when Flint starts, by the name of the setting and never by its path, and the usual model is what the boot line and the status name', async () => {
+    const log = stale.srv.log();
+    expect(log).toContain('[inference] WHISPER_MODEL is the path of a file that is not there; using the usual transcription model');
+    expect(log).toContain('[voice] hearing=whisper-cpp (ggml-base.en.bin) speaking=openai (tts-1, onyx)');
+    const st = (await stale.srv.get('/inference')).json as { voice: { transcription: Record<string, unknown> }; lines: string[]; notices: string[]; problems: Array<Record<string, unknown>> };
+    expect(st.problems).toEqual([{ key: 'WHISPER_MODEL', reason: 'the path of a file that is not there', kind: 'missing' }]);
+    expect(st.notices).toContain("The transcription model named in Flint's setup isn't on this Mac, so Flint uses the usual one.");
+    expect(st.lines).toContain('Transcription uses whisper-cpp (ggml-base.en.bin), on this Mac.');
+    expect(st.voice.transcription).toMatchObject({ name: 'Whisper Base English', sentence: 'Your voice is turned into text on this Mac.' });
+    expect(log + JSON.stringify(st)).not.toMatch(/nonexistent|ggml-gone/);
+  });
+
+  it.runIf(ON_A_MAC)('a recording is transcribed, with the usual model: not one fails for the stale line', async () => {
+    for (let i = 0; i < 2; i++) expect(await transcribe(stale.srv, silence())).toEqual({ status: 200, json: { text: 'Heard with the usual model.' } });
+    const argv = JSON.parse(readFileSync(stale.whisperRan, 'utf8')) as string[];
+    expect(argv.slice(0, 2)).toEqual(['-m', join(stale.srv.home, '.flint', 'models', 'ggml-base.en.bin')]);
+    expect(argv.join(' ')).not.toMatch(/nonexistent|ggml-gone/);
+  });
+});
+
+describe('the real server, as a process: the same stale name in the environment, and no usual model either', () => {
+  it('it is refused at start all the same: where the value came from changes nothing', async () => {
+    expect(none.srv.log()).toContain('[inference] WHISPER_MODEL is the path of a file that is not there; using the usual transcription model');
+    const st = (await none.srv.get('/inference')).json as { problems: Array<Record<string, unknown>> };
+    expect(st.problems).toEqual([{ key: 'WHISPER_MODEL', reason: 'the path of a file that is not there', kind: 'missing' }]);
+  });
+
+  it('a recording is answered with a sentence: a 503 that says the model is not on this Mac, with no reference, no stack, and nothing run', async () => {
+    const before = none.srv.log().length;
+    for (let i = 0; i < 2; i++) {
+      const r = await transcribe(none.srv, silence());
+      expect(r).toEqual({ status: 503, json: { error: 'Flint can’t turn speech into text: the transcription model isn’t on this Mac.' } });
+    }
+    // The program was never started (it has no model to be started with), and the server has nothing to say of a failure.
+    expect(existsSync(none.whisperRan)).toBe(false);
+    const said = none.srv.log().slice(before);
+    expect(said).not.toMatch(/transcribe|ENOENT|    at |Error/);
+    // The rest of the route is as it was: no recording is still a 400, and a recording that is too large a 413.
+    expect((await transcribe(none.srv, Buffer.alloc(0))).status).toBe(400);
+  });
+
+  it('the model put where it belongs while Flint runs is used by the very next recording: nothing has to be restarted', async () => {
+    const usual = join(none.srv.home, '.flint', 'models', 'ggml-base.en.bin');
+    mkdirSync(join(none.srv.home, '.flint', 'models'), { recursive: true });
+    writeFileSync(usual, 'a stand-in for the usual model file\n');
+    try {
+      const r = await transcribe(none.srv, silence());
+      if (ON_A_MAC) {
+        expect(r).toEqual({ status: 200, json: { text: 'This is never printed.' } });
+        expect((JSON.parse(readFileSync(none.whisperRan, 'utf8')) as string[]).slice(0, 2)).toEqual(['-m', usual]);
+      } else {
+        // Off a Mac the recording cannot be made into the WAV whisper reads: a failure of a run, which is not this sentence.
+        expect(r.status).not.toBe(503);
+      }
+    } finally {
+      rmSync(usual, { force: true });
+    }
   });
 });

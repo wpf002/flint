@@ -667,6 +667,18 @@ describe('voice: what speaks and what hears, for the console and for the command
     expect(bad.lines).toContain('Transcription uses whisper-cpp (ggml-base.en.bin), on this Mac.');
     expect(bad.lines).toContain('Speech uses OpenAI (tts-1, onyx). A reply that stays on this Mac is spoken by the device instead.');
     for (const line of bad.lines) expect(line).not.toMatch(/[\u0000-\u001f\u007f]|FAKE|two words/);
+    // A program or a model that is named and is not on this Mac (a line saved long ago): its own sentence, and the
+    // row names the usual model, which is what is used.
+    const cfg = readInferenceConfig({ ...KEY, WHISPER_MODEL: '/nonexistent/old/ggml-gone.bin', WHISPER_BIN: '/gone/whisper-cli' }, undefined, { home: '/home/will', fileExists: () => false });
+    const gone = inferenceStatus({ ...input({ env: KEY }), local: { ...input({ env: KEY }).local, cfg } as LocalBrains, voice: planVoice(cfg, KEY, { platform: 'darwin', home: '/home/will' }) });
+    expect(gone.notices).toEqual([
+      "The transcription program named in Flint's setup isn't on this Mac, so Flint uses the usual one.",
+      "The transcription model named in Flint's setup isn't on this Mac, so Flint uses the usual one.",
+    ]);
+    expect(gone.lines).toContain('A setting was refused: WHISPER_MODEL is the path of a file that is not there.');
+    expect(gone.lines).toContain('Transcription uses whisper-cpp (ggml-base.en.bin), on this Mac.');
+    expect(gone.voice!.transcription.name).toBe('Whisper Base English');
+    expect(JSON.stringify(gone)).not.toMatch(/nonexistent|ggml-gone|\/gone\//);
     // A path under the home folder, written with ~: taken, and shown by its file's name alone.
     const tilde = status({ env: { ...KEY, WHISPER_MODEL: '~/.flint/models/ggml-small.en.bin' } });
     expect(tilde.notices).toEqual([]);
