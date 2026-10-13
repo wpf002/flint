@@ -285,17 +285,20 @@ export const ALONE_CAPS: Readonly<Record<string, Cap>> = {
 };
 
 /**
- * Is this action named as a task, an asset or a review, known or not, or is it
+ * Is this action named as a task, an asset or a review, known or not, or as
  * the Hive's dispatch (P5)? These are the names the database reads a card's
  * subject from when Will signs it. None is ever asked for from chat (step 1c):
  * a card from chat under a look-alike name could otherwise draw a signature
- * that stands in a real card's way. Never an MCP tool's name (those live under
- * `mcp:`).
+ * that stands in a real card's way. Read by how the name begins, in any case
+ * (`Task.cancel`, `hive.dispatch_jobs`): wider than the database, which reads
+ * these names exactly, so a name that only looks like one is caught too. A
+ * name that holds one of them further in (`goal.review.local`) is not one.
+ * Never an MCP tool's name (those live under `mcp:`).
  */
-const TASK_NAME_PREFIXES = ['task.', 'asset.', 'review.'] as const;
-const TASK_NAMES: ReadonlySet<string> = new Set(['hive.dispatch_job']);
+const TASK_NAME_PREFIXES = ['task.', 'asset.', 'review.', 'hive.dispatch_job'] as const;
 export function taskNamed(action: string): boolean {
-  return TASK_NAMES.has(action) || TASK_NAME_PREFIXES.some((p) => action.startsWith(p));
+  const name = action.toLowerCase();
+  return TASK_NAME_PREFIXES.some((p) => name.startsWith(p));
 }
 
 /**

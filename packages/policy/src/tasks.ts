@@ -171,11 +171,11 @@ export const TASK_OUTPUTS = {
 /**
  * Probability words a result may not carry: a task never states odds the
  * ledger did not produce. The runtime's notes are held to the same pattern.
- * "Even" on its own is a plain word ("even after a retry"); as odds it comes
- * with one of the others ("even odds", "an even chance") or as the ledger's
- * own "about even".
+ * "Even" on its own is a plain word ("even after a retry"). As odds it is one
+ * of the phrases named here: "even money", "even odds" and the ledger's own
+ * "about even" (and "an even chance", by its last word).
  */
-export const LOOSE_ODDS = /\b(likely|unlikely|probabl[ey]|almost certain|certain(ly)?|chances?|odds|confident|about even)\b|\d+ ?%/i;
+export const LOOSE_ODDS = /\b(likely|unlikely|probabl[ey]|almost certain|certain(ly)?|chances?|odds|confident|about even|even (?:money|odds))\b|\d+ ?%/i;
 
 export const CHECK_OPS = ['shape', 'refs_known', 'covers', 'count', 'max_chars', 'all_labelled', 'no_loose_odds', 'item', 'ci'] as const;
 export type CheckOp = (typeof CHECK_OPS)[number];

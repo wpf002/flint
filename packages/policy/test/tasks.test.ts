@@ -17,6 +17,7 @@ import {
   isTaskCard,
   isTaskDispatch,
   isTaskSignedAction,
+  LOOSE_ODDS,
   NewTaskBody,
   OutputRef,
   outputRefOf,
@@ -180,12 +181,14 @@ describe('evaluateChecks: every rule against hand-made results', () => {
 
   it('no_loose_odds: it states no odds of its own', () => {
     expect(one(summarize(), rule('no_loose_odds'), summary)).toBe(true);
-    for (const text of ['This will likely slip', 'About 80% done', 'The odds are good', 'It is almost certain', 'It is about even', 'An even chance of slipping', 'Even odds it lands']) {
+    for (const text of ['This will likely slip', 'About 80% done', 'The odds are good', 'It is almost certain', 'It is about even', 'An even chance of slipping', 'Even odds it lands', 'Even money says yes', 'I would call it even money']) {
       expect(one(summarize(), rule('no_loose_odds'), { ...summary, headline: text }), text).toBe(false);
+      expect(LOOSE_ODDS.test(text), text).toBe(true);
     }
     // The plain word is not odds.
-    for (const text of ['It passed even after a retry', 'Even the docs build is green', 'An even split of open and closed']) {
+    for (const text of ['It passed even after a retry', 'Even the docs build is green', 'An even split of open and closed', 'The money is even with last month', 'Not even one failed']) {
       expect(one(summarize(), rule('no_loose_odds'), { ...summary, headline: text }), text).toBe(true);
+      expect(LOOSE_ODDS.test(text), text).toBe(false);
     }
   });
 

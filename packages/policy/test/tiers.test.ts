@@ -661,7 +661,12 @@ describe('P5: assets, tasks and reviews', () => {
 
   it('from chat, anything about a task, an asset or a review is FORBIDDEN in step 1, known or not, whatever a policy row says', () => {
     const rows = (a: string) => [row(a, 'alone'), row('task.*', 'alone'), row('task.dispatch.*', 'alone'), row('review.*', 'alone'), row('asset.*', 'alone'), row('hive.*', 'alone'), row('*', 'alone')];
-    const unknown = ['task.note', 'task.dispatch.anything', 'task.', 'asset.disable', 'asset.enable.v2', 'review.anything', 'review.enforce.v2'];
+    const unknown = [
+      'task.note', 'task.dispatch.anything', 'task.', 'asset.disable', 'asset.enable.v2', 'review.anything', 'review.enforce.v2',
+      // In any case, and the Hive's dispatch by how its name begins: a name that only looks like one is caught too.
+      'Task.cancel', 'TASK.cancel', 'tAsK.Check_Bar', 'Asset.enable', 'ASSET.ENABLE', 'Review.local', 'REVIEW.enforce',
+      'hive.dispatch_jobs', 'hive.dispatch_job.v2', 'Hive.Dispatch_Job', 'HIVE.DISPATCH_JOBS',
+    ];
     for (const a of [...P5_ACTIONS, HIVE_DISPATCH, ...unknown]) {
       expect(taskNamed(a), a).toBe(true);
       for (const tainted of [false, true]) {
@@ -672,8 +677,13 @@ describe('P5: assets, tasks and reviews', () => {
     // From the console a name the table does not know still waits for Will, as any unknown action does.
     for (const a of unknown) expect(resolveTier(a, consoleCtx), a).toMatchObject({ tier: 'approval', rule: 'unknown' });
     // Only those names: a goal's review, and names that merely look alike, are not caught by this rule.
-    for (const a of ['goal.review.local', 'tasks.list', 'taskforce.run', 'asset', 'assets.list', 'reviews.run', 'reviewer.pick', 'hive.dispatch_jobs', 'hive.status', 'plan.change']) {
+    // A name that holds one of them further in is another name, in any case too.
+    for (const a of [
+      'goal.review.local', 'Goal.Review.Local', 'my.task.cancel', 'MY.TASK.CANCEL', 'x.asset.enable', 'world.hive.dispatch_job',
+      'tasks.list', 'taskforce.run', 'task', 'asset', 'assets.list', 'reviews.run', 'reviewer.pick', 'hive.dispatch', 'hive.status', 'plan.change',
+    ]) {
       expect(taskNamed(a), a).toBe(false);
+      expect(resolveTier(a, chat).reason, a).not.toBe('tasks, assets and reviews are never asked for from chat');
     }
     expect(resolveTier('goal.review.local', chat)).toMatchObject({ tier: 'approval', rule: 'code' });
     // An MCP tool lives under its own names: a server called `task` is not one of Flint's task actions.
