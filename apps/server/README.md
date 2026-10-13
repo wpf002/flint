@@ -2068,17 +2068,26 @@ names its task from a read of that task: that row is marked "Looked Up", is neve
 the title or the sentence, and Show Details (signed fields only) says in one sentence that
 the row above was looked up. A title the card signs is never replaced by a looked-up one.
 The names are read before a list is drawn, for at most 600 ms, and a list is drawn once:
-names that land later wait for the next load. While an approval is in flight the list is
-not drawn again and no other card is opened, approved or rejected; what the approval said
-stays with its card, also when its panel was closed before the prompt was answered.
+names that land later wait for the next load. A list that is read again never draws the
+card that is open a second time: it keeps its rows and its buttons where they are, and
+shows a looked-up name the next time it is opened. While an approval is in flight the list
+is not drawn again and no other card is opened, approved or rejected (Approve All
+included); what the approval said stays with its card, also when its panel was closed
+before the prompt was answered. A prompt that never answers does not hold the panel: after
+two minutes the list is let go, the card says the prompt was dismissed, and the list is
+read again. Approve All lets go the same way, says how many of its cards still wait, and
+signs nothing more.
 
-The list marks a card that is a connected server's tool (`mcp: true`). Whoever runs a server
-chooses its tools' names, so a tool can be called `task.check_bar` or `goal.activate`. The
-console gives a card the words it keeps for one of Flint's own (a goal, a plan, a rule, a
-source, a nightly job, a forecast, an asset, a task) only when the card is not marked and its
-kind is the kind the runtime files that action under. Any other card under such a name is
-drawn as a tool's card ("Approve a Tool Call", with its server and tool named), asks on its
-own, is left out of Approve All, lights no dot and is not signed from the Tasks panel.
+The list says for every card whether it is a connected server's tool (`mcp`, true or
+false). Whoever runs a server chooses its tools' names, so a tool can be called
+`task.check_bar` or `goal.activate`. The console gives a card the words it keeps for one of
+Flint's own (a goal, a plan, a rule, a source, a nightly job, a forecast, an asset, a task)
+only when the list says the card is not a tool's and its kind is the kind the runtime files
+that action under. Any other card under such a name is drawn as a tool's card ("Approve a
+Tool Call", with its server and tool named), asks on its own, is left out of Approve All,
+lights no dot and is not signed from the Tasks panel. So is a card that does not say (a
+list from an older server): several of Flint's own are filed as tool calls, and without the
+server's word nothing tells them from a tool of the same name.
 
 ## Tools / integrations
 
