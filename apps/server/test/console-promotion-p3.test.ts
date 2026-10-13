@@ -87,13 +87,23 @@ describe('P3’s promotion cards', () => {
   });
 
   it('the later card, for suggestions from chat: its own title, sentence and limit', () => {
+    // Both rows (part 5 added the commitments): goals Flint hears land in Suggested, and what Will says he'll do lands unconfirmed.
     const rows = rowsOf('P3C_PROMOTIONS');
-    expect(rows).toEqual([{ pattern: 'goal.propose', dailyCap: 3 }]);
+    expect(rows).toEqual([{ pattern: 'goal.propose', dailyCap: 3 }, { pattern: 'world.commitment.from_chat', dailyCap: 10 }]);
     const c = say(card(rows, 'p3c.promotion'));
-    expect(c.title).toBe('Let Flint Suggest Goals from Chat');
-    expect(c.sub).toBe(`Until ${date}, Flint adds goals it hears in chat to Suggested.`);
-    expect(c.facts).toEqual([['Until', date], ['Limits', 'Goal Suggestions from Chat 3 a Day'], ['Filed By', 'You']]);
+    expect(c.title).toBe('Let Flint Take Goals and Commitments from Chat');
+    expect(c.sub).toBe(`Until ${date}, Flint adds goals it hears in chat to Suggested, and the things you say you’ll do as unconfirmed commitments.`);
+    expect(c.facts).toEqual([['Until', date], ['Limits', 'Goal Suggestions from Chat 3 a Day · Commitments from Chat 10 a Day'], ['Filed By', 'You']]);
     expect(c.alone).toBe(true);
+    // In either order it is the same card; each row alone has its own title and sentence.
+    expect(say(card([...rows].reverse(), 'p3c.promotion')).title).toBe('Let Flint Take Goals and Commitments from Chat');
+    const goals = say(card([rows[0]!], 'p3c.promotion'));
+    expect([goals.title, goals.sub]).toEqual(['Let Flint Suggest Goals from Chat', `Until ${date}, Flint adds goals it hears in chat to Suggested.`]);
+    const commitments = say(card([rows[1]!], 'p3c.promotion'));
+    expect([commitments.title, commitments.sub]).toEqual(['Let Flint Add Commitments from Chat', `Until ${date}, Flint adds the things you say you’ll do in chat, unconfirmed.`]);
+    expect(commitments.facts[1]).toEqual(['Limits', 'Commitments from Chat 10 a Day']);
+    // With anything else beside them it is named for what it would let run, never for chat's table.
+    expect(say(card([...rows, { pattern: 'notify.push', dailyCap: 3 }], 'p3c.promotion')).title).toBe('Let 3 Actions Run on Their Own');
   });
 
   it('every line is Will’s standard: Title Case titles and labels, one complete sentence under the title, nothing internal on screen', () => {
@@ -131,7 +141,10 @@ describe('P3’s promotion cards', () => {
   it('Show Details: each of the two cards says its row as a sentence, its limit and its last day', () => {
     expect(run(`apprDate('${UNTIL}')`)).toBe(date);
     expect(details(card(rowsOf('P3_PROMOTIONS'), 'p3.promotion'))).toEqual([`Goal reviews may run on their own, up to 20 a day, until ${date}.`]);
-    expect(details(card(rowsOf('P3C_PROMOTIONS'), 'p3c.promotion'))).toEqual([`Goal suggestions from chat may be filed on their own, up to 3 a day, until ${date}.`]);
+    expect(details(card(rowsOf('P3C_PROMOTIONS'), 'p3c.promotion'))).toEqual([
+      `Goal suggestions from chat may be filed on their own, up to 3 a day, until ${date}.`,
+      `Commitments from chat may be added on their own, up to 10 a day, until ${date}.`,
+    ]);
   });
 
   it('no card’s details are built from its stored args: the panel and the chat card both go through apprDetails, and nothing prints the args', () => {

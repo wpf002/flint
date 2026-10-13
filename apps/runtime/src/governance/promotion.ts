@@ -32,7 +32,7 @@
  * afternoon, and no more is claimed for it. What stands between a table and
  * its rule is Will's signature over the rows on the card.
  */
-import { CHAT_SUGGESTION_ACTIONS, CODE_TABLE, FORECAST_SIGNED_ACTIONS, GOAL_SIGNED_ACTIONS, PROPHET_ACTIONS, SUGGESTIONS_PER_DAY, localDay, localDayBounds, previousDay } from '@flint/policy';
+import { CHAT_SUGGESTION_ACTIONS, CODE_TABLE, FORECAST_SIGNED_ACTIONS, GOAL_SIGNED_ACTIONS, PROPHET_ACTIONS, localDay, localDayBounds, previousDay } from '@flint/policy';
 import type { Db } from '../db.js';
 import { createProposal, Refused } from './proposals.js';
 import { PolicyArgs } from './internal.js';
@@ -103,9 +103,13 @@ export const P3_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number }
  * own quoted words lands as a suggestion (never active), 3 a day at most; a
  * commitment lands unconfirmed, 10 a day at most (the numbers the candidates
  * intake files under while each card still waits for him: @flint/policy
- * SUGGESTIONS_PER_DAY). It takes two weeks of those cards, not one.
+ * SUGGESTIONS_PER_DAY; a test keeps the two the same). It takes two weeks of
+ * those cards, not one.
  */
-export const P3C_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number }> = CHAT_SUGGESTION_ACTIONS.map((pattern) => ({ pattern, dailyCap: SUGGESTIONS_PER_DAY[pattern] }));
+export const P3C_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number }> = [
+  { pattern: 'goal.propose', dailyCap: 3 },
+  { pattern: 'world.commitment.from_chat', dailyCap: 10 },
+];
 /** p3c's evidence: two weeks of chat's suggestion cards. */
 export const P3C_SHADOW_DAYS = 14;
 

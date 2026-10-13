@@ -280,6 +280,11 @@
   .gfound .err{margin:0 16px 8px;}
   .gconfirm{display:flex;flex-direction:column;}
   .gconfirm b{color:var(--t1);font-weight:600;}
+  /* A suggestion from a chat: Will's own words under its title, whole, and its two buttons beside them (under them on a phone). */
+  .row.gsug{align-items:flex-start;padding-top:12px;padding-bottom:12px;}
+  .gsug .lbl .gquote{margin-top:6px;font-size:13px;line-height:18px;color:var(--t2);overflow-wrap:anywhere;}
+  .gsug .gsact{display:flex;flex:none;gap:8px;align-self:center;}
+  #goalfromchat{margin:0 4px 12px;}
   .gleft{display:flex;flex-wrap:wrap;gap:4px;flex:1;}
   #goalfoot{flex-wrap:wrap;}
   #goalfoot #goalmsg{flex-basis:100%;margin:0;}
@@ -350,6 +355,7 @@
     .ct{align-items:flex-start;} .ct b{white-space:normal;} .ct .sub{white-space:normal;} .ct svg.i{margin-top:2px;}
     #apprfoot{flex-wrap:wrap;} #apprfoot .note{flex-basis:100%;}
     .row.gwrap{flex-wrap:wrap;} .row.gwrap .lbl{flex:1 1 55%;} .row.gwrap>.ghost{margin-left:auto;}
+    .row.gsug .lbl{flex-basis:100%;} .row.gsug .gsact{flex-basis:100%;margin-top:4px;} .row.gsug .gsact .btn{flex:1;justify-content:center;}
     .fl:has(>.field.gempty:not(:focus))::after{font-size:16px;}
     #goalfoot .gconfirm{flex-basis:100%;} #goalfoot .btn{flex:1;justify-content:center;}
   }
@@ -1286,8 +1292,13 @@ var APPR_GOAL_WORDS={'goal.criteria_change':['Change a Goal','This changes what 
 /* P3's promotion cards, by the one row each signs (what the card changes, never a label it carries): the title, and what
    Flint then does, as a sentence. Signing the first ends the reviews' trial week; the second is for suggestions from chat. */
 var APPR_PROMOTES={'goal.review.local':['Let Goal Reviews Run on Their Own','Flint files its plan suggestions as cards you sign'],
-  'goal.propose':['Let Flint Suggest Goals from Chat','Flint adds goals it hears in chat to Suggested']};
-function apprPromotes(rows){return (rows&&rows.length===1&&rows[0]&&apprGet(APPR_PROMOTES,rows[0].pattern))||null;}
+  'goal.propose':['Let Flint Suggest Goals from Chat','Flint adds goals it hears in chat to Suggested'],
+  'world.commitment.from_chat':['Let Flint Add Commitments from Chat','Flint adds the things you say you’ll do in chat, unconfirmed']};
+/* The table for suggestions from chat signs both rows at once (part 5): goals to Suggested, and commitments. */
+var APPR_PROMOTES_CHAT=['Let Flint Take Goals and Commitments from Chat','Flint adds goals it hears in chat to Suggested, and the things you say you’ll do as unconfirmed commitments'];
+function apprPromotes(rows){
+  if(rows&&rows.length===2&&rows[0]&&rows[1]&&[String(rows[0].pattern),String(rows[1].pattern)].sort().join(' ')==='goal.propose world.commitment.from_chat')return APPR_PROMOTES_CHAT;
+  return (rows&&rows.length===1&&rows[0]&&apprGet(APPR_PROMOTES,rows[0].pattern))||null;}
 /* What a rule card's rows do, read from the rows (their tier) and never from a label: 'alone' lets something run on
    its own, 'approval' has Flint ask each time, 'forbidden' stops it. Rows that do not all say the same, or say
    nothing this panel knows, are 'mixed': such a card is never titled as letting something run. */
@@ -1487,6 +1498,8 @@ function apprOpSays(o,at,took){o=o||{};at=at||'';took=took||function(){};
 function apprCount(n,one,many){return n+' '+(n===1?one:many||one+'s');}
 /* A card's own words for some of its keys, where the stored name would not read: by the kind of card. */
 var APPR_KEYS_GOAL={successCriteria:'Check',check:'',links:'Link',ops:'Change',from:'Current',to:'New',dueAt:'Due',horizonAt:'Finish By',reviewCadence:'Review Every',dependsOn:'Waits On',watchPaths:'Watches',ordinal:'Order'};
+/* A suggestion from chat (part 5): what Will said, when, and the day he named. */
+var APPR_KEYS_SAID={title:'Goal',text:'Commitment',quote:'You Said',saidAt:'Said On',dueOn:'Due',dueAt:'Due'};
 /* A list whose items are numbered under one word ("Link 1") goes by that word's plural when it is empty: "Links: None". */
 var APPR_MANY={successCriteria:'Checks',links:'Links',ops:'Changes',people:'People',rows:'Rules'};
 var APPR_KEYS_RULE={rows:'Rule',pattern:'Action',dailyCap:'Limit a Day',expiresAt:'Last Day'};
@@ -1534,9 +1547,13 @@ function apprDetails(p){p=p||{};var a=p.args&&typeof p.args==='object'&&!Array.i
       says.push('Flint will review it '+every(a.reviewCadence)+(now2?', and it is '+now2+' now':'')+'.');}}
   else if(f==='goal.done'||f==='goal.abandon'){names=APPR_KEYS_GOAL;if((t=q('goalTitle',a.goalTitle)))says.push(apprEnds('The goal is '+t));}
   else if(f==='plan.change'){names=APPR_KEYS_GOAL;if((t=q('goalTitle',a.goalTitle)))says.push(apprEnds('The goal is '+t));(Array.isArray(a.ops)?a.ops:[]).forEach(function(o,i){says.push(apprOpSays(o,'ops.'+i,took));});}
-  else if(f==='goal.propose'||f==='world.commitment.from_chat'){names=APPR_KEYS_GOAL;
+  else if(f==='goal.propose'||f==='world.commitment.from_chat'){names=APPR_KEYS_SAID;
     if((t=q('title',a.title)))says.push(apprEnds('The goal would be '+t));
+    if((t=q('text',a.text)))says.push(apprEnds('The commitment would be '+t));
+    /* His own words, whole: in the sentence when they can sit in one, else under it in full. */
     if(typeof a.quote==='string'&&a.quote){t=q('quote',a.quote,300);says.push(t?apprEnds('You said '+t):'What you said is listed below.');}
+    if(typeof a.saidAt==='string'&&a.saidAt)says.push('You said it on '+when('saidAt',a.saidAt)+'.');
+    if(typeof a.dueOn==='string'&&a.dueOn)says.push('The day you named is '+when('dueOn',a.dueOn)+'.');
     if(a.dueAt)says.push('It’s due '+when('dueAt',a.dueAt)+'.');}
   else if(f==='world.person.create'){names=APPR_KEYS_PERSON;
     (Array.isArray(a.people)?a.people:[]).forEach(function(x,i){x=x&&typeof x==='object'?x:{};var at='people.'+i,nm=apprInline(x.name,80)?x.name:'',em=apprInline(x.email,120)?x.email:'';
@@ -1612,8 +1629,8 @@ function apprGoalFacts(p){var a=p.args||{},f=[];var when=function(t){return t?ap
   else if(p.fullName==='goal.criteria_change')f=[['Goal',a.title],['Checks',apprChecks(a.successCriteria)]];
   else if(p.fullName==='goal.horizon_change')f=[['Goal',a.goalTitle],['Finish By',a.goalTitle?when(a.horizonAt):''],['Review Every',apprCadence(a.reviewCadence)]];
   else if(p.fullName==='plan.change')f=[['Goal',a.goalTitle],['Changes',apprChanges(a.ops)],['Filed By',apprFrom(p.origin)]];
-  else if(p.fullName==='goal.propose')f=[['Goal',a.title],['You Said',a.quote]];
-  else if(p.fullName==='world.commitment.from_chat')f=[['You Said',a.quote],['Due',a.quote?when(a.dueAt):'']];
+  else if(p.fullName==='goal.propose')f=[['Goal',a.title],['You Said',a.quote],['Due',typeof a.dueOn==='string'&&a.dueOn?apprWhenSays(a.dueOn):'']];
+  else if(p.fullName==='world.commitment.from_chat')f=[['Commitment',a.text],['You Said',a.quote],['Due',typeof a.dueOn==='string'&&a.dueOn?apprWhenSays(a.dueOn):a.dueAt?when(a.dueAt):'']];
   else f=[['Goal',a.goalTitle],['Filed By',apprFrom(p.origin)],['Expires',p.expiresAt?apprDate(p.expiresAt):'']];
   /* A card whose args were cleared keeps only what it still knows. */
   return f.filter(function(x){return typeof x[1]==='string'&&x[1];}).slice(0,3);}
@@ -1837,6 +1854,8 @@ pollApprovals();setInterval(pollApprovals,60000);
  * change. With reviews off (the planner is not on yet), nothing is ever late, and the list says that
  * scheduled reviews start soon. */
 var GOALS={tab:'active',view:'list',page:null,suggested:0,goal:null,form:null,draft:null,busy:false,seq:0,nav:0,note:null,timer:null};
+/* How many suggestions a Suggested page holds: its own rows (part 5), or an older runtime's proposed goals. */
+function goalSuggestedCount(d){d=d||{};var s=d.suggestions||[];return s.length||(d.goals||[]).length;}
 var GOAL_METHODS=[['manual','You Mark It'],['steps','When Its Steps Are Done'],['item','When an Item Changes']];
 /* A condition's words by its field and value: the picker's, and the sentence's ("Flint checks this: wpf002/flint #57
    is merged."). Which conditions an item offers comes with the item, from the runtime. */
@@ -1936,10 +1955,14 @@ function goalList(tab){goalNav('list');GOALS.tab=tab||'active';GOALS.goal=null;G
   if(GOALS.note){goalMsg(GOALS.note,'ok');GOALS.note=null;}
   gCall('/goals?tab='+GOALS.tab).then(function(d){if(seq!==GOALS.seq)return;goalsShown(true);GOALS.page=d;goalRender(list,d);
     /* Suggested shows only when Flint has suggested something. */
-    if(GOALS.tab!=='suggested')gCall('/goals?tab=suggested').then(function(s){GOALS.suggested=(s.goals||[]).length;var b=document.getElementById('goaltab-suggested');if(b)b.hidden=!(GOALS.suggested>0);},function(){});
+    if(GOALS.tab!=='suggested')gCall('/goals?tab=suggested').then(function(s){GOALS.suggested=goalSuggestedCount(s);var b=document.getElementById('goaltab-suggested');if(b)b.hidden=!(GOALS.suggested>0);},function(){});
+    else GOALS.suggested=goalSuggestedCount(d);
   },function(e){if(seq!==GOALS.seq)return;if(e.status===501)goalsShown(false);list.textContent='';list.appendChild(goalFailed(e,function(){goalList(GOALS.tab);}));});}
 function goalRender(list,d){list.textContent='';var goals=d.goals||[],waiting=d.waiting||[];
   goals.forEach(function(x){if(goalDraftIs(x.id))GOALS.draft=null;});
+  /* Suggested (part 5): what Flint heard Will say in a chat, each with his own words and two buttons. */
+  if(GOALS.tab==='suggested'&&(d.suggestions||[]).length){document.getElementById('goaladd').hidden=false;var sg=gEl('div','group');sg.id='goalsuggested';
+    d.suggestions.forEach(function(x){sg.appendChild(goalSuggestion(x));});list.appendChild(sg);return;}
   document.getElementById('goaladd').hidden=GOALS.tab==='active'&&!goals.length&&!waiting.length;
   if(!goals.length&&!waiting.length){
     if(GOALS.tab==='active')list.appendChild(goalEmpty('No Goals Yet','Add something you’re working toward, and Flint keeps track of it.',gBtn('btn pri','Add Goal',function(){goalNew();})));
@@ -1951,6 +1974,18 @@ function goalRender(list,d){list.textContent='';var goals=d.goals||[],waiting=d.
   goals.forEach(function(x){g.appendChild(goalRow(x.title,goalLine(x,on),goalTags(x,on),function(){goalOpen(x.id);}));});
   list.appendChild(g);
   if(GOALS.tab==='active'&&d.reviews==='off'&&goals.length)list.appendChild(gEl('p','gnote','Flint checks your goals when you open them. Scheduled reviews start soon.'));}
+/* One suggestion: its short title, when Will said it, his own words in quotation marks (whole, never cut), and what he can
+   do with it. Make It a Goal opens the New Goal form with what he said already in it; nothing starts until he signs it there. */
+function goalSaidLine(x){return x&&x.saidAt?'You said this in a chat on '+gDay(x.saidAt)+'.':'You said this in a chat.';}
+function goalSuggestion(x){var row=gEl('div','row two gwrap gsug');var l=gEl('span','lbl');l.appendChild(gEl('b',null,x.title));l.appendChild(gEl('span',null,goalSaidLine(x)));
+  l.appendChild(gEl('span','gquote','“'+String(x.quote||'')+'”'));row.appendChild(l);
+  var act=gEl('span','gsact');
+  act.appendChild(gBtn('btn','Dismiss',function(b){goalPlain('/goals/'+encodeURIComponent(x.goalId)+'/dismiss',{},b,function(){GOALS.note='You dismissed it.';goalList('suggested');});}));
+  act.appendChild(gBtn('btn pri','Make It a Goal',function(){goalFromSuggestion(x);}));row.appendChild(act);return row;}
+/* The New Goal form for a suggestion: its title, his words as why it matters, and the day he named when it is still ahead.
+   It is a form of its own, never the kept New Goal draft. */
+function goalFromSuggestion(x){GOALS.form={mode:'new',suggestion:x,draftKey:null,title:String(x.title||''),why:String(x.quote||''),checks:[goalCheck()],
+    finishBy:(x.dueOn&&x.dueOn>gLocalDay())?x.dueOn:'',cadence:'P1W',steps:[{title:'',due:''}],done:false};goalNav('form');goalForm('check:0:text');}
 function goalRow(title,line,tags,open){var row=gEl('div','row two click gwrap');row.tabIndex=0;var l=gEl('span','lbl');l.appendChild(gEl('b',null,title));l.appendChild(gEl('span',null,line));row.appendChild(l);
   (tags||[]).forEach(function(t){row.appendChild(t);});row.appendChild(gIcon('chev'));
   row.onclick=open;row.onkeydown=function(e){if(e&&e.key==='Enter')open();};return row;}
@@ -2129,7 +2164,8 @@ function goalSign(o){
 function goalActions(g){var f=goalFoot();
   if(g.status==='proposed'){f.hidden=false;f.appendChild(gEl('span','note'));
     f.appendChild(gBtn('btn','Dismiss',function(b){goalPlain(gGoalPath(g,'/dismiss'),{},b,function(){GOALS.note='You dismissed it.';goalList('finished');});}));
-    f.appendChild(gBtn('btn pri',gLabel('Make It a Goal'),function(b){goalResume(g,'start',[b]);}));return;}
+    /* A goal needs a way to know it is done: Make It a Goal opens the form with what Will said already in it. */
+    f.appendChild(gBtn('btn pri','Make It a Goal',function(){goalFromSuggestion({goalId:g.id,title:g.title,quote:g.description,saidAt:null,dueOn:g.horizonAt?gLocalDay(new Date(g.horizonAt)):null,waiting:false});}));return;}
   if(!goalLive(g))return;f.hidden=false;
   var left=gEl('span','gleft');
   left.appendChild(gBtn('ghost','Edit Goal',function(){goalEdit(g);}));
@@ -2215,10 +2251,12 @@ function goalEdit(g){var checks=(g.successCriteria||[]).map(function(c){var k=c.
     return {id:c.id,text:c.text,method:k.kind,q:'',orig:c,cond:k.kind==='item'?k.key+' '+k.value:'',
       item:k.kind==='item'?{entityId:k.entityId,label:link?link.label:'its item',kind:link?link.kind:'',conditions:(link&&link.conditions&&link.conditions.length)?link.conditions:[{key:k.key,value:k.value}]}:null};});
   GOALS.form={mode:'edit',goal:g,title:g.title,why:g.description,checks:checks,done:false};goalNav('edit');goalForm('name');}
-function goalForm(focus){var f=GOALS.form;if(!f)return;goalHead(f.mode==='edit'?'Edit Goal':'New Goal',true,false,f.mode==='new'&&!f.done);
+function goalForm(focus){var f=GOALS.form;if(!f)return;goalHead(f.mode==='edit'?'Edit Goal':'New Goal',true,false,f.mode==='new'&&!f.done&&!f.suggestion);
   var body=document.getElementById('goalbody'),top=body.scrollTop||0;body.textContent='';
   if(f.done){goalFormDone(body);return;}
   var form=gEl('div','gform');
+  /* From a suggestion: say where its words came from, above the fields they fill. */
+  if(f.suggestion){var from=gEl('p','gnote',goalSaidLine(f.suggestion)+' Add how you’ll know it’s done, then make it a goal.');from.id='goalfromchat';form.appendChild(from);}
   form.appendChild(gEl('div','gsh','Goal'));var g1=gEl('div','group');
   var r1=gEl('div','formrow');var title=goalField('Name','input','Run a half marathon',120);gKey(title.input,'name');title.input.value=f.title;title.input.oninput=function(){f.title=title.input.value;};r1.appendChild(title.wrap);g1.appendChild(r1);
   var r2=gEl('div','formrow');var why=goalField('Why It Matters','textarea','Optional',1000);gKey(why.input,'why');why.input.value=f.why;why.input.oninput=function(){f.why=why.input.value;};r2.appendChild(why.wrap);g1.appendChild(r2);
@@ -2268,7 +2306,7 @@ function goalFind(q,box,c,i){var seq=box.seq=(box.seq||0)+1;box.textContent='';b
 function goalFormFoot(){var f=GOALS.form;if(!gKeyed()){goalNeedsKey();return;}
   var foot=goalFoot();foot.hidden=false;foot.appendChild(gEl('span','note'));
   var cancel=gBtn('btn','Cancel',function(){if(f.mode==='edit'){goalNav('goal');GOALS.form=null;goalShow(f.goal);}else goalList(GOALS.tab);});
-  var go=gBtn('btn pri',gLabel(f.mode==='edit'?'Save':'Add Goal'),function(){goalSubmit([go,cancel]);});
+  var go=gBtn('btn pri',gLabel(f.mode==='edit'?'Save':f.suggestion?'Make It a Goal':'Add Goal'),function(){goalSubmit([go,cancel]);});
   foot.appendChild(cancel);foot.appendChild(go);}
 /* What the form cannot file, said in the footer; the cursor goes to the field it is about. */
 function goalFormError(t,focus){goalMsg(t);goalFocus(focus);}
@@ -2302,11 +2340,16 @@ function goalSubmit(buttons){var f=GOALS.form;if(!f||GOALS.busy)return;goalMsg('
     if(!cr.criteria.length){goalFormError('Add at least one way to know it’s done.','check:0:text');return;}
     if(f.finishBy&&f.finishBy<=gLocalDay()){goalFormError('Pick a date after today.','finish');return;}
     for(var i=0;i<steps.length;i++)if(steps[i].due&&steps[i].due<gLocalDay()){goalFormError('Pick a step date that isn’t past.','step:'+f.steps.indexOf(steps[i])+':due');return;}
-    var args={goalId:'go'+f.draftKey,owner:'will',origin:'will',sensitivity:'personal',tainted:false,nexusProjectId:null,title:title,description:String(f.why||'').trim(),
+    /* A suggestion keeps the id it was filed under and stays one Flint suggested; a goal Will adds is his own, from his draft. */
+    var sug=f.suggestion||null;
+    var args={goalId:sug?sug.goalId:'go'+f.draftKey,owner:'will',origin:sug?'flint':'will',sensitivity:'personal',tainted:false,nexusProjectId:null,title:title,description:String(f.why||'').trim(),
       successCriteria:cr.criteria,horizonAt:f.finishBy?gAt(f.finishBy,23,59):null,reviewCadence:f.cadence,links:goalLinks(cr.criteria,[]),
       plan:steps.length?{ops:steps.map(function(s,j){return {op:'add',key:'s'+(j+1),step:{ordinal:(j+1)*100,title:gClean(s.title).slice(0,200),kind:'will_task',tier:'approval',dueAt:s.due?gAt(s.due,17,0):null,dependsOn:[]}};})}:null};
     /* Added: the draft is spent. If Will has gone back to the list meanwhile, the list shows the new goal. */
     var spent=function(){f.done=true;if(GOALS.draft===f)GOALS.draft=null;};
+    /* One signature either way. For a suggestion it starts the goal and sets its own waiting card aside (the runtime does both). */
+    if(sug){goalSign({path:'/goals/'+encodeURIComponent(sug.goalId)+'/start',body:{args:args},args:args,prompt:gPrompt('start'),buttons:buttons,filed:function(id){f.cardId=id;},
+      done:function(){spent();goalForm();},away:spent});return;}
     goalSign({path:'/goals',body:{draftKey:f.draftKey,args:args},args:args,prompt:gPrompt('add'),buttons:buttons,filed:function(id){f.cardId=id;},
       done:function(){spent();goalForm();},away:spent});
     return;}
@@ -2323,7 +2366,10 @@ function goalSubmit(buttons){var f=GOALS.form;if(!f||GOALS.busy)return;goalMsg('
 /* Added: say so; Done is the likelier next step, Add Another the other. */
 function goalFormDone(body){var r=GOALS.page&&GOALS.page.reviews;
   body.appendChild(goalEmpty('Goal Added',r==='on'?'Your goal is active. Flint’s first review runs in a few minutes.':r==='off'?'Your goal is active. Scheduled reviews start soon.':'Your goal is active.'));var foot=goalFoot();foot.hidden=false;foot.appendChild(gEl('span','note'));
-  foot.appendChild(gBtn('btn','Add Another',function(){goalNew();}));foot.appendChild(gBtn('btn pri','Done',function(){goalList('active');}));}
+  /* Add Another is for his own goals; after a suggestion the other button goes back to what else Flint heard. */
+  if(GOALS.form&&GOALS.form.suggestion)foot.appendChild(gBtn('btn','More Suggestions',function(){goalList('suggested');}));
+  else foot.appendChild(gBtn('btn','Add Another',function(){goalNew();}));
+  foot.appendChild(gBtn('btn pri','Done',function(){goalList('active');}));}
 
 goalsProbe();
 </script>

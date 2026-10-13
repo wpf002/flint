@@ -167,6 +167,9 @@ function opened(p: Panel, id: string) {
 const GOAL = 'go1finishbuildingflint00';
 const ITEM = 'en8f3k2m9x7q1w5z4c6v0b1n';
 const OTHER = 'en1a2b3c4d5e6f7g8h9i0j1k';
+/** A suggestion's source and the goal id made from it, as the runtime makes them. */
+const SOURCE = `chat:${'4f'.repeat(32)}`;
+const SUGGESTED = `go${'4f'.repeat(16)}`;
 const UNTIL = laterDay(4, 5);
 const UNTIL_SHOWN = shownDay(4, 5);
 const base = (over: Record<string, unknown>) => ({ id: 'pr1', tainted: false, status: 'pending', origin: 'console', ts: Date.now() - 3600_000, expiresAt: '2026-10-27T18:00:00.000Z', destructive: false, ...over });
@@ -230,8 +233,9 @@ const CARDS: Record<string, Record<string, unknown>> = {
       { op: 'set', key: 's1', from: { title: 'Ship goal reviews', status: 'blocked' }, to: { status: 'in_progress' } },
     ] },
   }),
-  'a goal suggested from chat': base({ fullName: 'goal.propose', kind: 'goal', origin: 'chat:c1', consequential: true, args: { title: 'Run a Half Marathon', quote: 'I want to run a half marathon by spring', conversationId: 'c8f3k2m9x7q1w5z4c6v0b1n2', turnId: 't1790000000000' } }),
-  'a commitment from chat': base({ fullName: 'world.commitment.from_chat', kind: 'world', origin: 'chat:c1', consequential: true, args: { quote: 'I will send Dana the draft by Friday', dueAt: '2026-10-16T18:00:00.000Z', personEntityId: OTHER } }),
+  // What chat suggested, exactly as the candidates intake files it (part 5): Will's words, when he said them, the day he named, and where they came from.
+  'a goal suggested from chat': base({ fullName: 'goal.propose', kind: 'goal', origin: 'chat:c8f3k2m9x7q1w5z4c6v0b1n2', templateId: 'chat.goal', sensitivity: 'personal', consequential: false, reason: 'Approving adds it to your suggested goals.', args: { goalId: SUGGESTED, title: 'Run a Half Marathon', quote: 'I want to run a half marathon by spring', dueOn: '2027-03-20', saidAt: '2026-10-08T20:04:00.000Z', sourceRef: SOURCE } }),
+  'a commitment from chat': base({ fullName: 'world.commitment.from_chat', kind: 'tool_call', origin: 'chat:c8f3k2m9x7q1w5z4c6v0b1n2', templateId: 'chat.commitment', sensitivity: 'personal', consequential: false, reason: 'Approving adds it to the things Flint knows you said you’d do.', args: { text: 'Send Dana the draft', quote: 'I will send Dana the draft by Friday', saidAt: '2026-10-08T20:04:00.000Z', sourceRef: SOURCE } }),
   'people from the calendar': base({ fullName: 'world.person.create', kind: 'world', origin: 'runtime:google_calendar', args: { source: 'google_calendar', people: [{ name: 'Ada Lovelace', email: 'ada@example.com' }, { name: 'grace@example.com', email: 'grace@example.com' }] } }),
   'a source to turn on': base({ fullName: 'world.source.enable', kind: 'world', origin: 'cli', args: { source: 'deploy' } }),
   'a triage rule': base({ fullName: 'triage.rule.create', kind: 'triage', origin: 'cli', args: { rule: { name: 'CI Is Red on Main', lane: 'relevant', match: { source: 'github', type: 'ci_failed' }, notify: true, quietHours: ['22:00', '07:00'] } } }),
@@ -283,7 +287,7 @@ Object.assign(CARDS, {
       { op: 'add', key: 's9', step: { ordinal: 1, title: 'ADDED', kind: 'asset_task', tier: 'alone', dueAt: null, dependsOn: ['s1'] } },
     ] },
   }),
-  'a suggestion whose quote does not fit a sentence': base({ fullName: 'goal.propose', kind: 'goal', origin: 'chat:c1', args: { title: 'Run a "Half" Marathon', quote: `I said: "I want to run"\n${'and then some more words '.repeat(20)}`, dueAt: '2027-05-15T18:30:00.000Z', conversationId: 'c1', turnId: 'turn_0123456789abcdef0123' } }),
+  'a suggestion whose quote does not fit a sentence': base({ fullName: 'goal.propose', kind: 'goal', origin: 'chat:c1', templateId: 'chat.goal', args: { goalId: SUGGESTED, title: 'Run a "Half" Marathon', quote: `I said "I want to run" ${'and then some more words '.repeat(10)}for sure`, dueOn: '2027-05-15', saidAt: '2026-10-08T20:04:00.000Z', sourceRef: SOURCE } }),
   // P4's card: its numbers are listed by their names; one this page cannot name is counted, and given exactly below.
   'predictions to turn on': base({
     fullName: 'forecast.series.enable', kind: 'forecast', origin: 'console', sensitivity: 'financial', consequential: true, reason: 'Approving turns on Flint’s forecasts of these numbers, on this Mac.',
@@ -614,14 +618,25 @@ describe('what each kind says, and what it lists below', () => {
     expect(odd).toMatchObject({ says: ['Change the status of “Ship it”.'], facts: [['Change 1 New Status', 'Constructor']] });
   });
 
-  it('what chat suggested says the words of Will’s it rests on; where it heard them is a reference', () => {
+  it('what chat suggested says the words of Will’s it rests on, whole, when he said them and the day he named; where it came from is a reference', () => {
     expect(says('a goal suggested from chat')).toMatchObject({
-      lines: ['The goal would be “Run a Half Marathon”.', 'You said “I want to run a half marathon by spring”.'], facts: [],
-      refs: [['Conversation ID', 'c8f3k2m9x7q1w5z4c6v0b1n2'], ['Turn ID', 't1790000000000']],
+      lines: ['Approving adds it to your suggested goals.', 'The goal would be “Run a Half Marathon”.', 'You said “I want to run a half marathon by spring”.', `You said it on ${momentOf('2026-10-08T20:04:00.000Z')}.`, 'The day you named is Mar 20, 2027.'],
+      facts: [], refs: [['Goal ID', SUGGESTED], ['Source Ref', SOURCE]],
     });
     expect(says('a commitment from chat')).toMatchObject({
-      lines: ['You said “I will send Dana the draft by Friday”.', `It’s due ${momentOf('2026-10-16T18:00:00.000Z')}.`], facts: [], refs: [['Person Entity ID', OTHER]],
+      lines: ['Approving adds it to the things Flint knows you said you’d do.', 'The commitment would be “Send Dana the draft”.', 'You said “I will send Dana the draft by Friday”.', `You said it on ${momentOf('2026-10-08T20:04:00.000Z')}.`],
+      facts: [], refs: [['Source Ref', SOURCE]],
     });
+    // Words that cannot sit inside a sentence (quotation marks of their own, 290 characters) are under it, every one of them.
+    const long = says('a suggestion whose quote does not fit a sentence');
+    const quote = (cardOf('a suggestion whose quote does not fit a sentence').args as { quote: string }).quote;
+    expect(quote.length).toBeGreaterThan(280);
+    expect(quote.length).toBeLessThanOrEqual(300);
+    expect(long.lines).toEqual(expect.arrayContaining(['What you said is listed below.', 'The day you named is May 15, 2027.']));
+    expect(long.facts).toEqual([['Goal', 'Run a "Half" Marathon'], ['You Said', quote]]);
+    expect(long.text).toContain(quote);
+    // Neither asks on its own by its name or its mark: a suggestion only lands as a suggestion.
+    for (const kind of ['a goal suggested from chat', 'a commitment from chat']) expect(p.run(`apprAlone(${JSON.stringify(cardOf(kind))})`), kind).toBe(false);
   });
 
   it('a person card names each person and where they come from', () => {

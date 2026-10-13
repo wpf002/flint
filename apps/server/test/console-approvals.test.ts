@@ -540,10 +540,16 @@ describe('the console Approvals panel', () => {
       .toEqual(['Update a Plan', 'Flint suggests 3 small changes.', [['Goal', 'Synthetic goal'], ['Changes', 'Move 2 Dates · Mark 1 Blocked'], ['Filed By', 'Flint']]]);
     expect(say({ fullName: 'plan.change', origin: 'runtime:goals', templateId: 'plan.diff.material', args: { goalTitle: 'Synthetic goal', ops: ops.slice(0, 1) } }).slice(0, 2)).toEqual(['Change a Plan', 'Flint suggests a bigger change.']);
     expect(say({ fullName: 'plan.change', args: { goalTitle: 'Synthetic goal', ops: ops.slice(0, 1) } }).slice(0, 3)).toEqual(['Change a Plan', 'You asked for this change.', [['Goal', 'Synthetic goal'], ['Changes', 'Add 1 Step'], ['Filed By', 'You']]]);
-    expect(say({ fullName: 'goal.propose', origin: 'chat:c1', args: { title: 'Synthetic goal', quote: 'I want to run a half marathon' } }).slice(0, 3))
-      .toEqual(['Suggest a Goal from Chat', 'You said this in a chat.', [['Goal', 'Synthetic goal'], ['You Said', 'I want to run a half marathon']]]);
-    expect(say({ fullName: 'world.commitment.from_chat', origin: 'chat:c1', args: { quote: 'I will send it by Friday', dueAt: h } }).slice(0, 3))
-      .toEqual(['Add a Commitment from Chat', 'You said this in a chat.', [['You Said', 'I will send it by Friday'], ['Due', run(`apprDate('${h}')`)]]]);
+    // What chat suggested (part 5), as the candidates intake files it: the short text, Will's own words, and the day he named.
+    expect(say({ fullName: 'goal.propose', origin: 'chat:c1', templateId: 'chat.goal', args: { goalId: 'go4f4f4f4f4f4f4f4f', title: 'Synthetic goal', quote: 'I want to run a half marathon', dueOn: '2027-03-20', saidAt: h, sourceRef: `chat:${'4f'.repeat(32)}` } }).slice(0, 3))
+      .toEqual(['Suggest a Goal from Chat', 'You said this in a chat.', [['Goal', 'Synthetic goal'], ['You Said', 'I want to run a half marathon'], ['Due', 'Mar 20, 2027']]]);
+    expect(say({ fullName: 'goal.propose', origin: 'chat:c1', args: { title: 'Synthetic goal', quote: 'I want to run a half marathon' } })[2]).toEqual([['Goal', 'Synthetic goal'], ['You Said', 'I want to run a half marathon']]);
+    expect(say({ fullName: 'world.commitment.from_chat', origin: 'chat:c1', templateId: 'chat.commitment', args: { text: 'Send it', quote: 'I will send it by Friday', saidAt: h, sourceRef: `chat:${'4f'.repeat(32)}` } }).slice(0, 3))
+      .toEqual(['Add a Commitment from Chat', 'You said this in a chat.', [['Commitment', 'Send it'], ['You Said', 'I will send it by Friday']]]);
+    expect(say({ fullName: 'world.commitment.from_chat', origin: 'chat:c1', args: { text: 'Send it', quote: 'I will send it by Friday', dueOn: '2027-03-20' } })[2]).toEqual([['Commitment', 'Send it'], ['You Said', 'I will send it by Friday'], ['Due', 'Mar 20, 2027']]);
+    // The titles are the ones Will's notes use for the same two actions.
+    expect(say({ fullName: 'goal.propose', args: {} })[0]).toBe(ACTION_WORDS['goal.propose']);
+    expect(say({ fullName: 'world.commitment.from_chat', args: {} })[0]).toBe(ACTION_WORDS['world.commitment.from_chat']);
     // A card whose args were cleared says what it still knows, and no empty facts.
     expect(say({ fullName: 'goal.done', args: null })[2]).toEqual([['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-16T14:00:00.000Z')`)]]);
     expect(say({ fullName: 'goal.activate', args: null }).slice(0, 3)).toEqual(['Add a Goal', 'It starts as soon as you approve.', []]);
