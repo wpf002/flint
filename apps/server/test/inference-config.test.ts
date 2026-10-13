@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { DEFAULTS, readContextSize, addressIsLocal, endpointIsLocal, localEndpoint, parseLocalUrl, readEnvProxy, readInferenceConfig, SCHEMAS, ollamaIsLocal, viaProxy } from '../src/inference-config';
+import { DEFAULTS, PDF_READERS, PDF_READER_PROGRAMS, readContextSize, addressIsLocal, endpointIsLocal, localEndpoint, parseLocalUrl, readEnvProxy, readInferenceConfig, SCHEMAS, ollamaIsLocal, viaProxy, type FileCheck } from '../src/inference-config';
 
 /**
  * Local-inference config: every key has a schema, a refused value never stops
@@ -528,11 +528,93 @@ describe('every key has a schema', () => {
         'FLINT_LOCAL_SERVER',
         'FLINT_LOCAL_TOOLS',
         'FLINT_LOCAL_TOOL_PASS_TIMEOUT_MS',
+        // Pictures and PDFs for the local model (./local-media): both ship off.
+        'FLINT_LOCAL_VISION',
+        'FLINT_LOCAL_PDF',
         'FLINT_HARDWARE_TIER',
         'OLLAMA_MODEL',
         'OLLAMA_NUM_CTX',
       ].sort(),
     );
+  });
+});
+
+// Pictures and PDFs for the local model. Both settings ship off, and off is exactly what Flint did before them.
+describe('FLINT_LOCAL_VISION and FLINT_LOCAL_PDF', () => {
+  const have = (...paths: string[]): FileCheck => (path, kind) => kind === 'program' && paths.includes(path);
+  const readWith = (env: Record<string, string | undefined>, fileExists?: FileCheck) => {
+    const warned: string[] = [];
+    const cfg = readInferenceConfig(env, (m) => warned.push(m), fileExists ? { fileExists } : {});
+    return { cfg, warned };
+  };
+
+  it('with nothing set both are off, and nothing is said', () => {
+    const { cfg, warned } = readWith({}, have('/usr/bin/mdimport'));
+    expect(cfg.local.vision).toBe(false);
+    expect(cfg.local.pdf).toBeUndefined();
+    expect(cfg.problems).toEqual([]);
+    expect(warned).toEqual([]);
+  });
+
+  it('pictures: on or off, in any case, and nothing else', () => {
+    expect(readWith({ FLINT_LOCAL_VISION: 'on' }).cfg.local.vision).toBe(true);
+    expect(readWith({ FLINT_LOCAL_VISION: ' ON ' }).cfg.local.vision).toBe(true);
+    expect(readWith({ FLINT_LOCAL_VISION: 'off' }).cfg.local.vision).toBe(false);
+    expect(readWith({ FLINT_LOCAL_VISION: 'off' }).cfg.problems).toEqual([]);
+    for (const bad of ['1', 'true', 'yes', 'auto', 'on; rm -rf /']) {
+      const { cfg, warned } = readWith({ FLINT_LOCAL_VISION: bad });
+      expect(cfg.local.vision, bad).toBe(false);
+      expect(cfg.problems.map((p) => p.key)).toEqual(['FLINT_LOCAL_VISION']);
+      expect(warned.join('\n')).toContain('no picture is sent to the local model');
+      expect(JSON.stringify(cfg.problems) + warned.join('\n')).not.toContain(bad);
+    }
+  });
+
+  it('PDFs: the reader it names, with its program as a full path that is on this Mac', () => {
+    expect(PDF_READERS).toEqual(['off', 'spotlight', 'pdftotext']);
+    expect(readWith({ FLINT_LOCAL_PDF: 'spotlight' }, have('/usr/bin/mdimport')).cfg.local.pdf).toEqual({ reader: 'spotlight', program: '/usr/bin/mdimport' });
+    expect(readWith({ FLINT_LOCAL_PDF: ' Spotlight ' }, have('/usr/bin/mdimport')).cfg.local.pdf).toEqual({ reader: 'spotlight', program: '/usr/bin/mdimport' });
+    expect(readWith({ FLINT_LOCAL_PDF: 'off' }, have('/usr/bin/mdimport')).cfg.local.pdf).toBeUndefined();
+    expect(readWith({ FLINT_LOCAL_PDF: 'off' }, have()).cfg.problems).toEqual([]);
+    // Homebrew's folder on Apple silicon first, then on Intel: whichever has it.
+    expect(readWith({ FLINT_LOCAL_PDF: 'pdftotext' }, have('/opt/homebrew/bin/pdftotext', '/usr/local/bin/pdftotext')).cfg.local.pdf).toEqual({ reader: 'pdftotext', program: '/opt/homebrew/bin/pdftotext' });
+    expect(readWith({ FLINT_LOCAL_PDF: 'pdftotext' }, have('/usr/local/bin/pdftotext')).cfg.local.pdf).toEqual({ reader: 'pdftotext', program: '/usr/local/bin/pdftotext' });
+    for (const list of Object.values(PDF_READER_PROGRAMS)) for (const p of list) expect(p).toMatch(/^\/[A-Za-z0-9/_.-]+$/);
+  });
+
+  it('a reader whose program is not on this Mac is refused by name, and no PDF is read: nothing is installed for it', () => {
+    const { cfg, warned } = readWith({ FLINT_LOCAL_PDF: 'pdftotext' }, have('/usr/bin/mdimport'));
+    expect(cfg.local.pdf).toBeUndefined();
+    expect(cfg.problems).toEqual([{ key: 'FLINT_LOCAL_PDF', reason: 'set to pdftotext, which is not installed on this Mac', kind: 'missing' }]);
+    expect(warned.join('\n')).toContain('no PDF is read on this Mac');
+    const none = readWith({ FLINT_LOCAL_PDF: 'spotlight' }, have());
+    expect(none.cfg.local.pdf).toBeUndefined();
+    expect(none.cfg.problems).toEqual([{ key: 'FLINT_LOCAL_PDF', reason: "set to spotlight, and this machine does not have the Mac's own PDF importer", kind: 'missing' }]);
+  });
+
+  it('the program has to be one that can be run: the check is asked for a program, not for a file', () => {
+    const asked: Array<[string, string]> = [];
+    readWith({ FLINT_LOCAL_PDF: 'spotlight' }, (path, kind) => (asked.push([path, kind]), true));
+    expect(asked).toEqual([['/usr/bin/mdimport', 'program']]);
+  });
+
+  it('a value that is not a reader is refused, never repeated, and never becomes a program or a path', () => {
+    for (const bad of ['/usr/bin/mdimport', 'mdimport', 'poppler', 'yes', '/tmp/evil.sh', 'spotlight; rm -rf /']) {
+      const { cfg, warned } = readWith({ FLINT_LOCAL_PDF: bad }, () => true);
+      expect(cfg.local.pdf, bad).toBeUndefined();
+      expect(cfg.problems.map((p) => [p.key, p.kind])).toEqual([['FLINT_LOCAL_PDF', 'invalid']]);
+      expect(JSON.stringify(cfg.problems) + warned.join('\n')).not.toContain(bad);
+    }
+  });
+
+  it('with no file check handed in (a caller that only reads the settings), the reader is taken at its first path', () => {
+    expect(readInferenceConfig({ FLINT_LOCAL_PDF: 'pdftotext' }).local.pdf).toEqual({ reader: 'pdftotext', program: '/opt/homebrew/bin/pdftotext' });
+  });
+
+  it('neither setting changes any other: the config is the same with both on, but for the two fields', () => {
+    const off = readWith({}, have('/usr/bin/mdimport')).cfg;
+    const on = readWith({ FLINT_LOCAL_VISION: 'on', FLINT_LOCAL_PDF: 'spotlight' }, have('/usr/bin/mdimport')).cfg;
+    expect({ ...on, local: { ...on.local, vision: false, pdf: undefined } }).toEqual(off);
   });
 });
 
