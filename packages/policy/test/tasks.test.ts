@@ -28,6 +28,7 @@ import {
   TASK_FAILURE_SAYS,
   TASK_FAILURES,
   TASK_FORECAST_RULE,
+  TASK_COST_MAX_MICROS,
   TASK_FORM_ITEMS_MAX,
   TASK_OUTPUTS,
   TASK_REASONS,
@@ -363,6 +364,26 @@ describe('the cards', () => {
     expect(TaskForm.safeParse({ templates: [{ ...one, items: Array.from({ length: TASK_FORM_ITEMS_MAX + 1 }, (_, i) => ({ entityId: `e${i}`, label: 'A CI' })) }], goals: [] }).success).toBe(false);
     expect(TaskForm.safeParse({ templates: [one], goals: [{ id: 'goabc12345', title: 'Finish Building Flint', description: 'why' }] }).success).toBe(false);
     expect(TaskForm.safeParse({ templates: [one] }).success).toBe(false);
+    // A kind of task is offered once: the form's first field picks one by its name.
+    expect(TaskForm.safeParse({ templates: [one, { ...one, runsOn: 'Another Watcher' }], goals: [] }).success).toBe(false);
+    expect(TaskForm.safeParse({ templates: [one, { ...one, template: 'summarize_items', title: 'Summarize Items' }], goals: [] }).success).toBe(true);
+  });
+
+  it('what a task cost is an amount a task\'s row can hold: whole, not negative, and no more than that', () => {
+    const row = { id: TASK, title: 'Watch a CI Run', about: 'wpf002/flint CI', status: 'accepted', line: 'It passed 2 of 2 checks.', runsOn: 'CI Watcher', outside: false, costs: true, createdAt: '2026-10-12T10:00:00.000Z' };
+    const open = (micros: unknown) => ({ task: { ...row, result: null, checks: [], checkedBy: null, askedBy: 'you', goalId: null, dueAt: null, chance: null, cost: { micros, estimate: false }, card: null, can: { cancel: false, accept: false, reject: false } } });
+    expect(TASK_COST_MAX_MICROS).toBe(999_999_999_900);
+    for (const ok of [0, 100, 250_000, TASK_COST_MAX_MICROS]) expect(TaskAnswer.safeParse(open(ok)).success, String(ok)).toBe(true);
+    for (const bad of [-1, 0.5, TASK_COST_MAX_MICROS + 100, Number.MAX_SAFE_INTEGER, 1e21, '0', null]) expect(TaskAnswer.safeParse(open(bad)).success, String(bad)).toBe(false);
+  });
+
+  it('what Run Again and a forbidden card say: each a sentence of its own, with its code', () => {
+    expect(TASK_SAYS.flintAsked).toBe('Flint asked for this task, so it can’t be run again from here.');
+    expect(TASK_SAYS.itemEnded).toBe('One of its items is no longer active.');
+    expect(TASK_SAYS.goalEnded).toBe('Its goal is no longer active.');
+    expect(TASK_SAYS.ruleForbids).toBe('A rule you set doesn’t allow this.');
+    expect(TASK_SAYS.notAllowed).toBe('Flint may not do this.');
+    for (const code of ['flintAsked', 'itemEnded', 'goalEnded', 'ruleForbids', 'notAllowed'] as const) expect(taskCodeOf(TASK_SAYS[code])).toBe(code);
   });
 });
 
