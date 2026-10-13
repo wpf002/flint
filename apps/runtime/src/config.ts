@@ -10,7 +10,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize } from 'node:path';
 import { z } from 'zod';
-import { zoneFrom } from '@flint/policy';
+import { readEnvProxy, viaProxy, zoneFrom } from '@flint/policy';
 
 /**
  * `calendar:push` (P2.6) opens one route, the Apple Calendar snapshot, and
@@ -174,7 +174,11 @@ export interface Config {
   /** P5's tasks and assets may run (FLINT_ASSETS=on). The signed card is still what turns an asset on. */
   assets: boolean;
   /** The local model triage and goal reviews ask; absent, triage is rules only and a review suggests no plan changes. */
-  ollama?: { url: string; model: string; numCtx?: number };
+  /**
+   * The local model's Ollama. `proxied`: Node's env proxy (NODE_USE_ENV_PROXY with a proxy named) would carry
+   * requests to it, loopback included, so it is not this Mac and no local call is made (model/here.ts).
+   */
+  ollama?: { url: string; model: string; numCtx?: number; proxied?: true };
   /** Where Ollama is asked which models it has (this Mac's own address), for Settings > Health. */
   ollamaUrl?: string;
   /** The standby model as the server's settings name it (a model, or "off"/"none"); absent when they name none. */
@@ -203,7 +207,7 @@ export function parseHealthExtra(raw: string | undefined): Array<{ name: string;
   });
 }
 
-export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
+export function loadConfig(env: Record<string, string | undefined> = process.env, execArgv: readonly string[] = process.execArgv): Config {
   const r = Env.safeParse(env);
   if (!r.success) {
     // Names and reasons only: a value here may be a secret.
@@ -255,13 +259,26 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     planner: e.FLINT_PLANNER?.trim().toLowerCase() === 'on',
     predict: e.FLINT_PREDICT?.trim().toLowerCase() === 'on',
     assets: e.FLINT_ASSETS?.trim().toLowerCase() === 'on',
-    ...(e.FLINT_TRIAGE_MODEL
-      ? { ollama: { url: e.OLLAMA_URL ?? 'http://127.0.0.1:11434', model: e.FLINT_TRIAGE_MODEL, ...(e.OLLAMA_NUM_CTX ? { numCtx: e.OLLAMA_NUM_CTX } : {}) } }
-      : {}),
+    ...(e.FLINT_TRIAGE_MODEL ? { ollama: ollamaOf(e.OLLAMA_URL, e.FLINT_TRIAGE_MODEL, e.OLLAMA_NUM_CTX, env, execArgv) } : {}),
     ollamaUrl: e.OLLAMA_URL ?? 'http://127.0.0.1:11434',
     ...(e.FLINT_LOCAL_FALLBACK_MODEL ? { standbyModel: e.FLINT_LOCAL_FALLBACK_MODEL } : {}),
     gitSha: e.RUNTIME_GIT_SHA && /^[0-9a-f]{40}$/.test(e.RUNTIME_GIT_SHA) ? e.RUNTIME_GIT_SHA : 'dev',
   };
+}
+
+/**
+ * The local model's Ollama, as every local call is to find it (model/here.ts).
+ *  - `localhost` is pinned to 127.0.0.1, as the server pins it: the request then goes to this machine's
+ *    loopback whatever a resolver or a hosts file says the name means.
+ *  - Node's own proxy switch is read as Node reads it (it is not one of Flint's settings). With it on, a
+ *    request to 127.0.0.1 leaves this process for the proxy first, so the address is marked: said once here,
+ *    and no local call is made while it holds.
+ */
+function ollamaOf(given: string | undefined, model: string, numCtx: number | undefined, env: Record<string, string | undefined>, execArgv: readonly string[]): NonNullable<Config['ollama']> {
+  const url = (given ?? 'http://127.0.0.1:11434').replace('//localhost:', '//127.0.0.1:');
+  const proxied = viaProxy(new URL(url).host, readEnvProxy(env, execArgv));
+  if (proxied) console.error('runtime config: Node’s env proxy is on and would carry requests to Ollama, so the local model is not asked; name its host in NO_PROXY to keep them on this Mac');
+  return { url, model, ...(numCtx ? { numCtx } : {}), ...(proxied ? { proxied: true as const } : {}) };
 }
 
 /**

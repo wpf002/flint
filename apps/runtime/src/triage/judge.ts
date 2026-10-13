@@ -25,7 +25,7 @@ import { OllamaProvider } from '@flint/core/ollama';
 import { dataBlock, entityRef, REASON_CODES } from '@flint/policy';
 import { scopedFetch } from '../policy/egress.js';
 import { modelSlot } from '../model/slot.js';
-import { LOCAL_MODELS, type LocalModels } from '../model/here.js';
+import { LOCAL_MODELS, type AskedOllama, type LocalModels } from '../model/here.js';
 import type { Load } from './load.js';
 import type { EventFacts } from './verdict.js';
 
@@ -81,7 +81,7 @@ export function judgePrompt(f: EventFacts): { system: string; user: string } {
 }
 
 export interface JudgeDeps {
-  ollama: { url: string; model: string; numCtx?: number };
+  ollama: AskedOllama & { numCtx?: number };
   /** Before each request: is a chat turn running? */
   load: () => Promise<Load>;
   /** Before each request: one slot of the hour cap, or false when it is used up. */

@@ -40,6 +40,7 @@
  */
 import { z } from 'zod';
 import { HARDWARE_TIER_IDS, isLoopbackHost, isOllamaCloudModel, type HardwareTierId } from '@flint/core';
+import { readEnvProxy as policyEnvProxy, viaProxy, type EnvProxy } from '@flint/policy';
 import { LOCAL_MODEL_MAX_LEN, LOCAL_MODEL_RE } from './local-model';
 
 export const MODES = ['local', 'cloud', 'hybrid'] as const;
@@ -67,51 +68,14 @@ export const DEFAULTS = {
 
 type Env = Record<string, string | undefined>;
 
-/**
- * Node's own proxy switch. With NODE_USE_ENV_PROXY=1 (or `--use-env-proxy`)
- * Node sends every `fetch` through the proxy HTTP_PROXY / HTTPS_PROXY name,
- * LOOPBACK INCLUDED, unless NO_PROXY lists the host. A request to 127.0.0.1
- * then leaves this process for the proxy first: the model's prompt, and the
- * status command's bearer token. So an address that goes through the proxy is
- * not "this Mac", whatever its host is (`viaProxy`).
- */
-export interface EnvProxy {
-  /** Node is sending `fetch` through a proxy the environment names. */
-  on: boolean;
-  /** The hosts NO_PROXY names exactly, in lower case and without brackets; `*` is every host. */
-  direct: readonly string[];
-}
+// Node's own proxy switch (NODE_USE_ENV_PROXY): with it on, a request to 127.0.0.1 leaves this process for the
+// proxy first, so an address that goes through the proxy is not "this Mac", whatever its host is. The rule is
+// @flint/policy's (models.ts), which the runtime reads too; re-exported so imports here hold.
+export { viaProxy, type EnvProxy };
 
 /** Read the switch as Node reads it at startup. `execArgv`: this process's own flags. */
 export function readEnvProxy(env: Env, execArgv: readonly string[] = process.execArgv): EnvProxy {
-  const flagged = (s: string | undefined): boolean => !!s && s.split(/\s+/).includes('--use-env-proxy');
-  const asked = env.NODE_USE_ENV_PROXY?.trim() === '1' || execArgv.includes('--use-env-proxy') || flagged(env.NODE_OPTIONS);
-  // Whichever proxy is named: which scheme it would carry is Node's to decide, so any one counts.
-  const named = [env.HTTP_PROXY, env.http_proxy, env.HTTPS_PROXY, env.https_proxy].some((v) => !!v && v.trim() !== '');
-  const direct = `${env.NO_PROXY ?? ''},${env.no_proxy ?? ''}`
-    .split(/[,\s]+/)
-    .map((e) => e.trim().toLowerCase().replace(/^\[|\]$/g, ''))
-    .filter((e) => e !== '');
-  return { on: asked && named, direct };
-}
-
-/**
- * Would a request to this host go through the proxy? Only an entry that names
- * the host exactly (or `*`) is taken as keeping it direct: a suffix, a
- * wildcard or a port on the entry is Node's to interpret, and a wrong guess
- * here would call a proxied address "this Mac". A host that is not known is
- * proxied.
- */
-export function viaProxy(host: string | undefined, proxy: EnvProxy): boolean {
-  if (!proxy.on) return false;
-  if (proxy.direct.includes('*')) return false;
-  if (!host) return true;
-  let name = host.trim().toLowerCase();
-  // `host` may carry a port (`127.0.0.1:11434`, `[::1]:8080`): the name alone is what NO_PROXY lists.
-  const v6 = /^\[([^\]]+)\](?::\d+)?$/.exec(name);
-  if (v6) name = v6[1]!;
-  else if (/^[^:]+:\d+$/.test(name)) name = name.slice(0, name.lastIndexOf(':'));
-  return !proxy.direct.includes(name);
+  return policyEnvProxy(env, execArgv);
 }
 
 /** The longest address that is looked at at all (a model server's URL is a few dozen characters). */

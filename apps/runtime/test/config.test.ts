@@ -118,6 +118,38 @@ describe('runtime config', () => {
     expect(() => loadConfig({ DATABASE_URL: DB, HOME, FLINT_TRIAGE_MODEL: 'a model; rm -rf' })).toThrow(/FLINT_TRIAGE_MODEL/);
   });
 
+  it('the local model’s address: localhost is pinned to 127.0.0.1, and Node’s env proxy marks it as not this Mac', () => {
+    const base = { DATABASE_URL: DB, HOME, FLINT_TRIAGE_MODEL: 'm' };
+    expect(loadConfig({ ...base, OLLAMA_URL: 'http://localhost:11434' }, []).ollama).toEqual({ url: 'http://127.0.0.1:11434', model: 'm' });
+    const quiet = console.error;
+    const said: string[] = [];
+    console.error = (m: string) => void said.push(m);
+    try {
+      const PROXY = { NODE_USE_ENV_PROXY: '1', HTTP_PROXY: 'http://proxy.example:3128' };
+      // A proxy that is named but not switched on, or switched on with none named, carries nothing.
+      expect(loadConfig({ ...base, HTTP_PROXY: PROXY.HTTP_PROXY }, []).ollama).toEqual({ url: 'http://127.0.0.1:11434', model: 'm' });
+      expect(loadConfig({ ...base, NODE_USE_ENV_PROXY: '1' }, []).ollama?.proxied).toBeUndefined();
+      expect(said).toEqual([]);
+      // Switched on: a request to 127.0.0.1 would leave for the proxy first.
+      expect(loadConfig({ ...base, ...PROXY }, []).ollama).toEqual({ url: 'http://127.0.0.1:11434', model: 'm', proxied: true });
+      expect(loadConfig({ ...base, HTTPS_PROXY: 'http://p:1' }, ['--use-env-proxy']).ollama?.proxied).toBe(true);
+      expect(loadConfig({ ...base, HTTP_PROXY: 'http://p:1', NODE_OPTIONS: '--use-env-proxy' }, []).ollama?.proxied).toBe(true);
+      expect(loadConfig({ ...base, ...PROXY, OLLAMA_URL: 'http://[::1]:11434' }, []).ollama?.proxied).toBe(true);
+      expect(said).toHaveLength(4);
+      // The message names no value: not the proxy, not the address.
+      expect(said.join(' ')).not.toMatch(/proxy\.example|3128|11434/);
+      // NO_PROXY naming the host exactly keeps it on this Mac; an entry Node would have to interpret does not.
+      expect(loadConfig({ ...base, ...PROXY, NO_PROXY: 'localhost,127.0.0.1,::1' }, []).ollama?.proxied).toBeUndefined();
+      expect(loadConfig({ ...base, ...PROXY, NO_PROXY: '::1', OLLAMA_URL: 'http://[::1]:11434' }, []).ollama?.proxied).toBeUndefined();
+      expect(loadConfig({ ...base, ...PROXY, NO_PROXY: 'localhost' }, []).ollama?.proxied).toBe(true);
+      expect(loadConfig({ ...base, ...PROXY, NO_PROXY: '127.0.0.0/8' }, []).ollama?.proxied).toBe(true);
+      // Without a local model there is nothing to mark.
+      expect(loadConfig({ DATABASE_URL: DB, HOME, ...PROXY }, []).ollama).toBeUndefined();
+    } finally {
+      console.error = quiet;
+    }
+  });
+
   it('the git sha is a full sha or dev', () => {
     expect(loadConfig({ DATABASE_URL: DB, HOME, RUNTIME_GIT_SHA: 'f'.repeat(40) }).gitSha).toBe('f'.repeat(40));
     expect(loadConfig({ DATABASE_URL: DB, HOME, RUNTIME_GIT_SHA: 'nope' }).gitSha).toBe('dev');

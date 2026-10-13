@@ -7,6 +7,7 @@
  * main() at import time and therefore could not be unit-tested at all.
  */
 
+import { onThisMachine } from '@flint/policy';
 import { isCloudModel } from './memory-brain';
 import { LOCALITY } from './ollama-locality';
 
@@ -123,19 +124,9 @@ export function isLocalWire(provider: string): boolean {
   return LOCAL_WIRES.has(provider);
 }
 
-/** Is this URL's host the machine itself? Exactly 127.0.0.1, localhost or ::1: `127.0.0.1.example.com` is someone else's. */
-export function onThisMachine(baseURL: string | undefined): boolean {
-  if (!baseURL) return false;
-  let host: string;
-  try {
-    const u = new URL(baseURL);
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
-    host = u.hostname.toLowerCase();
-  } catch {
-    return false;
-  }
-  return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]';
-}
+// Is this URL's host the machine itself? Exactly 127.0.0.1, localhost or ::1 (`127.0.0.1.example.com` is someone
+// else's). The rule is @flint/policy's (models.ts), which the runtime reads too; re-exported so imports here hold.
+export { onThisMachine };
 
 /**
  * What only this server's own settings can say about an address. ./inference

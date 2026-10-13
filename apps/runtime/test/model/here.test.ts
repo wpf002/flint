@@ -10,7 +10,8 @@
  * nothing claimed and no model request sent.
  */
 import { describe, it, expect } from 'vitest';
-import { LISTING_MAX_AGE_MS, LocalModels } from '../../src/model/here';
+import { PLACE_ASK_EVERY_MS, PLACE_MAX_AGE_MS } from '@flint/policy';
+import { LocalModels } from '../../src/model/here';
 import { judge } from '../../src/triage/judge';
 import { planDiff, type PlanFacts } from '../../src/goals/planner';
 import { facts as eventFacts } from '../triage/helpers';
@@ -31,7 +32,7 @@ describe('what the runtime knows of the models on this Mac', () => {
     expect(await models.runsHere({ url: URL_, model: 'Llama3.1' }, o.fetch)).toBe(true);
     expect(await models.runsHere({ url: `${URL_}/`, model: MODEL }, o.fetch)).toBe(true);
     expect(o.seen).toEqual([{ method: 'GET', url: `${URL_}/api/tags` }]);
-    now += LISTING_MAX_AGE_MS;
+    now += PLACE_ASK_EVERY_MS;
     expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
     expect(o.seen).toHaveLength(1);
     // A minute on, it is asked again.
@@ -55,9 +56,21 @@ describe('what the runtime knows of the models on this Mac', () => {
       expect(await models.runsHere({ url, model: MODEL }, o.fetch), url).toBe(false);
     }
     expect(o.seen).toEqual([]);
-    // Nor is a listing taken for one.
+    // Nor does a listing heard from one make it this machine.
     models.learn('http://10.0.0.5:11434', HERE);
     expect(await models.runsHere({ url: 'http://10.0.0.5:11434', model: MODEL }, o.fetch)).toBe(false);
+    expect(o.seen).toEqual([]);
+  });
+
+  it('an address Node’s env proxy would carry is not this machine, whatever its host says', async () => {
+    const models = new LocalModels();
+    const o = listening(() => tags(HERE));
+    expect(await models.runsHere({ url: URL_, model: MODEL, proxied: true }, o.fetch)).toBe(false);
+    expect(o.seen).toEqual([]);
+    // Even with a listing already believed.
+    models.learn(URL_, HERE);
+    expect(await models.runsHere({ url: URL_, model: MODEL, proxied: true }, o.fetch)).toBe(false);
+    expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
   });
 
   it('a plain name that Ollama lists with a remote host or a remote model runs elsewhere', async () => {
@@ -77,35 +90,69 @@ describe('what the runtime knows of the models on this Mac', () => {
     expect(await models.runsHere({ url: URL_, model: 'muse-glimmer:7b' }, o.fetch)).toBe(false);
   });
 
-  it('a listing that fails is no listing: not here, and asked again the next time', async () => {
-    const failures: Array<[string, () => Response | Promise<Response>]> = [
+  it('nothing is local until Ollama has said so: an answer that says nothing is asked for again, and one that is no listing is believed', async () => {
+    // These say nothing either way: nothing is learned, and the next call asks again.
+    const silent: Array<[string, () => Response | Promise<Response>]> = [
       ['a 500', () => new Response('{"error":"x"}', { status: 500 })],
-      ['a 404', () => new Response('not found', { status: 404 })],
+      ['a 401', () => new Response('', { status: 401 })],
       ['a redirect', () => new Response(null, { status: 302, headers: { location: 'https://ollama.com/api/tags' } })],
       ['refused', () => { throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } }); }],
-      ['no JSON', () => new Response('<html>hello</html>', { status: 200 })],
-      ['JSON that is no listing', () => new Response('{"models":"all of them"}', { status: 200 })],
-      ['null', () => new Response('null', { status: 200 })],
-      ['an empty listing', () => tags([])],
     ];
-    for (const [what, listing] of failures) {
+    for (const [what, listing] of silent) {
       const models = new LocalModels();
       const o = listening(listing);
       expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch), what).toBe(false);
+      expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch), what).toBe(false);
+      expect(o.seen, what).toHaveLength(2);
+    }
+    // These are an answer: it is no Ollama, or an Ollama without the model. Believed, and not asked again within the minute.
+    const answered: Array<[string, () => Response | Promise<Response>]> = [
+      ['a 404', () => new Response('not found', { status: 404 })],
+      ['no JSON', () => new Response('<html>hello</html>', { status: 200 })],
+      ['JSON that is no listing', () => new Response('{"models":"all of them"}', { status: 200 })],
+      ['null', () => new Response('null', { status: 200 })],
+      ['an Ollama with no models', () => new Response('{"models":null}', { status: 200 })],
+      ['an empty listing', () => tags([])],
+    ];
+    for (const [what, listing] of answered) {
+      const models = new LocalModels();
+      const o = listening(listing);
+      expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch), what).toBe(false);
+      expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch), what).toBe(false);
       expect(o.seen, what).toHaveLength(1);
     }
-    // What was known before a failure is not believed after it.
+  });
+
+  it('what Ollama said is believed for five minutes and then not at all', async () => {
     let now = 0;
     let up = true;
     const models = new LocalModels({ now: () => now });
     const o = listening(() => (up ? tags(HERE) : new Response('', { status: 503 })));
     expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
+    // It stops answering: asked again each time, and its last word still holds for now.
     up = false;
-    now += LISTING_MAX_AGE_MS + 1;
+    now = PLACE_ASK_EVERY_MS + 1;
+    expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
+    now = PLACE_MAX_AGE_MS;
+    expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
+    expect(o.seen).toHaveLength(3);
+    // Five minutes after it last answered, nothing on it is known to be here.
+    now = PLACE_MAX_AGE_MS + 1;
     expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(false);
     up = true;
     expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
-    expect(o.seen).toHaveLength(3);
+    expect(o.seen).toHaveLength(5);
+  });
+
+  it('a model that is repointed at Ollama’s servers stops being here at the next listing', async () => {
+    let now = 0;
+    let rows: unknown[] = HERE;
+    const models = new LocalModels({ now: () => now });
+    const o = listening(() => tags(rows));
+    expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(true);
+    rows = [{ name: MODEL, remote_host: 'https://ollama.com:443' }];
+    now = PLACE_ASK_EVERY_MS + 1;
+    expect(await models.runsHere({ url: URL_, model: MODEL }, o.fetch)).toBe(false);
   });
 
   it('a listing that hangs is given up: not here, in about the time it is allowed', async () => {
@@ -119,6 +166,15 @@ describe('what the runtime knows of the models on this Mac', () => {
     const polite = (async (_u: string, init?: RequestInit) => new Promise<Response>((_, reject) => init!.signal!.addEventListener('abort', () => { aborted = true; reject(new DOMException('timed out', 'TimeoutError')); }))) as unknown as typeof fetch;
     expect(await new LocalModels({ timeoutMs: 40 }).runsHere({ url: URL_, model: MODEL }, polite)).toBe(false);
     expect(aborted).toBe(true);
+    // A listing that arrives after it was given up is not taken.
+    let late!: (r: Response) => void;
+    const slow = new LocalModels({ timeoutMs: 20 });
+    const s = listening(() => new Promise<Response>((r) => (late = r)));
+    expect(await slow.runsHere({ url: URL_, model: MODEL }, s.fetch)).toBe(false);
+    late(tags(HERE));
+    await new Promise((r) => setTimeout(r, 10));
+    const none = listening(() => new Response('', { status: 500 }));
+    expect(await slow.runsHere({ url: URL_, model: MODEL }, none.fetch)).toBe(false);
   });
 
   it('callers that ask together share one request', async () => {
@@ -160,7 +216,7 @@ interface Counts {
   loads: number;
 }
 /** One local call the runtime makes: asked of `ollama`, through `o`, with what it knows in `models`. */
-type Caller = (ollama: { url: string; model: string }, o: Listened, models: LocalModels, n: Counts) => Promise<Called>;
+type Caller = (ollama: { url: string; model: string; proxied?: boolean }, o: Listened, models: LocalModels, n: Counts) => Promise<Called>;
 
 const gates = (n: Counts) => ({ load: async () => (n.loads++, 'proceed' as const), claim: async () => (n.claims++, true) });
 
@@ -179,7 +235,7 @@ const CALLERS: Array<[string, Caller, unknown]> = [
 
 describe.each(CALLERS)('%s asks only a model on this Mac', (_name, call, good) => {
   const model = (o: { n: number }) => (async () => (o.n++, chatReply(good))) as unknown as typeof fetch;
-  const refused = async (ollama: { url: string; model: string }, listing: () => Response | Promise<Response>, listings: number, models = new LocalModels({ timeoutMs: 40 })) => {
+  const refused = async (ollama: { url: string; model: string; proxied?: boolean }, listing: () => Response | Promise<Response>, listings: number, models = new LocalModels({ timeoutMs: 40 })) => {
     const sent = { n: 0 };
     const o = listening(listing, model(sent));
     const n = { claims: 0, loads: 0 };
@@ -224,11 +280,16 @@ describe.each(CALLERS)('%s asks only a model on this Mac', (_name, call, good) =
     await refused({ url: URL_, model: MODEL }, () => new Response('', { status: 500 }), 1);
     await refused({ url: URL_, model: MODEL }, () => { throw new TypeError('fetch failed'); }, 1);
     await refused({ url: URL_, model: MODEL }, () => new Response('not a listing', { status: 200 }), 1);
+    await refused({ url: URL_, model: MODEL }, () => new Response('', { status: 404 }), 1);
     await refused({ url: URL_, model: MODEL }, () => tags([{ name: 'llama3.1:latest' }]), 1);
   });
 
   it('an Ollama that is not this machine: unavailable, and nothing at all is sent there', async () => {
     for (const url of ['http://10.0.0.5:11434', 'https://ollama.com', 'http://127.0.0.1.example.com:11434']) await refused({ url, model: MODEL }, () => tags(HERE), 0);
+  });
+
+  it('an address Node’s env proxy would carry: unavailable, and nothing at all is sent', async () => {
+    await refused({ url: URL_, model: MODEL, proxied: true }, () => tags(HERE), 0);
   });
 
   it('nothing is believed on a caller’s say-so: a model nobody has listed is not here', async () => {

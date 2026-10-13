@@ -35,7 +35,7 @@ import { OllamaProvider } from '@flint/core/ollama';
 import { GOAL_BUDGETS, dataBlock, estimateTokens, type CheckState } from '@flint/policy';
 import { scopedFetch } from '../policy/egress.js';
 import { modelSlot } from '../model/slot.js';
-import { LOCAL_MODELS, type LocalModels } from '../model/here.js';
+import { LOCAL_MODELS, type AskedOllama, type LocalModels } from '../model/here.js';
 import type { Load } from '../triage/load.js';
 import { STEP_TEMPLATES, STEP_TEMPLATE_IDS, SUGGESTED_STATUSES, type ReplyOp } from './steps.js';
 
@@ -201,7 +201,7 @@ export function planPrompt(f: PlanFacts, budget: number): { system: string; user
 export const promptBudget = (numCtx?: number): number => (numCtx ?? DEFAULT_NUM_CTX) - REPLY_TOKENS - PROMPT_MARGIN;
 
 export interface PlanDeps<T> {
-  ollama: { url: string; model: string; numCtx?: number };
+  ollama: AskedOllama & { numCtx?: number };
   /** Before each request: is a chat turn running? */
   load: () => Promise<Load>;
   /** One slot of goal.review.local's daily cap, or false when it is used up. Asked once per review. */
