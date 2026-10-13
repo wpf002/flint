@@ -69,14 +69,14 @@ export async function proposeEnable(db: Db, source: string, now = new Date()) {
     tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: 7 * 24 * 60, reason: 'Approving turns this source on.',
   }, 'will:cli', now);
 }
+/** A policy row's pattern, as the database's own CHECK reads it. */
+const POLICY_PATTERN = z.string().max(200).regex(/^[A-Za-z0-9_:-]+(\.[A-Za-z0-9_:-]+)*(\.\*)?$/);
+
 /**
  * A signed policy change, held to the database's own rules (pattern shape,
  * 180-day expiry, millisecond times, int4 caps) so a bad row is refused when the
  * proposal is made, not half-applied when it runs.
  */
-/** A policy row's pattern, as the database's own CHECK reads it. */
-const POLICY_PATTERN = z.string().max(200).regex(/^[A-Za-z0-9_:-]+(\.[A-Za-z0-9_:-]+)*(\.\*)?$/);
-
 export const PolicyArgs = z
   .object({
     rows: z
