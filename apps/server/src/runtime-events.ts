@@ -96,15 +96,17 @@ const RECALL = ['semantic', 'lexical', 'timeout', 'error', 'none', 'skipped'] as
 
 /**
  * Which route a request was, as the wire names it; undefined for the lanes
- * proxy (/inbox, /escalations, /runtime/health) and the goals proxy (/goals),
- * whose 5xx says the runtime failed, not the server: the runtime does not need
- * telling about itself.
+ * proxy (/inbox, /escalations, /runtime/health), the goals proxy (/goals) and
+ * the predictions proxy (/predictions), whose 5xx says the runtime failed, not
+ * the server: the runtime does not need telling about itself.
  */
 export function routeOf(url: string): 'chat' | 'generate' | 'speak' | 'transcribe' | 'approvals' | 'proposals' | 'other' | undefined {
   const path = url.split('?')[0] ?? '';
   if (path === '/inbox' || path.startsWith('/inbox/') || path.startsWith('/escalations/') || path === '/runtime/health') return undefined;
   // The goals proxy too (P3): its 5xx is the runtime's, and a goal's route is no event of the runtime's own.
   if (path === '/goals' || path.startsWith('/goals/')) return undefined;
+  // And the predictions proxy (P4): the same, and a number's key in a path is never an event's to carry.
+  if (path === '/predictions' || path.startsWith('/predictions/')) return undefined;
   if (path === '/chat') return 'chat';
   if (path === '/generate') return 'generate';
   if (path === '/speak') return 'speak';

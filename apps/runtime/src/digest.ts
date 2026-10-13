@@ -23,6 +23,8 @@ import { appendAudit } from './governance/audit.js';
 import { activePolicies } from './governance/proposals.js';
 import { claim } from './governance/counters.js';
 import { notifyServer, type NotifyOutcome } from './notify.js';
+import { questionsWaiting } from './predict/questions.js';
+import { questionsAnnounced } from './predict/view.js';
 
 export interface Digest {
   day: string;
@@ -75,8 +77,11 @@ export async function buildDigest(db: Db, tz: string, now = new Date()): Promise
                SELECT 1 FROM "AuditEntry" a WHERE a."correlationId" = gr.id AND a.action = 'goal.review.local' AND a.inputs->>'late' = 'true'))::int AS late
       FROM "GoalReview" gr WHERE gr."createdAt" >= ${start} AND gr."createdAt" < ${end}`,
   ]);
+  // Will's questions in Predictions, counted only once he has let Flint ask on its own: until then they wait in the
+  // panel and nothing announces them.
+  const questions = (await questionsAnnounced(db, now)) ? await questionsWaiting(db, now) : 0;
   const degraded = latest.filter((c) => c.status !== 'ok' && c.status !== 'disabled' && !c.component.includes('.')).map((c) => c.component).sort();
-  const counts = { relevant, quiet, escalated, did, queued, open, due, goalsReviewed: goals[0]?.reviewed ?? 0, goalsLate: goals[0]?.late ?? 0 };
+  const counts = { relevant, quiet, escalated, did, queued, open, due, goalsReviewed: goals[0]?.reviewed ?? 0, goalsLate: goals[0]?.late ?? 0, questions };
   return { day, title: digestTitle(day), body: digestBody(counts, degraded).slice(0, 500), counts: { ...counts, degraded: degraded.length }, degraded };
 }
 
@@ -85,6 +90,11 @@ export function goalsSentence(reviewed: number, late: number): string {
   if (!reviewed) return '';
   if (reviewed === 1) return `Flint reviewed 1 goal yesterday, ${late ? 'and it was late' : 'on time'}.`;
   return `Flint reviewed ${reviewed} goals yesterday, and ${late ? `${late} ${late === 1 ? 'was' : 'were'} late` : 'none was late'}.`;
+}
+
+/** "Flint has 2 questions for you in Predictions.": a count only. '' when none wait. */
+export function questionsSentence(n: number): string {
+  return n ? `Flint has ${plural(n, 'question')} for you in Predictions.` : '';
 }
 
 /**
@@ -98,12 +108,13 @@ export function digestTitle(day: string): string {
 }
 
 /**
- * The digest's lines, each a sentence: four, and a fifth on a day Flint reviewed
- * goals. The title carries the day; the console's tabs are Important and Other, it
+ * The digest's lines, each a sentence: four, a fifth on a day Flint reviewed
+ * goals, and a last one when questions wait for Will in Predictions (only once
+ * he has let Flint ask on its own). The title carries the day; the console's tabs are Important and Other, it
  * calls a proposal an approval, and Health's names stand for the components.
  */
 export function digestBody(
-  c: { relevant: number; quiet: number; escalated: number; did: number; queued: number; open: number; due: number; goalsReviewed?: number; goalsLate?: number },
+  c: { relevant: number; quiet: number; escalated: number; did: number; queued: number; open: number; due: number; goalsReviewed?: number; goalsLate?: number; questions?: number },
   degraded: string[],
 ): string {
   const waiting = [c.queued ? plural(c.queued, 'approval') : '', c.open ? plural(c.open, 'open escalation') : ''].filter(Boolean);
@@ -114,6 +125,7 @@ export function digestBody(
     ...(c.goalsReviewed ? [goalsSentence(c.goalsReviewed, c.goalsLate ?? 0)] : []),
     degraded.length ? `${degraded.length === 1 ? 'This needs' : 'These need'} a look: ${listOf(names)}.` : 'Everything checked is healthy.',
     c.due ? `Today, ${plural(c.due, 'prediction')} ${c.due === 1 ? 'resolves' : 'resolve'}.` : 'No predictions resolve today.',
+    ...(c.questions ? [questionsSentence(c.questions)] : []),
   ].join('\n');
 }
 

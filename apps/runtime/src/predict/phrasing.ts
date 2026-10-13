@@ -81,3 +81,162 @@ export function noTrendPhrase(r: Omit<RangeWords, 'point'>): string {
 export function forecastPhrase(r: RangeWords & { beatsNaive: boolean | null }): string {
   return r.beatsNaive === true ? rangePhrase(r) : noTrendPhrase(r);
 }
+
+// ---- The Predictions panel's words (P4 part 4) -------------------------------------------------------
+// Every sentence and value the console's Predictions panel shows about a number,
+// a question or Flint's record is made here, from the row's own numbers, and
+// sent as words: the console writes none of them. A state that has no number
+// (waiting, not enough history, no data) says so in a sentence, never with a
+// number Flint does not have. No parentheses, no key, no id.
+
+export type StepName = 'day' | 'week';
+
+const title = (s: string): string => s.replace(/\b[a-z]/g, (c) => c.toUpperCase());
+const steps = (n: number, step: StepName): string => `${n} ${step === 'day' ? 'day' : 'week'}${n === 1 ? '' : 's'}`;
+
+/** A day in words: "Oct 3", with the year when it is not `now`'s. */
+export function dayWords(at: Date, tz: string, now: Date): string {
+  const year = (d: Date) => new Intl.DateTimeFormat('en-US', { timeZone: tz, year: 'numeric' }).format(d);
+  return new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'short', day: 'numeric', ...(year(at) === year(now) ? {} : { year: 'numeric' }) }).format(at);
+}
+
+/** A later step of a forecast, by when it starts: "Tue, Oct 13" for a day, "Week of Oct 19" for a week. */
+export function stepLabel(at: Date, tz: string, step: StepName): string {
+  if (step === 'week') return `Week of ${new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'short', day: 'numeric' }).format(at)}`;
+  return new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short', month: 'short', day: 'numeric' }).format(at);
+}
+
+/** The fixed sentences and values: a state with no number says so. */
+export const PANEL = {
+  noData: 'This number has no data yet.',
+  off: 'Forecasts for this number are off.',
+  failed: 'Flint couldn’t forecast this number last night.',
+  tonight: 'Flint makes its next forecast tonight.',
+  noRecord: 'Flint has no results for this number yet.',
+  noResults: 'There are no results yet.',
+  better: 'Flint did better than always guessing the usual rate.',
+  noBetter: 'Flint did no better than guessing the usual rate.',
+  outsideClaim: 'Flint made this prediction in a chat.',
+  values: { noTrend: 'No Trend', steady: 'Steady', waiting: 'Waiting', short: 'Not Enough History', noData: 'No Data', tonight: 'Tonight', failed: 'Failed', off: 'Off' },
+} as const;
+
+/** "About 4", "About $1.20", "About 12 Minutes". */
+export function aboutValue(point: number, unit: ForecastUnit): string {
+  return `About ${title(unitValue(point, unit))}`;
+}
+
+/** A forecast that beat a plain guess: "Flint expects about 4, with an 80% range of 2 to 6." */
+export function expectSays(r: RangeWords): string {
+  return `Flint expects ${rangePhrase(r)}.`;
+}
+
+/** One that did not: "There’s no reliable trend, and a plain guess gives an 80% range of 0 to 3." It names no middle. */
+export function noTrendSays(r: Omit<RangeWords, 'point'>): string {
+  return `There’s ${noTrendPhrase(r)}.`;
+}
+
+/** The last 28 values are all the same. */
+export function steadySays(step: StepName): string {
+  return `This number hasn’t changed in ${steps(28, step)}.`;
+}
+
+/** The number for the step just ended is not in: Flint never forecasts from a made-up one. */
+export function waitingSays(step: StepName): string {
+  return step === 'day' ? 'Yesterday’s number isn’t in yet, so there’s no forecast for today.' : 'Last week’s number isn’t in yet, so there’s no forecast for this week.';
+}
+
+/** Not enough history yet: how much a forecast needs, and how much there is. */
+export function shortSays(step: StepName, need: number, have: number): string {
+  return `Flint needs ${steps(need, step)} of history. It has ${have}.`;
+}
+
+/** One step's range under its value: the forecast's own, or (no reliable trend) a plain guess's. */
+export function stepRangeSays(r: Omit<RangeWords, 'point'>, beatsNaive: boolean): string {
+  const span = unitSpan(r.lower, r.upper, r.unit);
+  return beatsNaive ? `The ${pct(r.level)} range is ${span}.` : `A plain guess gives ${leveled(r.level)} of ${span}.`;
+}
+
+/** The forecast's yes/no question as a label: "Above 3", "Above $1.20". */
+export function aboveLabel(threshold: number, unit: ForecastUnit): string {
+  return `Above ${title(unitValue(threshold, unit))}`;
+}
+
+/** Its chance as a value: "Likely · 70%". */
+export function chanceValue(p: number): string {
+  const x = chanceParts(p, undefined, 'UTC');
+  return `${title(x.word)} · ${x.pct}%`;
+}
+
+/** And as a sentence: "It’s likely, around 70%, that today runs above 3." */
+export function chanceSays(p: number, step: StepName, threshold: number, unit: ForecastUnit): string {
+  const x = chanceParts(p, undefined, 'UTC');
+  return `It’s ${x.word}, around ${x.pct}%, that ${step === 'day' ? 'today' : 'this week'} runs above ${unitValue(threshold, unit)}.`;
+}
+
+/** How a number's last ranges held: "22 of its last 27 ranges held." */
+export function recordSays(held: number, of: number): string {
+  if (of <= 0) return PANEL.noRecord;
+  if (of === 1) return held ? 'Its last range held.' : 'Its last range didn’t hold.';
+  return `${held} of its last ${of} ranges held.`;
+}
+
+/** Under a question for Will: what Flint said, and when. "Flint said likely, around 70%, on Oct 3." */
+export function saidSays(p: number, on: string): string {
+  const x = chanceParts(p, undefined, 'UTC');
+  return `Flint said ${x.word}, around ${x.pct}%, on ${on}.`;
+}
+
+/** Under one he answered. */
+export function answeredSays(answer: 'yes' | 'no' | 'skip', on: string): string {
+  return answer === 'skip' ? `You skipped it on ${on}.` : `You said ${answer} on ${on}.`;
+}
+
+/** A templated claim (one made from outside text) in plain words around an item's own label. */
+export function templatedClaim(kind: 'healthy' | 'deploy' | 'closed', label: string): string {
+  return kind === 'healthy' ? `${label} reports healthy.` : kind === 'deploy' ? `The next deploy of ${label} succeeds.` : `${label} is closed.`;
+}
+
+/** A templated claim about one of Flint's own numbers: "Deploys is above 4." */
+export function thresholdClaim(name: string, op: 'above' | 'below', value: number, unit: ForecastUnit): string {
+  return `${name} is ${op} ${unitValue(value, unit)}.`;
+}
+
+/** "41 Scored". */
+export function scoredValue(n: number): string {
+  return `${n} Scored`;
+}
+
+/** "When Flint said about 70%, it happened 64% of the time, over 41 predictions." */
+export function calledSays(statedPct: number, happenedPct: number, n: number): string {
+  return `When Flint said about ${statedPct}%, it happened ${happenedPct}% of the time, over ${n} ${n === 1 ? 'prediction' : 'predictions'}.`;
+}
+
+/** "Its 80% ranges held 79% of the time, over 120 forecasts." */
+export function rangesHeldSays(level: number, heldPct: number, n: number): string {
+  return `Its ${pct(level)} ranges held ${heldPct}% of the time, over ${n} ${n === 1 ? 'forecast' : 'forecasts'}.`;
+}
+
+/** Too few results of one kind to say how Flint did. */
+export function tooFewSays(kind: 'binary' | 'range', have: number, need: number): string {
+  return `Flint has ${have} of the ${need} results it needs for its ${kind === 'binary' ? 'yes or no predictions' : 'ranges'}.`;
+}
+
+/** The error score, from 100 scored on; its likely range when one was measured. */
+export function errorScoreSays(score: number, low?: number, high?: number): string {
+  const range = low !== undefined && high !== undefined ? ` The likely range is ${low.toFixed(2)} to ${high.toFixed(2)}.` : '';
+  return `Its error score is ${score.toFixed(2)}, and lower is better.${range}`;
+}
+
+/** How far its stated chances sat from what happened, in points. */
+export function gapSays(points: number): string {
+  return `Its stated chances sat ${points} ${points === 1 ? 'point' : 'points'} from what happened, on average.`;
+}
+
+/** What was left unsettled, a sentence a kind. */
+export function unsettledSays(kind: 'expired' | 'late' | 'declined' | 'void', n: number): string {
+  const one = n === 1;
+  if (kind === 'expired') return one ? '1 prediction ran out before it could be checked.' : `${n} predictions ran out before they could be checked.`;
+  if (kind === 'late') return one ? '1 was revised close to its date.' : `${n} were revised close to their date.`;
+  if (kind === 'declined') return `${n} depended on advice you declined.`;
+  return one ? '1 was set aside with your approval.' : `${n} were set aside with your approval.`;
+}

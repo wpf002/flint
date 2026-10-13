@@ -372,12 +372,14 @@ describe.skipIf(NO_DB)('the ledger\'s sweep on flint_test', () => {
       const specs = predictJobs(ctx());
       expect(specs.map((s) => [s.queue, s.cron, s.missed])).toEqual([
         ['forecast.series', '30 3 * * *', 'once'], ['forecast.run', '50 3 * * *', 'once'], ['ledger.sweep', '40 * * * *', undefined], ['ledger.snapshot', '45 3 * * *', 'once'],
+        // Part 4: the day's questions for Will, picked in the morning, ahead of the 07:30 digest.
+        ['ledger.ask', '20 7 * * *', 'once'],
       ]);
       expect([SERIES_CRON, SWEEP_CRON, SNAPSHOT_CRON, FORECAST_CRON]).toEqual(['30 3 * * *', '40 * * * *', '45 3 * * *', '50 3 * * *']);
       for (const s of specs) expect(ALL_QUEUES, s.queue).toContain(s.queue);
       // They are part of the runtime's job set only when on.
       const queues = (c: JobContext) => jobSpecs(c).map((s) => s.queue);
-      const four = ['forecast.series', 'forecast.run', 'ledger.sweep', 'ledger.snapshot'];
+      const four = ['forecast.series', 'forecast.run', 'ledger.sweep', 'ledger.snapshot', 'ledger.ask'];
       expect(queues(ctx())).toEqual(expect.arrayContaining(four));
       for (const q of four) expect(queues(ctx({ predict: false })), q).not.toContain(q);
       // Yesterday's numbers, then the sweep that settles what they decide, then the scores, then today's forecasts.

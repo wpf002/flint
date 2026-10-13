@@ -33,6 +33,7 @@ import { hasNul } from './jsonsize.js';
 import { isChatCommitmentKey } from './world/kinds.js';
 import { registerP2Routes } from './routes/p2.js';
 import { registerGoalRoutes } from './routes/goals.js';
+import { registerPredictionRoutes } from './routes/predictions.js';
 import { registerAppleCalendarRoutes } from './routes/apple-calendar.js';
 import type { CalendarInbox } from './sources/apple/inbox.js';
 import type { Bus } from './bus.js';
@@ -68,7 +69,7 @@ export const HEALTH_RUN_STALE_MS = 10 * 60_000;
 
 export interface AppDeps {
   db: Db;
-  config: Pick<Config, 'tokens' | 'rp' | 'tz'> & Partial<Pick<Config, 'triage' | 'home' | 'planner'>>;
+  config: Pick<Config, 'tokens' | 'rp' | 'tz'> & Partial<Pick<Config, 'triage' | 'home' | 'planner' | 'predict'>>;
   logger?: boolean;
   /** Where the log lines go (tests read them); stdout by default. */
   logStream?: { write(line: string): void };
@@ -331,6 +332,9 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // P3 part 2: the goals panel (scope proposals: the runtime connector's token can never read a goal's words).
   // Part 3: with the planner on, the views say when a review is late and Review Now sends the goal's review job.
   registerGoalRoutes(app, { db, need, tz: config.tz, reviews: config.planner ?? false, bus: () => deps.status?.bus });
+  // P4 part 4: the Predictions panel (scope proposals: the runtime connector's token can never read a forecast's
+  // numbers or a question's words, nor answer one for Will).
+  registerPredictionRoutes(app, { db, need, tz: config.tz, predict: config.predict ?? false });
   // P2.6: Flint Calendar's push (scope calendar:push only; up to the wire's byte budget, 2 MiB, this route alone).
   registerAppleCalendarRoutes(app, {
     db, need, bus: () => deps.status?.bus, log: (msg) => app.log.warn(msg),

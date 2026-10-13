@@ -4,7 +4,11 @@
  */
 import { describe, it, expect } from 'vitest';
 import { noteProblems } from '@flint/policy';
-import { chancePhrase, forecastPhrase, noTrendPhrase, rangePhrase, unitSpan, unitValue } from '../../src/predict/phrasing';
+import { PanelSentence, PanelWords, noteProblems as problems } from '@flint/policy';
+import {
+  PANEL, aboutValue, aboveLabel, answeredSays, calledSays, chanceParts, chancePhrase, chanceSays, chanceValue, dayWords, errorScoreSays, expectSays, forecastPhrase, gapSays, noTrendPhrase, noTrendSays,
+  rangePhrase, rangesHeldSays, recordSays, saidSays, scoredValue, shortSays, steadySays, stepLabel, stepRangeSays, templatedClaim, thresholdClaim, tooFewSays, unitSpan, unitValue, unsettledSays, waitingSays,
+} from '../../src/predict/phrasing';
 import { hasLoosePrediction, phrase, phraseBefore } from '../../src/templates/escalations';
 import type { ForecastUnit } from '../../src/predict/forecast';
 
@@ -100,5 +104,136 @@ describe('the phrase table', () => {
     // Words of chance written by hand are caught, whatever numbers sit beside them.
     expect(hasLoosePrediction('Deploys will probably be about 4.')).toBe(true);
     expect(hasLoosePrediction('Deploys today: about 4.')).toBe(false);
+  });
+});
+
+describe('the Predictions panel\'s words (P4 part 4)', () => {
+  /** A sentence the panel shows: fit for the wire, and for Will (the notes' rules). */
+  const sentence = (s: string) => {
+    expect(PanelSentence.safeParse(s).success, s).toBe(true);
+    expect(problems('Predictions', s), s).toEqual([]);
+    expect(s, s).toMatch(/^[A-Z0-9].*[.]$/);
+    expect(s, s).not.toMatch(/daily\.|weekly\.|\busd\b|_|[()]|NaN|undefined|null|Infinity/);
+  };
+  /** A label or a value: a few words, Title Case. */
+  const words = (s: string) => {
+    expect(PanelWords.safeParse(s).success, s).toBe(true);
+    expect(s, s).not.toMatch(/(^| )[a-z]/);
+    expect(s, s).not.toMatch(/NaN|undefined|null|Infinity|[()_]/);
+  };
+
+  it('a forecast says its range in plain words, in the number\'s own unit', () => {
+    expect(expectSays({ point: 4, lower: 2, upper: 6, level: 0.8, unit: 'count' })).toBe('Flint expects about 4, with an 80% range of 2 to 6.');
+    expect(expectSays({ point: 1.2, lower: 0.8, upper: 1.75, level: 0.8, unit: 'usd' })).toBe('Flint expects about $1.20, with an 80% range of $0.80 to $1.75.');
+    expect(expectSays({ point: 12, lower: 5, upper: 40, level: 0.8, unit: 'minutes' })).toBe('Flint expects about 12 minutes, with an 80% range of 5 to 40 minutes.');
+    expect(expectSays({ point: 3.5, lower: 1, upper: 6.25, level: 0.8, unit: 'hours' })).toBe('Flint expects about 3.5 hours, with an 80% range of 1 to 6.25 hours.');
+    expect([aboutValue(4, 'count'), aboutValue(1.2, 'usd'), aboutValue(12, 'minutes'), aboutValue(1, 'minutes'), aboutValue(3.5, 'hours'), aboutValue(12_345, 'count')]).toEqual(['About 4', 'About $1.20', 'About 12 Minutes', 'About 1 Minute', 'About 3.5 Hours', 'About 12,345']);
+    for (const unit of UNITS) {
+      sentence(expectSays({ point: 4, lower: 2, upper: 6, level: 0.8, unit }));
+      words(aboutValue(4, unit));
+    }
+  });
+
+  it('no reliable trend names no middle: only a plain guess\'s range', () => {
+    expect(noTrendSays({ lower: 0, upper: 3, level: 0.8, unit: 'count' })).toBe('There’s no reliable trend, and a plain guess gives an 80% range of 0 to 3.');
+    for (const unit of UNITS) {
+      const said = noTrendSays({ lower: 0, upper: 3, level: 0.8, unit });
+      sentence(said);
+      expect(said).not.toContain('about');
+      expect(said).not.toContain('expects');
+    }
+    words(PANEL.values.noTrend);
+  });
+
+  it('a state with no number says so in a sentence, and carries no number of the series', () => {
+    expect(waitingSays('day')).toBe('Yesterday’s number isn’t in yet, so there’s no forecast for today.');
+    expect(waitingSays('week')).toBe('Last week’s number isn’t in yet, so there’s no forecast for this week.');
+    expect(shortSays('day', 24, 9)).toBe('Flint needs 24 days of history. It has 9.');
+    expect(shortSays('week', 19, 1)).toBe('Flint needs 19 weeks of history. It has 1.');
+    expect(steadySays('day')).toBe('This number hasn’t changed in 28 days.');
+    expect(steadySays('week')).toBe('This number hasn’t changed in 28 weeks.');
+    expect([PANEL.noData, PANEL.off, PANEL.failed, PANEL.tonight]).toEqual([
+      'This number has no data yet.', 'Forecasts for this number are off.', 'Flint couldn’t forecast this number last night.', 'Flint makes its next forecast tonight.',
+    ]);
+    for (const s of [waitingSays('day'), waitingSays('week'), steadySays('day'), steadySays('week'), PANEL.noData, PANEL.off, PANEL.failed, PANEL.tonight]) {
+      sentence(s);
+      // Nothing but the fixed 28: no value, no range, no percent.
+      expect(s.replace('28', ''), s).not.toMatch(/\d|%|\$/);
+    }
+    sentence(shortSays('day', 24, 0));
+    expect(Object.values(PANEL.values)).toEqual(['No Trend', 'Steady', 'Waiting', 'Not Enough History', 'No Data', 'Tonight', 'Failed', 'Off']);
+    for (const v of Object.values(PANEL.values)) words(v);
+  });
+
+  it('one step of a forecast: its own range, or a plain guess\'s; later steps are named by their day or week', () => {
+    expect(stepRangeSays({ lower: 2, upper: 6, level: 0.8, unit: 'count' }, true)).toBe('The 80% range is 2 to 6.');
+    expect(stepRangeSays({ lower: 0, upper: 3, level: 0.8, unit: 'count' }, false)).toBe('A plain guess gives an 80% range of 0 to 3.');
+    for (const unit of UNITS) for (const beats of [true, false]) sentence(stepRangeSays({ lower: 0.5, upper: 3, level: 0.8, unit }, beats));
+    expect(stepLabel(new Date('2026-10-13T05:00:00Z'), TZ, 'day')).toBe('Tue, Oct 13');
+    expect(stepLabel(new Date('2026-10-19T05:00:00Z'), TZ, 'week')).toBe('Week of Oct 19');
+    // The day is Flint's own zone's: this instant is still Oct 12 in Chicago.
+    expect(stepLabel(new Date('2026-10-13T03:00:00Z'), TZ, 'day')).toBe('Mon, Oct 12');
+    expect(dayWords(new Date('2026-10-03T17:00:00Z'), TZ, new Date('2026-10-12T12:00:00Z'))).toBe('Oct 3');
+    expect(dayWords(new Date('2025-12-31T17:00:00Z'), TZ, new Date('2026-10-12T12:00:00Z'))).toBe('Dec 31, 2025');
+  });
+
+  it('the forecast\'s yes/no question says its chance in the ledger\'s own words, with its number', () => {
+    expect(aboveLabel(3, 'count')).toBe('Above 3');
+    expect(aboveLabel(1.2, 'usd')).toBe('Above $1.20');
+    expect(aboveLabel(12, 'minutes')).toBe('Above 12 Minutes');
+    expect(chanceValue(0.7)).toBe('Likely · 70%');
+    expect(chanceValue(0.5)).toBe('About Even · 50%');
+    expect(chanceSays(0.7, 'day', 3, 'count')).toBe('It’s likely, around 70%, that today runs above 3.');
+    expect(chanceSays(0.08, 'week', 12, 'count')).toBe('It’s very unlikely, around 8%, that this week runs above 12.');
+    for (let i = 5; i <= 95; i += 5) {
+      const p = i / 100;
+      const x = chanceParts(p, undefined, TZ);
+      for (const unit of UNITS) sentence(chanceSays(p, 'day', 3, unit));
+      // The same word and number the notes' phrase table gives for this chance.
+      expect(chanceSays(p, 'day', 3, 'count')).toContain(`${x.word}, around ${x.pct}%`);
+      expect(chanceValue(p)).toContain(`${x.pct}%`);
+      words(chanceValue(p));
+    }
+  });
+
+  it('a number\'s record, a question for Will and his answer are each one sentence', () => {
+    expect(recordSays(22, 27)).toBe('22 of its last 27 ranges held.');
+    expect(recordSays(0, 0)).toBe('Flint has no results for this number yet.');
+    expect([recordSays(1, 1), recordSays(0, 1)]).toEqual(['Its last range held.', 'Its last range didn’t hold.']);
+    expect(saidSays(0.7, 'Oct 3')).toBe('Flint said likely, around 70%, on Oct 3.');
+    expect(answeredSays('yes', 'Oct 12')).toBe('You said yes on Oct 12.');
+    expect(answeredSays('no', 'Oct 12')).toBe('You said no on Oct 12.');
+    expect(answeredSays('skip', 'Oct 12')).toBe('You skipped it on Oct 12.');
+    expect(templatedClaim('healthy', 'Flint Server')).toBe('Flint Server reports healthy.');
+    expect(templatedClaim('deploy', 'wpf002/flint CI')).toBe('The next deploy of wpf002/flint CI succeeds.');
+    expect(templatedClaim('closed', 'wpf002/flint #57')).toBe('wpf002/flint #57 is closed.');
+    expect(thresholdClaim('Deploys', 'above', 4, 'count')).toBe('Deploys is above 4.');
+    expect(thresholdClaim('Anthropic Spend', 'below', 1.2, 'usd')).toBe('Anthropic Spend is below $1.20.');
+    for (const s of [recordSays(22, 27), recordSays(0, 0), recordSays(1, 1), recordSays(0, 1), saidSays(0.7, 'Oct 3'), saidSays(0.05, 'Dec 31, 2025'), answeredSays('yes', 'Oct 12'), answeredSays('skip', 'Oct 12'), PANEL.outsideClaim, PANEL.noRecord]) sentence(s);
+  });
+
+  it('how Flint has done: each line a sentence made from counts and shares', () => {
+    expect(calledSays(70, 64, 41)).toBe('When Flint said about 70%, it happened 64% of the time, over 41 predictions.');
+    expect(rangesHeldSays(0.8, 79, 120)).toBe('Its 80% ranges held 79% of the time, over 120 forecasts.');
+    expect(tooFewSays('binary', 12, 30)).toBe('Flint has 12 of the 30 results it needs for its yes or no predictions.');
+    expect(tooFewSays('range', 25, 30)).toBe('Flint has 25 of the 30 results it needs for its ranges.');
+    expect(errorScoreSays(0.2149)).toBe('Its error score is 0.21, and lower is better.');
+    expect(errorScoreSays(0.21, 0.18, 0.24)).toBe('Its error score is 0.21, and lower is better. The likely range is 0.18 to 0.24.');
+    expect(gapSays(6)).toBe('Its stated chances sat 6 points from what happened, on average.');
+    expect(gapSays(1)).toBe('Its stated chances sat 1 point from what happened, on average.');
+    expect([PANEL.better, PANEL.noBetter, PANEL.noResults]).toEqual(['Flint did better than always guessing the usual rate.', 'Flint did no better than guessing the usual rate.', 'There are no results yet.']);
+    expect(scoredValue(41)).toBe('41 Scored');
+    words(scoredValue(0));
+    expect([unsettledSays('expired', 3), unsettledSays('late', 2), unsettledSays('declined', 4), unsettledSays('void', 1)]).toEqual([
+      '3 predictions ran out before they could be checked.', '2 were revised close to their date.', '4 depended on advice you declined.', '1 was set aside with your approval.',
+    ]);
+    expect([unsettledSays('expired', 1), unsettledSays('late', 1), unsettledSays('declined', 1), unsettledSays('void', 2)]).toEqual([
+      '1 prediction ran out before it could be checked.', '1 was revised close to its date.', '1 depended on advice you declined.', '2 were set aside with your approval.',
+    ]);
+    for (const s of [
+      calledSays(70, 64, 41), calledSays(100, 0, 1), rangesHeldSays(0.8, 79, 120), rangesHeldSays(0.8, 100, 1), tooFewSays('binary', 12, 30), tooFewSays('range', 25, 30), errorScoreSays(0.21), errorScoreSays(0.21, 0.18, 0.24), gapSays(6), gapSays(0),
+      PANEL.better, PANEL.noBetter, PANEL.noResults,
+      ...(['expired', 'late', 'declined', 'void'] as const).flatMap((kind) => [1, 2, 40].map((n) => unsettledSays(kind, n))),
+    ]) sentence(s);
   });
 });

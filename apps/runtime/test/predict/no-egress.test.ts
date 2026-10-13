@@ -12,6 +12,10 @@
  *
  * When the local model's estimate arrives (its own part), it reaches loopback
  * Ollama through scopedFetch in one file, and this test names that file.
+ *
+ * Part 4's two files are held to the same: the panel's views (which hold a
+ * series' numbers in words) and Will's questions reach nothing but the
+ * database, and neither writes a log line.
  */
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -23,7 +27,7 @@ const ledger = ['ledger/sweep.ts', 'ledger/scoring.ts', 'ledger/bootstrap.ts', '
 const code = (f: string) => readFileSync(join(SRC, f), 'utf8');
 /** The file without its comments: what it does, not what it says about itself. */
 const bare = (f: string) => code(f).replace(/\/\*[\s\S]*?\*\/|(^|[^:'"`])\/\/.*$/gm, '$1');
-/** The four prediction jobs, as jobs.ts runs them: the function that makes their handlers, and nothing else of that file. */
+/** The prediction jobs, as jobs.ts runs them: the function that makes their handlers, and nothing else of that file. */
 const jobs = (() => {
   const src = bare('jobs.ts');
   const from = src.indexOf('export function predictJobs(');
@@ -31,8 +35,10 @@ const jobs = (() => {
 })();
 
 describe('no egress from predictions', () => {
-  it('every file is here: the forecaster, the materialiser, the runner, the phrase table, the resolvers, the registry and the card', () => {
-    expect(predict.sort()).toEqual(['predict/enable.ts', 'predict/forecast.ts', 'predict/metrics.ts', 'predict/phrasing.ts', 'predict/resolvers.ts', 'predict/run.ts', 'predict/series.ts']);
+  it('every file is here: the forecaster, the materialiser, the runner, the phrase table, the resolvers, the registry, the card, and the panel\'s questions and views', () => {
+    expect(predict.sort()).toEqual([
+      'predict/enable.ts', 'predict/forecast.ts', 'predict/metrics.ts', 'predict/phrasing.ts', 'predict/questions.ts', 'predict/resolvers.ts', 'predict/run.ts', 'predict/series.ts', 'predict/view.ts',
+    ]);
   });
 
   it('none of them fetches, opens a socket, asks a model, or has a path to the frontier', () => {
@@ -50,7 +56,7 @@ describe('no egress from predictions', () => {
 
   it('the jobs that run them (jobs.ts) add nothing: no fetch, no socket, no model, and one runner for commands, handed to the numbers job', () => {
     expect(jobs.length).toBeGreaterThan(1000);
-    for (const queue of ['forecast.series', 'forecast.run', 'ledger.sweep', 'ledger.snapshot']) expect(jobs).toContain(`queue: '${queue}'`);
+    for (const queue of ['forecast.series', 'forecast.run', 'ledger.sweep', 'ledger.snapshot', 'ledger.ask']) expect(jobs).toContain(`queue: '${queue}'`);
     expect(jobs).not.toMatch(/\bfetch\s*\(|scopedFetch|XMLHttpRequest|WebSocket|EventSource|https?:\/\/|process\.env|\bimport\s*\(/);
     expect(jobs).not.toMatch(/ollama|OllamaProvider|@flint\/core|\/api\/chat|\/internal\/complete|frontier|anthropic\.com|openai\.com/i);
     expect(jobs).not.toMatch(/child_process|execFile|\bexec\(|\bspawn\(/);
@@ -78,6 +84,19 @@ describe('no egress from predictions', () => {
       expect(part.match(/\brun\(/g)).toHaveLength(1);
       expect(part).not.toMatch(/fetch|pull|remote\b|\blog\b|\bshow\b|--all|--branches/);
     }
+  });
+
+  it('the panel\'s views and questions write no log line: a forecast\'s numbers and a question\'s words go to the console and nowhere else', () => {
+    for (const f of ['predict/view.ts', 'predict/questions.ts', 'routes/predictions.ts']) {
+      const src = bare(f);
+      expect(src, f).not.toMatch(/console\.(log|warn|error|info|debug)|process\.std(out|err)/);
+      expect(src, f).not.toMatch(/notifyServer|notify\.js|deliver|\/internal\/notify/);
+    }
+    // The views take no logger at all; the questions' job is handed one and says only counts with it (jobs.ts).
+    expect(bare('predict/view.ts')).not.toMatch(/\blog\b/);
+    // The routes log a refusal by status and field paths, and nothing else.
+    expect(bare('routes/predictions.ts').match(/req\.log\./g)).toHaveLength(1);
+    expect(bare('routes/predictions.ts')).toContain("req.log.warn({ ref, status: err.status, why: err.why }, 'predictions route refused')");
   });
 
   it('the arithmetic draws on no clock and no chance: the forecaster, the scoring and the bootstrap give the same answer every time', () => {

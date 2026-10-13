@@ -5,7 +5,8 @@
  * fallback, never /generate); a chat.turn event ends each /chat turn and no
  * /generate turn; an eval replay's 5xx is not a route.error; memory extraction
  * waits for chat on the local model and is spend-gated only on the frontier;
- * the goals panel's proxy runs after the lanes proxy, behind the full token.
+ * the goals panel's proxy runs after the lanes proxy, behind the full token,
+ * and the predictions panel's after it.
  *
  * And the independence pieces: the local brain is never Anthropic; the frontier
  * breaker sees every client's requests and gates both routes; each persona says
@@ -145,6 +146,20 @@ describe('index.ts wiring', () => {
     expect(goals).toBeGreaterThan(inbox);
     expect(src.indexOf('if (!scopeAllows(scope, req.method')).toBeLessThan(goals);
     expect(src.match(/goalsRoutes\(/g)).toHaveLength(1);
+  });
+
+  it('the predictions proxy (P4) runs after the goals proxy, behind the bearer check and its scope, with the runtime link and nothing else', () => {
+    const predictions = src.indexOf('if (await predictionsRoutes(req, res, url, { runtime: ctx.runtime, errorRef })) return;');
+    const goals = src.indexOf('if (await goalsRoutes(req, res, url, { runtime: ctx.runtime, errorRef })) return;');
+    expect(goals).toBeGreaterThan(0);
+    expect(predictions).toBeGreaterThan(goals);
+    expect(src.indexOf('if (!scopeAllows(scope, req.method')).toBeLessThan(predictions);
+    expect(src.match(/predictionsRoutes\(/g)).toHaveLength(1);
+    expect(src).toContain("import { predictionsRoutes } from './predictions-routes';");
+    // A forecast's numbers pass through the proxy and go nowhere else in the server: index.ts reads no predictions
+    // route of the runtime's itself (no chat block, no note, no check is made from one).
+    expect(src).not.toContain('/v1/predictions');
+    expect(src).not.toMatch(/from '\.\.\/\.\.\/runtime|predict\/view|predict\/phrasing/);
   });
 
   it('memory extraction is chosen by FLINT_MEMORY_BRAIN: on the local model it waits for chat, on the frontier it is spend-gated', () => {
