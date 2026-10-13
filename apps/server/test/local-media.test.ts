@@ -49,12 +49,12 @@ function inner(window = 16_384): ProviderAdapter & { asked: GenerateArgs[]; base
     estimateTokens: (messages) => estimateMessageTokens(messages),
     async generate(args) {
       asked.push(args);
-      return { message: { id: 'a', role: 'assistant', content: 'ok', timestamp: 0 }, usage: { inputTokens: 1, outputTokens: 1 }, reason: 'complete' };
+      return { message: { id: 'a', role: 'assistant', content: 'ok', timestamp: 0 }, usage: { input: 1, output: 1 }, reason: 'complete' };
     },
     async *stream(args) {
       asked.push(args);
       yield { type: 'text', delta: 'ok' } as StreamEvent;
-      yield { type: 'done', reason: 'complete', usage: { inputTokens: 1, outputTokens: 1 } } as StreamEvent;
+      yield { type: 'done', reason: 'complete', usage: { input: 1, output: 1 } } as StreamEvent;
     },
   };
 }
