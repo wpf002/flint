@@ -31,8 +31,8 @@ import { noteProblems } from '@flint/policy';
 import { NO_DB, URLS, freshDb, withClient } from './db';
 import { enrollTestKey } from './sign';
 import { createDb, type Db } from '../src/db';
-import { loadConfig, nexusBackupWanted, type Config } from '../src/config';
-import { FLINT_SET, NEXUS_SET, NotReadOnly, canWrite, checkedSet, client, countRows, dumpDatabase, needsSetup, newestDump, pruneDumps, pruneOffsite, restoreDrill, targetOf, type BackupSet, type Tools } from '../src/backup/backup';
+import { loadConfig, nexusBackupState, nexusBackupWanted, runtimeEnv, type Config } from '../src/config';
+import { DrillBusy, FLINT_SET, NEXUS_SET, NotReadOnly, TookTooLong, canWrite, checkedSet, client, countRows, dumpDatabase, encryptTo, needsSetup, newestDump, pruneDumps, pruneOffsite, restoreDrill, targetOf, type BackupSet, type Tools } from '../src/backup/backup';
 import { NEXUS_OFF, nexusHelp, nexusSetup, nexusSetupArgs } from '../src/backup/nexus';
 import { fileBackup, fileFailure } from '../src/backup/record';
 import { checkDump, RestoreRefused } from '../src/backup/restore';
@@ -41,6 +41,7 @@ import { approveProposal, createProposal } from '../src/governance/proposals';
 import { runInternal } from '../src/governance/internal';
 import { NEXUS_HEALTH, checkComponents } from '../src/health/checks';
 import { watchdog } from '../src/health/watchdog';
+import { p2Report } from '../src/report/exit';
 import { CRITICAL_TEMPLATES, criticalVerdict } from '../src/triage/critical';
 import { render, type TemplateId } from '../src/templates/escalations';
 import { facts } from './triage/helpers';
@@ -70,7 +71,14 @@ const sentencesOrCommands = (lines: readonly string[]) => {
 describe('a backup set’s names', () => {
   it('the two sets are Flint’s and Nexus’s, and neither can be given a name that reaches anything else', () => {
     expect(FLINT_SET).toEqual({ prefix: 'flint', schemas: ['public'], scratch: 'flint_restore_test', kind: 'pg_dump_flint' });
-    expect(NEXUS_SET).toEqual({ prefix: 'nexus', schemas: ['public'], scratch: 'nexus_restore_test', kind: 'nexus_dump', readOnly: true });
+    expect(NEXUS_SET).toEqual({
+      prefix: 'nexus', schemas: ['public'], scratch: 'nexus_restore_test', kind: 'nexus_dump', readOnly: true,
+      // A database others are using: pg_dump waits 15 seconds on a lock, each tool has a time limit, and a second test waits two minutes.
+      limits: { lockWaitMs: 15_000, dumpMs: 20 * 60_000, offsiteMs: 20 * 60_000, drillMs: 30 * 60_000, drillWaitMs: 2 * 60_000 },
+    });
+    // Flint's own set has none of that: its commands are what they were.
+    expect(FLINT_SET.limits ?? FLINT_SET.readOnly).toBeUndefined();
+    for (const limits of [{ ...NEXUS_SET.limits!, dumpMs: 0 }, { ...NEXUS_SET.limits!, lockWaitMs: 1.5 }, { ...NEXUS_SET.limits!, drillMs: 48 * 3_600_000 }]) expect(() => checkedSet({ ...NEXUS_SET, limits })).toThrow(/limits/);
     expect(checkedSet(NEXUS_SET)).toBe(NEXUS_SET);
     const bad: Array<Partial<BackupSet>> = [
       { prefix: 'nexus.*' }, { prefix: '' }, { prefix: 'Nexus' }, { prefix: '../nexus' }, { prefix: 'n' },
@@ -139,7 +147,7 @@ describe('a backup set’s names', () => {
       [pgError('42501', 'permission denied for table MemoryEntry'), /not let into/],
       [pgError('28P01', 'password authentication failed for user "flint_backup"'), /^The login in the Nexus address was refused\. Its password may have changed\.$/],
       [pgError('3D000', 'database "nexus" does not exist'), /^There is no database by the name in the Nexus address on this Mac\.$/],
-      [new NotReadOnly(), /^The login in the Nexus address could change Nexus, so Flint backed nothing up\.$/],
+      [new NotReadOnly(['table']), /^The login in the Nexus address holds a right to change Nexus, so Flint backed nothing up\.$/],
     ];
     for (const [err, first] of cases) {
       const lines = nexusHelp(err, { backupUrl: url });
@@ -154,8 +162,23 @@ describe('a backup set’s names', () => {
       'Let it in once with these commands, then run this again:',
       "  psql -d postgres -c 'GRANT CONNECT ON DATABASE nexus TO flint_backup'",
       "  psql -d postgres -c 'GRANT pg_read_all_data TO flint_backup'",
-      'The first lets that login connect to Nexus. The second lets it read every table there and change none.',
+      'The first lets that login connect to Nexus. The second lets it read every table there and gives it no right to change one.',
     ]);
+    // That advice is the backup's alone: only the backup reads Nexus. A restore test that was refused (its scratch
+    // database belongs to someone else, an extension it may not make) says so in its own words, and names no grant;
+    // the offsite copy, which works on a file, gets none.
+    for (const refused of [pgError('42501', 'must be owner of database nexus_restore_test'), pgError('42501', 'permission denied to create extension "vector"'), pgError('28P01', 'password authentication failed for user "flint_restore"')]) {
+      const drill = nexusHelp(refused, { backupUrl: url }, 'drill');
+      expect(drill).toEqual(['The restore test could not use its scratch database, so nothing was tested.', 'Nexus was not opened, and nothing there needs changing.']);
+      expect(nexusHelp(refused, { backupUrl: url }, 'offsite')).toEqual([]);
+      expect(nexusHelp(refused, { backupUrl: url }, 'backup').join('\n')).toMatch(/GRANT|Set the address again/);
+    }
+    for (const other of [new Error('row counts differ in 1 table'), new DrillBusy(), new TookTooLong('pg_restore', 60_000), new NotReadOnly(['table']), undefined]) {
+      expect(nexusHelp(other, { backupUrl: url }, 'drill')).toEqual([]);
+      expect(nexusHelp(other, { backupUrl: url }, 'offsite')).toEqual([]);
+    }
+    // An address that cannot be used is said the same way whichever step it stopped.
+    for (const step of ['backup', 'offsite', 'drill'] as const) expect(nexusHelp(undefined, { problem: 'FLINT_NEXUS_BACKUP_URL is not a URL' }, step)[0]).toBe('Flint did not back Nexus up: the address set for it is not a URL.');
     // A login or a database whose name would need quoting is never put into a command.
     const odd = nexusHelp(pgError('42501', 'permission denied'), { backupUrl: `postgresql://Some%20One:${secret}@[::1]:5432/nexus` });
     expect(odd.join('\n')).not.toMatch(/psql|GRANT|Some/);
@@ -168,8 +191,14 @@ describe('a backup set’s names', () => {
     expect(nexusHelp(new Error('No space left on device'), { backupUrl: url })).toEqual([]);
     expect(nexusHelp(undefined, { backupUrl: url })).toEqual([]);
     sentencesOrCommands(NEXUS_OFF);
-    // A login that could write is a setup problem, never "tries again tonight"; the scratch database missing is not.
+    // A login that could write is a setup problem, never "tries again tonight"; the scratch database missing is not,
+    // nor is a step that was stopped for taking too long or held up by another test.
     expect(needsSetup(new NotReadOnly())).toBe(true);
+    expect(needsSetup(new TookTooLong('pg_dump', 20 * 60_000))).toBe(false);
+    expect(needsSetup(new DrillBusy())).toBe(false);
+    expect(new TookTooLong('pg_dump', 20 * 60_000).message).toBe('pg_dump was stopped because it ran longer than 20 minutes');
+    expect(new TookTooLong('age', 60_000).message).toBe('age was stopped because it ran longer than 1 minute');
+    expect(new DrillBusy().message).toBe('another restore test was using the scratch database, so this one did not run');
     expect(needsSetup(new Error('database "nexus_restore_test" does not exist'))).toBe(false);
     expect(needsSetup(new Error('database "nexus" does not exist'))).toBe(true);
   });
@@ -187,7 +216,8 @@ describe('the one-time setup, as the README gives it', () => {
       'cd ~/flint && pnpm --filter @flint/runtime nexus-setup',
       'cd ~/flint && pnpm --filter @flint/runtime nexus-backup',
       'cd ~/flint && pnpm --filter @flint/runtime nexus-drill',
-      "sed -i '' '/^FLINT_NEXUS_BACKUP_URL=/d' ~/.flint/backup.env && chmod 600 ~/.flint/backup.env",
+      "sed -i '' -E '/^(export[[:space:]]+)?FLINT_NEXUS_BACKUP_URL=/d' ~/.flint/backup.env && chmod 600 ~/.flint/backup.env",
+      `psql -d flint -c "UPDATE \\"BackupRun\\" SET \\"restoreTestedAt\\" = NULL, \\"restoreOk\\" = NULL, \\"restoreDetail\\" = NULL WHERE kind = 'nexus_dump'"`,
     ]);
     // The grants are the ones a refusal prints, to the letter; the other one it prints is named in the text.
     const printed = nexusHelp(Object.assign(new Error('permission denied for database "nexus"'), { code: '42501' }), { backupUrl: 'postgresql://flint_backup:x@[::1]:5432/nexus' }).map((l) => l.trim());
@@ -197,24 +227,49 @@ describe('the one-time setup, as the README gives it', () => {
     expect([...NEXUS_OFF].map((l) => l.trim())).toContain(commands[1]);
     // It says what it never does, and that restoring Nexus is not here yet.
     for (const said of ['It ships off.', 'Flint cannot restore Nexus.', 'It never opens the Nexus database.', 'Nexus\'s own backup job is not touched.']) expect(section, said).toContain(said);
+    // What it says of the login is what is checked, and it says what is left over; it never promises Nexus cannot be changed.
+    expect(section).toContain('through a login that has no right to\n  change Nexus\'s tables');
+    expect(section).toContain('### What the login check covers');
+    for (const left of ['call a function Nexus\nopened to everyone', 'make temporary tables', 'ordinary read locks']) expect(section, left).toContain(left);
+    expect(section).not.toMatch(/can change nothing|cannot change it|changes nothing there|change nothing there|write none|change none/);
+    // Rolling back to an older runtime: it says that runtime reads any tested backup, and gives the one step.
+    expect(section).not.toContain('are read by nothing');
+    expect(section).toContain('read the newest tested backup of any kind');
     const runbook = readFileSync(join(RUNTIME, '..', '..', 'docs', 'RECOVERY.md'), 'utf8');
     expect(runbook).toContain('it cannot\n  put Nexus back');
     expect(runbook).toContain('Restoring Nexus from one is a later part.');
   });
 
-  it('switching it off: the README’s own command takes the line out, keeps the others, and leaves the file its owner’s alone', () => {
+  it('switching it off: the README’s own command takes the line out however it was written, keeps the others, and leaves the file its owner’s alone', () => {
     const home = mkdtempSync(join(tmpdir(), 'flint-nexus-off-'));
     mkdirSync(join(home, '.flint'), { mode: 0o700 });
     const file = join(home, '.flint', 'backup.env');
-    writeFileSync(file, 'FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/flint\nFLINT_NEXUS_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/nexus\nFLINT_BACKUP_CATCHUP=on\n', { mode: 0o600 });
-    expect(nexusBackupWanted(home, file)).toBe(true);
     const off = commands.find((c) => c.startsWith('sed '))!;
-    const r = spawnSync('/bin/zsh', ['-c', off], { env: { PATH: '/usr/bin:/bin', HOME: home }, encoding: 'utf8' });
-    expect(`${r.stdout}${r.stderr}`).toBe('');
-    expect(r.status).toBe(0);
-    expect(readFileSync(file, 'utf8')).toBe('FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/flint\nFLINT_BACKUP_CATCHUP=on\n');
-    expect(statSync(file).mode & 0o777).toBe(0o600);
-    expect(nexusBackupWanted(home, file)).toBe(false);
+    const script = readFileSync(join(RUNTIME, 'backup-nightly.sh'), 'utf8');
+    const fn = /^nexus_on\(\) \{.*\}$/m.exec(script)![0];
+    const nightly = () => spawnSync('/bin/zsh', ['-c', `DATA="$1"; ${fn}\nnexus_on`, 'zsh', join(home, '.flint')], { encoding: 'utf8' }).status === 0;
+    const url = 'postgresql://flint_backup:x@[::1]:5432/nexus';
+    // As `nexus-setup` writes it, as someone exporting it wrote it, quoted, and twice.
+    for (const line of [`FLINT_NEXUS_BACKUP_URL=${url}`, `export FLINT_NEXUS_BACKUP_URL=${url}`, `export   FLINT_NEXUS_BACKUP_URL="${url}"`, `FLINT_NEXUS_BACKUP_URL=${url}\nexport FLINT_NEXUS_BACKUP_URL=${url}`]) {
+      writeFileSync(file, `FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/flint\n${line}\nFLINT_BACKUP_CATCHUP=on\n`, { mode: 0o600 });
+      expect(nexusBackupState(home, file), line).toBe('on');
+      expect(nightly(), line).toBe(true);
+      const r = spawnSync('/bin/zsh', ['-c', off], { env: { PATH: '/usr/bin:/bin', HOME: home }, encoding: 'utf8' });
+      expect(`${r.stdout}${r.stderr}`, line).toBe('');
+      expect(r.status, line).toBe(0);
+      expect(readFileSync(file, 'utf8'), line).toBe('FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/flint\nFLINT_BACKUP_CATCHUP=on\n');
+      expect(statSync(file).mode & 0o777, line).toBe(0o600);
+      expect(nexusBackupState(home, file), line).toBe('off');
+      expect(nightly(), line).toBe(false);
+    }
+    // A line left with nothing after the = is off everywhere too: for the runtime, for the nightly script, and for the commands.
+    for (const empty of ['FLINT_NEXUS_BACKUP_URL=', 'export FLINT_NEXUS_BACKUP_URL=', 'FLINT_NEXUS_BACKUP_URL=""', "export FLINT_NEXUS_BACKUP_URL=''", 'FLINT_NEXUS_BACKUP_URL=   ']) {
+      writeFileSync(file, `FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/flint\n${empty}\n`, { mode: 0o600 });
+      expect(nexusBackupState(home, file), empty).toBe('off');
+      expect(nexusBackupWanted(home, file), empty).toBe(false);
+      expect(nightly(), empty).toBe(false);
+      expect(runtimeEnv(file, {}).FLINT_NEXUS_BACKUP_URL?.trim() ?? '', empty).toBe('');
+    }
     rmSync(home, { recursive: true, force: true });
   });
 });
@@ -325,6 +380,8 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       // The counts: the listed schema's tables, never the migrations table, never another schema's.
       expect(d.counts).toEqual({ 'public."MemoryEntry"': ROWS['"MemoryEntry"'], 'public."Thread"': ROWS['"Thread"'] });
       expect(JSON.parse(readFileSync(`${d.path}.counts.json`, 'utf8'))).toEqual(d.counts);
+      // The one large object the fixture holds is counted, so the run can say it was left out; Flint's own dump counts none.
+      expect(d.largeObjects).toBe(1);
       // What is in it: every schema's tables (pg_dump takes the whole database), and no large object.
       const listing = execFileSync(tools.pgRestore, ['-l', d.path], { encoding: 'utf8' });
       expect(listing).toMatch(/TABLE DATA public MemoryEntry/);
@@ -375,6 +432,128 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       // A file that is no dump fails the test, and the scratch database is gone all the same.
       writeFileSync(copy, 'not a dump');
       await expect(restoreDrill(copy, URLS!.restore!, tools, SET)).rejects.toThrow(/pg_restore exited/);
+      expect(await databases(`${SET.scratch}%`)).toEqual([]);
+    });
+
+    it('Flint’s own dump and restore test run the tools exactly as before; Nexus’s add only the lock wait, and its own scratch name', async () => {
+      // A stand-in for each tool that writes down how it was run, then runs the real one.
+      const log = join(dir, 'argv.log');
+      const wrapped = (real: string, name: string): string => {
+        const f = join(dir, name);
+        writeFileSync(f, `#!/bin/zsh\nprint -r -- "${name} $*" >> ${JSON.stringify(log)}\n[[ -n $PGPASSWORD ]] && print -r -- "${name} had its password in its environment" >> ${JSON.stringify(log)}\nexec ${JSON.stringify(real)} "$@"\n`, { mode: 0o755 });
+        return f;
+      };
+      const logging: Tools = { pgDump: wrapped(tools.pgDump, 'pg_dump'), pgRestore: wrapped(tools.pgRestore, 'pg_restore') };
+      const ran = () => readFileSync(log, 'utf8').trim().split('\n');
+      const at = new Date('2026-10-13T08:00:00.000Z');
+      const where = (url: string) => {
+        const t = targetOf(url);
+        return `-h ${t.host} -p ${t.port} -U ${t.user}`;
+      };
+      // Flint's own database (flint_test here): the arguments main runs, to the letter.
+      const own = join(dir, 'own');
+      const f = await dumpDatabase(URLS!.backup!, own, logging, at);
+      expect(f.largeObjects).toBeUndefined();
+      await restoreDrill(f.path, URLS!.restore!, logging);
+      const flintDb = targetOf(URLS!.backup!).database;
+      expect(ran().map((l) => l.replace(/--snapshot=\S+/, '--snapshot=S'))).toEqual([
+        `pg_dump -Fc --no-large-objects --snapshot=S ${where(URLS!.backup!)} -d ${flintDb} -f ${f.path}.partial`,
+        'pg_dump had its password in its environment',
+        `pg_restore --no-owner --no-privileges --exit-on-error ${where(URLS!.restore!)} -d flint_restore_test ${f.path}`,
+        'pg_restore had its password in its environment',
+      ]);
+      // Nexus's: the same, with the wait on a lock, and its own scratch database.
+      writeFileSync(log, '');
+      const n = await dumpDatabase(nexusUrl, join(dir, 'theirs'), logging, at, SET);
+      await restoreDrill(n.path, URLS!.restore!, logging, SET);
+      expect(ran().map((l) => l.replace(/--snapshot=\S+/, '--snapshot=S'))).toEqual([
+        `pg_dump -Fc --no-large-objects --lock-wait-timeout=15000 --snapshot=S ${where(nexusUrl)} -d ${fixture} -f ${n.path}.partial`,
+        'pg_dump had its password in its environment',
+        `pg_restore --no-owner --no-privileges --exit-on-error ${where(URLS!.restore!)} -d ${SET.scratch} ${n.path}`,
+        'pg_restore had its password in its environment',
+      ]);
+      // No password is ever an argument.
+      for (const url of [URLS!.backup!, URLS!.restore!]) expect(readFileSync(log, 'utf8')).not.toContain(decodeURIComponent(new URL(url).password));
+    });
+
+    it('a lock someone holds in Nexus ends the dump after its wait, with nothing half-written: it is not waited on all night', async () => {
+      // Someone in Nexus holds a table locked (a migration, say): pg_dump cannot take its own lock on it.
+      const holder = client(targetOf(ownerUrl));
+      await holder.connect();
+      await holder.query('BEGIN');
+      await holder.query('LOCK TABLE other.elsewhere IN ACCESS EXCLUSIVE MODE');
+      try {
+        const out = join(dir, 'locked');
+        const began = Date.now();
+        const err = await dumpDatabase(nexusUrl, out, tools, new Date(), { ...SET, limits: { ...NEXUS_SET.limits!, lockWaitMs: 1000, dumpMs: 60_000 } }).then(() => undefined, (e: unknown) => e);
+        expect(err).toBeInstanceOf(Error);
+        // (pg_dump's own wait on a lock is a time limit on the statement that takes it.)
+        expect((err as Error).message).toBe('pg_dump exited 1: canceling statement due to statement timeout');
+        expect(Date.now() - began).toBeLessThan(20_000);
+        expect(readdirSync(out)).toEqual([]);
+        // Another night may go better: it is not a setup problem.
+        expect(needsSetup(err)).toBe(false);
+        // And were the wait itself to hang, the step's own time limit stops the tool where it stands.
+        const late = join(dir, 'late');
+        const stopped = await dumpDatabase(nexusUrl, late, tools, new Date(), { ...SET, limits: { ...NEXUS_SET.limits!, lockWaitMs: 600_000, dumpMs: 1500 } }).then(() => undefined, (e: unknown) => e);
+        expect(stopped).toBeInstanceOf(TookTooLong);
+        expect((stopped as Error).message).toBe('pg_dump was stopped because it ran longer than 2 seconds');
+        expect(readdirSync(late)).toEqual([]);
+        expect(spawnSync('/usr/bin/pgrep', ['-f', join(late, 'nexus-')], { encoding: 'utf8' }).stdout.trim()).toBe('');
+      } finally {
+        await holder.query('ROLLBACK');
+        await holder.end();
+      }
+      // The lock gone, the same dump is taken.
+      expect((await dumpDatabase(nexusUrl, join(dir, 'unlocked'), tools, new Date(), SET)).counts).toMatchObject({ 'public."Thread"': ROWS['"Thread"'] });
+    });
+
+    it('the offsite copy and the restore test have a time limit too: the tool is stopped, the step fails, and nothing half-made stays', async () => {
+      const bin = join(dir, 'slow');
+      mkdirSync(bin);
+      // An age that begins as age does and never finishes; a pg_restore that never finishes. (exec: the tool itself is what is stopped.)
+      writeFileSync(join(bin, 'age'), `#!/bin/zsh\nprint -n -- 'age-encryption.org/v1\\n-> stand-in\\n'\nexec sleep 20\n`, { mode: 0o755 });
+      writeFileSync(join(bin, 'pg_restore'), '#!/bin/zsh\nexec sleep 20\n', { mode: 0o755 });
+      const sent = join(dir, 'sent');
+      const began = Date.now();
+      const copy = await encryptTo(dump, `age1${'q'.repeat(58)}`, { ...tools, age: join(bin, 'age') }, sent, 700).then(() => undefined, (e: unknown) => e);
+      expect(copy).toBeInstanceOf(TookTooLong);
+      expect((copy as Error).message).toBe('age was stopped because it ran longer than 1 second');
+      expect(readdirSync(sent)).toEqual([]);
+      const test = await restoreDrill(dump, URLS!.restore!, { ...tools, pgRestore: join(bin, 'pg_restore') }, { ...SET, limits: { ...NEXUS_SET.limits!, drillMs: 700 } }).then(() => undefined, (e: unknown) => e);
+      expect(test).toBeInstanceOf(TookTooLong);
+      expect((test as Error).message).toBe('pg_restore was stopped because it ran longer than 1 second');
+      expect(await databases(`${SET.scratch}%`)).toEqual([]);
+      expect(Date.now() - began).toBeLessThan(15_000);
+      expect(spawnSync('/usr/bin/pgrep', ['-f', bin], { encoding: 'utf8' }).stdout.trim()).toBe('');
+    });
+
+    it('one Nexus restore test at a time: a second waits its turn, and says so when the wait is too long, instead of dropping the first one’s database', async () => {
+      const key = `restore test ${SET.scratch}`;
+      // Another test is under way: it holds the scratch database's lock, as every Nexus test does from start to end.
+      const other = client(targetOf(URLS!.restore!));
+      await other.connect();
+      await other.query('SELECT pg_advisory_lock(hashtext($1))', [key]);
+      await other.query(`CREATE DATABASE ${SET.scratch}`);
+      try {
+        const busy = await restoreDrill(dump, URLS!.restore!, tools, { ...SET, limits: { ...NEXUS_SET.limits!, drillWaitMs: 600 } }).then(() => undefined, (e: unknown) => e);
+        expect(busy).toBeInstanceOf(DrillBusy);
+        expect((busy as Error).message).toBe('another restore test was using the scratch database, so this one did not run');
+        // The other test's database is still there: nothing was dropped under it.
+        expect(await databases(`${SET.scratch}%`)).toEqual([SET.scratch]);
+        // With time to wait, it runs once the other has finished.
+        const waiting = restoreDrill(dump, URLS!.restore!, tools, { ...SET, limits: { ...NEXUS_SET.limits!, drillWaitMs: 30_000 } });
+        await new Promise((r) => setTimeout(r, 800));
+        expect(await databases(`${SET.scratch}%`)).toEqual([SET.scratch]);
+        await other.query(`DROP DATABASE ${SET.scratch}`);
+        await other.query('SELECT pg_advisory_unlock(hashtext($1))', [key]);
+        expect(await waiting).toEqual({ ok: true, tables: 2, mismatches: [] });
+      } finally {
+        await other.end();
+      }
+      // Two started at once: each has the scratch database to itself, one after the other, and both pass.
+      const both = await Promise.all([restoreDrill(dump, URLS!.restore!, tools, SET), restoreDrill(dump, URLS!.restore!, tools, SET), restoreDrill(dump, URLS!.restore!, tools, SET)]);
+      expect(both.map((r) => r.ok)).toEqual([true, true, true]);
       expect(await databases(`${SET.scratch}%`)).toEqual([]);
     });
 
@@ -453,8 +632,10 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       const writes = cli(['nexus-setup', '--database', fixture]);
       expect(writes.status).toBe(1);
       expect(writes.lines).toEqual([
-        'Flint’s backup login could change the Nexus database, so Flint will not use it there. Nothing was changed.',
-        'Take away what lets it write in Nexus, then run this again.',
+        'Flint’s backup login holds a right to change the Nexus database, so Flint will not use it there. Nothing was changed.',
+        // What it holds, by kind (never by name): here it owns the fixture and everything in it.
+        expect.stringMatching(/^What it holds: it owns the database; .*it owns something in the database\.$/),
+        'Take that away from it, then run this again.',
       ]);
       expect(before()).toBe(kept);
       noSecrets(writes);
@@ -484,7 +665,7 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       expect(r.err).toBe('');
       expect(r.status).toBe(0);
       expect(r.lines).toEqual([
-        'Flint can read the Nexus database and cannot change it.',
+        'Flint’s login can read the Nexus database and has no right to change its tables. Flint only reads it.',
         'Nexus’s backup is on. Tonight’s run files its first card in Approvals.',
         'To take a backup now and test it, run these:',
         '  cd ~/flint && pnpm --filter @flint/runtime nexus-backup',
@@ -522,7 +703,8 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       const ran = cli(['nexus-backup', '--auto']);
       expect(ran.err).toBe('');
       expect(ran.status).toBe(0);
-      expect(ran.out).toMatch(/^backup\.nexus: ok \{"bytes":\d+,"sha256":"[0-9a-f]{64}","tables":2,"pruned":0\}\n$/);
+      // The fixture holds one large object: no backup includes one, and the run says how many it left out.
+      expect(ran.out).toMatch(/^backup\.nexus: ok \{"bytes":\d+,"sha256":"[0-9a-f]{64}","tables":2,"pruned":0,"largeObjects":1\}\nNexus holds 1 large object\. No backup includes it, so it was left out\.\n$/);
       expect((await db.proposal.findUniqueOrThrow({ where: { id: card!.id } })).status).toBe('executed');
       expect(await db.auditEntry.findFirst({ where: { action: 'backup.nexus', kind: 'action' }, orderBy: { seq: 'desc' }, select: { actor: true, context: true, outcome: true, correlationId: true } }))
         .toEqual({ actor: 'runtime', context: 'autonomous', outcome: 'ok', correlationId: card!.id });
@@ -543,8 +725,10 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       expect(existsSync(join(home, 'FlintBackups', 'pg'))).toBe(false);
       expect(await db.backupRun.count({ where: { kind: 'pg_dump_flint' } })).toBe(0);
       // By hand it is Will: no card, and another dump with a record of its own.
+      await asOwner((c) => c.query('SELECT lo_from_bytea(0, \'another\'::bytea)'));
       const byHand = cli(['nexus-backup']);
       expect(byHand.status).toBe(0);
+      expect(byHand.lines.at(-1)).toBe('Nexus holds 2 large objects. No backup includes them, so they were left out.');
       expect(await cards('backup.nexus')).toHaveLength(1);
       expect(await rows({ location: 'local' })).toHaveLength(2);
       expect(await db.auditEntry.findFirst({ where: { action: 'backup.nexus', kind: 'action' }, orderBy: { seq: 'desc' }, select: { actor: true, context: true, outcome: true, correlationId: true } }))
@@ -553,11 +737,17 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
     });
 
     it('`nexus-drill`: the newest dump restored into the scratch database and compared; the result is on that dump’s record', async () => {
+      // A record of another kind that happens to name the same file, and is newer: the result is not written there.
+      const newest = newestDump(dumps(), 'nexus')!;
+      await withClient(URLS!.owner, (c) => c.query(
+        `INSERT INTO "BackupRun" (id, kind, location, path, encrypted, status, "startedAt", "finishedAt") VALUES ($1, 'pg_dump_flint', 'local', $2, false, 'ok', now() + interval '1 hour', now() + interval '1 hour')`, [`decoy${tag}`, newest]));
       const r = cli(['nexus-drill']);
       expect(r.err).toBe('');
       expect(r).toMatchObject({ status: 0, out: 'restore.drill.nexus: ok {"tables":2,"mismatches":0}\n' });
       const local = await rows({ location: 'local' });
       expect(local.map((x) => x.restoreOk)).toEqual([null, true]);
+      expect(await db.backupRun.findUniqueOrThrow({ where: { id: `decoy${tag}` }, select: { restoreOk: true, restoreTestedAt: true } })).toEqual({ restoreOk: null, restoreTestedAt: null });
+      await withClient(URLS!.owner, (c) => c.query(`DELETE FROM "BackupRun" WHERE id = $1`, [`decoy${tag}`]));
       expect(await databases('nexus_restore_test')).toEqual([]);
       // The fixture is as it was.
       expect(await count('"MemoryEntry"')).toBe(ROWS['"MemoryEntry"']);
@@ -573,7 +763,7 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       writeFileSync(join(dumps(), 'notes.txt'), 'keep');
       const r = cli(['nexus-backup']);
       expect(r.status).toBe(0);
-      expect(r.out).toMatch(/"pruned":2\}\n$/);
+      expect(r.out).toMatch(/"pruned":2,"largeObjects":2\}\n/);
       const left = readdirSync(dumps());
       expect(left.filter((f) => /^nexus-.*\.dump$/.test(f))).toHaveLength(14);
       expect(left.filter((f) => f.startsWith('nexus-2026-09-01') || f.startsWith('nexus-2026-09-02'))).toEqual([]);
@@ -610,35 +800,58 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       expect(await recorded()).toEqual([{ location: 'icloud', path: copy, status: 'ok', encrypted: true, bytes: BigInt(statSync(copy).size), sha256: expect.stringMatching(/^[0-9a-f]{64}$/), restoreOk: null, restoreTestedAt: null }]);
       expect(cli(['nexus-offsite'], { FLINT_BACKUP_AGE_RECIPIENT: recipient }).status).toBe(0);
       expect(await recorded()).toHaveLength(1);
+      // Only Nexus's own records say which copies there are to prune. Seven files with copies' names that are on
+      // record under ANOTHER kind are not its copies: sending again removes none of them.
+      const decoys = Array.from({ length: 7 }, (_, i) => `nexus-2020-01-0${i + 1}T00-00-00-000Z.dump.age`);
+      for (const [i, name] of decoys.entries()) {
+        writeFileSync(join(offsite(), name), 'not one of its copies');
+        await withClient(URLS!.owner, (c) => c.query(
+          `INSERT INTO "BackupRun" (id, kind, location, path, encrypted, status, "startedAt", "finishedAt") VALUES ($1, 'pg_dump_flint', 'icloud', $2, true, 'ok', now() - interval '9 days', now() - interval '9 days')`, [`decoy${tag}${i}`, join(offsite(), name)]));
+      }
+      const again = cli(['nexus-offsite'], { FLINT_BACKUP_AGE_RECIPIENT: recipient });
+      expect(again.out).toMatch(/"pruned":0\}\n$/);
+      for (const name of decoys) expect(existsSync(join(offsite(), name)), name).toBe(true);
+      for (const name of decoys) rmSync(join(offsite(), name));
+      await withClient(URLS!.owner, (c) => c.query(`DELETE FROM "BackupRun" WHERE id LIKE $1`, [`decoy${tag}%`]));
       // Its list of copies is its own, beside its own dumps; Flint's own offsite folder and list were not made.
       expect(readFileSync(join(dumps(), 'offsite-copies.txt'), 'utf8')).toBe(`${basename(newest)}.age\n`);
       expect(existsSync(join(home, 'offsite', 'pg')) || existsSync(join(home, 'FlintBackups', 'pg'))).toBe(false);
       expect(readdirSync(join(home, 'offsite'))).toEqual(['nexus']);
     });
 
-    it('an address that is not a database on this Mac stops Nexus’s backup with why, and never Flint’s own', async () => {
+    it('an address that is not a database on this Mac: none of Nexus’s steps runs, none files a card, the command says why, and Flint’s own backup is not stopped', async () => {
       const secret = 'hunter2-not-shown';
       writeEnv({ ...base(), FLINT_NEXUS_BACKUP_URL: `postgresql://flint_backup:${secret}@db.example.com:5432/nexus` });
-      const before = (await rows()).length;
-      const r = cli(['nexus-backup']);
-      expect(r.status).toBe(1);
-      expect(r.lines).toEqual([
-        'backup.nexus: FAILED: FLINT_NEXUS_BACKUP_URL must be a database on this Mac {}',
+      expect(nexusBackupState(home, backupEnv)).toBe('bad');
+      const before = { rows: (await rows()).length, cards: await db.proposal.count({ where: { action: { in: ['backup.nexus', 'backup.nexus.offsite', 'restore.drill.nexus'] } } }) };
+      const said = (action: string) => [
+        `${action}: not run (FLINT_NEXUS_BACKUP_URL must be a database on this Mac)`,
         'Flint did not back Nexus up: the address set for it must be a database on this Mac.',
         'Set it again with this command:',
         '  cd ~/flint && pnpm --filter @flint/runtime nexus-setup',
-      ]);
-      expect(`${r.out}${r.err}`).not.toMatch(new RegExp(`${secret}|example\\.com`));
-      // The failed run is on record (Health says it at once), with nothing dumped.
-      const failed = await rows({ status: 'failed', location: 'local' });
-      expect(failed).toHaveLength(1);
-      expect(failed[0]).toMatchObject({ location: 'local', encrypted: false, bytes: null });
-      expect(await rows()).toHaveLength(before + 1);
+      ];
+      // A database address nothing answers on: were Flint's own database opened (to ask for a card, say), the command would fail.
+      const nowhere = { DATABASE_URL: 'postgresql://nobody:nothing@127.0.0.1:1/none' };
+      for (const [cmd, action] of [['nexus-backup', 'backup.nexus'], ['nexus-offsite', 'backup.nexus.offsite'], ['nexus-drill', 'restore.drill.nexus']] as const) {
+        // The nightly job: said in its log, and it goes on to the next step.
+        const auto = cli([cmd, '--auto'], nowhere);
+        expect(auto.err, cmd).toBe('');
+        expect(auto.status, cmd).toBe(0);
+        expect(auto.lines, cmd).toEqual(said(action));
+        // By hand: the same, and the command fails.
+        const byHand = cli([cmd]);
+        expect(byHand.status, cmd).toBe(1);
+        expect(byHand.lines, cmd).toEqual(said(action));
+        expect(`${auto.out}${auto.err}${byHand.out}${byHand.err}`, cmd).not.toMatch(new RegExp(`${secret}|example\\.com|postgresql:`));
+      }
+      // No card was filed for a step that could not run, and nothing was recorded or dumped.
+      expect(await db.proposal.count({ where: { action: { in: ['backup.nexus', 'backup.nexus.offsite', 'restore.drill.nexus'] } } })).toBe(before.cards);
+      expect(await rows()).toHaveLength(before.rows);
       // Flint's own backup reads the same file, and is not stopped by it.
       const own = cli(['backup']);
       expect(own.err).toBe('');
       expect(own.status).toBe(0);
-      expect(own.out).toMatch(/^backup\.local: ok /);
+      expect(own.out).toMatch(/^backup\.local: ok \{"bytes":\d+,"sha256":"[0-9a-f]{64}","tables":\d+,"pruned":0\}\n$/);
       expect(`${own.out}${own.err}`).not.toContain(secret);
     });
 
@@ -648,9 +861,9 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       const writes = cli(['nexus-backup']);
       expect(writes.status).toBe(1);
       expect(writes.lines).toEqual([
-        'backup.nexus: FAILED: the login that reads this database could also change it, so nothing was backed up {}',
-        'The login in the Nexus address could change Nexus, so Flint backed nothing up.',
-        'Flint reads Nexus only through a login that can change nothing there. Set the address again with this command:',
+        expect.stringMatching(/^backup\.nexus: FAILED: the login that reads this database holds a right to change it, so nothing was backed up \(it owns the database; .*it owns something in the database\) \{\}$/),
+        'The login in the Nexus address holds a right to change Nexus, so Flint backed nothing up.',
+        'Flint reads Nexus only through a login with no right to change it. Set the address again with this command:',
         '  cd ~/flint && pnpm --filter @flint/runtime nexus-setup',
       ]);
       expect(readdirSync(dumps())).toHaveLength(files);
@@ -675,7 +888,7 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
           'Let it in once with these commands, then run this again:',
           `  psql -d postgres -c 'GRANT CONNECT ON DATABASE ${fixture} TO flint_backup'`,
           "  psql -d postgres -c 'GRANT pg_read_all_data TO flint_backup'",
-          'The first lets that login connect to Nexus. The second lets it read every table there and change none.',
+          'The first lets that login connect to Nexus. The second lets it read every table there and gives it no right to change one.',
         ]);
         noSecrets(shut);
         // The first of them, run by the fixture's owner, is all it takes.
@@ -684,6 +897,42 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       } finally {
         await asOwner((c) => c.query(`GRANT CONNECT ON DATABASE ${fixture} TO PUBLIC`));
       }
+    });
+  });
+
+  describe('a restore test that is refused', () => {
+    it('says so in its own words: never the grants that let the backup into Nexus, which would not help it', async () => {
+      const home = mkdtempSync(join(tmpdir(), 'flint-nexus-drill-'));
+      mkdirSync(join(home, '.flint'), { mode: 0o700 });
+      const backupEnv = join(home, '.flint', 'backup.env');
+      writeFileSync(backupEnv, `FLINT_DB_BACKUP_URL=${URLS!.backup!}\nFLINT_DB_RESTORE_URL=${URLS!.restore!}\nFLINT_NEXUS_BACKUP_URL=${nexusUrl}\n`, { mode: 0o600 });
+      const cli = (args: string[]) => {
+        const r = spawnSync(join(RUNTIME, 'node_modules', '.bin', 'tsx'), ['src/cli.ts', ...args], {
+          cwd: RUNTIME, encoding: 'utf8',
+          env: { PATH: process.env.PATH ?? '', HOME: home, NODE_ENV: 'test', RUNTIME_ENV_FILE: join(home, 'none.env'), BACKUP_ENV_FILE: backupEnv, DATABASE_URL: URLS!.app, FLINT_TZ: 'UTC' },
+        });
+        return { status: r.status, lines: r.stdout.trim().split('\n').filter(Boolean), all: `${r.stdout}${r.stderr}` };
+      };
+      expect(cli(['nexus-backup']).status).toBe(0);
+      // The scratch database is there already and belongs to another login: the restore login may not drop it.
+      await withClient(URLS!.owner, (c) => c.query(`CREATE DATABASE ${NEXUS_SET.scratch}`));
+      try {
+        const r = cli(['nexus-drill']);
+        expect(r.status).toBe(1);
+        expect(r.lines).toEqual([
+          `restore.drill.nexus: FAILED: must be owner of database ${NEXUS_SET.scratch} {}`,
+          'The restore test could not use its scratch database, so nothing was tested.',
+          'Nexus was not opened, and nothing there needs changing.',
+        ]);
+        expect(r.all).not.toMatch(/GRANT|pg_read_all_data|not let into/);
+        // The other login's database was left as it was.
+        expect(await databases(NEXUS_SET.scratch)).toEqual([NEXUS_SET.scratch]);
+      } finally {
+        await withClient(URLS!.owner, (c) => c.query(`DROP DATABASE IF EXISTS ${NEXUS_SET.scratch}`));
+      }
+      // With the scratch name free again the same command passes, and a test that only finds a difference gets no advice either.
+      expect(cli(['nexus-drill']).lines).toEqual(['restore.drill.nexus: ok {"tables":2,"mismatches":0}']);
+      rmSync(home, { recursive: true, force: true });
     });
   });
 
@@ -775,9 +1024,35 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
         expect(asked.length).toBeGreaterThan(0);
         expect(asked.filter((kind) => kind === 'nexus_dump'), state).toEqual([]);
         // The watchdog raises nothing about it either, though an old dump is on record from when it was on.
-        expect((await watchdog(db, config, NOW)).filter((r) => r.ref.startsWith('nexus:'))).toEqual([]);
+        expect((await watchdog(db, config, NOW)).filter((r) => r.type.startsWith('nexus'))).toEqual([]);
       }
       expect(nexusBackupWanted(home)).toBe(false);
+      expect(nexusBackupState(home)).toBe('off');
+    });
+
+    it('an address Flint cannot use: the row says it needs fixing, whatever the last dump’s age, and nothing of Nexus’s backup is looked up', async () => {
+      await forget();
+      await dumpAt(ago(2 * HOUR));
+      const asked: unknown[] = [];
+      const watching = new Proxy(db, {
+        get: (t, k) => (k === 'backupRun'
+          ? new Proxy(t.backupRun, { get: (b, m) => (typeof m === 'string' && /^find|^count/.test(m) ? (args: { where?: { kind?: unknown } }) => { asked.push(args?.where?.kind); return (Reflect.get(b, m) as (a: unknown) => unknown).call(b, args); } : Reflect.get(b, m)) })
+          : Reflect.get(t, k)),
+      });
+      for (const bad of ['postgresql://flint_backup:s3cret@db.example.com:5432/nexus', 'not an address', URLS!.backup!, 'postgresql://flint_backup:s3cret@[::1]:5432/postgres']) {
+        writeFileSync(flint('backup.env'), `FLINT_DB_BACKUP_URL=${URLS!.backup!}\nFLINT_NEXUS_BACKUP_URL=${bad}\n`, { mode: 0o600 });
+        expect(nexusBackupState(home), bad).toBe('bad');
+        asked.length = 0;
+        const got = (await row(NOW, watching)).find((c) => c.component === 'nexus_backup');
+        expect(got, bad).toEqual({ component: 'nexus_backup', status: 'down', detail: 'The Nexus backup’s address needs fixing. Nothing is backed up until it is set again.' });
+        expect(asked.filter((kind) => kind === 'nexus_dump'), bad).toEqual([]);
+        expect(JSON.stringify(got)).not.toMatch(/s3cret|example|postgres/);
+      }
+      expect(noteProblems('Nexus Backup', NEXUS_HEALTH.address)).toEqual([]);
+      // Set right again, the row is the backup's own again.
+      on();
+      expect(nexusBackupState(home)).toBe('on');
+      expect(await nexus(NOW)).toEqual({ component: 'nexus_backup', status: 'ok', detail: 'The last Nexus backup is 2 hours old.' });
     });
 
     it('switched on: no backup yet is an issue; then its age; late after 26 hours and missing after 36; a failure is said at once', async () => {
@@ -845,31 +1120,81 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       expect(raised.filter((r) => r.type === 'drill.failed' || r.type === 'backup.stale')).toEqual([]);
     });
 
-    it('the watchdog’s stale-backup rule covers it: once per last good dump, with a note of its own', async () => {
+    it('the watchdog’s stale-backup rule covers it: once per last good Nexus dump, as an event and a note of its own', async () => {
       await forget();
-      const stale = async (now: Date) => (await watchdog(db, config, now)).filter((r) => r.type === 'backup.stale');
+      const stale = async (now: Date) => (await watchdog(db, config, now)).filter((r) => r.type === 'backup.stale' || r.type === 'nexus_backup.stale');
       // No dump ever: nothing to count from.
       expect(await stale(NOW)).toEqual([]);
       await dumpAt(ago(35 * HOUR), 'old');
       expect(await stale(NOW)).toEqual([]);
       const id = (await db.backupRun.findFirstOrThrow({ where: { kind: 'nexus_dump' }, select: { id: true } })).id;
       const later = new Date(NOW.getTime() + 5 * HOUR);
-      expect(await stale(later)).toEqual([{ type: 'backup.stale', ref: `nexus:after:${id}`, occurredAt: later, payload: { hoursSince: 40, what: 'nexus' } }]);
+      expect(await stale(later)).toEqual([{ type: 'nexus_backup.stale', ref: `after:${id}`, occurredAt: later, payload: { hoursSince: 40 } }]);
       // The same last good dump is the same occurrence, however long it lasts.
-      expect((await stale(new Date(later.getTime() + DAY)))[0]!.ref).toBe(`nexus:after:${id}`);
+      expect((await stale(new Date(later.getTime() + DAY)))[0]!.ref).toBe(`after:${id}`);
+      // It counts Nexus's dumps and nothing else: a fresh backup of Flint's own database beside a stale Nexus one
+      // does not hide it...
+      const flintDump = (at: Date, name: string) => fileBackup(db, { kind: 'pg_dump_flint', location: 'local', path: `/x/FlintBackups/pg/flint-${name}.dump`, bytes: 1000, sha256: 'c'.repeat(64), startedAt: at });
+      await flintDump(new Date(later.getTime() - HOUR), 'fresh');
+      expect((await stale(later)).map((r) => r.type)).toEqual(['nexus_backup.stale']);
+      // ...and a fresh Nexus dump beside a stale backup of Flint's own does not hide that one, nor is it taken for it.
+      await forget();
+      await flintDump(ago(35 * HOUR), 'old');
+      await dumpAt(new Date(later.getTime() - HOUR), 'fresh');
+      const flintId = (await db.backupRun.findFirstOrThrow({ where: { kind: 'pg_dump_flint' }, select: { id: true } })).id;
+      expect(await stale(later)).toEqual([{ type: 'backup.stale', ref: `after:${flintId}`, occurredAt: later, payload: { hoursSince: 40 } }]);
       // The note it becomes: Nexus's own, critical like the rule it shares.
-      const v = criticalVerdict(facts({ source: 'runtime', type: 'backup.stale', payload: { hoursSince: 40, what: 'nexus' } }));
+      const v = criticalVerdict(facts({ source: 'runtime', type: 'nexus_backup.stale', payload: { hoursSince: 40 } }));
       expect(v).toMatchObject({ action: 'escalate', critical: true, template: { id: 'nexus_backup_stale', fields: { hoursSince: 40 } } });
       expect(CRITICAL_TEMPLATES.has('nexus_backup_stale')).toBe(true);
       const said = render(v!.template!.id as TemplateId, v!.template!.fields);
       expect(said).toMatchObject({ title: 'Nexus Backups Have Stopped', body: 'The last good Nexus backup is 40 hours old.' });
       expect(noteProblems(said.title, said.body)).toEqual([]);
-      // Flint's own stale backup is still its own note, whatever else the event carries.
+      // Flint's own stale backup is its own note, as it was, whatever else its event carries.
       expect(criticalVerdict(facts({ source: 'runtime', type: 'backup.stale', payload: { hoursSince: 40 } }))!.template).toEqual({ id: 'backup_stale', fields: { hoursSince: 40 } });
-      expect(criticalVerdict(facts({ source: 'runtime', type: 'backup.stale', payload: { hoursSince: 40, what: 'database' } }))!.template!.id).toBe('backup_stale');
-      // A fresh dump ends it.
-      await dumpAt(new Date(later.getTime() - HOUR), 'fresh');
+      expect(criticalVerdict(facts({ source: 'runtime', type: 'backup.stale', payload: { hoursSince: 40, what: 'nexus' } }))!.template!.id).toBe('backup_stale');
+      // With the address unusable nothing new is dumped, so the rule still stands; switched off, it does not.
+      await forget();
+      await dumpAt(ago(35 * HOUR), 'old');
+      writeFileSync(flint('backup.env'), `FLINT_DB_BACKUP_URL=${URLS!.backup!}\nFLINT_NEXUS_BACKUP_URL=not an address\n`, { mode: 0o600 });
+      expect((await stale(later)).map((r) => r.type)).toEqual(['nexus_backup.stale']);
+      off();
       expect(await stale(later)).toEqual([]);
+      on();
+    });
+
+    it('Flint’s own restore criterion counts Flint’s own restore tests: a passing Nexus test, or the MacBook’s of an offsite copy, is not one', async () => {
+      await forget();
+      const now = new Date();
+      const weeks = async () => (await p2Report(db, { tz: 'UTC', home }, now)).criteria.find((c) => c.n === 7)!.values.drillWeeks;
+      expect(await weeks()).toBe(0);
+      // A Nexus dump, tested and passed this week; and an offsite copy the MacBook tested.
+      await dumpAt(new Date(now.getTime() - 2 * HOUR), 'tested');
+      await tested('/x/FlintBackups/nexus/nexus-tested.dump', new Date(now.getTime() - HOUR), true);
+      await fileBackup(db, { kind: 'pg_dump_flint', location: 'icloud', path: '/x/icloud/pg/flint-sent.dump.age', bytes: 1, sha256: 'd'.repeat(64), startedAt: new Date(now.getTime() - 2 * HOUR) });
+      await tested('/x/icloud/pg/flint-sent.dump.age', new Date(now.getTime() - HOUR), true);
+      expect(await weeks()).toBe(0);
+      // Flint's own dump on this Mac, tested and passed: that is the one it means.
+      await fileBackup(db, { kind: 'pg_dump_flint', location: 'local', path: '/x/FlintBackups/pg/flint-tested.dump', bytes: 1, sha256: 'e'.repeat(64), startedAt: new Date(now.getTime() - 2 * HOUR) });
+      await tested('/x/FlintBackups/pg/flint-tested.dump', new Date(now.getTime() - HOUR), true);
+      expect(await weeks()).toBe(1);
+    });
+
+    it('rolling back to an older runtime: the README’s one step clears Nexus’s test results and nothing else', async () => {
+      await forget();
+      const now = new Date();
+      await dumpAt(new Date(now.getTime() - 2 * HOUR), 'tested');
+      await tested('/x/FlintBackups/nexus/nexus-tested.dump', new Date(now.getTime() - HOUR), false);
+      await fileBackup(db, { kind: 'pg_dump_flint', location: 'local', path: '/x/FlintBackups/pg/flint-tested.dump', bytes: 1, sha256: 'e'.repeat(64), startedAt: new Date(now.getTime() - 2 * HOUR) });
+      await tested('/x/FlintBackups/pg/flint-tested.dump', new Date(now.getTime() - 2 * HOUR), true);
+      const readme = readFileSync(join(RUNTIME, 'README.md'), 'utf8');
+      const sql = /^psql -d flint -c "(UPDATE .* WHERE kind = 'nexus_dump')"$/m.exec(readme)![1]!.replace(/\\"/g, '"');
+      await withClient(URLS!.owner, (c) => c.query(sql));
+      const left = await db.backupRun.findMany({ orderBy: { kind: 'asc' }, select: { kind: true, restoreOk: true, restoreTestedAt: true, status: true } });
+      expect(left).toEqual([
+        { kind: 'nexus_dump', restoreOk: null, restoreTestedAt: null, status: 'ok' },
+        { kind: 'pg_dump_flint', restoreOk: true, restoreTestedAt: expect.any(Date), status: 'ok' },
+      ]);
     });
   });
 });

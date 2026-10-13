@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadBackupConfig, loadConfig, loadRuntimeConfig, nexusBackupWanted, nexusUrlProblem, offsiteFolder, parseTokens, parseHealthExtra, runtimeEnv } from '../src/config';
+import { loadBackupConfig, loadConfig, loadRuntimeConfig, nexusBackupState, nexusBackupWanted, nexusUrlProblem, offsiteFolder, parseTokens, parseHealthExtra, runtimeEnv } from '../src/config';
 
 const DB = 'postgresql://flint_app:x@[::1]:5432/flint';
 const HOME = '/Users/test';
@@ -332,6 +332,34 @@ describe('runtime config', () => {
         rmSync(file);
         expect(nexusBackupWanted(h, file)).toBe(false);
         expect(nightly()).toBe(false);
+        // For Settings > Health the runtime tells three things apart, and keeps none of the address: off, on, and
+        // set to something Flint cannot use (which the commands refuse with the same reason).
+        const flintLine = 'FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/flint\n';
+        const states: Array<[string, 'off' | 'on' | 'bad']> = [
+          [flintLine, 'off'],
+          [`${flintLine}FLINT_NEXUS_BACKUP_URL=\n`, 'off'],
+          [`${flintLine}FLINT_NEXUS_BACKUP_URL=${url}\n`, 'on'],
+          [`${flintLine}export FLINT_NEXUS_BACKUP_URL="${url}"\n`, 'on'],
+          [`${flintLine}FLINT_NEXUS_BACKUP_URL=postgresql://flint_backup:x@db.example.com:5432/nexus\n`, 'bad'],
+          [`${flintLine}FLINT_NEXUS_BACKUP_URL=nexus\n`, 'bad'],
+          [`${flintLine}FLINT_NEXUS_BACKUP_URL=postgresql://flint_backup:x@localhost:5432/flint\n`, 'bad'],
+          [`${flintLine}FLINT_NEXUS_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/postgres\n`, 'bad'],
+          // The last line for a name counts, for both names.
+          [`${flintLine}FLINT_NEXUS_BACKUP_URL=nexus\nFLINT_NEXUS_BACKUP_URL=${url}\n`, 'on'],
+          [`FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/nexus\n${flintLine}FLINT_NEXUS_BACKUP_URL=${url}\n`, 'on'],
+          [`${flintLine}FLINT_DB_BACKUP_URL=postgresql://flint_backup:x@[::1]:5432/nexus\nFLINT_NEXUS_BACKUP_URL=${url}\n`, 'bad'],
+        ];
+        for (const [text, state] of states) {
+          writeFileSync(file, text, { mode: 0o600 });
+          expect(nexusBackupState(h, file), JSON.stringify(text)).toBe(state);
+          expect(nexusBackupWanted(h, file), JSON.stringify(text)).toBe(state !== 'off');
+          // ...and it is what the commands' own check of the same lines says.
+          const env = runtimeEnv(file, {});
+          const value = env.FLINT_NEXUS_BACKUP_URL?.trim();
+          expect(!value ? 'off' : nexusUrlProblem(value, env.FLINT_DB_BACKUP_URL) ? 'bad' : 'on', JSON.stringify(text)).toBe(state);
+        }
+        rmSync(file);
+        expect(nexusBackupState(h, file)).toBe('off');
         rmSync(h, { recursive: true, force: true });
       });
     });

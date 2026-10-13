@@ -4,11 +4,13 @@
  *
  *  - It ships off. Nothing here runs, and nothing of Nexus is read, until
  *    FLINT_NEXUS_BACKUP_URL is in ~/.flint/backup.env (config.ts).
- *  - Flint reads Nexus through a login that can change nothing there (the
+ *  - Flint reads Nexus through a login with no right to change it (the
  *    backup login it already has, flint_backup: it may read every table and
- *    write none). A login that could write is refused before any dump is
- *    taken (backup.ts, canWrite), so a mistaken address can never become a
- *    way to change Nexus.
+ *    holds no right to write one), and Flint itself only reads. Before every
+ *    dump the login's rights are looked up, through every role it is a member
+ *    of, and one that holds a right to change the database is refused
+ *    (backup.ts, writeRights, which also says what no such check can rule
+ *    out). So a mistaken address is not a way to change Nexus.
  *  - The dump is a file of this user's alone, in ~/FlintBackups/nexus. It
  *    leaves this Mac only encrypted to Will's key, with its row counts. No
  *    model ever reads it.
@@ -23,7 +25,7 @@
  * address is set and Nexus will not let it read.
  */
 import { nexusUrlProblem, runtimeEnv, type NexusBackupConfig } from '../config.js';
-import { NotReadOnly, ToolFailed, canWrite, client, targetOf } from './backup.js';
+import { NotReadOnly, ToolFailed, WRITE_RIGHTS, client, targetOf, writeRights } from './backup.js';
 import { stageEnv } from './bootstrap.js';
 
 /** The name Nexus's database has on this Mac unless `nexus-setup` is told another. */
@@ -56,14 +58,28 @@ function refusal(err: unknown): 'writes' | 'login' | 'no-database' | 'not-let-in
  * The two grants are what the owner's side gives, once:
  *  - CONNECT on the Nexus database lets Flint's backup login open it;
  *  - membership of pg_read_all_data lets that login read every table, view
- *    and sequence, and gives it no way to change any of them.
+ *    and sequence, and gives it no right to change any of them.
  * Neither is Flint's to give itself: Nexus's database and its logins are
  * never touched from here.
+ *
+ * `step` is which of the three steps failed. Only the backup's own failures
+ * to connect or read get this advice: a restore test that was refused (in its
+ * scratch database, as the restore login) gets a sentence of its own, and the
+ * offsite copy none.
  */
-export function nexusHelp(err: unknown, nexus: Pick<NexusBackupConfig, 'backupUrl' | 'problem'>): string[] {
+export function nexusHelp(err: unknown, nexus: Pick<NexusBackupConfig, 'backupUrl' | 'problem'>, step: 'backup' | 'offsite' | 'drill' = 'backup'): string[] {
   if (nexus.problem) {
     return [`Flint did not back Nexus up: ${nexus.problem.replace(/^FLINT_NEXUS_BACKUP_URL /, 'the address set for it ')}.`, 'Set it again with this command:', SETUP];
   }
+  // Only the backup itself reads Nexus. The restore test works in its own scratch database, as another login,
+  // and the offsite copy works on a file: a refusal there has nothing to do with what Nexus lets Flint read,
+  // and the grants below would not help it.
+  if (step === 'drill') {
+    return refusal(err) && !(err instanceof NotReadOnly)
+      ? ['The restore test could not use its scratch database, so nothing was tested.', 'Nexus was not opened, and nothing there needs changing.']
+      : [];
+  }
+  if (step !== 'backup') return [];
   let login: string | undefined;
   let database: string | undefined;
   try {
@@ -76,8 +92,8 @@ export function nexusHelp(err: unknown, nexus: Pick<NexusBackupConfig, 'backupUr
   switch (refusal(err)) {
     case 'writes':
       return [
-        'The login in the Nexus address could change Nexus, so Flint backed nothing up.',
-        'Flint reads Nexus only through a login that can change nothing there. Set the address again with this command:',
+        'The login in the Nexus address holds a right to change Nexus, so Flint backed nothing up.',
+        'Flint reads Nexus only through a login with no right to change it. Set the address again with this command:',
         SETUP,
       ];
     case 'login':
@@ -91,7 +107,7 @@ export function nexusHelp(err: unknown, nexus: Pick<NexusBackupConfig, 'backupUr
             'Let it in once with these commands, then run this again:',
             `  psql -d postgres -c 'GRANT CONNECT ON DATABASE ${database} TO ${login}'`,
             `  psql -d postgres -c 'GRANT pg_read_all_data TO ${login}'`,
-            'The first lets that login connect to Nexus. The second lets it read every table there and change none.',
+            'The first lets that login connect to Nexus. The second lets it read every table there and gives it no right to change one.',
           ]
         : ['Flint’s backup login is not let into the Nexus database.', 'Set the address again with this command:', SETUP];
     default:
@@ -116,10 +132,10 @@ export function nexusSetupArgs(argv: readonly string[]): { database: string } {
  * It works the address out from Flint's own backup address in backup.env: the
  * same login and password, on the same server, with the Nexus database's name.
  * So no password is typed or shown. Before it writes anything it opens that
- * database once, with that login, to see that the login is let in and can
- * change nothing there; it reads the server's records of who may do what, and
- * no table. Only then is the one line written (the file stays this user's
- * alone, 0600), and the nightly job takes it from there.
+ * database once, with that login, to see that the login is let in and holds
+ * no right to change it (writeRights); it reads the server's records of who
+ * may do what, and no table. Only then is the one line written (the file stays
+ * this user's alone, 0600), and the nightly job takes it from there.
  *
  * Every line it says is a sentence or a command. The address is never said.
  */
@@ -146,7 +162,8 @@ export async function nexusSetup(o: { backupEnv: string; database: string; say: 
     await c.connect();
     try {
       await c.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
-      if (await canWrite(c)) throw new NotReadOnly();
+      const rights = await writeRights(c);
+      if (rights.length) throw new NotReadOnly(rights);
     } finally {
       await c.end().catch(() => {});
     }
@@ -154,8 +171,9 @@ export async function nexusSetup(o: { backupEnv: string; database: string; say: 
     const lines = nexusHelp(err, { backupUrl: url });
     if (err instanceof NotReadOnly) {
       // Here the login is Flint's own backup login, so setting the address again would change nothing.
-      say('Flint’s backup login could change the Nexus database, so Flint will not use it there. Nothing was changed.');
-      say('Take away what lets it write in Nexus, then run this again.');
+      say('Flint’s backup login holds a right to change the Nexus database, so Flint will not use it there. Nothing was changed.');
+      say(`What it holds: ${err.rights.map((r) => WRITE_RIGHTS[r]).join('; ')}.`);
+      say('Take that away from it, then run this again.');
     } else if (lines.length) {
       for (const line of lines) say(line);
       say('Nothing was changed.');
@@ -165,7 +183,7 @@ export async function nexusSetup(o: { backupEnv: string; database: string; say: 
     return false;
   }
   stageEnv(o.backupEnv, { FLINT_NEXUS_BACKUP_URL: url }).commit();
-  say('Flint can read the Nexus database and cannot change it.');
+  say('Flint’s login can read the Nexus database and has no right to change its tables. Flint only reads it.');
   say('Nexus’s backup is on. Tonight’s run files its first card in Approvals.');
   say('To take a backup now and test it, run these:');
   say('  cd ~/flint && pnpm --filter @flint/runtime nexus-backup');

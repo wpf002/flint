@@ -470,21 +470,37 @@ export function loadBackupConfig(): BackupConfig {
 export const backupEnvFile = (home: string = process.env.HOME ?? ''): string => process.env.BACKUP_ENV_FILE ?? join(home, '.flint', 'backup.env');
 
 /**
- * Whether Nexus's backup is switched on: ~/.flint/backup.env (or
- * BACKUP_ENV_FILE) has a FLINT_NEXUS_BACKUP_URL line that is not empty. Only
- * that is looked for. The address itself is never kept, parsed or passed on
- * here: the runtime's service asks this to know whether Health has a Nexus
- * line at all, and has no use for the login in it.
+ * Whether Nexus's backup is switched on, as the runtime's service needs to
+ * know it for Settings > Health: `off` when ~/.flint/backup.env (or
+ * BACKUP_ENV_FILE) has no FLINT_NEXUS_BACKUP_URL, or an empty one; `on` when
+ * it has one Flint can use; `bad` when it has one Flint cannot (not a
+ * database on this Mac, or Flint's own: nexusUrlProblem), so that nothing is
+ * being backed up and nothing will be until it is set again.
+ *
+ * The lines are read the way the backup commands read them (runtimeEnv):
+ * `NAME=value`, with or without `export` and quotes, and of two lines for one
+ * name the last counts. The address is looked at here and then dropped: only
+ * one of the three words leaves this function, and the service keeps no login.
  */
-export function nexusBackupWanted(home: string, file: string = backupEnvFile(home)): boolean {
+export function nexusBackupState(home: string, file: string = backupEnvFile(home)): 'off' | 'on' | 'bad' {
+  let text: string;
   try {
-    // The same lines the backup commands read it from (runtimeEnv): `NAME=value`, with or without `export` and
-    // quotes, and of two lines for it the last one counts.
-    const lines = readFileSync(file, 'utf8').match(/^(?:export[ \t]+)?FLINT_NEXUS_BACKUP_URL=.*$/gm);
-    return !!lines && /=[ \t]*["']?[^\s"']/.test(lines[lines.length - 1]!);
+    text = readFileSync(file, 'utf8');
   } catch {
-    return false;
+    return 'off';
   }
+  const last = (name: string): string | undefined => {
+    const lines = text.match(new RegExp(`^(?:export[ \\t]+)?${name}=.*$`, 'gm'));
+    return lines?.[lines.length - 1]?.replace(/^[^=]*=/, '').trim().replace(/^(["'])(.*)\1$/, '$2').trim();
+  };
+  const value = last('FLINT_NEXUS_BACKUP_URL');
+  if (!value) return 'off';
+  return nexusUrlProblem(value, last('FLINT_DB_BACKUP_URL')) ? 'bad' : 'on';
+}
+
+/** Whether Nexus's backup is switched on at all (an address is set, usable or not). */
+export function nexusBackupWanted(home: string, file: string = backupEnvFile(home)): boolean {
+  return nexusBackupState(home, file) !== 'off';
 }
 
 /**

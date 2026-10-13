@@ -538,7 +538,9 @@ describe('the console Approvals panel', () => {
     for (const p of three()) expect(run(`apprAlone(${JSON.stringify(p)})`), p.fullName as string).toBe(false);
     // Show Details: what it does, in a sentence. (When it runs is the line under its title, said once.)
     const details = (fullName: string) => (run(`apprDetails(${JSON.stringify(nexus('x', fullName))})`) as { says: string[]; facts: string[][]; refs: string[][] });
-    expect(details('backup.nexus').says).toEqual(['Flint copies the Nexus database to this Mac. It reads Nexus and changes nothing there.']);
+    expect(details('backup.nexus').says).toEqual(['Flint copies the Nexus database to this Mac. It only reads Nexus, through a login with no right to change its tables.']);
+    // No card says more than the runtime checks: it never promises that Nexus cannot be changed.
+    for (const f of ['backup.nexus', 'backup.nexus.offsite', 'restore.drill.nexus']) expect(details(f).says.join(' ')).not.toMatch(/changes nothing|cannot change|can’t change|can change nothing/);
     expect(details('backup.nexus.offsite').says).toEqual(['The newest Nexus backup is encrypted to your key before it leaves this Mac.']);
     expect(details('restore.drill.nexus').says).toEqual(['Flint restores the newest Nexus backup into a scratch database and compares it. Nexus itself isn’t opened.']);
     for (const f of ['backup.nexus', 'backup.nexus.offsite', 'restore.drill.nexus']) {

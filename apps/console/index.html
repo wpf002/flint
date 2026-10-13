@@ -1238,7 +1238,7 @@ var LANE_LINES={'ci_run.state':'A CI run changed.','pull_request.state':'A pull 
   'repo.meta':'A repo’s details changed.','deadline.due':'A milestone’s due date changed.','service.health':'A service’s health changed.','service.status':'A background service changed.',
   'service.railway':'A Railway service changed.','deployment.railway':'A Railway deploy changed.','deployment.status':'A deploy changed.','thread.state':'A Nexus thread changed.',
   'handoff.unaccepted_24h':'A Nexus handoff hasn’t been accepted in a day.','knowledge.fact':'Flint’s memory learned something.','account.level':'A vendor’s spending level changed.',
-  'backup.stale':'Backups are overdue.','drill.failed':'A restore test failed.','migrate.failed':'A database update failed.','service.down_30m':'A service has been down for 30 minutes.',
+  'backup.stale':'Backups are overdue.','nexus_backup.stale':'The Nexus backup is overdue.','drill.failed':'A restore test failed.','migrate.failed':'A database update failed.','service.down_30m':'A service has been down for 30 minutes.',
   'vendor.cap_100':'A vendor reached its spending cap.','source.circuit_open':'A source stopped after repeated failures.','source.circuit_closed':'A source is reading again.',
   'spend.threshold':'Spending reached a budget threshold.','route.error':'A request to Flint failed.'};
 var LANE_SOURCES={github:'GitHub',git:'Git',imessage:'iMessage',google_calendar:'Google Calendar',apple_calendar:'Apple Calendar',nexus:'Nexus',nexus_inbox:'Nexus',railway:'Railway',launchd:'Launchd',runtime:'Flint',server:'Flint'};
@@ -1511,8 +1511,9 @@ var APPR_NIGHTLY={'backup.local':["Run Tonight's Backup",'db','tonight at 2:15 A
   'restore.drill.nexus':["Run This Week's Nexus Restore Test",'db','Sunday at 2:15 AM']};
 /* The nightly cards whose job runs on Sundays only (@flint/policy WEEKLY_JOBS; a test keeps the two the same). */
 var APPR_WEEKLY={'restore.drill':1,'restore.drill.nexus':1};
-/* What each of Nexus's cards does, as a sentence for its details: it is a database that is not Flint's, so the card says what is read and what is never changed. */
-var APPR_NEXUS={'backup.nexus':'Flint copies the Nexus database to this Mac. It reads Nexus and changes nothing there.',
+/* What each of Nexus's cards does, as a sentence for its details: it is a database that is not Flint's, so the card
+   says what is read, and what the runtime checks of the login it reads through (never more than it checks). */
+var APPR_NEXUS={'backup.nexus':'Flint copies the Nexus database to this Mac. It only reads Nexus, through a login with no right to change its tables.',
   'backup.nexus.offsite':'The newest Nexus backup is encrypted to your key before it leaves this Mac.',
   'restore.drill.nexus':'Flint restores the newest Nexus backup into a scratch database and compares it. Nexus itself isn’t opened.'};
 /* What each source reads, and how often (its cadenceMs), as a sentence. */

@@ -288,6 +288,8 @@ describe('the console Activity panel: lanes', () => {
     expect(line('nexus', 'thread.state')).toBe('A Nexus thread changed.');
     expect(line('knowledge', 'knowledge.fact')).toBe('Flint’s memory learned something.');
     expect(line('runtime', 'backup.stale')).toBe('Backups are overdue.');
+    // Nexus's own stale backup is an event of its own, with a line of its own: it never reads as Flint's.
+    expect(line('runtime', 'nexus_backup.stale')).toBe('The Nexus backup is overdue.');
     expect(line('runtime', 'source.circuit_open')).toBe('A source stopped after repeated failures.');
     expect(line('google_calendar', 'person.seen')).toBe('Someone is on an event you accepted or organized.');
     expect(line('google_calendar', 'deadline.state')).toBe('A deadline on your calendar changed.');

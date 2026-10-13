@@ -165,12 +165,13 @@ export async function watchdog(db: Db, config: Pick<Config, 'home' | 'tz'>, now:
   if (backup && now.getTime() - backup.startedAt.getTime() > BACKUP_STALE_MS) {
     out.push({ type: 'backup.stale', ref: `after:${backup.id}`, occurredAt: now, payload: { hoursSince: Math.floor((now.getTime() - backup.startedAt.getTime()) / 3_600_000) } });
   }
-  // The same rule for Nexus's own backup (P7), while it is switched on: once per last good dump. Switched off
-  // nothing is looked at, and an old dump left from when it was on raises nothing.
+  // The same rule for Nexus's own backup (P7), while it is switched on, as an event of its own: once per last
+  // good Nexus dump, whatever Flint's own backup is doing. Switched off nothing is looked at, and an old dump
+  // left from when it was on raises nothing.
   if (nexusBackupWanted(config.home)) {
     const nexus = await db.backupRun.findFirst({ where: { kind: 'nexus_dump', location: 'local', status: 'ok' }, orderBy: { startedAt: 'desc' }, select: { id: true, startedAt: true } });
     if (nexus && now.getTime() - nexus.startedAt.getTime() > BACKUP_STALE_MS) {
-      out.push({ type: 'backup.stale', ref: `nexus:after:${nexus.id}`, occurredAt: now, payload: { hoursSince: Math.floor((now.getTime() - nexus.startedAt.getTime()) / 3_600_000), what: 'nexus' } });
+      out.push({ type: 'nexus_backup.stale', ref: `after:${nexus.id}`, occurredAt: now, payload: { hoursSince: Math.floor((now.getTime() - nexus.startedAt.getTime()) / 3_600_000) } });
     }
   }
 

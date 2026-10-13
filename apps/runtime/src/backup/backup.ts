@@ -108,20 +108,44 @@ export class ToolFailed extends Error {
   }
 }
 
+/** A step's tool ran past the time its set allows (StepLimits) and was stopped. Another night may go better: not a setup problem. */
+export class TookTooLong extends Error {
+  constructor(readonly tool: string, readonly ms: number) {
+    const n = ms >= 60_000 ? Math.round(ms / 60_000) : Math.max(1, Math.round(ms / 1000));
+    super(`${tool} was stopped because it ran longer than ${n} ${ms >= 60_000 ? 'minute' : 'second'}${n === 1 ? '' : 's'}`);
+  }
+}
+
 /**
  * Run pg_dump or pg_restore. A tool that cannot be started at all (not there, not
  * runnable) is a fault and is passed on as it is; one that ran and failed is a
- * ToolFailed, which says what kind of failure and names no data.
+ * ToolFailed, which says what kind of failure and names no data. With
+ * `timeoutMs`, one still running then is killed outright and the run fails as
+ * TookTooLong.
  */
-export function run(bin: string, args: string[], password: string, opts: { stdoutFile?: string } = {}): Promise<void> {
+export function run(bin: string, args: string[], password: string, opts: { stdoutFile?: string; timeoutMs?: number } = {}): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args, { env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin', PGPASSWORD: password, PGCONNECT_TIMEOUT: '10' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const tool = bin.split('/').pop() ?? 'tool';
     let err = '';
+    let late = false;
+    const clock = opts.timeoutMs === undefined ? undefined : setTimeout(() => {
+      late = true;
+      child.kill('SIGKILL');
+    }, opts.timeoutMs);
     child.stderr.on('data', (d) => (err = (err + d).slice(-8000)));
     if (opts.stdoutFile) child.stdout.pipe(createWriteStream(opts.stdoutFile, { mode: 0o600 }));
     else child.stdout.resume();
-    child.on('error', reject);
-    child.on('close', (code) => (code === 0 ? resolve() : reject(new ToolFailed(bin.split('/').pop() ?? 'tool', code, toolError(err)))));
+    child.on('error', (e) => {
+      clearTimeout(clock);
+      reject(e);
+    });
+    child.on('close', (code) => {
+      clearTimeout(clock);
+      if (late) reject(new TookTooLong(tool, opts.timeoutMs!));
+      else if (code === 0) resolve();
+      else reject(new ToolFailed(tool, code, toolError(err)));
+    });
   });
 }
 
@@ -140,21 +164,44 @@ export interface BackupSet {
   /** What its records are filed under (BackupRun.kind). */
   kind: 'pg_dump_flint' | 'nexus_dump';
   /**
-   * The login that dumps it must not be able to change it: checked before each
-   * dump, in the dump's own connection, and a login that could write is
-   * refused (NotReadOnly). Nexus's database is not Flint's to change.
+   * The login that dumps it must hold no right to change it: checked before
+   * each dump, in the dump's own connection (writeRights says what is looked
+   * for, and what no check of rights can rule out), and a login that holds
+   * one is refused (NotReadOnly). Nexus's database is not Flint's to change.
    */
   readOnly?: boolean;
+  /**
+   * How long its steps may wait and run, for a database someone else is using
+   * and changing: nothing there may hold Flint's night up. Flint's own set has
+   * none, and its commands are word for word what they were.
+   */
+  limits?: StepLimits;
 }
+
+export interface StepLimits {
+  /** How long pg_dump waits for a lock someone holds in that database, before it gives up (its --lock-wait-timeout). */
+  lockWaitMs: number;
+  /** The most the dump, the encrypted copy and the restore test may each take: past it the tool is stopped and the step fails. */
+  dumpMs: number;
+  offsiteMs: number;
+  drillMs: number;
+  /** How long a restore test waits for another one that is using the same scratch database, before it says so and ends. */
+  drillWaitMs: number;
+}
+
 export const FLINT_SET: BackupSet = { prefix: 'flint', schemas: ['public'], scratch: 'flint_restore_test', kind: 'pg_dump_flint' };
 /** Nexus keeps everything in `public` (its own migrations make no other schema). */
-export const NEXUS_SET: BackupSet = { prefix: 'nexus', schemas: ['public'], scratch: 'nexus_restore_test', kind: 'nexus_dump', readOnly: true };
+export const NEXUS_SET: BackupSet = {
+  prefix: 'nexus', schemas: ['public'], scratch: 'nexus_restore_test', kind: 'nexus_dump', readOnly: true,
+  limits: { lockWaitMs: 15_000, dumpMs: 20 * 60_000, offsiteMs: 20 * 60_000, drillMs: 30 * 60_000, drillWaitMs: 2 * 60_000 },
+};
 
 /** A set's names are built into file patterns and statements, so each is held to its shape first. */
 export function checkedSet(set: BackupSet): BackupSet {
   if (!/^[a-z]{2,16}$/.test(set.prefix)) throw new Error('a backup set’s prefix is small letters only');
   if (!set.schemas.length || set.schemas.some((n) => !/^[a-z_][a-z0-9_]{0,62}$/.test(n))) throw new Error('a backup set names at least one schema, each a plain name');
   if (!/^[a-z]{2,16}_restore_test(_[a-z0-9]{1,24})?$/.test(set.scratch)) throw new Error('a backup set’s scratch database is named <something>_restore_test');
+  if (set.limits && Object.values(set.limits).some((ms) => !Number.isInteger(ms) || ms < 100 || ms > 24 * 3_600_000)) throw new Error('a backup set’s limits are whole milliseconds, under a day');
   return set;
 }
 
@@ -186,6 +233,8 @@ export interface DumpResult {
   bytes: number;
   sha256: string;
   counts: Record<string, number>;
+  /** How many large objects the database held, which no dump includes (DUMP_FORMAT). Counted only for a set that is not Flint's own. */
+  largeObjects?: number;
 }
 
 /**
@@ -209,39 +258,113 @@ export const DUMP_FORMAT = ['-Fc', '--no-large-objects'] as const;
 export const dumpPathAt = (outDir: string, now: Date, prefix: string = FLINT_SET.prefix): string => join(outDir, `${prefix}-${now.toISOString().replace(/[:.]/g, '-')}.dump`);
 
 /**
- * The login may change the database it is asked to back up: it is a superuser,
- * may ignore row security, owns the database or something in it, may make
- * things in it, or may write to one of its tables. Never tried again as it is:
- * its setup needs fixing (NeedsSetup, below).
+ * What a login holds that would let it change the database it is asked to
+ * back up, each as a few words. The names are fixed here; none holds a role's
+ * or an object's name.
+ */
+export const WRITE_RIGHTS = {
+  attribute: 'it is a superuser, may pass row security, may make roles or may replicate',
+  role: 'it belongs to one of Postgres’s own roles that is not read-only',
+  ownsDatabase: 'it owns the database',
+  createInDatabase: 'it may make schemas in the database',
+  schema: 'it owns a schema or may make things in one',
+  table: 'it owns a table or a view, or holds a right to change, lock or hang a trigger on one',
+  column: 'it may change a column of a table',
+  sequence: 'it owns a sequence or may advance one',
+  routine: 'it owns a function',
+  type: 'it owns a type',
+  owner: 'it owns something in the database',
+} as const;
+export type WriteRight = keyof typeof WRITE_RIGHTS;
+
+/**
+ * The login may change the database it is asked to back up. Never tried again
+ * as it is: its setup needs fixing (needsSetup, below). `rights` says which
+ * kinds of right were found (WRITE_RIGHTS), never whose or on what.
  */
 export class NotReadOnly extends Error {
-  constructor() {
-    super('the login that reads this database could also change it, so nothing was backed up');
+  constructor(readonly rights: readonly WriteRight[] = []) {
+    super(`the login that reads this database holds a right to change it, so nothing was backed up${rights.length ? ` (${rights.map((r) => WRITE_RIGHTS[r]).join('; ')})` : ''}`);
   }
 }
 
 /**
- * Whether the login on `c` could change the database it is connected to.
- * Asked of the server's own records of who may do what, in the connection the
- * dump is counted on: no table is read for it.
+ * Postgres's own roles a read-only login may belong to: reading every table,
+ * and reading the server's own statistics and settings. Any other of them
+ * (writing every table, maintaining them, signalling other sessions, reading
+ * or writing the server's files, and whatever a later Postgres adds) is not
+ * read-only. pg_database_owner is not listed and not refused by name: it means
+ * "owns this database", which is asked on its own below.
  */
+const READ_ONLY_ROLES = ['pg_read_all_data', 'pg_monitor', 'pg_read_all_settings', 'pg_read_all_stats', 'pg_stat_scan_tables'] as const;
+
+/**
+ * Every kind of right the login on `c` holds that would let it change the
+ * database it is connected to; empty when it holds none. Asked of the server's
+ * own records of who may do what, in the connection the dump is counted on: no
+ * table is read for it.
+ *
+ * It is asked of EVERY role the login is a member of, not only the ones whose
+ * rights it has without asking: a membership it can only use through SET ROLE,
+ * or only hand on to itself (ADMIN), is one command away from the same rights.
+ * For each of those roles:
+ *  - an attribute that passes every check (superuser, BYPASSRLS), makes roles
+ *    or replicates;
+ *  - one of Postgres's own roles that is not read-only;
+ *  - owning the database, or leave to make schemas in it;
+ *  - owning a schema, or leave to make things in one;
+ *  - owning a table, view or foreign table, or any right on one but reading:
+ *    INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, MAINTAIN (which
+ *    locks, rewrites and reindexes);
+ *  - INSERT, UPDATE or REFERENCES on any one column;
+ *  - owning a sequence, or USAGE or UPDATE on one (either moves it on);
+ *  - owning a function, a type, or anything else in the database (the
+ *    server's record of who owns what covers large objects, extensions,
+ *    operators and the rest).
+ * Rights given to everyone (PUBLIC) count as the login's own.
+ *
+ * What this does NOT rule out, because Postgres gives it to every login that
+ * can connect: calling a function its owner opened to everyone (one that runs
+ * with its owner's rights can then write), making temporary tables, and the
+ * ordinary read locks a dump takes while it runs.
+ */
+export async function writeRights(c: pg.Client): Promise<WriteRight[]> {
+  const { rows } = await c.query<Record<WriteRight, boolean | null>>(`
+    WITH me AS (
+      SELECT g.oid, g.rolname, g.rolsuper, g.rolbypassrls, g.rolcreaterole, g.rolreplication
+        FROM pg_roles g
+       WHERE pg_has_role(current_user, g.oid, 'MEMBER') OR pg_has_role(current_user, g.oid, 'MEMBER WITH ADMIN OPTION')
+    ), db AS (
+      SELECT d.oid, d.datdba FROM pg_database d WHERE d.datname = current_database()
+    ), nsp AS (
+      SELECT n.oid, n.nspowner FROM pg_namespace n WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+    )
+    SELECT
+      EXISTS (SELECT 1 FROM me WHERE rolsuper OR rolbypassrls OR rolcreaterole OR rolreplication) AS "attribute",
+      EXISTS (SELECT 1 FROM me WHERE rolname ~ '^pg_' AND rolname <> 'pg_database_owner' AND rolname <> ALL ($1::text[])) AS "role",
+      EXISTS (SELECT 1 FROM db JOIN me ON me.oid = db.datdba) AS "ownsDatabase",
+      EXISTS (SELECT 1 FROM db, me WHERE has_database_privilege(me.oid, db.oid, 'CREATE')) AS "createInDatabase",
+      EXISTS (SELECT 1 FROM nsp, me WHERE nsp.nspowner = me.oid OR has_schema_privilege(me.oid, nsp.oid, 'CREATE')) AS "schema",
+      EXISTS (SELECT 1 FROM pg_class r JOIN nsp ON nsp.oid = r.relnamespace, me
+               WHERE r.relkind IN ('r', 'p', 'v', 'm', 'f')
+                 AND (r.relowner = me.oid OR has_table_privilege(me.oid, r.oid, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, MAINTAIN'))) AS "table",
+      EXISTS (SELECT 1 FROM pg_class r JOIN nsp ON nsp.oid = r.relnamespace, me
+               WHERE r.relkind IN ('r', 'p', 'v', 'm', 'f') AND has_any_column_privilege(me.oid, r.oid, 'INSERT, UPDATE, REFERENCES')) AS "column",
+      EXISTS (SELECT 1 FROM pg_class r JOIN nsp ON nsp.oid = r.relnamespace, me
+               WHERE r.relkind = 'S' AND (r.relowner = me.oid OR has_sequence_privilege(me.oid, r.oid, 'USAGE, UPDATE'))) AS "sequence",
+      EXISTS (SELECT 1 FROM pg_proc p JOIN nsp ON nsp.oid = p.pronamespace JOIN me ON me.oid = p.proowner) AS "routine",
+      EXISTS (SELECT 1 FROM pg_type t JOIN nsp ON nsp.oid = t.typnamespace JOIN me ON me.oid = t.typowner) AS "type",
+      EXISTS (SELECT 1 FROM pg_shdepend s JOIN db ON db.oid = s.dbid JOIN me ON me.oid = s.refobjid
+               WHERE s.refclassid = 'pg_authid'::regclass AND s.deptype = 'o') AS "owner"`, [[...READ_ONLY_ROLES]]);
+  const said = rows[0];
+  // No answer at all is not "no rights": the check then counts as failed, and nothing is dumped.
+  if (!said) return ['attribute'];
+  return (Object.keys(WRITE_RIGHTS) as WriteRight[]).filter((k) => said[k] !== false);
+}
+
+/** Whether the login on `c` holds any right that would let it change the database it is connected to (writeRights). */
 export async function canWrite(c: pg.Client): Promise<boolean> {
-  const { rows } = await c.query<{ able: boolean }>(`
-    SELECT (SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user)
-        OR pg_has_role(current_user, (SELECT datdba FROM pg_database WHERE datname = current_database()), 'USAGE')
-        OR has_database_privilege(current_user, current_database(), 'CREATE')
-        OR EXISTS (
-             SELECT 1 FROM pg_namespace n
-              WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
-                AND (pg_has_role(current_user, n.nspowner, 'USAGE') OR has_schema_privilege(current_user, n.oid, 'CREATE')))
-        OR EXISTS (
-             SELECT 1 FROM pg_class r JOIN pg_namespace n ON n.oid = r.relnamespace
-              WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND r.relkind IN ('r', 'p', 'S', 'v', 'm', 'f')
-                AND (pg_has_role(current_user, r.relowner, 'USAGE')
-                  OR (r.relkind <> 'S' AND has_table_privilege(current_user, r.oid, 'INSERT, UPDATE, DELETE, TRUNCATE'))
-                  OR (r.relkind = 'S' AND has_sequence_privilege(current_user, r.oid, 'UPDATE'))))
-        AS able`);
-  return rows[0]?.able !== false;
+  return (await writeRights(c)).length > 0;
 }
 
 /** One consistent dump plus its counts. The file appears only when complete. */
@@ -256,15 +379,24 @@ export async function dumpDatabase(backupUrl: string, outDir: string, tools: Too
   await c.connect();
   try {
     await c.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
-    if (set.readOnly && (await canWrite(c))) throw new NotReadOnly();
+    if (set.readOnly) {
+      const rights = await writeRights(c);
+      if (rights.length) throw new NotReadOnly(rights);
+    }
+    // No one statement of the counting outlasts the step's own limit. (Waiting on a lock ends sooner: client().)
+    if (set.limits) await c.query(`SET LOCAL statement_timeout = ${Math.trunc(set.limits.dumpMs)}`);
     const snapshot = (await c.query<{ s: string }>('SELECT pg_export_snapshot() AS s')).rows[0]!.s;
     const counts = await countRows(c, set.schemas);
-    await run(tools.pgDump, [...DUMP_FORMAT, `--snapshot=${snapshot}`, '-h', t.host, '-p', String(t.port), '-U', t.user, '-d', t.database, '-f', partial], t.password);
+    // Said, never dumped: what is left out of this database's backup.
+    const largeObjects = set.readOnly ? Number((await c.query<{ n: string }>('SELECT count(*) AS n FROM pg_largeobject_metadata')).rows[0]!.n) : undefined;
+    // In a database others are changing, pg_dump gives up on a lock someone holds instead of waiting on it all night.
+    const patient = set.limits ? [`--lock-wait-timeout=${Math.trunc(set.limits.lockWaitMs)}`] : [];
+    await run(tools.pgDump, [...DUMP_FORMAT, ...patient, `--snapshot=${snapshot}`, '-h', t.host, '-p', String(t.port), '-U', t.user, '-d', t.database, '-f', partial], t.password, set.limits ? { timeoutMs: set.limits.dumpMs } : {});
     await c.query('COMMIT');
     chmodSync(partial, 0o600);
     renameSync(partial, final);
     writeFileSync(`${final}.counts.json`, JSON.stringify(counts), { mode: 0o600 });
-    return { path: final, bytes: statSync(final).size, sha256: await sha256File(final), counts };
+    return { path: final, bytes: statSync(final).size, sha256: await sha256File(final), counts, ...(largeObjects === undefined ? {} : { largeObjects }) };
   } catch (err) {
     rmSync(partial, { force: true });
     throw err;
@@ -297,6 +429,8 @@ export class NeedsSetup extends Error {}
 /** Whether a nightly job failed for a reason that stays until someone fixes its setup. */
 export function needsSetup(err: unknown): boolean {
   if (err instanceof NeedsSetup || err instanceof NotReadOnly) return true;
+  // Stopped for taking too long, or held up by another restore test: another night may go better.
+  if (err instanceof TookTooLong || err instanceof DrillBusy) return false;
   const e = err as { code?: unknown; message?: unknown } | null;
   const message = String(e?.message ?? '');
   // The restore drill's own scratch database missing is not Will's setup: the drill makes and drops it each
@@ -325,10 +459,12 @@ const AGE_HEADER = Buffer.from('age-encryption.org/v1\n');
  * not even under a partial name. What is written is flushed to disk before it
  * counts.
  */
-function seal(age: string, recipient: string, src: string, dest: string): Promise<{ bytes: number; sha256: string }> {
+function seal(age: string, recipient: string, src: string, dest: string, timeoutMs?: number): Promise<{ bytes: number; sha256: string }> {
   return new Promise((resolve, reject) => {
     // No -o: age writes the ciphertext to its stdout, which is a pipe here, never a terminal.
     const child = spawn(age, ['-r', recipient, src], { env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Past its set's limit it is stopped where it stands (end kills it), and what it had written goes with it (encryptTo).
+    const clock = timeoutMs === undefined ? undefined : setTimeout(() => end(new TookTooLong('age', timeoutMs)), timeoutMs);
     const hash = createHash('sha256');
     /** The first bytes, held until they are seen to begin an age file; undefined once the file is open. */
     let held: Buffer[] | undefined = [];
@@ -343,8 +479,9 @@ function seal(age: string, recipient: string, src: string, dest: string): Promis
     const end = (failure?: unknown) => {
       if (settled) return;
       settled = true;
+      clearTimeout(clock);
       if (failure) {
-        child.kill();
+        child.kill(failure instanceof TookTooLong ? 'SIGKILL' : undefined);
         out?.destroy();
       }
       try {
@@ -406,14 +543,14 @@ function seal(age: string, recipient: string, src: string, dest: string): Promis
  * The copy appears under its name only once it is whole, and only ciphertext
  * is ever written there.
  */
-export async function encryptTo(path: string, recipient: string, tools: Tools, outDir: string): Promise<{ path: string; bytes: number; sha256: string }> {
+export async function encryptTo(path: string, recipient: string, tools: Tools, outDir: string, timeoutMs?: number): Promise<{ path: string; bytes: number; sha256: string }> {
   if (!/^age1[0-9a-z]{50,}$/.test(recipient)) throw new NeedsSetup('the age recipient is not an age public key');
   if (!tools.age || !existsSync(tools.age)) throw new NeedsSetup('age is not installed (brew install age)');
   mkdirSync(outDir, { recursive: true });
   const out = join(outDir, `${basename(path)}.age`);
   const partial = `${out}.partial`;
   try {
-    const sealed = await seal(tools.age, recipient, path, partial);
+    const sealed = await seal(tools.age, recipient, path, partial, timeoutMs);
     renameSync(partial, out);
     return { path: out, ...sealed };
   } catch (err) {
@@ -528,11 +665,31 @@ export interface DrillResult {
 }
 
 /**
+ * Another restore test is using the same scratch database, and did not finish
+ * within the time this one may wait (StepLimits.drillWaitMs): this one ran
+ * nothing. Not a setup problem: next time it will be free.
+ */
+export class DrillBusy extends Error {
+  constructor() {
+    super('another restore test was using the scratch database, so this one did not run');
+  }
+}
+
+/**
  * Restore `dump` into its set's scratch database (flint_restore_test, or
  * nexus_restore_test) as a role that may create databases (flint_restore),
  * compare counts with the counts taken at dump time, and drop it. `adminUrl`
  * names that role and any database it may connect to. Nothing but the scratch
  * database is touched: the database the dump was taken from is never opened.
+ *
+ * A set with limits (Nexus's) runs one test at a time: it holds a lock named
+ * for its scratch database, on the restore login's own connection, from before
+ * the scratch database is made until it is dropped. A second test (a deploy's
+ * own check of this code, say) waits its turn, and says so if the wait is too
+ * long, instead of dropping the database under the first. Its pg_restore is
+ * stopped if it runs past the set's limit, and the scratch database is then
+ * dropped with whatever is still connected to it. Flint's own test runs as it
+ * always has.
  */
 export async function restoreDrill(dump: string, adminUrl: string, tools: Tools, of: BackupSet = FLINT_SET): Promise<DrillResult> {
   const set = checkedSet(of);
@@ -542,6 +699,51 @@ export async function restoreDrill(dump: string, adminUrl: string, tools: Tools,
   const name = `"${set.scratch}"`;
   if (admin.database === set.scratch) throw new Error('the restore login’s own database is the scratch database');
   const scratch: PgTarget = { ...admin, database: set.scratch };
+  const limits = set.limits;
+  /** The restore and the comparison, once the scratch database is there. */
+  const restoreAndCompare = async (): Promise<DrillResult> => {
+    await run(tools.pgRestore, ['--no-owner', '--no-privileges', '--exit-on-error', '-h', scratch.host, '-p', String(scratch.port), '-U', scratch.user, '-d', scratch.database, dump], scratch.password, limits ? { timeoutMs: limits.drillMs } : {});
+    const r = client(scratch);
+    await r.connect();
+    let restored: Record<string, number>;
+    try {
+      if (limits) await r.query(`SET statement_timeout = ${Math.trunc(limits.drillMs)}`);
+      restored = await countRows(r, set.schemas);
+    } finally {
+      await r.end();
+    }
+    const mismatches = Object.entries(expected)
+      .filter(([table, n]) => restored[table] !== n)
+      .map(([table, n]) => ({ table, expected: n, restored: restored[table] ?? null }));
+    return { ok: mismatches.length === 0 && Object.keys(expected).length > 0, tables: Object.keys(expected).length, mismatches };
+  };
+
+  if (limits) {
+    // One connection for the whole test, holding the lock: it is released when the connection ends, however that is.
+    const c = client(admin);
+    await c.connect();
+    try {
+      await c.query(`SET lock_timeout = ${Math.trunc(limits.drillWaitMs)}`);
+      try {
+        await c.query('SELECT pg_advisory_lock(hashtext($1))', [`restore test ${set.scratch}`]);
+      } catch (err) {
+        if ((err as { code?: unknown } | null)?.code === '55P03') throw new DrillBusy();
+        throw err;
+      }
+      await c.query('SET lock_timeout = 15000');
+      await c.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+      await c.query(`CREATE DATABASE ${name}`);
+      try {
+        return await restoreAndCompare();
+      } finally {
+        // FORCE: a pg_restore that was stopped may still be connected for a moment, and must not keep the database there.
+        await c.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`).catch(() => {});
+      }
+    } finally {
+      await c.end().catch(() => {});
+    }
+  }
+
   const c = client(admin);
   await c.connect();
   try {
@@ -551,19 +753,7 @@ export async function restoreDrill(dump: string, adminUrl: string, tools: Tools,
     await c.end();
   }
   try {
-    await run(tools.pgRestore, ['--no-owner', '--no-privileges', '--exit-on-error', '-h', scratch.host, '-p', String(scratch.port), '-U', scratch.user, '-d', scratch.database, dump], scratch.password);
-    const r = client(scratch);
-    await r.connect();
-    let restored: Record<string, number>;
-    try {
-      restored = await countRows(r, set.schemas);
-    } finally {
-      await r.end();
-    }
-    const mismatches = Object.entries(expected)
-      .filter(([table, n]) => restored[table] !== n)
-      .map(([table, n]) => ({ table, expected: n, restored: restored[table] ?? null }));
-    return { ok: mismatches.length === 0 && Object.keys(expected).length > 0, tables: Object.keys(expected).length, mismatches };
+    return await restoreAndCompare();
   } finally {
     const d = client(admin);
     await d.connect();

@@ -42,7 +42,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { localDay, redact, resolveTier, runsInShadow, HEALTH_STATUS, REVIEW_DOWN_MS, REVIEW_LATE_MS, TASK_ASSET_KINDS, type HealthReport } from '@flint/policy';
 import type { z } from 'zod';
-import { nexusBackupWanted, type Config } from '../config.js';
+import { nexusBackupState, type Config } from '../config.js';
 import type { Db } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
 import { revokedIn } from '../sources/apple/calendar.js';
@@ -236,6 +236,8 @@ export const NEXUS_HEALTH = {
   drillFailed: (when: string) => `The last Nexus restore test failed ${when}.`,
   drillNone: 'No Nexus restore test has run yet.',
   drillLate: (days: number) => `The last Nexus restore test was ${count(days, 'day')} ago.`,
+  /** The address set for it is not one Flint can use: none of its steps runs until it is set again. */
+  address: 'The Nexus backup’s address needs fixing. Nothing is backed up until it is set again.',
 } as const;
 
 /** A copy older than this is late (degraded); older than the next, missing (down). The nightly jobs run a day apart. */
@@ -472,8 +474,15 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
     detail: backupFailed ? BACKUP_HEALTH.failed : backup ? `The last backup is ${count(Math.round(backupH), 'hour')} old.` : 'There’s no backup yet.',
   });
   out.push(await filesBackup(db, now));
-  // Nexus's own backup (P7): off until its address is set, and nothing of it is read while it is off.
-  out.push(nexusBackupWanted(d.config.home) ? await nexusBackup(db, d.config.home, d.config.tz, now) : { component: 'nexus_backup', status: 'disabled' });
+  // Nexus's own backup (P7): off until its address is set, and nothing of it is read while it is off. With an
+  // address Flint cannot use, none of its steps runs (and none files a card): that is said here, where it stays
+  // until the address is set again, whatever the last dump's age.
+  const nexus = nexusBackupState(d.config.home);
+  out.push(
+    nexus === 'off' ? { component: 'nexus_backup', status: 'disabled' }
+      : nexus === 'bad' ? { component: 'nexus_backup', status: 'down', detail: NEXUS_HEALTH.address }
+        : await nexusBackup(db, d.config.home, d.config.tz, now),
+  );
 
   // The encrypted copy off this Mac. The nightly job sends one only once Will's age key is here
   // (backup-nightly.sh), so without the key it is off, not failing. With it, a copy that is missing or

@@ -6,8 +6,8 @@
  *   pnpm --filter @flint/runtime drill    [--auto]   restore the newest dump and compare
  *   pnpm --filter @flint/runtime nexus-setup [--database <name>]
  *                                                    switch Nexus's own backup on (P7): work its address out
- *                                                    from Flint's backup address, check that the login can
- *                                                    read Nexus and change nothing there, and save it
+ *                                                    from Flint's backup address, check that the login is let
+ *                                                    in and holds no right to change Nexus, and save it
  *   pnpm --filter @flint/runtime nexus-backup  [--auto]  the same dump of the Nexus database (~/FlintBackups/nexus)
  *   pnpm --filter @flint/runtime nexus-offsite [--auto]  its age-encrypted copy off the box (7 kept)
  *   pnpm --filter @flint/runtime nexus-drill   [--auto]  restore the newest Nexus dump into a scratch database
@@ -82,7 +82,7 @@ import { NEXUS_OFF, nexusHelp, nexusSetup, nexusSetupArgs } from './backup/nexus
 import { PRUNE_ACTION, pruneJob, pruneLines, pruneMode } from './backup/prune-job.js';
 import { fileBackup, fileFailure } from './backup/record.js';
 import { completeProposal } from './governance/proposals.js';
-import { FLINT_SET, NEXUS_SET, NeedsSetup, dumpDatabase, dumpPathAt, newestDump, pruneDumps, restoreDrill } from './backup/backup.js';
+import { FLINT_SET, NEXUS_SET, dumpDatabase, dumpPathAt, newestDump, pruneDumps, restoreDrill } from './backup/backup.js';
 import { sendOffsite, type OffsiteConfig } from './backup/offsite.js';
 import { notifyWill } from './notify.js';
 import { scopedFetch } from './policy/egress.js';
@@ -311,6 +311,15 @@ async function main(): Promise<void> {
     }
     return;
   }
+  if (nexus && b.nexus!.problem) {
+    // An address that cannot be used (not on this Mac, not Postgres, Flint's own database): none of Nexus's
+    // steps runs, and none asks for a card it could not act on. Said here, with what to run; Settings > Health
+    // says it too, for as long as it lasts (health/checks.ts). Neither database is opened.
+    console.log(`${action}: not run (${b.nexus!.problem})`);
+    for (const line of nexusHelp(undefined, b.nexus!, step)) console.log(line);
+    if (!auto) process.exitCode = 1;
+    return;
+  }
   const where = nexus
     ? { dumpDir: b.nexus!.dumpDir, offsiteDir: b.nexus!.offsiteDir, offsiteManifest: b.nexus!.offsiteManifest }
     : { dumpDir: b.dumpDir, offsiteDir: b.offsiteDir, offsiteManifest: b.offsiteManifest };
@@ -325,6 +334,8 @@ async function main(): Promise<void> {
   } satisfies Parameters<typeof tellFailure>[3];
   /** What went wrong with Nexus's own setup, for the lines after the FAILED one (nexusHelp); nothing else is kept of it. */
   let refused: unknown;
+  /** How many large objects a Nexus dump left out (no dump includes them); said after the dump when there are any. */
+  let left = 0;
   try {
     let proposalId: string | undefined;
     if (auto) {
@@ -344,9 +355,6 @@ async function main(): Promise<void> {
     // could change, or one that stays until its setup is fixed.
     const o = await attempt(async () => {
       try {
-        // An address that cannot be used (not on this Mac, not Postgres) stops Nexus's steps here, with why;
-        // it never reaches a connection, and Flint's own steps never look at it.
-        if (nexus && b.nexus!.problem) throw new NeedsSetup(b.nexus!.problem);
         if (step === 'backup') {
           const d = await dumpDatabase(nexus ? b.nexus!.backupUrl! : b.backupUrl, where.dumpDir, b.tools, now, set);
           // The dump's fingerprint, kept beside it: a restore can check the file when the database cannot be asked.
@@ -358,7 +366,8 @@ async function main(): Promise<void> {
               data: { kind: 'pg_dump_flint', location: 'local', path: d.path, bytes: BigInt(d.bytes), sha256: d.sha256, encrypted: false, status: 'ok', startedAt: now, finishedAt: new Date() },
             });
           }
-          return { detail: { bytes: d.bytes, sha256: d.sha256, tables: Object.keys(d.counts).length, pruned: pruned.length } };
+          left = d.largeObjects ?? 0;
+          return { detail: { bytes: d.bytes, sha256: d.sha256, tables: Object.keys(d.counts).length, pruned: pruned.length, ...(d.largeObjects === undefined ? {} : { largeObjects: d.largeObjects }) } };
         }
         if (step === 'offsite') {
           // The same key and the same offsite place as Flint's own copy; this set's own folders, names and list.
@@ -396,11 +405,14 @@ async function main(): Promise<void> {
     }
     await appendAudit(db, [{ actor, context, kind: 'action', action, decision: 'act', outcome: ok ? 'ok' : 'failed', inputs: detail, ...(error ? { reasoning: error.slice(0, 1000) } : {}), ...(proposalId ? { correlationId: proposalId } : {}) }]);
     console.log(`${action}: ${ok ? 'ok' : `FAILED: ${error}`} ${JSON.stringify(detail)}`);
+    if (ok && left > 0) console.log(left === 1 ? 'Nexus holds 1 large object. No backup includes it, so it was left out.' : `Nexus holds ${left} large objects. No backup includes them, so they were left out.`);
     if (!ok) {
       process.exitCode = 1;
-      // Nexus would not let Flint read it, or its address cannot be used: what is wrong and the commands that put
-      // it right, in the job's log and in Terminal alike. The owner's side runs them; Flint never changes Nexus.
-      if (nexus) for (const line of nexusHelp(refused, b.nexus!)) console.log(line);
+      // Nexus would not let Flint read it: what is wrong and the commands that put it right, in the job's log and
+      // in Terminal alike. Only the backup's own failures get that advice; a restore test that was refused in its
+      // scratch database gets a sentence of its own (nexusHelp). The owner's side runs the commands; Flint never
+      // changes Nexus.
+      if (nexus) for (const line of nexusHelp(refused, b.nexus!, step)) console.log(line);
       // The error itself is in the FAILED line above (stdout, the LaunchAgent's out.log) and the audit. The note
       // says what happened and what happens next, in Will's words, and promises only what is true (tellFailure):
       //  - a failure another try cannot change says its setup needs fixing;

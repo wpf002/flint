@@ -357,6 +357,7 @@ describe('the runtime’s notes to Will', () => {
       ...[61 * 60_000, 5 * 3_600_000, 47 * 3_600_000, 9 * 86_400_000].map((ms): [string, string] => ['deploy_hold', UPKEEP_HEALTH.notChecked(ms)]),
       // Nexus's own backup (P7): its one line in Health, whichever of its three parts it speaks of.
       ['nexus_backup', NEXUS_HEALTH.none], ['nexus_backup', NEXUS_HEALTH.failed], ['nexus_backup', NEXUS_HEALTH.offsiteNone], ['nexus_backup', NEXUS_HEALTH.offsiteFailed], ['nexus_backup', NEXUS_HEALTH.drillNone],
+      ['nexus_backup', NEXUS_HEALTH.address],
       ...[0, 1, 30, 400].flatMap((h): Array<[string, string]> => [['nexus_backup', NEXUS_HEALTH.age(h)], ['nexus_backup', NEXUS_HEALTH.offsiteAge(h)]]),
       ...['today', 'yesterday', '6 days ago'].map((w): [string, string] => ['nexus_backup', NEXUS_HEALTH.drillFailed(w)]),
       ...[9, 13, 400].map((d): [string, string] => ['nexus_backup', NEXUS_HEALTH.drillLate(d)]),
@@ -368,7 +369,9 @@ describe('the runtime’s notes to Will', () => {
     expect(nexusFn.length).toBeGreaterThan(500);
     expect(nexusFn.match(/\bdetail: /g)).toHaveLength(5);
     expect(nexusFn.match(/NEXUS_HEALTH\.\w+/g)!.sort()).toEqual(['age', 'drillFailed', 'drillLate', 'drillNone', 'failed', 'none', 'offsiteAge', 'offsiteFailed', 'offsiteNone'].map((k) => `NEXUS_HEALTH.${k}`));
-    expect(Object.keys(NEXUS_HEALTH).sort()).toEqual(['age', 'drillFailed', 'drillLate', 'drillNone', 'failed', 'none', 'offsiteAge', 'offsiteFailed', 'offsiteNone']);
+    // (The one sentence its check does not say itself: an address that cannot be used, said before the check is made.)
+    expect(Object.keys(NEXUS_HEALTH).sort()).toEqual(['address', 'age', 'drillFailed', 'drillLate', 'drillNone', 'failed', 'none', 'offsiteAge', 'offsiteFailed', 'offsiteNone']);
+    expect(nexusCheck.match(/NEXUS_HEALTH\.address/g)).toHaveLength(1);
     expect(HEALTH_NAMES.nexus_backup).toBe('Nexus Backup');
     expect(digestBody({ relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 }, ['nexus_backup'])).toContain('Nexus Backup');
     // Its three jobs by name, as a failure's note says them, and the commands' own lines in Terminal.

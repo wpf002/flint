@@ -139,11 +139,12 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   // that card, and by hand it is Will's own command: never from chat (NEVER_FROM_CHAT below).
   'backup.prune': approval({ cap: { limit: 1, period: 'day' }, byName: true, note: 'deletes update backups past the newest 10 and 30 days; never the running release\'s' }),
   // Nexus's own backup (P7): the same three steps for the Nexus database, which is on this Mac and is not
-  // Flint's. Read through a login that can change nothing there; the copy leaves this Mac only encrypted; the
-  // weekly test restores into a scratch database and never opens Nexus itself. Off until its address is set.
+  // Flint's. Flint only reads it, through a login the runtime checks holds no right to change it; the copy
+  // leaves this Mac only encrypted; the weekly test restores into a scratch database and never opens Nexus
+  // itself. Off until its address is set.
   // Each is promoted by its own name only: a rule signed for the backups as a group, before these existed,
   // does not cover them. Only their own nightly jobs file their cards: never from chat (NEVER_FROM_CHAT below).
-  'backup.nexus': approval({ cap: { limit: 1, period: 'day' }, byName: true, note: 'a dump of the Nexus database, read-only, onto this Mac' }),
+  'backup.nexus': approval({ cap: { limit: 1, period: 'day' }, byName: true, note: 'a dump of the Nexus database, which Flint only reads, onto this Mac' }),
   'backup.nexus.offsite': approval({ cap: { limit: 1, period: 'day' }, egress: true, byName: true, note: 'the Nexus dump, age-encrypted, to iCloud' }),
   'restore.drill.nexus': approval({ cap: { limit: 1, period: 'week' }, byName: true, note: 'the Nexus dump, into a scratch database' }),
   // Replacing the production database with a backup (P7). Never promoted, never

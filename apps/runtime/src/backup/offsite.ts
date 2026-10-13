@@ -44,13 +44,15 @@ export async function sendOffsite(
   if (!b.offsiteDir) throw new NeedsSetup('nowhere to send it: iCloud Drive is not on this Mac and FLINT_OFFSITE_DIR is not set');
   const dump = newestDump(b.dumpDir, set.prefix);
   if (!dump) throw new Error('no local dump to send');
-  const e = await encryptTo(dump, b.ageRecipient, b.tools, b.offsiteDir);
+  // A set with limits (Nexus's): age is stopped if it runs past them, and nothing half-written stays offsite.
+  const limit = set.limits?.offsiteMs;
+  const e = await encryptTo(dump, b.ageRecipient, b.tools, b.offsiteDir, limit);
   // One record for each copy: a dump sent again (last night's backup failed, so the newest dump is the one
   // already sent) is the same file under the same name, and its record now says what is there.
   await fileBackup(db, { kind: set.kind, location: 'icloud', path: e.path, bytes: e.bytes, sha256: e.sha256, startedAt: now });
   const counts = `${dump}.counts.json`;
   if (existsSync(counts)) {
-    await encryptTo(counts, b.ageRecipient, b.tools, b.offsiteDir).catch((err: unknown) =>
+    await encryptTo(counts, b.ageRecipient, b.tools, b.offsiteDir, limit).catch((err: unknown) =>
       warn(`${action}: the copy is written, but its row counts were not sent: ${err instanceof Error ? err.message : String(err)}`),
     );
   }

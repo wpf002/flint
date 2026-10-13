@@ -48,8 +48,9 @@ type Rule = (f: EventFacts) => Template | undefined;
 
 const CRITICAL: Record<string, Rule> = {
   'runtime:service.down_30m': (f) => ({ id: 'service_down', fields: { service: refOf(f), downMinutes: num(f.payload.downMinutes, 30, 100_000, 30) } }),
-  // Flint's own database, or (when the watchdog says so) Nexus's: each has its own note.
-  'runtime:backup.stale': (f) => ({ id: f.payload.what === 'nexus' ? 'nexus_backup_stale' : 'backup_stale', fields: { hoursSince: num(f.payload.hoursSince, 36, 100_000, 36) } }),
+  'runtime:backup.stale': (f) => ({ id: 'backup_stale', fields: { hoursSince: num(f.payload.hoursSince, 36, 100_000, 36) } }),
+  // The same rule for Nexus's own backup (P7), which is raised as an event of its own and has a note of its own.
+  'runtime:nexus_backup.stale': (f) => ({ id: 'nexus_backup_stale', fields: { hoursSince: num(f.payload.hoursSince, 36, 100_000, 36) } }),
   'runtime:drill.failed': (f) => ({ id: 'drill_failed', fields: { mismatches: num(f.payload.mismatches, 0, 1_000_000, 0) } }),
   'runtime:vendor.cap_100': (f) => {
     const vendor = pick(f.payload.vendor, VENDORS);
