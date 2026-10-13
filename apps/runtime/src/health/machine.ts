@@ -21,6 +21,7 @@
  * Each check is a sentence built here from numbers and fixed words: never a
  * path, a host's name, or anything a program said.
  */
+// Network: None of its own: Ollama's two lists are read through model/here.ts, on this Mac only.
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { statfs } from 'node:fs/promises';

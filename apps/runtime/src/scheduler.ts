@@ -4,6 +4,7 @@
  * Postgres advisory lock so a second runtime (a deploy overlap) cannot run it
  * at the same moment.
  */
+// Network: None of its own: it hands each source a fetch scoped to that source's own endpoints.
 import type { Db } from './db.js';
 import { scopedFetch } from './policy/egress.js';
 import type { Registered } from './sources/registry.js';

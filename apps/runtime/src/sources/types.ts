@@ -3,6 +3,7 @@
  * world model and numbers for MetricPoint. Sources are read-only and
  * deterministic, and make no model calls.
  */
+// Network: None of its own: it names the scoped fetch a source is handed.
 import type { Observation } from '../world/mapper.js';
 
 export type SourceName = 'launchd' | 'health' | 'git' | 'spend' | 'github' | 'railway' | 'nexus' | 'deploy' | 'knowledge' | 'nexus_inbox' | 'google_calendar' | 'apple_calendar';

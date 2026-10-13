@@ -58,6 +58,7 @@
  * records `none:unavailable`. A job that died after filing its cards files
  * none twice: its next run finds them waiting.
  */
+// Network: None of its own: it passes a test's fetch through to the plan stage (goals/planner.ts).
 import { Prisma } from '@prisma/client';
 import {
   CHECK_PATHS,

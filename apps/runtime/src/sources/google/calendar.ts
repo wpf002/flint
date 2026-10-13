@@ -18,6 +18,7 @@
  *    itself shows declined or cancelled, and what has ended, is archived
  *    whatever else the listing held.
  */
+// Network: Google Calendar's events endpoint only, by GET, through the scoped fetch the scheduler hands this source.
 import { z } from 'zod';
 import type { Endpoint } from '../../policy/egress.js';
 import { lagOf, lagSeries, lastRunOf, mapEvents as mapCalendar, unlisted } from '../calendar/core.js';

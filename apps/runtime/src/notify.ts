@@ -8,6 +8,7 @@
  * ref (the escalation id) the server dedupes on, so a retried delivery is
  * "duplicate", never a second note or ping; its answer says whether to retry.
  */
+// Network: The Flint server's own address only, a scoped POST to /internal/notify.
 import { NotifyResponse, type NotifyRequest } from '@flint/policy';
 import type { Config } from './config.js';
 import { scopedFetch } from './policy/egress.js';

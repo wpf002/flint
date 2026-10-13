@@ -17,6 +17,7 @@
  *  - Commit messages are written by whoever pushed: never stored (only the sha
  *    and status are).
  */
+// Network: Railway's API only, through the scoped fetch the scheduler hands this source.
 import { z } from 'zod';
 import { clip } from './text.js';
 import type { Source, SourceObservation, SourceRun, SyncResult } from './types.js';

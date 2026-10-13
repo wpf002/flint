@@ -3,6 +3,7 @@
  * minutes. The verdict (ok, degraded, down) is state; the latency is a metric,
  * so a quiet day creates no versions.
  */
+// Network: The health addresses named in this Mac's settings only, through the scoped fetch the scheduler hands this source.
 import type { Source, SourceObservation, MetricObservation } from './types.js';
 
 export interface HealthTarget {

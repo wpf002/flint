@@ -33,6 +33,7 @@
  *    estimateTokens: done steps are dropped first, then items, then the latest
  *    open steps, and the drops are counted.
  */
+// Network: Ollama on this Mac only, a scoped POST to /api/chat, after model/here.ts says the model runs here.
 import { z } from 'zod';
 import { OllamaProvider } from '@flint/core/ollama';
 import { GOAL_BUDGETS, dataBlock, estimateTokens, type CheckState } from '@flint/policy';

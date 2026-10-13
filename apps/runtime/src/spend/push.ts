@@ -8,6 +8,7 @@
  * marked as an estimate: other accounts' spend on the same vendor is not
  * known here yet, so the view errs low only by what Flint cannot see.
  */
+// Network: The Flint server's own address only, a scoped POST to /internal/spend-external.
 import type { Config } from '../config.js';
 import { scopedFetch } from '../policy/egress.js';
 import { ledgerTotals, VENDORS } from '../sources/spend.js';

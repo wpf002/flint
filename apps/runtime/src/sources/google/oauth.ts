@@ -20,6 +20,7 @@
  *  - No token, code, verifier or client secret ever reaches an error message
  *    or a log line: messages name files and scopes, never values.
  */
+// Network: Google's token endpoint through a scoped fetch, and a listener on 127.0.0.1 for the sign-in's redirect.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmodSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';

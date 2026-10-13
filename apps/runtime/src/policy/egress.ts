@@ -5,6 +5,7 @@
  * path prefix; redirects are not followed, so a 30x cannot take a source
  * anywhere else. A self-modification PR may not touch this file (P6 allowlist).
  */
+// Network: This is the scoped fetch itself: every request the runtime makes is limited here to a fixed list of endpoints.
 export interface Endpoint {
   /** `https://api.github.com` or `http://localhost:8080`. */
   origin: string;

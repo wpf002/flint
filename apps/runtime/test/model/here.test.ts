@@ -505,6 +505,37 @@ function reachProblems(sources: ReadonlyMap<string, string>, callers: readonly s
   return problems;
 }
 
+/**
+ * Every file under src/ whose code may name fetch, or a module that opens a connection, at all. The check above reads
+ * a request off its shape (a provider, an endpoint's path); a URL put together from pieces and handed to
+ * `globalThis.fetch` has no shape to read. So the files that can make a request are a named list, and a file that is
+ * not on it does not name fetch in any form. Each file on it says why in one line (`// Network: ...`).
+ */
+const NETWORK_FILES = [
+  'cli.ts', 'goals/batch.ts', 'goals/planner.ts', 'health/machine.ts', 'model/here.ts', 'notify.ts', 'policy/egress.ts', 'predict/reason.ts', 'scheduler.ts',
+  'sources/github.ts', 'sources/google/calendar.ts', 'sources/google/oauth.ts', 'sources/health.ts', 'sources/nexus-inbox.ts', 'sources/nexus.ts', 'sources/railway.ts',
+  'sources/types.ts', 'spend/push.ts', 'triage/judge.ts', 'triage/load.ts', 'triage/worker.ts',
+];
+/** fetch under any name that ends in it (`fetch(`, `.fetch`, `globalThis.fetch`, `scopedFetch`), a module that opens a connection, and `globalThis[...]`. */
+const NETWORK = /(?<![A-Za-z0-9_$])(?:[A-Za-z0-9_$]*F|f)etch(?![A-Za-z0-9_$])|\bundici\b|['"`](?:node:)?(?:http|https|http2|net|tls|dgram)['"`]|\bXMLHttpRequest\b|\bWebSocket\b|\bEventSource\b|globalThis\s*\[|\bnet\.connect\b/;
+const WHY_LINE = /^\/\/ Network: [A-Z][^\n]{20,170}\.$/gm;
+
+function networkProblems(sources: ReadonlyMap<string, string>, may: readonly string[] = NETWORK_FILES): string[] {
+  const problems: string[] = [];
+  for (const [file, raw] of sources) {
+    const names = NETWORK.test(bare(raw));
+    const whys = (raw.match(WHY_LINE) ?? []).length;
+    const marked = (raw.match(/^\s*\/\/ Network:/gm) ?? []).length;
+    const listed = may.includes(file);
+    if (names && !listed) problems.push(`${file}: it names fetch or a module that opens a connection, and is not one of the files that may`);
+    if (!names && listed) problems.push(`${file}: it is listed as a file that may reach the network, and names nothing that does: take it off the list`);
+    if (listed && (whys !== 1 || marked !== 1)) problems.push(`${file}: it says why it may reach the network in exactly one line, "// Network: " and a sentence`);
+    if (!listed && marked > 0) problems.push(`${file}: it gives a reason to reach the network, and is not one of the files that may`);
+  }
+  for (const file of may) if (!sources.has(file)) problems.push(`${file}: listed, and not there`);
+  return problems;
+}
+
 describe('nothing in the runtime reaches a model without asking where it runs', () => {
   const src = join(__dirname, '..', '..', 'src');
   const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(dir, e.name)) : e.name.endsWith('.ts') ? [join(dir, e.name)] : []));
@@ -557,6 +588,63 @@ describe('nothing in the runtime reaches a model without asking where it runs', 
     }
     // Health fetching the listing itself, as it did before there was one reader.
     caught(changed('health/machine.ts', "const installed = await rows('/api/tags');", "const installed = await rows('/api/tags');\n  void scopedFetch([{ origin: 'x', pathPrefix: '/api/tags', methods: ['GET'] }]);"), 'health/machine.ts', /fetches one of Ollama’s lists itself/);
+  });
+
+  it('only the files on a named list name fetch, or a module that opens a connection, in any form; each of them says why in one line', () => {
+    const sources = real();
+    expect(networkProblems(sources)).toEqual([]);
+    expect([...NETWORK_FILES].sort()).toEqual(NETWORK_FILES);
+    expect(NETWORK_FILES.length).toBeLessThanOrEqual(21);
+    // The three that ask a model are on it, and say the same thing: Ollama on this Mac, after it was asked.
+    for (const file of LOCAL_CALLERS) expect(sources.get(file)!, file).toContain('// Network: Ollama on this Mac only, a scoped POST to /api/chat, after model/here.ts says the model runs here.');
+    // Every reason is a plain sentence: no address but this Mac's, no key.
+    for (const file of NETWORK_FILES) {
+      const [why] = sources.get(file)!.match(WHY_LINE)!;
+      expect(why, file).not.toMatch(/https?:\/\/(?!127\.0\.0\.1)|token=|Bearer /);
+    }
+  });
+
+  it('that check catches a request with no shape to read: fetch under another name, a URL made from pieces, a module that opens a connection', () => {
+    const base = real();
+    const withFile = (file: string, source: string) => new Map([...base, [file, source]]);
+    const caught = (source: string, what = /names fetch or a module that opens a connection, and is not one of the files that may/) => {
+      const problems = networkProblems(withFile('zzsneak/net.ts', source)).filter((p) => p.startsWith('zzsneak/net.ts: '));
+      expect(problems.join('\n'), source.slice(0, 80)).toMatch(what);
+      // (And the model check alone would not have seen it, where it has no provider and no endpoint's path.)
+    };
+    // The reviewer's case: the path in pieces, and fetch taken off the global object.
+    const pieces = "export const ask = (origin: string, body: string) => globalThis.fetch([origin, 'api', ['ch', 'at'].join('')].join('/'), { method: 'POST', body });\n";
+    expect(reachProblems(withFile('zzsneak/net.ts', pieces)).filter((p) => p.startsWith('zzsneak/net.ts: '))).toEqual([]);
+    caught(pieces);
+    caught("const f = fetch;\nexport const ask = (u: string) => f(u);\n");
+    caught("export const ask = (u: string) => fetch.call(undefined, u);\n");
+    caught("export const ask = (u: string) => globalThis['fetch'](u);\n");
+    caught("export const ask = (u: string) => (globalThis as Record<string, unknown>)['fe' + 'tch'];\nexport const g = globalThis[\"x\"];\n");
+    caught("export const ask = (d: { fetch: (u: string) => Promise<Response> }, u: string) => d.fetch(u);\n");
+    caught("import { scopedFetch } from '../policy/egress.js';\nexport const ask = (o: string) => scopedFetch([{ origin: o, pathPrefix: '/', methods: ['POST'] }])(`${o}/x`, { method: 'POST' });\n");
+    caught("import { request } from 'undici';\nexport const ask = (u: string) => request(u);\n");
+    caught("import { request } from 'node:http';\nexport const ask = (u: string) => request(u);\n");
+    caught("import https from 'node:https';\nexport const ask = (u: string) => https.get(u);\n");
+    caught("const http = require('http');\nexport const ask = (u: string) => http.get(u);\n");
+    caught("import net from 'node:net';\nexport const ask = (port: number) => net.connect(port, '10.0.0.5');\n");
+    caught("import tls from 'node:tls';\nexport const ask = (port: number) => tls.connect(port, 'example.com');\n");
+    caught("export const ask = (u: string) => new WebSocket(u);\n");
+    // A comment may name what the code must never do.
+    expect(networkProblems(withFile('zzsneak/net.ts', "// It never calls fetch, and imports nothing from 'node:http'.\n/* globalThis.fetch is not used. */\nexport const x = 1;\n")).filter((p) => p.startsWith('zzsneak/'))).toEqual([]);
+    // A reason does not put a file on the list...
+    caught("// Network: Because it would like to, and says so in a whole sentence.\nexport const ask = (u: string) => fetch(u);\n", /is not one of the files that may/);
+    expect(networkProblems(withFile('zzsneak/net.ts', '// Network: Because it would like to, and says so in a whole sentence.\nexport const x = 1;\n')).join('\n')).toMatch(/zzsneak\/net\.ts: it gives a reason to reach the network, and is not one of the files that may/);
+    // ...and a file on the list says why, once, as a sentence; and comes off it when it names nothing any more.
+    const without = new Map([...base, ['notify.ts', base.get('notify.ts')!.replace(/^\/\/ Network: .*\n/m, '')]]);
+    expect(without.get('notify.ts')).not.toBe(base.get('notify.ts'));
+    expect(networkProblems(without).join('\n')).toMatch(/notify\.ts: it says why it may reach the network in exactly one line/);
+    const twice = new Map([...base, ['notify.ts', `// Network: Twice is one too many, however it is put.\n${base.get('notify.ts')!}`]]);
+    expect(networkProblems(twice).join('\n')).toMatch(/notify\.ts: it says why/);
+    const short = new Map([...base, ['notify.ts', base.get('notify.ts')!.replace(/^\/\/ Network: .*$/m, '// Network: yes')]]);
+    expect(networkProblems(short).join('\n')).toMatch(/notify\.ts: it says why/);
+    const idle = new Map([...base, ['sources/types.ts', '// Network: None of its own: it names the scoped fetch a source is handed.\nexport const x = 1;\n']]);
+    expect(networkProblems(idle).join('\n')).toMatch(/sources\/types\.ts: it is listed as a file that may reach the network, and names nothing that does/);
+    expect(networkProblems(base, [...NETWORK_FILES, 'gone.ts']).join('\n')).toMatch(/gone\.ts: listed, and not there/);
   });
 });
 

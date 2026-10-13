@@ -23,6 +23,7 @@
  *  - Failing, it says why: invalid (replies, none usable), unavailable (no
  *    reply at all), capped, or deferred (chat is busy: try again later).
  */
+// Network: Ollama on this Mac only, a scoped POST to /api/chat, after model/here.ts says the model runs here.
 import { z } from 'zod';
 import { OllamaProvider } from '@flint/core/ollama';
 import { dataBlock, entityRef, REASON_CODES } from '@flint/policy';

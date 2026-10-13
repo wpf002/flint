@@ -48,6 +48,7 @@
  * is not read. Listing models loads nothing and costs nothing, so it needs no
  * slot and no cap.
  */
+// Network: Ollama on this Mac only, scoped GETs of /api/tags and /api/ps: the one reader of its lists.
 import { ModelPlaces, PLACE_FRESH_MS, PLACE_TIMEOUT_MS, isCloudModel, onThisMachine, placeSaid, type AskPlace, type PlaceSaid } from '@flint/policy';
 import { scopedFetch } from '../policy/egress.js';
 

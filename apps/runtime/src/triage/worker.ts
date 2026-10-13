@@ -11,6 +11,7 @@
  *    (`fallback:deferred`) and the health check says triage is degraded.
  *  - Job data is {eventId} (and the deferral count): nothing else.
  */
+// Network: None of its own: it passes a test's fetch through to the judge (triage/judge.ts).
 import { z } from 'zod';
 import { CODE_TABLE, resolveTier, runsInShadow, type Tier } from '@flint/policy';
 import type { Config } from '../config.js';

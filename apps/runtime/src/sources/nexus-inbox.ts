@@ -5,6 +5,7 @@
  * or content. A handoff still pending 24 hours after it was sent raises one
  * handoff.unaccepted_24h event (triage escalates it once per sender a day).
  */
+// Network: Nexus's own address only, through the scoped fetch the scheduler hands this source.
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { toolJson } from './nexus.js';

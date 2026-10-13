@@ -24,6 +24,7 @@
  *    (404, 410, or moved elsewhere: 301) is closed as it was last known; a
  *    milestone that closed or lost its due date is archived.
  */
+// Network: GitHub's API only, through the scoped fetch the scheduler hands this source.
 import { createSign } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
