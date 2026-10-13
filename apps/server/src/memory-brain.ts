@@ -28,7 +28,8 @@
  *    his turn never waits behind it;
  *  - failing, it says why (MemoryBrainError, see BrainFailure).
  */
-import { OllamaProvider, isFlintError, isOllamaCloudModel } from '@flint/core';
+import { OllamaProvider, isFlintError } from '@flint/core';
+import { canonicalModel, isCloudModel, sameModel } from '@flint/policy';
 import type { ChatLoad } from './chat-load';
 import { creditExhausted } from './frontier-breaker';
 import { LOCAL_MODEL_MAX_LEN, LOCAL_MODEL_RE, liveOllamaOptions } from './local-model';
@@ -46,13 +47,10 @@ export function memoryBrainSetting(env: Env, log: (m: string) => void): MemoryBr
   return 'local';
 }
 
-/**
- * Is this one of Ollama's cloud models (`gpt-oss:120b-cloud`, `glm-4.6:cloud`)?
- * Those run on Ollama's servers: a pull is only a pointer to them.
- */
-export function isCloudModel(name: string): boolean {
-  return isOllamaCloudModel(name); // @flint/core's rule, shared with the default-model choice and evolve
-}
+// What a cloud model's name looks like, and when two names are one model, are @flint/policy's
+// (packages/policy/src/models.ts): the runtime asks a local Ollama too, and must mean the same thing.
+// Re-exported so imports here hold.
+export { isCloudModel, canonicalModel, sameModel };
 
 export interface LocalMemoryModel {
   /** Ollama's origin: OLLAMA_HOST, as the chat brain reads it. */
@@ -113,21 +111,6 @@ export function chatOllama(env: Env): { baseURL: string; numCtx: number | undefi
   } catch {
     return undefined;
   }
-}
-
-/**
- * Ollama's name for a model: lower case, and `:latest` when no tag is given
- * ("Llama3.1" and "llama3.1:latest" are the same model). A tag is what follows
- * the last ':' after the last '/', so a registry port isn't one.
- */
-export function canonicalModel(name: string): string {
-  const n = name.trim().toLowerCase();
-  return n.lastIndexOf(':') > n.lastIndexOf('/') ? n : `${n}:latest`;
-}
-
-/** Are these the same Ollama model, however each is written? */
-export function sameModel(a: string, b: string): boolean {
-  return canonicalModel(a) === canonicalModel(b);
 }
 
 export type MemoryBrainPlan =

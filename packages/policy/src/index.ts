@@ -23,3 +23,4 @@ export * from './predict.js';
 export * from './goals-now.js';
 export * from './suggestions.js';
 export * from './tasks.js';
+export * from './models.js';
