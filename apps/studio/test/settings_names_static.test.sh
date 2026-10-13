@@ -47,6 +47,7 @@ not_settings=(
   FLINT_SKIP_TESTS          # the emergency bypass of the gate, typed by hand; auto_deploy.sh clears it
   FLINT_TEST_FAULT          # the runtime's tests stop it at a named point (read only when NODE_ENV is test)
   FLINT_TEST_REAL_SAY       # the server's process tests: run the three that start the Mac's own say for real; install-server.sh clears it, so the deploy gate never does
+  FLINT_TEST_REAL_PDF       # the server's tests: run the ones that read a PDF with the Mac's own importer for real; install-server.sh clears it, so the deploy gate never does
   # The rebuild rehearsal (rebuild.sh --rehearse) and its tests.
   FLINT_REHEARSAL_EXISTING  # the rehearsal pretends the scratch Mac already holds Flint's files
   FLINT_REHEARSAL_INNER     # set by the rehearsal itself when it starts over inside its scratch home folder

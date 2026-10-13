@@ -46,6 +46,8 @@ export interface OllamaModel {
    * as Ollama's does.
    */
   remoteHost?: string;
+  /** What `/api/show` says the model can do. Left out: `completion` and `tools`, as it always answered. */
+  capabilities?: string[];
 }
 
 interface ChatMessage {
@@ -158,7 +160,7 @@ export async function startOllamaStub(models: Record<string, OllamaModel>): Prom
     }
     if (req.method === 'POST' && path === '/api/show') {
       const m = named(body?.model ?? body?.name);
-      return m ? json(200, { capabilities: ['completion', 'tools'], model_info: { 'test.context_length': 131072 }, details: { family: m.family ?? 'test' } }) : json(404, { error: 'model not found' });
+      return m ? json(200, { capabilities: m.capabilities ?? ['completion', 'tools'], model_info: { 'test.context_length': 131072 }, details: { family: m.family ?? 'test' } }) : json(404, { error: 'model not found' });
     }
     if (req.method === 'POST' && path === '/api/generate') {
       const m = named(body?.model);

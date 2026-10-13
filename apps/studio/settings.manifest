@@ -113,6 +113,12 @@ secrets.env  FLINT_LOCAL_MODEL                    restore   model
 secrets.env  FLINT_LOCAL_FALLBACK_MODEL           restore   model
 secrets.env  FLINT_LOCAL_FALLBACK_NUM_CTX         restore   number
 secrets.env  FLINT_LOCAL_TOOLS                    restore   word
+# Pictures and PDFs for the local model (apps/server/src/local-media.ts). Both are off unless set. Each is a word
+# that can only choose among Flint's own behaviours (on or off; off, spotlight or pdftotext), never a program or a
+# path: a word the server does not know, or a PDF reader that is not on this Mac, is refused and the thing stays
+# off. Put back by a rebuild, so one that dropped them does not start refusing the private turns they answered.
+secrets.env  FLINT_LOCAL_VISION                   restore   word
+secrets.env  FLINT_LOCAL_PDF                      restore   word
 secrets.env  FLINT_LOCAL_CONNECT_TIMEOUT_MS       restore   number
 secrets.env  FLINT_LOCAL_FIRST_OUTPUT_TIMEOUT_MS  restore   number
 secrets.env  FLINT_LOCAL_TOOL_PASS_TIMEOUT_MS     restore   number

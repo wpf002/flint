@@ -379,6 +379,8 @@ describe('refused settings and an unreadable mode are notices, each a plain sent
       FLINT_LOCAL_TTS_VOICE: 1,
       FLINT_LOCAL_VOICE_API_KEY: 1,
       FLINT_SAY_VOICE: 1,
+      FLINT_LOCAL_VISION: 1,
+      FLINT_LOCAL_PDF: 1,
     } satisfies Record<ConfigKey, 1>) as ConfigKey[];
     const generic = "A setting in Flint's setup isn't valid, so Flint ignored it.";
     for (const key of keys) {
@@ -388,7 +390,10 @@ describe('refused settings and an unreadable mode are notices, each a plain sent
       expect(s, key).not.toBe(generic);
     }
     // One sentence per class, not one per key: the six timing keys share theirs.
-    expect(new Set(keys.map((k) => say(k))).size).toBe(21);
+    expect(new Set(keys.map((k) => say(k))).size).toBe(23);
+    expect(say('FLINT_LOCAL_VISION')).toBe("The pictures setting in Flint's setup isn't valid, so no picture is sent to the local model.");
+    expect(say('FLINT_LOCAL_PDF')).toBe("The PDF setting in Flint's setup isn't one it knows, so no PDF is read here.");
+    expect(say('FLINT_LOCAL_PDF', 'missing')).toBe("The PDF reader named in Flint's setup isn't on this Mac, so no PDF is read here.");
     expect(say('FLINT_LOCAL_TOOLS')).toBe("The tools setting in Flint's setup isn't valid, so the local model is offered no tools.");
     expect(say('FLINT_HARDWARE_TIER')).toBe("The model size named in Flint's setup isn't one it knows, so Flint checks this machine instead.");
   });
