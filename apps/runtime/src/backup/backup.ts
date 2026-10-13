@@ -465,8 +465,8 @@ const READ_ONLY_ROLES = ['pg_read_all_data', 'pg_monitor', 'pg_read_all_settings
  *    locks, rewrites and reindexes);
  *  - INSERT, UPDATE or REFERENCES on any one column;
  *  - owning a sequence, or USAGE or UPDATE on one (either moves it on);
- *  - owning a foreign server or a foreign data wrapper, or USAGE on one (which
- *    is leave to point the database at another one);
+ *  - owning a foreign server, or USAGE on one or on a foreign data wrapper
+ *    (which is leave to point the database at another one);
  *  - owning a large object, or UPDATE on one;
  *  - a right of any kind that it may hand on to another login (WITH GRANT
  *    OPTION), reading included: handing it on changes who may do what;
@@ -514,7 +514,8 @@ async function rightsOf(c: pg.Client, me: string, who: string): Promise<WriteRig
     ), nsp AS (
       SELECT n.oid, n.nspowner, n.nspacl FROM pg_namespace n WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
     ), given AS (
-      -- Every right on record in this database that its holder may hand on.
+      -- Every right on record in this database that its holder may hand on. (Not a foreign server's or a foreign
+      -- data wrapper's: the right itself is refused below, with or without leave to hand it on.)
                 SELECT x.grantee FROM db, aclexplode(db.datacl) x WHERE x.is_grantable
       UNION ALL SELECT x.grantee FROM nsp, aclexplode(nsp.nspacl) x WHERE x.is_grantable
       UNION ALL SELECT x.grantee FROM pg_class r JOIN nsp ON nsp.oid = r.relnamespace, aclexplode(r.relacl) x WHERE x.is_grantable
@@ -523,8 +524,6 @@ async function rightsOf(c: pg.Client, me: string, who: string): Promise<WriteRig
       UNION ALL SELECT x.grantee FROM pg_type t JOIN nsp ON nsp.oid = t.typnamespace, aclexplode(t.typacl) x WHERE x.is_grantable
       UNION ALL SELECT x.grantee FROM pg_language l, aclexplode(l.lanacl) x WHERE x.is_grantable
       UNION ALL SELECT x.grantee FROM pg_largeobject_metadata m, aclexplode(m.lomacl) x WHERE x.is_grantable
-      UNION ALL SELECT x.grantee FROM pg_foreign_server f, aclexplode(f.srvacl) x WHERE x.is_grantable
-      UNION ALL SELECT x.grantee FROM pg_foreign_data_wrapper w, aclexplode(w.fdwacl) x WHERE x.is_grantable
     )
     SELECT
       EXISTS (SELECT 1 FROM me WHERE rolsuper OR rolbypassrls OR rolcreaterole OR rolreplication) AS "attribute",
@@ -542,7 +541,7 @@ async function rightsOf(c: pg.Client, me: string, who: string): Promise<WriteRig
       EXISTS (SELECT 1 FROM pg_proc p JOIN nsp ON nsp.oid = p.pronamespace JOIN me ON me.oid = p.proowner) AS "routine",
       EXISTS (SELECT 1 FROM pg_type t JOIN nsp ON nsp.oid = t.typnamespace JOIN me ON me.oid = t.typowner) AS "type",
       (EXISTS (SELECT 1 FROM pg_foreign_server f, me WHERE f.srvowner = me.oid OR has_server_privilege(${who}, f.oid, 'USAGE'))
-        OR EXISTS (SELECT 1 FROM pg_foreign_data_wrapper w, me WHERE w.fdwowner = me.oid OR has_foreign_data_wrapper_privilege(${who}, w.oid, 'USAGE'))) AS "foreign",
+        OR EXISTS (SELECT 1 FROM pg_foreign_data_wrapper w, me WHERE has_foreign_data_wrapper_privilege(${who}, w.oid, 'USAGE'))) AS "foreign",
       -- (Postgres 17 has no has_..._privilege for a large object: its own list of who may do what is read instead. 0 there is everyone.)
       EXISTS (SELECT 1 FROM pg_largeobject_metadata m, me
                WHERE m.lomowner = me.oid

@@ -670,12 +670,12 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
     });
 
     it('each Nexus step has one limit over all its parts: a part well inside its own limit still ends when the step’s time is up', async () => {
-      const bin = join(dir, 'whole');
-      mkdirSync(bin);
-      writeFileSync(join(bin, 'pg_dump'), '#!/bin/zsh\nexec sleep 20\n', { mode: 0o755 });
-      writeFileSync(join(bin, 'age'), `#!/bin/zsh\nprint -n -- 'age-encryption.org/v1\\n-> stand-in\\n'\nexec sleep 20\n`, { mode: 0o755 });
-      writeFileSync(join(bin, 'pg_restore'), '#!/bin/zsh\nexec sleep 20\n', { mode: 0o755 });
-      const slow: Tools = { pgDump: join(bin, 'pg_dump'), pgRestore: join(bin, 'pg_restore'), age: join(bin, 'age') };
+      const folder = join(dir, 'whole');
+      mkdirSync(folder);
+      writeFileSync(join(folder, 'pg_dump'), '#!/bin/zsh\nexec sleep 20\n', { mode: 0o755 });
+      writeFileSync(join(folder, 'age'), `#!/bin/zsh\nprint -n -- 'age-encryption.org/v1\\n-> stand-in\\n'\nexec sleep 20\n`, { mode: 0o755 });
+      writeFileSync(join(folder, 'pg_restore'), '#!/bin/zsh\nexec sleep 20\n', { mode: 0o755 });
+      const slow: Tools = { pgDump: join(folder, 'pg_dump'), pgRestore: join(folder, 'pg_restore'), age: join(folder, 'age') };
       // Every tool and statement has all the time it could want (the real limits, 20 and 30 minutes): only the step's own is short.
       const step = (ms: number, over: Partial<StepLimits> = {}): BackupSet => ({ ...SET, limits: { ...NEXUS_SET.limits!, ...over, stepMs: ms } });
       // The backup, held up in a statement: a table someone holds locked in Nexus is counted before pg_dump runs.
@@ -722,8 +722,13 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
       const other = client(targetOf(URLS!.restore!));
       await other.connect();
       await other.query('SELECT pg_advisory_lock(hashtext($1))', [drillLockKey(SET)]);
-      began = Date.now();
       try {
+        // (The wait alone: with the other test never done, it ends with the step, long before its own 30 seconds.)
+        began = Date.now();
+        const waited = await restoreDrill(dump, URLS!.restore!, tools, step(2000, { drillWaitMs: 30_000 })).then(() => undefined, (e: unknown) => e);
+        expect((waited as Error).message).toBe('the restore test was stopped because it ran longer than 2 seconds');
+        expect(Date.now() - began).toBeLessThan(8000);
+        began = Date.now();
         const test = restoreDrill(dump, URLS!.restore!, slow, step(3000, { drillWaitMs: 30_000, drillMs: 20_000 })).then(() => undefined, (e: unknown) => e);
         await new Promise((r) => setTimeout(r, 1200));
         await other.query('SELECT pg_advisory_unlock(hashtext($1))', [drillLockKey(SET)]);
@@ -737,7 +742,26 @@ describe.skipIf(!READY)('Nexus’s own backup, on a second database (never the r
         await other.end();
       }
       expect(await databases(`${SET.scratch}%`)).toEqual([]);
-      expect(spawnSync('/usr/bin/pgrep', ['-f', bin], { encoding: 'utf8' }).stdout.trim()).toBe('');
+      expect(spawnSync('/usr/bin/pgrep', ['-f', folder], { encoding: 'utf8' }).stdout.trim()).toBe('');
+      // The restore test, held up in its comparison: the restore itself is done, and a session left on the scratch
+      // database holds one restored table locked. The count of it ends with the step (not after the 15 seconds a lock
+      // is waited on), and the scratch database is dropped with that session still on it.
+      const psql = bin('psql');
+      if (psql) {
+        writeFileSync(join(folder, 'pg_restore'), [
+          '#!/bin/zsh',
+          `${JSON.stringify(tools.pgRestore)} "$@" || exit $?`,
+          'for ((i = 1; i <= $#; i++)); do case $argv[i] in (-h) h=$argv[i+1];; (-p) p=$argv[i+1];; (-U) u=$argv[i+1];; (-d) d=$argv[i+1];; esac; done',
+          `${JSON.stringify(psql)} -X -q -w -h $h -p $p -U $u -d $d -c 'BEGIN' -c 'LOCK TABLE "Thread" IN ACCESS EXCLUSIVE MODE' -c 'SELECT pg_sleep(7)' > /dev/null 2>&1 &!`,
+          'sleep 0.7', 'exit 0', '',
+        ].join('\n'), { mode: 0o755 });
+        began = Date.now();
+        const held = await restoreDrill(dump, URLS!.restore!, slow, step(3000, { drillMs: 20_000 })).then(() => undefined, (e: unknown) => e);
+        expect(held).toBeInstanceOf(TookTooLong);
+        expect((held as Error).message).toBe('the restore test was stopped because it ran longer than 3 seconds');
+        expect(Date.now() - began).toBeLessThan(9000);
+        expect(await databases(`${SET.scratch}%`)).toEqual([]);
+      }
       // With the real limits the same steps pass: nothing of this is in their way.
       expect((await restoreDrill(dump, URLS!.restore!, tools, SET)).ok).toBe(true);
     });

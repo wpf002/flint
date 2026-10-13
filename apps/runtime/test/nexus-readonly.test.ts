@@ -102,7 +102,8 @@ const CASES: Record<string, Case> = {
   // ---- a foreign server or a foreign data wrapper: using one is leave to point the database somewhere else ----
   srvusage: { grant: ['GRANT USAGE ON FOREIGN SERVER nx_srv TO $me'], rights: ['foreign'] },
   fdwusage: { grant: ['GRANT USAGE ON FOREIGN DATA WRAPPER nx_fdw TO $me'], rights: ['foreign'] },
-  srvowner: { grant: ['ALTER SERVER nx_srv2 OWNER TO $me'], rights: ['foreign', 'owner'] },
+  // (An owner that took its own right to use it away is still its owner.)
+  srvowner: { grant: ['ALTER SERVER nx_srv2 OWNER TO $me', 'REVOKE ALL ON FOREIGN SERVER nx_srv2 FROM $me'], rights: ['foreign', 'owner'] },
   // ---- a right it may hand on: whatever the right is, reading included, and on whatever it is held ----
   grantopt: { grant: ['GRANT SELECT ON public.t1 TO $me WITH GRANT OPTION'], rights: ['grantOption'] },
   grantopt_col: { grant: ['GRANT SELECT (title) ON public.t3 TO $me WITH GRANT OPTION'], rights: ['grantOption'] },
@@ -249,6 +250,8 @@ describe.skipIf(NO_CLUSTER)('the read-only check of Nexus’s backup login, one 
 
   it('a login that only reads passes, and its dump is taken', async () => {
     expect(await as('ro', writeRights)).toEqual([]);
+    // (No answer at all from the server is never taken for "no rights": the check then counts as failed.)
+    expect(await writeRights({ query: async () => ({ rows: [] }) } as unknown as pg.Client)).toEqual(['attribute']);
     expect(await as('ro', canWrite)).toBe(false);
     const out = join(dir, 'ro');
     const d = await dumpDatabase(url('ro'), out, cluster.tools, new Date(), { ...NEXUS_SET, schemas: ['public', 'other'] });
