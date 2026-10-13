@@ -173,13 +173,53 @@ describe('ollamaBackend', () => {
     expect((await throwing.probe(['main-model:30b'], signal())).models['main-model:30b']).toMatchObject({ installed: true, loaded: true });
   });
 
-  it('probe: a server that does not answer hands over no listing', async () => {
+  it('probe: a server that does not answer hands over no listing, and says so', async () => {
     const heard: unknown[] = [];
+    let silent = 0;
     const f = (async () => {
       throw new TypeError('fetch failed');
     }) as unknown as typeof fetch;
-    expect(await ollamaBackend('http://127.0.0.1:9', f, (rows) => heard.push(rows)).probe(['m'], signal())).toEqual({ reachable: false, models: {} });
+    expect(await ollamaBackend('http://127.0.0.1:9', f, (rows) => heard.push(rows), () => void silent++).probe(['m'], signal())).toEqual({ reachable: false, models: {} });
     expect(heard).toEqual([]);
+    expect(silent).toBe(1);
+  });
+
+  // The follow-up review's F2: the listing can fail while the rest of the server answers, and a name can be pointed
+  // at a cloud model behind that. A look that came back without a listing is told to whoever keeps the last one.
+  it('probe: a look whose listing failed while the rest answered says so, each time, however it failed; a look with a listing never does', async () => {
+    server = await startMockLocalServer({ models: { 'main-model:30b': { loaded: true, contextLength: 16384 } } });
+    const real = guardedFetch({ origin: server.origin, paths: OLLAMA_PATHS });
+    for (const how of ['500', '401', 'not json', 'throws', 'hangs'] as const) {
+      let broken = true;
+      const f = ((url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        if (!broken || !String(url).endsWith('/api/tags')) return real(url, init);
+        if (how === 'throws') return Promise.reject(new TypeError('fetch failed'));
+        if (how === 'hangs') return new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted'))));
+        return Promise.resolve(how === 'not json' ? new Response('<html>', { status: 502 }) : new Response('{"error":"x"}', { status: Number(how) }));
+      }) as typeof fetch;
+      const heard: unknown[] = [];
+      let silent = 0;
+      const b = ollamaBackend(server.origin, f, (rows) => heard.push(rows), () => void silent++);
+      const r = await b.probe(['main-model:30b'], how === 'hangs' ? AbortSignal.timeout(60) : signal());
+      // The server is there, and what it has in memory is known; what is installed is not.
+      expect(r.reachable, how).toBe(true);
+      expect(r.models['main-model:30b'], how).toEqual({ loaded: true, contextLength: 16384 });
+      expect(heard, how).toEqual([]);
+      expect(silent, how).toBe(1);
+      await b.probe(['main-model:30b'], how === 'hangs' ? AbortSignal.timeout(60) : signal());
+      expect(silent, how).toBe(2);
+      broken = false;
+      await b.probe(['main-model:30b'], signal());
+      expect(heard, how).toHaveLength(1);
+      expect(silent, how).toBe(2);
+    }
+    // Whoever is told has its own trouble: the look is the look all the same. And nobody need be told.
+    const fails = ((url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => (String(url).endsWith('/api/tags') ? Promise.resolve(new Response('{}', { status: 500 })) : real(url, init))) as typeof fetch;
+    const throwing = ollamaBackend(server.origin, fails, undefined, () => {
+      throw new Error('the keeper is broken');
+    });
+    expect((await throwing.probe(['main-model:30b'], signal())).reachable).toBe(true);
+    expect((await ollamaBackend(server.origin, fails).probe(['main-model:30b'], signal())).reachable).toBe(true);
   });
 
   it('probe: a server that is not there is unreachable, and nothing throws', async () => {
@@ -324,14 +364,28 @@ describe('askPlace / withPlace: every look asks the server what it is', () => {
     expect(server.requests.filter((q) => q.path === '/api/tags')).toHaveLength(2);
   });
 
-  it('withPlace: a server that did not say is not reported, and trouble keeping the answer never fails a look', async () => {
+  it('withPlace: a server that did not say is reported as silent, not as an answer, and trouble keeping the answer never fails a look', async () => {
     server = await startMockLocalServer({ kind: 'llamacpp', models: { 'only-model': { loaded: true } } });
     const f = guardedFetch({ origin: server.origin, paths: [...llamaCppPaths('/v1'), PLACE_PATH] });
     const inner = llamaCppBackend(server.origin, '/v1', f);
     const told: PlaceSaid[] = [];
-    const silent = withPlace(inner, async () => undefined, (said) => told.push(said));
+    let quiet = 0;
+    const silent = withPlace(inner, async () => undefined, (said) => told.push(said), () => void quiet++);
     expect((await silent.probe(['only-model'], signal())).reachable).toBe(true);
     expect(told).toEqual([]);
+    expect(quiet).toBe(1);
+    await silent.probe(['only-model'], signal());
+    expect(quiet).toBe(2); // every look that came back without it
+    // Nobody to tell, and a keeper with trouble of its own: the look is the look all the same.
+    expect((await withPlace(inner, async () => undefined, (said) => told.push(said)).probe(['only-model'], signal())).reachable).toBe(true);
+    const brokenSilent = withPlace(inner, async () => undefined, (said) => told.push(said), () => {
+      throw new Error('the keeper is broken');
+    });
+    expect((await brokenSilent.probe(['only-model'], signal())).reachable).toBe(true);
+    // A look that was answered is never "silent".
+    const answered = withPlace(inner, (sig) => askPlace(f, server!.origin, sig), () => {}, () => void quiet++);
+    await answered.probe(['only-model'], signal());
+    expect(quiet).toBe(2);
     const broken = withPlace(inner, (sig) => askPlace(f, server!.origin, sig), () => {
       throw new Error('the keeper is broken');
     });

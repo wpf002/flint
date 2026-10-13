@@ -532,7 +532,12 @@ export class Inference {
    */
   helperFetch(kind: 'helper' | 'background', base: typeof fetch = fetch): typeof fetch {
     return (async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-      await this.helpersHeard();
+      // Asked first only where the answer decides something: a request for a private message, one that carries
+      // text that stays here, a background call (answered only by a model that runs here), and any request outside
+      // the cloud mode (where nothing may go to a model on Ollama's servers). An ordinary request in the cloud mode
+      // is sent whatever the listing says, so it does not wait for one: a model server whose listing hangs would
+      // otherwise hold every ordinary turn's embedding for as long as an ask may take.
+      if (kind === 'background' || isPrivateRequest() || carriesKeptText() || this.mode.current() !== 'cloud') await this.helpersHeard();
       const model = helperModel(init?.body);
       const off = kind === 'background' ? this.backgroundOff(model) : this.helpersOff(model);
       if (off) throw new TypeError(`fetch refused: ${off}`);
@@ -782,6 +787,9 @@ export async function buildInference(deps: BuildInferenceDeps): Promise<Inferenc
     // What the model server says it is, each time the monitor looks at it, and where each of its models really runs
     // (./ollama-locality).
     place: (baseURL, said) => (said === 'other' ? LOCALITY.notOllama(baseURL) : LOCALITY.learn(baseURL, said.ollama)),
+    // ...and a look that came back without that answer leaves nothing it said before believed to run here: a turn
+    // that stays here waited for this look, and is not decided on a listing the server no longer stands behind.
+    silent: (baseURL) => LOCALITY.silent(baseURL),
     // ...and a model it says runs elsewhere is never loaded ahead of a turn.
     elsewhere: (baseURL, model) => LOCALITY.runsElsewhere(baseURL, model),
     log,

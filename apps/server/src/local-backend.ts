@@ -193,25 +193,36 @@ export const OLLAMA_PATHS = ['/api/version', '/api/tags', '/api/ps', '/api/show'
  * /api/tags, as they came), each time one is read. The listing is where an
  * Ollama says whether a model really runs on it (a `remote_host` on the row
  * means it does not), and ./ollama-locality keeps that for ./policy.
+ *
+ * `onSilent`: told every look that came back WITHOUT a listing: the server
+ * did not answer at all, or it answered and its listing failed (a 500, a
+ * hang, anything that is no listing). A turn that stays here waits for this
+ * look before it is routed, so a look with no listing in it must not leave
+ * the last one standing: a name could have been pointed at a cloud model
+ * behind the silence (./ollama-locality silent).
  */
-export function ollamaBackend(origin: string, f: Fetch, onListing?: (rows: ReadonlyArray<Record<string, unknown>>) => void): LocalBackend {
+export function ollamaBackend(origin: string, f: Fetch, onListing?: (rows: ReadonlyArray<Record<string, unknown>>) => void, onSilent?: () => void): LocalBackend {
   const at = (path: string): string => `${origin}${path}`;
+  const tell = (what: (() => void) | undefined): void => {
+    try {
+      what?.();
+    } catch {
+      /* whoever keeps the listing has its own trouble: a look at the server never fails for it */
+    }
+  };
   return {
     kind: 'ollama',
     async probe(models, signal) {
       const version = await ask(f, at('/api/version'), signal);
       const v = (version?.json as { version?: unknown } | undefined)?.version;
-      if (!version || version.status !== 200 || typeof v !== 'string') return { reachable: false, models: {} };
+      if (!version || version.status !== 200 || typeof v !== 'string') {
+        tell(onSilent);
+        return { reachable: false, models: {} };
+      }
       const [tags, ps] = await Promise.all([ask(f, at('/api/tags'), signal), ask(f, at('/api/ps'), signal)]);
       const installed = tags?.status === 200 ? rows(tags.json, 'models') : undefined;
       const loaded = ps?.status === 200 ? rows(ps.json, 'models') : undefined;
-      if (installed) {
-        try {
-          onListing?.(installed);
-        } catch {
-          /* whoever keeps the listing has its own trouble: a look at the server never fails for it */
-        }
-      }
+      tell(installed ? () => onListing?.(installed) : onSilent);
       const out: Record<string, ModelProbe> = {};
       for (const m of models) {
         const named = (r: Record<string, unknown>): boolean => typeof r.name === 'string' && same(r.name, m);
@@ -298,19 +309,20 @@ export async function askPlace(f: Fetch, origin: string, signal: AbortSignal, he
  * FLINT_LOCAL_SERVER says; either can be wrong, and an Ollama behind that wire
  * serves cloud models under plain names like any other. So the question is
  * asked of every kind, at every look, and ./policy takes nothing on that wire
- * for local until the server has answered it.
+ * for local until the server has answered it. A look in which it did NOT
+ * answer the question tells `silent`: what it said before does not stand
+ * through a look that came back without it (./ollama-locality silent).
  */
-export function withPlace(backend: LocalBackend, look: (signal: AbortSignal) => Promise<PlaceSaid | undefined>, told: (said: PlaceSaid) => void): LocalBackend {
+export function withPlace(backend: LocalBackend, look: (signal: AbortSignal) => Promise<PlaceSaid | undefined>, told: (said: PlaceSaid) => void, silent?: () => void): LocalBackend {
   return {
     kind: backend.kind,
     async probe(models, signal) {
       const [out, said] = await Promise.all([backend.probe(models, signal), look(signal)]);
-      if (said) {
-        try {
-          told(said);
-        } catch {
-          /* whoever keeps the answer has its own trouble: a look at the server never fails for it */
-        }
+      try {
+        if (said) told(said);
+        else silent?.();
+      } catch {
+        /* whoever keeps the answer has its own trouble: a look at the server never fails for it */
       }
       return out;
     },

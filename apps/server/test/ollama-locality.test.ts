@@ -291,7 +291,104 @@ describe('OllamaLocality', () => {
     l.clear();
   });
 
-  it('fresh: a server that does not answer is not asked at every call, what was known stands until it is too old to believe, and nothing rejects', async () => {
+  // The follow-up review's F2. A listing that went silent used to stand for five minutes: a name pointed at a cloud
+  // model while `/api/tags` answered 500, or hung, went on being read as a model on this Mac by callers that had
+  // asked first and been told nothing. An ask somebody WAITED for that yields no word now drops what was believed.
+  it('fresh: a server that gives no word to an ask a caller waited for is no longer believed on what it said before, however it fails; nothing rejects', async () => {
+    for (const how of ['refused', '500', '401', 'not json 503', 'redirect'] as const) {
+      let now = 1_000_000;
+      let up = true;
+      let asked = 0;
+      const l = new OllamaLocality({
+        now: () => now,
+        fetchImpl: (async () => {
+          asked++;
+          if (up) return tags([{ name: 'qwen2.5:14b' }, { name: 'mine:latest', remote_host: 'https://ollama.com:443' }]);
+          if (how === 'refused') throw new Error('ECONNREFUSED');
+          if (how === 'redirect') throw new TypeError('redirect mode is set to error');
+          return new Response(how === 'not json 503' ? '<html>busy</html>' : '{"error":"x"}', { status: how === '500' ? 500 : how === '401' ? 401 : 503 });
+        }) as unknown as typeof fetch,
+      });
+      await l.fresh(HERE);
+      expect(l.runsHere(HERE, 'qwen2.5:14b'), how).toBe(true);
+      expect(l.said(HERE), how).toBe('ollama');
+      // Its word is still fresh: nothing is asked, and nothing changes.
+      up = false;
+      now += 2_000;
+      await l.fresh(HERE);
+      expect(asked, how).toBe(1);
+      expect(l.runsHere(HERE, 'qwen2.5:14b'), how).toBe(true);
+      // Too old to use without asking: asked, no word, and what it listed as its own is not believed any more.
+      now += 1;
+      await expect(l.fresh(HERE), how).resolves.toBeUndefined();
+      expect(asked, how).toBe(2);
+      expect(l.runsHere(HERE, 'qwen2.5:14b'), how).toBe(false);
+      expect(l.runsHere(`${HERE}/v1`, 'qwen2.5:14b'), how).toBe(false); // the server, at every path
+      // What it said runs ELSEWHERE is kept: silence never makes that a yes, and it is still a no with a reason.
+      expect(l.runsElsewhere(HERE, 'mine:latest'), how).toBe(true);
+      expect(l.runsHere(HERE, 'mine:latest'), how).toBe(false);
+      expect(l.runsElsewhere(HERE, 'qwen2.5:14b'), how).toBe(false); // not known either way
+      // ...and it is no longer taken as having said what it is.
+      expect(l.said(HERE), how).toBeUndefined();
+      // A "no, not an Ollama" from that origin does not turn what is left into "local by its address".
+      l.notOllama(`${HERE}/v1`);
+      expect(l.said(HERE), how).toBeUndefined();
+      expect(l.runsElsewhere(HERE, 'mine:latest'), how).toBe(true);
+      // It answers again: believed again, at the next ask.
+      up = true;
+      now += 2_001;
+      await l.fresh(HERE);
+      expect(l.runsHere(HERE, 'qwen2.5:14b'), how).toBe(true);
+      expect(l.said(HERE), how).toBe('ollama');
+      l.clear();
+    }
+  });
+
+  it('fresh: a server that hangs is given up on after one ask (two seconds unless told otherwise), and is then not believed', async () => {
+    let now = 1_000_000;
+    let hang = false;
+    const l = new OllamaLocality({
+      now: () => now,
+      timeoutMs: 40,
+      fetchImpl: ((_url: string, init?: RequestInit) =>
+        hang
+          ? new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted'))))
+          : Promise.resolve(tags([{ name: 'qwen2.5:14b' }]))) as unknown as typeof fetch,
+    });
+    await l.fresh(HERE);
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(true);
+    hang = true;
+    now += 2_001;
+    const began = Date.now();
+    const waited = l.fresh(HERE);
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(true); // while the ask is out, what was known
+    await waited;
+    expect(Date.now() - began).toBeLessThan(1_000);
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(false);
+    l.clear();
+  });
+
+  it('fresh: a server that said it is no Ollama is forgotten the same way: with no word from it, its address alone is not enough', async () => {
+    let now = 1_000_000;
+    let up = true;
+    const l = new OllamaLocality({
+      now: () => now,
+      fetchImpl: (async () => (up ? new Response('{"error":"not found"}', { status: 404 }) : new Response('{}', { status: 500 }))) as unknown as typeof fetch,
+    });
+    await l.fresh(HERE);
+    expect(l.said(HERE)).toBe('other');
+    up = false;
+    now += 2_001;
+    await l.fresh(HERE);
+    expect(l.said(HERE)).toBeUndefined();
+    up = true;
+    now += 2_001;
+    await l.fresh(HERE);
+    expect(l.said(HERE)).toBe('other');
+    l.clear();
+  });
+
+  it('fresh: a server that does not answer is not asked at every call, and it is as silent for the next caller as it was for the ask', async () => {
     let now = 1_000_000;
     let up = true;
     let asked = 0;
@@ -306,24 +403,81 @@ describe('OllamaLocality', () => {
     await l.fresh(HERE);
     up = false;
     now += 3_000;
-    await expect(l.fresh(HERE)).resolves.toBeUndefined();
+    // An ask nobody waits for (the minute's `watch`) fails: by itself it changes nothing.
+    await l.refresh(HERE);
     expect(asked).toBe(2);
-    // Asked a moment ago and silent: not asked again for as long as an answer would have been fresh.
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(true);
+    // A caller that asks first, a moment later: the server is not asked again, and it is dropped for this caller too.
     now += 1_000;
     await l.fresh(HERE);
     await l.fresh(HERE);
     expect(asked).toBe(2);
-    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(true); // believed, as ever, for five minutes
-    now += 1_500;
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(false);
+    // Past the two seconds it is asked again.
+    now += 1_001;
     await l.fresh(HERE);
     expect(asked).toBe(3);
-    now += 5 * 60_000;
-    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(false);
     // Two callers at once are one request.
     up = true;
+    now += 2_001;
     const before = asked;
     await Promise.all([l.fresh(HERE), l.fresh(`${HERE}/`)]);
     expect(asked).toBe(before + 1);
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(true);
+    l.clear();
+  });
+
+  // The follow-up review's F5: the two seconds are counted from when the ask ENDED. Counted from when it began, a
+  // listing that hangs for the whole two seconds was asked again by the very next call, and every call waited.
+  it('fresh: a server whose listing hangs is left alone for two seconds after each ask ends, not asked again by the next call', async () => {
+    let now = 1_000_000;
+    let asked = 0;
+    let fail: (e: Error) => void = () => {};
+    const l = new OllamaLocality({
+      now: () => now,
+      fetchImpl: (() => {
+        asked++;
+        return new Promise<Response>((_, reject) => (fail = reject));
+      }) as unknown as typeof fetch,
+    });
+    const first = l.fresh(HERE);
+    now += 2_000; // the ask hung for as long as one may
+    fail(new Error('aborted'));
+    await first;
+    expect(asked).toBe(1);
+    // 1.5 s after it ended (3.5 s after it began): not asked, and nothing waits.
+    now += 1_500;
+    await l.fresh(HERE);
+    expect(asked).toBe(1);
+    // 2 s after it ended: asked again.
+    now += 501;
+    const again = l.fresh(HERE);
+    expect(asked).toBe(2);
+    fail(new Error('aborted'));
+    await again;
+    l.clear();
+  });
+
+  it('silent: what a server has said SINCE the ask that failed stands (another look heard it meanwhile); what it said before does not', async () => {
+    let now = 1_000_000;
+    let fail: (e: Error) => void = () => {};
+    const l = new OllamaLocality({ now: () => now, fetchImpl: (() => new Promise<Response>((_, reject) => (fail = reject))) as unknown as typeof fetch });
+    l.learn(HERE, [{ name: 'qwen2.5:14b' }]);
+    now += 5_000;
+    const waited = l.fresh(HERE); // too old: asked, and the ask hangs
+    now += 1_000;
+    l.learn(HERE, [{ name: 'qwen2.5:14b' }]); // the health monitor's own look heard the server in the meantime
+    now += 1_000;
+    fail(new Error('aborted'));
+    await waited;
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(true);
+    // Told directly (a look by the monitor that came back without a listing): dropped as of now.
+    l.silent(HERE);
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(false);
+    expect(l.said(HERE)).toBeUndefined();
+    // Nothing known of a server: nothing to drop, and nothing thrown.
+    expect(() => l.silent('http://127.0.0.1:9')).not.toThrow();
+    expect(() => l.silent('not a url')).not.toThrow();
     l.clear();
   });
 

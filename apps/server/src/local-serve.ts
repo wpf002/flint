@@ -172,7 +172,7 @@ export function heldToHere<P>(
     : // A model that is not there at all (not downloaded, not chosen yet) is said so, as for any turn that must be local.
       o.main?.state === 'unavailable'
       ? refusalFor(o.route, { ok: true }, o.main, o.allowedRemote)
-      : `Flint has not confirmed yet that its local model runs on ${staysOn(o.allowedRemote)}, ${tail}`;
+      : `Flint cannot confirm right now that its local model runs on ${staysOn(o.allowedRemote)}, ${tail}`;
   return { steps: [], primaryState: plan.primaryState, warmPrimary: false, refusal };
 }
 

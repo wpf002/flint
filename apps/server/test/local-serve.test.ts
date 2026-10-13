@@ -246,9 +246,9 @@ describe('heldToHere: a plan for a turn that stays here keeps only the models kn
     const cloudModel = heldToHere(both(), { route: local, here: never, elsewhere: (s) => s.which === 'primary' });
     expect(cloudModel).toEqual({ steps: [], primaryState: 'loaded', warmPrimary: false, refusal: "The local model is one that runs on Ollama's servers, and Local mode never uses the cloud." });
     const unknown = heldToHere(both(), { route: hybridPrivate, here: never, elsewhere: never });
-    expect(unknown.refusal).toBe('Flint has not confirmed yet that its local model runs on this Mac, and a private message never leaves this Mac.');
+    expect(unknown.refusal).toBe('Flint cannot confirm right now that its local model runs on this Mac, and a private message never leaves this Mac.');
     expect(heldToHere(both(), { route: hybridPrivate, here: never, elsewhere: never, allowedRemote: true }).refusal).toBe(
-      'Flint has not confirmed yet that its local model runs on this Mac or the model server you allowed, and a private message never leaves this Mac or the model server you allowed.',
+      'Flint cannot confirm right now that its local model runs on this Mac or the model server you allowed, and a private message never leaves this Mac or the model server you allowed.',
     );
     // A main model that is not there at all gets the sentence any turn that must be local gets.
     const missing = health('main-model', 'unavailable', 'not_installed');
