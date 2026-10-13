@@ -1538,6 +1538,14 @@ describe('the console Approvals panel', () => {
           expect(alone(p), `${name} as ${String(kind)}`).toBe(true);
         }
       }
+      // A card's fixed reason is not a way in either: the predictions card that changes second opinions only is worded
+      // from its reason, and a tool's card that carries the same name and the same reason gets none of those words.
+      const opinion = { fullName: 'forecast.series.enable', kind: 'tool_call', origin: 'console', consequential: true, reason: run('APPR_PREDICT_OPINION') as string, args: { series: ['daily.deploys.count'], reason: [] } };
+      expect(run(`apprPredictOnlyOpinion(${JSON.stringify(opinion)})`)).toBe(true);
+      expect(run(`apprReason(${JSON.stringify(opinion)})`)).toBe('change a second opinion');
+      expect(run(`apprPredictOnlyOpinion(${JSON.stringify({ ...opinion, mcp: true })})`)).toBe(false);
+      expect(words({ ...opinion, mcp: true }).slice(0, 2)).toEqual(['Approve a Tool Call', SUB]);
+      expect(run(`apprReason(${JSON.stringify({ ...opinion, mcp: true })})`)).toBe('run a tool on a connected server');
       // A tool under a name that is nobody's is a tool's card as it always was: its own words, and it may share a prompt.
       expect(words(plain())[0]).toBe('Read What Triage Decided');
       expect(alone(plain())).toBe(false);

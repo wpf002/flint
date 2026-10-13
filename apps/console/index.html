@@ -2231,7 +2231,7 @@ var APPR_PREDICT_ALSO='Turning this on also checks the predictions Flint has alr
    opinions and nothing else (and the runtime refuses it if a number was turned off before it runs). The card is
    worded from this, never from what this page happens to have loaded. */
 var APPR_PREDICT_OPINION='Approving changes only the local model’s second opinion on these numbers, which Flint already forecasts.';
-function apprPredictOnlyOpinion(p){return !!p&&p.fullName===APPR_PREDICT&&p.reason===APPR_PREDICT_OPINION;}
+function apprPredictOnlyOpinion(p){p=apprAs(p);return !!p&&p.fullName===APPR_PREDICT&&p.reason===APPR_PREDICT_OPINION;}
 /* Behind Show Details: every number on its own line, in words. */
 function apprPredictDetails(p){var l=apprPredictList(p),ul=apprEl('ul');
   l.named.forEach(function(x){ul.appendChild(apprEl('li',null,x.name+(x.kind==='money'?' · Spending':x.kind==='calendar'?' · Calendar':'')+(x.opinion?' · Second Opinion':'')));});
