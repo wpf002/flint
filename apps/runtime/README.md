@@ -1722,8 +1722,9 @@ does once tasks are switched on and an asset is on:
   for any reason, is offered to you again. Turning one down, or letting it
   lapse, ends the task. Its line then reads "You didn’t accept its result."
 - **Ending a task sets its other cards aside.** When your cancellation or your
-  override runs, the task's other waiting cards are turned away with "You ended
-  this task another way, so this card wasn’t needed."
+  override runs, the task's other waiting cards, a review of it among them, are
+  turned away with "You ended this task another way, so this card wasn’t
+  needed."
 - **Accept Anyway needs the result.** A task's raw output is deleted a week
   after it ended. After that the result can't be accepted any more, and the
   panel won't offer it.
@@ -1910,10 +1911,26 @@ model, reviews and the panel must hold to them too.
   under `tasks/adapters` to type-only imports: the test reads each one, in any
   sub-directory, and its list of files is closed.
 - **Money.** A dispatch that spends asks `reserve.take(cardId, micros)` before
-  it writes anything. Make `take` idempotent by the card's id. `release(cardId)`
-  is called whenever the dispatch does not happen, and is not called when that
-  can't be told, so a reservation must be able to outlive a task that never
-  went out.
+  it writes anything. Make `take` idempotent by the card's id, and `release`
+  of a key that holds nothing a no-op. A key is kept only for the card whose
+  dispatch happened. The runtime calls `release(cardId)` whenever a run of the
+  card ends and the card is known not to have sent its task out; for a task's
+  other dispatch cards once it has gone out on one; and for all of a task's
+  dispatch cards when it is withdrawn before it went out (its card lapsed, or
+  you cancelled it). Pass `reserve` to the tick and to `cancelTask` as well as
+  to the executor. When a run ends and it can't be told whether the card ran,
+  nothing is released then, and the next of those three gives it back. One
+  case is the keeper's own: a card whose item was forgotten and that never
+  runs again. Let a key lapse once its card's expiry has passed.
+- **Lock order.** A forget locks a task's cards by id, then the task. A card
+  that writes to the task's other cards (a cancellation, an override) locks
+  them with its own, by id, before the task (`lockCards`). Keep that order in
+  anything else that sets a card aside.
+- **Whose card counts.** Anything that asks whether a task or an asset has a
+  card waiting, or had one turned down, reads only cards the executor would
+  run: the check's own accept card, and cards filed from the console or the
+  CLI (`ACCEPT_CARD`, `WILL_ORIGINS`). A card written under another origin
+  never holds a real one back and is never your answer.
 - **The Hive.** A Hive dispatch card names one pool, as a plain name, at the
   top of its args. Give its args a contract before anything carries one out.
 - **Caps.** A dispatch takes its place under the day's cap after its writes,
