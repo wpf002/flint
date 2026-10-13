@@ -289,20 +289,6 @@
   #goalfoot{flex-wrap:wrap;}
   #goalfoot #goalmsg{flex-basis:100%;margin:0;}
 
-  /* predictions: the panel's rows, in the same components; every number in tabular figures */
-  #predictions .mh{height:auto;min-height:56px;padding-top:6px;padding-bottom:6px;}
-  #predbody{font-variant-numeric:tabular-nums;}
-  #predfoot{flex-wrap:wrap;}
-  #predfoot #predmsg{flex-basis:100%;margin:0;}
-  .plead{color:var(--t2);margin:4px 4px 0;}
-  .pacts{display:flex;align-items:center;gap:4px;flex:none;}
-  .pmany .lbl span+span{margin-top:4px;}
-  .ppick{cursor:pointer;}
-  @media (max-width:600px){
-    .row.gwrap>.pacts{flex:1 1 100%;justify-content:flex-end;} .pacts .ghost{min-width:72px;justify-content:center;}
-    #predfoot .btn{flex:1;justify-content:center;}
-  }
-
   /* a card Flint proposes in chat */
   .propose{margin-top:12px;border-radius:8px;background:var(--s2);padding:14px 16px;font-size:13px;line-height:18px;}
   .propose .pt{font-weight:500;}
@@ -374,6 +360,20 @@
     #goalfoot .gconfirm{flex-basis:100%;} #goalfoot .btn{flex:1;justify-content:center;}
   }
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;}}
+
+  /* predictions: the panel's rows, in the same components; every number in tabular figures */
+  #predictions .mh{height:auto;min-height:56px;padding-top:6px;padding-bottom:6px;}
+  #predbody{font-variant-numeric:tabular-nums;}
+  #predfoot{flex-wrap:wrap;}
+  #predfoot #predmsg{flex-basis:100%;margin:0;}
+  .plead{color:var(--t2);margin:4px 4px 0;}
+  .pacts{display:flex;align-items:center;gap:4px;flex:none;}
+  .pmany .lbl span+span{margin-top:4px;}
+  .ppick{cursor:pointer;}
+  @media (max-width:600px){
+    .row.gwrap>.pacts{flex:1 1 100%;justify-content:flex-end;} .pacts .ghost{min-width:72px;justify-content:center;}
+    #predfoot .btn{flex:1;justify-content:center;}
+  }
 </style>
 </head>
 <body>
