@@ -232,10 +232,12 @@ describe('the Predictions panel\'s words (P4 part 4)', () => {
     expect(saidSays(0.7, 'Oct 3')).toBe('Flint said likely, around 70%, on Oct 3.');
     // When it was due, in Flint's own zone: his answer is recorded as of that moment, so the question says it.
     const asOf = new Date('2026-10-12T12:00:00Z');
-    expect(dueSays(new Date('2026-10-05T20:00:00Z'), TZ, asOf)).toBe('It was due Oct 5 at 3:00 PM.');
-    expect(dueSays(new Date('2026-10-06T03:30:00Z'), TZ, asOf)).toBe('It was due Oct 5 at 10:30 PM.');
-    expect(dueSays(new Date('2025-12-31T18:05:00Z'), TZ, asOf)).toBe('It was due Dec 31, 2025 at 12:05 PM.');
-    expect(`${saidSays(0.7, 'Oct 3')} ${dueSays(new Date('2026-10-05T20:00:00Z'), TZ, asOf)}`).toBe('Flint said likely, around 70%, on Oct 3. It was due Oct 5 at 3:00 PM.');
+    // (The time and its AM or PM are held together by a no-break space: a narrow row never leaves "PM." alone on a line.)
+    expect(dueSays(new Date('2026-10-05T20:00:00Z'), TZ, asOf)).toBe('It was due Oct 5 at 3:00\u00a0PM.');
+    expect(dueSays(new Date('2026-10-06T03:30:00Z'), TZ, asOf)).toBe('It was due Oct 5 at 10:30\u00a0PM.');
+    expect(dueSays(new Date('2025-12-31T18:05:00Z'), TZ, asOf)).toBe('It was due Dec 31, 2025 at 12:05\u00a0PM.');
+    expect(dueSays(new Date('2026-10-05T14:00:00Z'), TZ, asOf)).toBe('It was due Oct 5 at 9:00\u00a0AM.');
+    expect(`${saidSays(0.7, 'Oct 3')} ${dueSays(new Date('2026-10-05T20:00:00Z'), TZ, asOf)}`).toBe('Flint said likely, around 70%, on Oct 3. It was due Oct 5 at 3:00\u00a0PM.');
     sentence(`${saidSays(0.7, 'Oct 3')} ${dueSays(new Date('2026-10-05T20:00:00Z'), TZ, asOf)}`);
     expect(answeredSays('yes', 'Oct 12')).toBe('You said yes on Oct 12.');
     expect(answeredSays('no', 'Oct 12')).toBe('You said no on Oct 12.');

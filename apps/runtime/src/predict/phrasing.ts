@@ -202,7 +202,9 @@ export function recordSays(held: number, of: number): string {
  * the question says it.
  */
 export function dueSays(at: Date, tz: string, now: Date): string {
-  const clock = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).format(at);
+  // The time and its AM or PM are held together (a no-break space, whichever space this system's formatter writes), so a
+  // narrow row never leaves "PM." on a line of its own.
+  const clock = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).format(at).replace(/\s+(AM|PM)$/, '\u00a0$1');
   return `It was due ${dayWords(at, tz, now)} at ${clock}.`;
 }
 

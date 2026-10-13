@@ -476,7 +476,7 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
       { id: stranger, ...UNSAID },
       { id: huge, ...UNSAID },
     ]);
-    expect(before.waiting[0]!.says).toMatch(/^Flint said likely, around 70%, on [A-Z][a-z]{2} \d{1,2}(, \d{4})?\. It was due [A-Z][a-z]{2} \d{1,2}(, \d{4})? at \d{1,2}:\d\d [AP]M\.$/);
+    expect(before.waiting[0]!.says).toMatch(/^Flint said likely, around 70%, on [A-Z][a-z]{2} \d{1,2}(, \d{4})?\. It was due [A-Z][a-z]{2} \d{1,2}(, \d{4})? at \d{1,2}:\d\d\u00a0[AP]M\.$/);
     for (const q of before.waiting) {
       expect(q.title).not.toMatch(/#|daily\.|github\.|at the resolve time|1e\+?300|IGNORE/);
       expect(q.title.length).toBeLessThanOrEqual(300);
