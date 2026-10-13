@@ -291,6 +291,26 @@ describe('asking first: a word’s age, and what silence means (the one rule the
     expect(places.runsHere(HERE, 'm:1')).toBe(true);
   });
 
+  it('told silent by a look of someone else’s, a server with nothing left to believe is still not asked again for two seconds', async () => {
+    const { t, places } = rig(async () => ({ ollama: [{ name: 'm:1' }] }));
+    await places.fresh(HERE);
+    expect(t.asks).toBe(1);
+    // A health look that waited for its listing found it silent. Nothing it said is kept (it listed nothing as run elsewhere).
+    t.now = 3_000;
+    places.silent(HERE, t.now, t.now);
+    expect([places.heard(HERE), places.runsHere(HERE, 'm:1')]).toEqual([false, false]);
+    // A caller a second later does not wait a second ask out on it...
+    t.now = 4_000;
+    await places.fresh(HERE);
+    expect(t.asks).toBe(1);
+    expect(places.runsHere(HERE, 'm:1')).toBe(false);
+    // ...and one after the two seconds does ask, and is told.
+    t.now = 3_000 + PLACE_FRESH_MS + 1;
+    await places.fresh(HERE);
+    expect(t.asks).toBe(2);
+    expect(places.runsHere(HERE, 'm:1')).toBe(true);
+  });
+
   it('an ask nobody waited for that fails changes nothing by itself: the next caller that asks first finds the silence', async () => {
     let up = true;
     const { t, places } = rig(async () => (up ? { ollama: ROWS } : undefined));
