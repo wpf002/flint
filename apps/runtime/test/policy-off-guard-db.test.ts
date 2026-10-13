@@ -550,6 +550,8 @@ describe.skipIf(NO_DB)('who may switch a policy row off (flint_test)', () => {
       }
       expect(await failure(app(`DELETE FROM "ActionPolicy" WHERE id = $1`, [hold]))).toEqual(['42501', 'permission denied for table ActionPolicy', null]);
       expect(await failure(app(`TRUNCATE "ActionPolicy"`))).toEqual(['42501', 'permission denied for table ActionPolicy', null]);
+      // Neither on nor off is not a state a row has.
+      expect(await k.code(app(`UPDATE "ActionPolicy" SET active = NULL WHERE id = $1`, [hold]))).toBe('23502');
       // The owner is held to P1's own rules as before: nothing but `active` changes, and no row is deleted.
       expect((await pgError(owner(`UPDATE "ActionPolicy" SET tier = 'alone' WHERE id = $1`, [hold]))).message).toBe(`policy row ${hold}: it can only be switched off`);
       expect((await pgError(owner(`DELETE FROM "ActionPolicy" WHERE id = $1`, [hold]))).message).toBe('policy rows are switched off, never deleted');
