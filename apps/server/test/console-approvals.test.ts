@@ -259,8 +259,20 @@ describe('the console Approvals panel', () => {
     run('approveAll()');
     await settle();
     expect(decided.map((d) => d[1])).toEqual(['a', 'b']);
-    // A prompt Will dismissed is said as that, the same sentence a single card says: never "Cancelled.".
-    expect(ids.apprnote!.textContent).toBe('You approved 1 of 3. You dismissed the prompt. The card is waiting in Approvals.');
+    // A prompt Will dismissed is said as that, never "Cancelled.", with how many of its cards still wait.
+    expect(ids.apprnote!.textContent).toBe('You approved 1 of 3. You dismissed the prompt. 2 cards are still waiting.');
+    failApprove = 'a';
+    decided = [];
+    run('approveAll()');
+    await settle();
+    expect(ids.apprnote!.textContent).toBe('You approved 0 of 3. You dismissed the prompt. 3 cards are still waiting.');
+    failApprove = 'c';
+    decided = [];
+    run('approveAll()');
+    await settle();
+    expect(ids.apprnote!.textContent).toBe('You approved 2 of 3. You dismissed the prompt. 1 card is still waiting.');
+    for (const n of [1, 2, 9]) expect(noteProblems('Approvals', run(`apprLeftSays(${n})`) as string), String(n)).toEqual([]);
+    failApprove = 'b';
     // Anything else is the sentence it came with.
     decided = [];
     failWith = 'The runtime isn’t answering.';
@@ -1334,12 +1346,21 @@ describe('the console Approvals panel', () => {
       learns[1]!(0);
       expect(ids.apprlist!.children[0]).toBe(late);
       expect(late.textContent).not.toMatch(/wpf002/);
-      // The load after that shows them.
+      // The load after that has them. The card he has open is still the very card that was on screen, with no new
+      // row: a load never draws an open card again. He sees the name on it the next time he opens it.
+      const opened = late.children[1]!;
       run('loadApprovals()');
       await settle();
       learns[2]!(0);
       expect(ids.apprlist!.children[0]).not.toBe(late);
-      expect(ids.apprlist!.textContent).toContain('wpf002/flint CI');
+      expect(ids.apprlist!.children[0]!.children[1]).toBe(opened);
+      expect(ids.apprlist!.children[0]!.children[0]).not.toBe(late.children[0]);
+      expect(opened.textContent).not.toMatch(/wpf002|Looked Up/);
+      ids.apprlist!.children[0]!.children[0]!.onclick!();
+      expect(ids.apprlist!.children[0]!.children[0]!.textContent).toContain('TaskWatch a CI Run · wpf002/flint CILooked Up');
+      ids.apprlist!.children[0]!.children[1]!.onclick!();
+      expect(ids.apprlist!.children[0]!.children[1]).not.toBe(opened);
+      expect(ids.apprlist!.children[0]!.children[1]!.textContent).toContain('CI Runwpf002/flint CILooked Up');
 
       // A list that was read again while an older one still waited for its names: the older one draws nothing.
       const before = ids.apprlist!.children[0];
@@ -1425,13 +1446,22 @@ describe('the console Approvals panel', () => {
       held = null;
       timers.find((t) => t[1] === 2500)![0]();
       await settle();
+      // The list was read and drawn again; the card he has open is the same card, with its line, where it was.
+      expect(ids.apprlist!.children[0]).not.toBe(list);
       const again = ids.apprlist!.children[0]!.children[0]!;
-      expect(again).not.toBe(first);
-      expect(again.getAttribute('data-id')).toBe('p5d');
+      expect(again).toBe(first);
+      expect(ids.apprlist!.children[0]!.children[1]).not.toBe(list.children[1]);
       expect(again.shown()).toContain(DISMISSED);
-      // Show Details is as he left it: a card he was reading does not fold when the list is drawn again.
       expect(again.all().find((e) => e.className === 'details')!.hidden).toBe(false);
-      expect(again.button('Hide Details').getAttribute('aria-expanded')).toBe('true');
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+      // Drawn afresh by something he does (the other tab and back), it is as he left it: its line, and Show Details open.
+      run("apprShow('approved');apprShow('waiting')");
+      const fresh = ids.apprlist!.children[0]!.children[0]!;
+      expect(fresh).not.toBe(first);
+      expect(fresh.getAttribute('data-id')).toBe('p5d');
+      expect(fresh.shown()).toContain(DISMISSED);
+      expect(fresh.all().find((e) => e.className === 'details')!.hidden).toBe(false);
+      expect(fresh.button('Hide Details').getAttribute('aria-expanded')).toBe('true');
       // Opening another card by hand starts that one closed, and going back finds this one closed too.
       ids.apprlist!.children[0]!.children[1]!.onclick!();
       const second = ids.apprlist!.children[0]!.children[1]!;
@@ -1671,10 +1701,206 @@ describe('the console Approvals panel', () => {
       expect(decided.map((d) => d[1])).toEqual(['x1']);
       // The same list from a server that says each is not a tool's: every card is its own again.
       answer = () => ({ status: 200, body: { signed: true, proposals: list.map((c) => ({ ...c, mcp: false })) } });
-      run('loadApprovals()');
-      await settle();
+      await open();
       expect(ids.apprlist!.textContent).not.toContain('Approve a Tool Call');
       expect(ids.apprlist!.textContent).toContain('Turn On the Deploy Source');
+    });
+
+    it('a card he opens while a list is on its way is never drawn again when that list lands: it gains no row, and its buttons stay where they are', async () => {
+      const timers = clock();
+      const learns: Array<(n: number) => void> = [];
+      ctx.taskNames = (_ps: unknown[], done: (n: number) => void) => learns.push(done);
+      answer = () => ({ status: 200, body: { proposals: [P5.accept, P5.cancel, plain({ id: 'x1' })], signed: true } });
+      await open();
+      // The first list is drawn at its deadline, with no name known.
+      timers.find((t) => t[1] === 600)![0]();
+      const firstList = ids.apprlist!.children[0]!;
+      // The list is read again. Its answer is in and its names are not; he opens the second card meanwhile.
+      run('loadApprovals()');
+      await settle();
+      firstList.children[1]!.onclick!();
+      const opened = ids.apprlist!.children[0]!.children[1]!;
+      const rowsOn = (c: El) => c.all().find((e) => e.tagName === 'dl' && e.className === 'facts')!.children.filter((e) => e.tagName === 'dt').map((e) => e.textContent);
+      expect(rowsOn(opened)).toEqual(['Filed By', 'Expires']);
+      const buttons = opened.all().filter((e) => e.tagName === 'button');
+      // The names land, and the list that was on its way is drawn: every other card anew, the open one as it was.
+      know('Watch a CI Run', 'wpf002/flint CI');
+      learns[1]!(2);
+      const drawn = ids.apprlist!.children[0]!;
+      expect(drawn.children.map((c) => c.getAttribute('data-id'))).toEqual(['p5c', 'p5d', 'x1']);
+      expect(drawn.children[1]).toBe(opened);
+      expect(drawn.children[0]).not.toBe(firstList.children[0]);
+      expect(rowsOn(opened)).toEqual(['Filed By', 'Expires']);
+      expect(opened.all().filter((e) => e.tagName === 'button')).toEqual(buttons);
+      expect(opened.textContent).not.toMatch(/Looked Up|wpf002/);
+      // Its buttons still do what they did: the card and the args he was shown.
+      opened.button('Approve with Password').onclick!();
+      expect(decided).toEqual([['approve', 'p5d', { reason: 'cancel this task', fresh: false, args: P5.cancel.args }]]);
+      await settle();
+      // A line kept for it meanwhile is put on that same card (nothing else on it is touched).
+      run(`apprSaid('p5d','It failed.','bad')`);
+      run('loadApprovals()');
+      await settle();
+      learns.at(-1)!(0);
+      expect(ids.apprlist!.children[0]!.children[1]).toBe(opened);
+      expect(opened.shown()).toContain('It failed.');
+      // Opened again by hand, it is drawn afresh, with the row that was looked up.
+      ids.apprlist!.children[0]!.children[0]!.onclick!();
+      ids.apprlist!.children[0]!.children[1]!.onclick!();
+      const reopened = ids.apprlist!.children[0]!.children[1]!;
+      expect(reopened).not.toBe(opened);
+      expect(rowsOn(reopened)).toEqual(['Task', 'Filed By', 'Expires']);
+      // A card that no longer waits is not kept on screen for having been open.
+      answer = () => ({ status: 200, body: { proposals: [P5.accept, plain({ id: 'x1' })], signed: true } });
+      run('loadApprovals()');
+      await settle();
+      learns.at(-1)!(0);
+      expect(cardsDrawn().map((c) => c.getAttribute('data-id'))).toEqual(['p5c', 'x1']);
+      expect(cardsDrawn()).not.toContain(reopened);
+      // The panel opened again starts from a drawing of its own.
+      const before = ids.apprlist!.children[0]!.children[0];
+      await open();
+      learns.at(-1)!(0);
+      expect(ids.apprlist!.children[0]!.children[0]).not.toBe(before);
+    });
+
+    it('a prompt that never answers does not hold the panel for good: after two minutes the list is let go, the card says so, and the list is read again', async () => {
+      const timers = clock();
+      held = [];
+      answer = () => ({ status: 200, body: { proposals: [P5.cancel, P5.accept, plain({ id: 'x1' })], signed: true } });
+      await open();
+      const first = ids.apprlist!.children[0]!.children[0]!;
+      first.button('Approve with Password').onclick!();
+      expect(run('APPR.flight')).toBe(1);
+      expect(run('APPR_PROMPT_MS')).toBe(120_000);
+      const waits = timers.filter((t) => t[1] === 120_000);
+      expect(waits).toHaveLength(1);
+      // Nothing answers. The wait runs out.
+      calls = [];
+      waits[0]![0]();
+      expect(run('APPR.flight')).toBe(0);
+      expect(first.shown()).toContain('You dismissed the prompt. The card is waiting in Approvals.');
+      expect(JSON.parse(run('JSON.stringify(APPR.said)') as string)).toEqual({ p5d: ['You dismissed the prompt. The card is waiting in Approvals.', 'bad'] });
+      // The list is read again there and then, and the card (still open, still his) keeps its line.
+      expect(calls.map((c) => c.url)).toEqual(['/proposals']);
+      await settle();
+      expect(ids.apprlist!.children[0]!.children[0]).toBe(first);
+      expect(first.shown()).toContain('You dismissed the prompt. The card is waiting in Approvals.');
+      // The panel works again: another card opens, and can be approved.
+      ids.apprlist!.children[0]!.children[1]!.onclick!();
+      expect(run('APPR.open')).toBe('p5c');
+      ids.apprlist!.children[0]!.children[1]!.button('Approve with Password').onclick!();
+      expect(held.map((h) => h.id)).toEqual(['p5d', 'p5c']);
+      expect(run('APPR.flight')).toBe(1);
+      // The first prompt answers after all, late. It is not counted a second time (the second approval is still in flight),
+      // and the list is read again to say what is true.
+      calls = [];
+      held[0]!.ok({ action: { status: 'done' } });
+      await settle();
+      expect(run('APPR.flight')).toBe(1);
+      expect(JSON.parse(run('JSON.stringify(APPR.said)') as string)).toEqual({});
+      expect(calls.map((c) => c.url)).toEqual(['/proposals']);
+      held[1]!.ok({ action: { status: 'done' } });
+      await settle();
+      expect(run('APPR.flight')).toBe(0);
+      // A prompt answered in time takes its wait with it: the wait running out later does nothing.
+      const n = timers.filter((t) => t[1] === 120_000).length;
+      expect(n).toBe(2);
+      timers.filter((t) => t[1] === 120_000)[1]![0]();
+      expect(run('APPR.flight')).toBe(0);
+      expect(JSON.parse(run('JSON.stringify(APPR.said)') as string)).toEqual({});
+      // One that fails late, after its wait ran out, leaves its own sentence for its card and changes nothing else.
+      held = [];
+      run("APPR.open='p5d';apprRender()");
+      const again = ids.apprlist!.children[0]!.children[0]!;
+      again.button('Approve with Password').onclick!();
+      timers.filter((t) => t[1] === 120_000).at(-1)![0]();
+      expect(run('APPR.flight')).toBe(0);
+      const res = again.all().find((e) => e.className.split(' ')[0] === 'res')!;
+      res.textContent = 'Flint didn’t answer. Try again.';
+      held[0]!.no(new Error('offline'));
+      await settle();
+      expect(run('APPR.flight')).toBe(0);
+      expect(JSON.parse(run('JSON.stringify(APPR.said)') as string)).toEqual({ p5d: ['Flint didn’t answer. Try again.', 'bad'] });
+    });
+
+    it('Approve All is not started beside a card’s own approval; its own prompt that never answers lets the list go, says how many cards wait, and signs nothing more', async () => {
+      const timers = clock();
+      held = [];
+      answer = () => ({ status: 200, body: { proposals: [P5.cancel, P5.accept, plain({ id: 'x1' })], signed: true } });
+      await open();
+      // A card's own prompt is up: Approve All does nothing.
+      ids.apprlist!.children[0]!.children[0]!.button('Approve with Password').onclick!();
+      ids.apprall!.onclick!();
+      run('approveAll()');
+      expect(held.map((h) => h.id)).toEqual(['p5d']);
+      expect(run('APPR.busy')).toBe(false);
+      held[0]!.no(new Error('not confirmed'));
+      await settle();
+      // Now Approve All: its first prompt never answers.
+      held = [];
+      run('approveAll()');
+      expect(held.map((h) => h.id)).toEqual(['p5d']);
+      expect(run('APPR.busy')).toBe(true);
+      expect(ids.apprnote!.textContent).toBe('Approving 1 of 3…');
+      timers.filter((t) => t[1] === 120_000).at(-1)![0]();
+      expect(run('APPR.busy')).toBe(false);
+      expect(ids.apprnote!.textContent).toBe('You approved 0 of 3. You dismissed the prompt. 3 cards are still waiting.');
+      expect(timers.at(-1)![1]).toBe(2500);
+      // The prompt answers after all: that card was signed, and Approve All signs nothing after it.
+      held[0]!.ok({ action: { status: 'done' } });
+      await settle();
+      expect(held.map((h) => h.id)).toEqual(['p5d']);
+      expect(ids.apprnote!.textContent).toBe('You approved 0 of 3. You dismissed the prompt. 3 cards are still waiting.');
+      // The second card's prompt hangs instead: the first is counted, and two still wait.
+      held = [];
+      run('approveAll()');
+      held[0]!.ok({ action: { status: 'done' } });
+      await settle();
+      expect(held.map((h) => h.id)).toEqual(['p5d', 'p5c']);
+      expect(ids.apprnote!.textContent).toBe('Approving 2 of 3…');
+      timers.filter((t) => t[1] === 120_000).at(-1)![0]();
+      expect(ids.apprnote!.textContent).toBe('You approved 1 of 3. You dismissed the prompt. 2 cards are still waiting.');
+      expect(run('APPR.busy')).toBe(false);
+      // Each step has a wait of its own, and one that finished takes its wait with it.
+      held = [];
+      run('approveAll()');
+      for (let i = 0; i < 3; i++) {
+        held[i]!.ok({ action: { status: 'done' } });
+        await settle();
+      }
+      expect(ids.apprnote!.textContent).toBe('You approved 3 of 3.');
+      for (const t of timers.filter((x) => x[1] === 120_000)) t[0]();
+      expect(ids.apprnote!.textContent).toBe('You approved 3 of 3.');
+      expect(run('APPR.busy')).toBe(false);
+    });
+
+    it('requiring reviews, and no longer requiring them, are said in plain words: never the action’s own name', () => {
+      const review = (enforced: unknown, over: Record<string, unknown> = {}) => card({ id: 'p5r', fullName: 'review.enforce', kind: 'policy', origin: 'console', consequential: true, reason: 'Approving makes cards that matter wait for a review.', args: { gate: 'proposal', enforced }, ...over });
+      expect(words(review(true)).slice(0, 2)).toEqual(['Require Reviews', 'Cards that matter wait for a review before you can approve them.']);
+      expect(words(review(false)).slice(0, 2)).toEqual(['Stop Requiring Reviews', 'You can approve cards before Flint reviews them.']);
+      // A card that says neither way keeps the notes' plain title for both.
+      expect(words(review('x')).slice(0, 2)).toEqual([ACTION_WORDS['review.enforce'], 'It changes whether cards wait for a review.']);
+      expect(words({ ...review(true), args: null })[0]).toBe('Change Whether Reviews Are Required');
+      const reason = (p: Record<string, unknown>) => run(`apprReason(${JSON.stringify(p)})`) as string;
+      expect([reason(review(true)), reason(review(false)), reason(review(null))]).toEqual(['require reviews', 'stop requiring reviews', 'change whether reviews are required']);
+      for (const p of [review(true), review(false), review('x')]) {
+        const [title, sub] = words(p);
+        expect(`${title} ${sub} ${reason(p)}`).not.toMatch(/Approve Review Enforce|review\.enforce|Enforce|enforce/);
+        expect(titleCase(title), title).toBe(true);
+        expect(noteProblems('Approvals', sub), sub).toEqual([]);
+        // It asks on its own, with or without the server's mark.
+        expect(run(`apprAlone(${JSON.stringify(p)})`)).toBe(true);
+        expect(run(`apprAlone(${JSON.stringify({ ...p, consequential: false })})`)).toBe(true);
+        // Behind Show Details: what it would do, and both of its fields under labels of their own.
+        const d = JSON.parse(run(`JSON.stringify(apprDetails(${JSON.stringify(p)}))`) as string) as { says: string[]; facts: Array<[string, string]> };
+        expect(d.says).toEqual([sub]);
+        expect(d.facts.map((x) => x[0])).toEqual(['Applies To', 'Reviews Required']);
+      }
+      expect(JSON.parse(run(`JSON.stringify(apprDetails(${JSON.stringify(review(true))}).facts)`) as string)).toEqual([['Applies To', 'Proposal'], ['Reviews Required', 'Yes']]);
+      // A connected server's tool called review.enforce gets none of it.
+      expect(words({ ...review(true), kind: 'tool_call', mcp: true })[0]).toBe('Approve a Tool Call');
+      expect(words({ ...review(true), mcp: undefined })[0]).toBe('Approve a Tool Call');
     });
 
     it('a goal’s task step on a plan card says Flint would run it as a task', () => {

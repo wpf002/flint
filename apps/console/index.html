@@ -1562,7 +1562,7 @@ pollNotifs();setInterval(pollNotifs,60000);
  * 5 minutes); a card with outside text or money, or one marked consequential (every
  * goal card), is left for its own approval, with its own fresh prompt. Text only:
  * nothing here is HTML. */
-var APPR={pending:[],approved:[],open:null,tab:'waiting',busy:false,signed:false,keyed:false,down:false,flight:0,seq:0,redraw:false,details:null,said:{}};
+var APPR={pending:[],approved:[],open:null,tab:'waiting',busy:false,signed:false,keyed:false,down:false,flight:0,seq:0,redraw:false,details:null,said:{},openEl:null};
 /* The nightly jobs' cards: the title, the icon, and when the job runs one Will approved (the LaunchAgent runs
    backups at 02:15 and the restore test on Sundays only, backup-nightly.sh; cleanup runs at 03:10, jobs.ts).
    The restore test's day is apprWhen's: its card is filed by a Sunday run, so on a Sunday past 2:15 it is a week away. */
@@ -1598,7 +1598,7 @@ function apprGet(table,key){key=String(key===null||key===undefined?'':key);retur
  * Flint's own are filed as tool calls too, so without the server's word their kind tells nothing apart. */
 var APPR_OWN={'goal.activate':'goal','goal.criteria_change':'goal','goal.horizon_change':'goal','goal.done':'goal','goal.abandon':'goal','goal.propose':'goal','plan.change':'plan',
   'world.commitment.from_chat':'tool_call','policy.change':'policy','triage.rule.create':'rule','world.source.enable':'tool_call','world.person.create':'tool_call','world.relation.write':'tool_call',
-  'forecast.series.enable':'tool_call','asset.enable':'policy','task.check_bar':'task','task.cancel':'task','task.bar_override':'task'};
+  'forecast.series.enable':'tool_call','asset.enable':'policy','review.enforce':'policy','task.check_bar':'task','task.cancel':'task','task.bar_override':'task'};
 /* The kinds one of Flint's own names is filed under, or null for a name that is not one of them. A nightly job's card
    is the job's own tool call; a task goes out as a task, or as a spend when it costs money. */
 function apprOwnKinds(name){name=String(name===null||name===undefined?'':name);var k=apprGet(APPR_OWN,name);if(k)return [k];
@@ -1967,6 +1967,8 @@ function apprDetails(p){p=apprAs(p||{});var a=p.args&&typeof p.args==='object'&&
   /* (When it runs is the line under the card's title already.) */
   else if(apprGet(APPR_NEXUS,f)!==undefined)says.push(apprGet(APPR_NEXUS,f));
   else if(apprTaskCard(p)){names=APPR_KEYS_TASK;apprTaskSays(p,a,says,took,extra);}
+  /* (What it would do is said in a sentence; both of its fields are listed below, under labels of their own.) */
+  else if(f===APPR_REVIEWS){names=APPR_KEYS_REVIEW;says.push(apprReviewWords(p)[1]);}
   else if(typeof APPR_PREDICT==='string'&&f===APPR_PREDICT){
     /* (A card that changes second opinions only turns nothing on: the checks it would start are running already.) */
     if(!apprPredictOnlyOpinion(p))says.push(APPR_PREDICT_ALSO);
@@ -2001,6 +2003,14 @@ function apprDetailsInto(host,p){p=apprAs(p);var d=apprDetails(p);d.says.forEach
   if(d.withheld)host.appendChild(apprEl('p','held',d.withheld));
   /* Everything above is what the card itself holds. A row of its face that was looked up is said to be, here, in one sentence. */
   var lk=apprLooked(p);if(lk)host.appendChild(apprEl('p','lookedsay',apprGet(APPR_LOOKED_SAYS,lk[0])||APPR_LOOKED_SAYS.Task));}
+/* Requiring reviews, or no longer (review.enforce): which way the card goes, in plain words. [title, sentence, what the
+   prompt says Flint is doing]. A card that says neither way keeps the plain title for both. */
+var APPR_REVIEWS='review.enforce';
+var APPR_KEYS_REVIEW={gate:'Applies To',enforced:'Reviews Required'};
+function apprReviewWords(p){var e=p.args&&p.args.enforced;
+  return e===true?['Require Reviews','Cards that matter wait for a review before you can approve them.','require reviews']
+    :e===false?['Stop Requiring Reviews','You can approve cards before Flint reviews them.','stop requiring reviews']
+    :['Change Whether Reviews Are Required','It changes whether cards wait for a review.','change whether reviews are required'];}
 /* A resumed goal's card says so in its fixed reason (goal.activate also starts a new one). */
 var APPR_RESUMES='Approving resumes this goal.';
 function apprGoalCard(p){p=apprAs(p);return !!p&&(!!apprGet(APPR_GOAL,p.fullName)||p.fullName==='plan.change'||!!apprGet(APPR_GOAL_WORDS,p.fullName));}
@@ -2047,6 +2057,7 @@ function apprGoalFacts(p){var a=p.args||{},f=[];var when=function(t){return t?ap
 function apprReason(p){p=apprAs(p);if(p.tool)return 'run a tool on a connected server';
   if(p.fullName==='goal.activate')return APPR_PROMPTS[p.reason===APPR_RESUMES?'resume':(p.args&&p.args.origin==='flint')?'start':'add'];
   if(p.fullName==='plan.change')return APPR_PROMPTS.plan;
+  if(p.fullName===APPR_REVIEWS)return apprReviewWords(p)[2];
   if(p.fullName===APPR_PREDICT)return apprPredictOnlyOpinion(p)?'change a second opinion':'turn on predictions';
   if(apprTaskCard(p))return apprTaskReason(p);
   var gw=apprGet(APPR_GOAL_WORDS,p.fullName);return gw?APPR_PROMPTS[gw[2]]:'approve: '+apprTitle(p);}
@@ -2244,6 +2255,7 @@ function apprTitle(p){p=apprAs(p);var a=p.args||{};var n=function(x){return Arra
   if(p.tool)return 'Approve a Tool Call';
   if(apprGoalCard(p))return apprGoalTitle(p);
   if(apprTaskCard(p))return apprTaskTitle(p);
+  if(p.fullName===APPR_REVIEWS)return apprReviewWords(p)[0];
   if(p.fullName===APPR_PREDICT)return 'Turn On Predictions';
   if(p.fullName==='world.source.enable')return 'Turn On the '+apprWords(a.source)+' Source';
   var off=apprOffRows(p);if(off)return off.length===1?'Switch Off 1 Rule':'Switch Off '+off.length+' Rules';
@@ -2272,6 +2284,7 @@ function apprSub(p){p=apprAs(p);var a=p.args||{};
   if(p.tool)return APPR_TOOL_SUB;
   if(apprGoalCard(p))return apprGoalSub(p);
   if(apprTaskCard(p))return apprTaskSub(p);
+  if(p.fullName===APPR_REVIEWS)return apprReviewWords(p)[1];
   if(apprPredictOnlyOpinion(p))return apprPredictCount(p)===1?'Flint already forecasts this number, so only its second opinion changes.':'Flint already forecasts these numbers, so only their second opinions change.';
   if(p.fullName===APPR_PREDICT){var k=apprPredictCount(p);return 'Flint forecasts '+(k?k+' of ':'')+'its own numbers each night, on this Mac.';}
   if(p.fullName==='world.source.enable')return apprGet(APPR_SOURCES,a.source)||'Flint starts reading this source.';
@@ -2320,12 +2333,12 @@ function apprFacts(p){p=apprAs(p);var a=p.args||{},f=[];
    suggested, which the runtime files with the mark so that each one is read before it is signed), and every rule card that would let
    anything run on its own. That last one is read from the card's rows, whatever its mark says: a card that widens what
    Flint may do alone is never signed in a batch, even one a server sent without the mark. So are the cards that change
-   what Flint reads and how it sorts it (APPR_ASKS), by their names, with P5's two that the runtime marks (turning an
-   asset on, and ending a task against its checks) and any task whose cost does not read as exactly nothing (it costs
+   what Flint reads and how it sorts it (APPR_ASKS), by their names, with P5's three that the runtime marks (turning an
+   asset on, requiring reviews or no longer, and ending a task against its checks) and any task whose cost does not read as exactly nothing (it costs
    money, or its cost cannot be read) or that is filed as a spend; so is a tool's card that carries one of Flint's own
    names (apprAs); and so is any card that does not show all of itself (apprWithheld: a secret's value, or more than
    it can list): what cannot all be read is never signed in a batch. */
-var APPR_ASKS={'world.source.enable':1,'triage.rule.create':1,'asset.enable':1,'task.bar_override':1};
+var APPR_ASKS={'world.source.enable':1,'triage.rule.create':1,'asset.enable':1,'review.enforce':1,'task.bar_override':1};
 function apprAlone(p){p=apprAs(p);return !!p.tool||!!p.consequential||!!apprGet(APPR_GOAL,p.fullName)||!!apprGet(APPR_ASKS,p.fullName)||(apprDispatchCard(p)&&apprCost(p)!==0)||p.fullName===APPR_PREDICT||apprWithheld(p)||(p.fullName==='plan.change'&&!apprSmallPlan(p))||!!p.tainted||!!p.destructive||p.sensitivity==='financial'||p.kind==='spend'||/spend|pay|purchase|transfer|invoice|charge|money|send|delete|remove/i.test(String(p.fullName||''))||
   (p.fullName==='policy.change'&&((p.args&&Array.isArray(p.args.rows)&&p.args.rows)||[]).some(function(r){return !!r&&(r.tier==='alone'||r.pattern==='world.person.create');}))||
   /* ...and every rule card that is not purely rows: one that switches rules off (ending a rule that holds an action
@@ -2347,14 +2360,21 @@ function apprFly(n){APPR.flight=Math.max(0,(APPR.flight||0)+n);return APPR.fligh
    drawn again): kept by the card's id and shown on that card for as long as it waits. No text takes it away. */
 function apprSaid(id,text,kind){id=String(id||'');if(!/^[A-Za-z0-9_-]{1,64}$/.test(id))return;if(!APPR.said)APPR.said={};
   if(text)APPR.said[id]=[String(text),kind==='ok'?'ok':'bad'];else delete APPR.said[id];}
+/* How long a prompt may stay unanswered before the list is let go. The Mac's own prompt has no time limit: without
+   one here, a prompt that never answers would hold the panel for good. */
+var APPR_PROMPT_MS=120000;
+/* The line a card keeps (apprSaid), put on a card that is already drawn. */
+function apprKeptInto(res,id){var kept=APPR.said?apprGet(APPR.said,id):undefined;if(kept){res.style.display='block';res.textContent=kept[0];res.className='res '+kept[1];}}
 function apprCard(p){var open=APPR.open===p.id;var card=apprEl('div','card row'+(open?' open':''));card.style.display='block';
   var ct=apprEl('div','ct');ct.appendChild(svgi(apprIcon(p)));var tt=apprEl('b');tt.appendChild(document.createTextNode(apprTitle(p)));
   tt.appendChild(apprEl('span','sub',apprSub(p)));ct.appendChild(tt);
   var mark=apprMark(p);if(mark)ct.appendChild(mark);
   ct.appendChild(apprEl('small',null,apprAge(p.ts)));card.appendChild(ct);
   var row=apprEl('div','cf prow');var res=apprEl('div','res');res.style.display='none';
-  var kept=APPR.said?apprGet(APPR.said,p.id):undefined;if(kept){res.style.display='block';res.textContent=kept[0];res.className='res '+kept[1];}
+  apprKeptInto(res,p.id);
   if(open){var dl=apprEl('dl','facts');apprFaceInto(dl,p);card.appendChild(dl);
+    /* The open card as it is drawn now: a list that is read again keeps this very card (apprRender). */
+    APPR.openEl={id:p.id,card:card,res:res};
     /* Show Details stays as Will left it when the list is drawn again: a card he is reading does not fold under him. */
     var det=apprEl('div','details');det.hidden=APPR.details!==p.id;if(p.reason)det.appendChild(apprEl('p',null,p.reason));
     /* What the card would do, in sentences and labelled values (apprDetails): never its args as they are stored, and
@@ -2364,11 +2384,19 @@ function apprCard(p){var open=APPR.open===p.id;var card=apprEl('div','card row'+
     show.onclick=function(){det.hidden=!det.hidden;APPR.details=det.hidden?null:p.id;show.firstChild.textContent=det.hidden?'Show Details':'Hide Details';show.setAttribute('aria-expanded',det.hidden?'false':'true');};show.appendChild(svgi('chev'));
     var no=apprEl('button','btn','Reject');var ok=apprEl('button','btn',approveLabel());
     no.onclick=function(){if(APPR.flight>0||APPR.busy)return;apprSaid(p.id);rejectAction(p.id,card);setTimeout(loadApprovals,1200);};
-    ok.onclick=function(){if(APPR.flight>0||APPR.busy)return;apprSaid(p.id);var going;apprFly(1);
-      try{going=approveAction(p.id,card,{reason:apprReason(p),fresh:apprAlone(p),args:p.args});}catch(e){apprFly(-1);throw e;}
-      going.then(function(d){apprFly(-1);
-        if(d&&d.action&&d.action.status==='done'&&typeof goalsApproved==='function')goalsApproved(p);setTimeout(loadApprovals,1200);},
-      function(){apprFly(-1);
+    ok.onclick=function(){if(APPR.flight>0||APPR.busy)return;apprSaid(p.id);var going,over=false,timer=null;apprFly(1);
+      /* The approval is over once: when it answers, or when the wait for its prompt runs out, whichever is first. */
+      var end=function(){if(over)return false;over=true;if(timer!==null&&typeof clearTimeout==='function')clearTimeout(timer);apprFly(-1);return true;};
+      try{going=approveAction(p.id,card,{reason:apprReason(p),fresh:apprAlone(p),args:p.args});}catch(e){end();throw e;}
+      /* A prompt that never answers: the list is let go, the card says the prompt was dismissed, and the list is read
+         again. (If the approval lands after all, the list is read once more, and says what is true.) */
+      if(typeof setTimeout==='function')timer=setTimeout(function(){if(!end())return;row.style.opacity=1;res.style.display='block';res.textContent=PROMPT_DISMISSED;res.className='res bad';
+        apprSaid(p.id,PROMPT_DISMISSED,'bad');APPR.redraw=false;loadApprovals();},APPR_PROMPT_MS);
+      going.then(function(d){var first=end();
+        if(d&&d.action&&d.action.status==='done'&&typeof goalsApproved==='function')goalsApproved(p);
+        if(first){setTimeout(loadApprovals,1200);return;}
+        apprSaid(p.id);loadApprovals();},
+      function(){if(!end()){if(res.textContent)apprSaid(p.id,res.textContent,'bad');return;}
         /* A list that was read while the prompt was up was held back (apprHeld). It is read again now, a little later
            so the line that says what happened can be read first; that line is kept for the card it is about. */
         if(APPR.redraw){APPR.redraw=false;if(res.textContent)apprSaid(p.id,res.textContent,'bad');setTimeout(loadApprovals,2500);}});};
@@ -2388,7 +2416,12 @@ function apprWaitingCard(p){p=apprAs(p);var card=apprEl('div','card row');card.s
   return card;}
 function apprHelp(text){var h=document.getElementById('apprhelp');h.textContent=text||'';h.hidden=!text;}
 function apprShow(tab){if(APPR.flight>0||APPR.busy)return;APPR.tab=tab;apprRender();}
-function apprRender(){var list=document.getElementById('apprlist');list.textContent='';
+/* `keep`: this drawing is a list that was read again, not something Will did. The card he has open is then the very
+   card that was on screen (its rows, its buttons, where they are), with only the line it keeps brought up to date:
+   an open card is never drawn again under him by a load, so it never gains a row while he reads or reaches for a
+   button. He sees a looked-up name on it the next time he opens it. */
+function apprRender(keep){var list=document.getElementById('apprlist');list.textContent='';
+  var was=keep===true&&APPR.openEl&&APPR.openEl.id===APPR.open?APPR.openEl:null;
   var seg=document.getElementById('apprseg');seg.hidden=!APPR.approved.length;
   document.getElementById('apprtab-waiting').classList.toggle('on',APPR.tab==='waiting');document.getElementById('apprtab-approved').classList.toggle('on',APPR.tab==='approved');
   document.getElementById('apprn-waiting').textContent=APPR.pending.length||'';document.getElementById('apprn-approved').textContent=APPR.approved.length||'';
@@ -2397,7 +2430,9 @@ function apprRender(){var list=document.getElementById('apprlist');list.textCont
   /* With the runtime down, the help line says why the list is empty: "Nothing Waiting" would contradict it. */
   if(!APPR.pending.length){if(!APPR.down){var e=apprEl('div','empty');e.appendChild(apprEl('b',null,'Nothing Waiting'));list.appendChild(e);}foot.hidden=true;return;}
   if(!APPR.open||!APPR.pending.some(function(p){return p.id===APPR.open;}))APPR.open=APPR.pending[0].id;
-  var g2=apprEl('div','group');APPR.pending.forEach(function(p){g2.appendChild(apprCard(p));});list.appendChild(g2);
+  var g2=apprEl('div','group');APPR.pending.forEach(function(p){
+    if(was&&p.id===was.id&&p.id===APPR.open){apprKeptInto(was.res,p.id);g2.appendChild(was.card);return;}
+    g2.appendChild(apprCard(p));});list.appendChild(g2);
   var all=APPR.pending.filter(function(p){return !apprAlone(p);}),alone=APPR.pending.length-all.length;
   foot.hidden=false;var btn=document.getElementById('apprall');var note=document.getElementById('apprnote');
   if(APPR.signed&&!APPR.keyed){note.textContent='This device needs an approval key.';btn.textContent='Open Settings';btn.onclick=function(){closeApprovals();openSettings();};btn.disabled=false;return;}
@@ -2438,19 +2473,25 @@ function loadApprovals(){var seq=APPR.seq=(APPR.seq||0)+1;
       if(APPR.tab==='approved'&&!APPR.approved.length)APPR.tab='waiting';
       /* What was kept to say on a card goes with the card: one that no longer waits takes its line with it. */
       if(APPR.said)Object.keys(APPR.said).forEach(function(id){if(!APPR.pending.some(function(x){return x.id===id;}))delete APPR.said[id];});
-      APPR.redraw=false;apprRender();});
+      APPR.redraw=false;apprRender(true);});
   }).catch(function(){if(seq!==APPR.seq||apprHeld())return;failed("Couldn't Reach Flint",false);});}
-/* One prompt, then each card signed and finished in turn; the server verifies each. */
-function approveAll(){if(APPR.busy)return;var queue=APPR.pending.filter(function(p){return !apprAlone(p);});if(!queue.length)return;
-  APPR.busy=true;var note=document.getElementById('apprnote'),btn=document.getElementById('apprall');btn.disabled=true;var done=0,failedAt=null;
+/* What Approve All says when its prompt was dismissed: how many of its cards still wait. */
+function apprLeftSays(n){return 'You dismissed the prompt. '+(n===1?'1 card is still waiting.':n+' cards are still waiting.');}
+/* One prompt, then each card signed and finished in turn; the server verifies each. Never beside a card's own
+   approval. A prompt that never answers lets the list go after APPR_PROMPT_MS, as a card's own does; nothing more is
+   then signed, whatever answers later. */
+function approveAll(){if(APPR.busy||APPR.flight>0)return;var queue=APPR.pending.filter(function(p){return !apprAlone(p);});if(!queue.length)return;
+  APPR.busy=true;var note=document.getElementById('apprnote'),btn=document.getElementById('apprall');btn.disabled=true;var done=0,over=false,timer=null;
   var rows={};Array.prototype.forEach.call(document.querySelectorAll('#apprlist .card'),function(c){rows[c.getAttribute('data-id')]=c;});
-  var next=function(i){if(i>=queue.length)return Promise.resolve();var p=queue[i];note.textContent='Approving '+(i+1)+' of '+queue.length+'…';
-    var card=rows[p.id]||apprCard(p);
-    return approveAction(p.id,card,{reason:i===0?'approve '+queue.length+' Flint card'+(queue.length===1?'':'s'):'approve: '+apprTitle(p),args:p.args}).then(function(){done++;return next(i+1);});};
-  next(0).catch(function(e){failedAt=e;}).then(function(){APPR.busy=false;
-    note.textContent='You approved '+done+' of '+queue.length+'.'+(failedAt?' '+(promptDismissed(failedAt)?PROMPT_DISMISSED:typeof errText==='function'?errText(failedAt):'It stopped.'):'');
-    APPR.redraw=false;setTimeout(loadApprovals,failedAt?2500:1200);});}
-function openApprovals(){if(!TOKEN){openSettings();return;}if(!APPR.pending.length&&!APPR.approved.length){var l=document.getElementById('apprlist');l.textContent='';l.appendChild(apprEl('div','empty','Loading…'));}showPanel('approvals',true);if(typeof loadCreds==='function')loadCreds();loadApprovals();}
+  var finish=function(e,unanswered){if(over)return;over=true;if(timer!==null&&typeof clearTimeout==='function')clearTimeout(timer);APPR.busy=false;
+    note.textContent='You approved '+done+' of '+queue.length+'.'+(unanswered||(e&&promptDismissed(e))?' '+apprLeftSays(queue.length-done):e?' '+(typeof errText==='function'?errText(e):'It stopped.'):'');
+    APPR.redraw=false;setTimeout(loadApprovals,e||unanswered?2500:1200);};
+  var wait=function(){if(typeof setTimeout!=='function')return;if(timer!==null&&typeof clearTimeout==='function')clearTimeout(timer);timer=setTimeout(function(){finish(null,true);},APPR_PROMPT_MS);};
+  var next=function(i){if(over||i>=queue.length)return Promise.resolve();var p=queue[i];note.textContent='Approving '+(i+1)+' of '+queue.length+'…';
+    var card=rows[p.id]||apprCard(p);wait();
+    return approveAction(p.id,card,{reason:i===0?'approve '+queue.length+' Flint card'+(queue.length===1?'':'s'):'approve: '+apprTitle(p),args:p.args}).then(function(){if(over)return;done++;return next(i+1);});};
+  next(0).then(function(){finish(null,false);},function(e){finish(e||new Error('It stopped.'),false);});}
+function openApprovals(){if(!TOKEN){openSettings();return;}APPR.openEl=null;if(!APPR.pending.length&&!APPR.approved.length){var l=document.getElementById('apprlist');l.textContent='';l.appendChild(apprEl('div','empty','Loading…'));}showPanel('approvals',true);if(typeof loadCreds==='function')loadCreds();loadApprovals();}
 function closeApprovals(){showPanel('approvals',false);pollApprovals();}
 /* The badge: how many cards wait for a signature. */
 function badge(n){var b=document.getElementById('apprbadge');b.textContent=n>9?'9+':String(n);b.hidden=!(n>0);if(typeof starters==='function'&&!document.getElementById('thread').children.length)starters(n);}

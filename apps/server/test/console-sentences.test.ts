@@ -113,7 +113,12 @@ describe('a card’s approval that did not go through', () => {
     // The one place the words are written out again is the Goals script's own copy, for a page with no Approvals script.
     expect(html.split(`'${SAYS}'`).length - 1).toBe(2);
     expect(block('goals-js')).toContain(`function gDismissed(){return typeof PROMPT_DISMISSED==='string'?PROMPT_DISMISSED:'${SAYS}';}`);
-    expect(block('approvals-js')).toContain('(promptDismissed(failedAt)?PROMPT_DISMISSED:');
+    // (Approve All is about several cards: it says the prompt was dismissed in the same words, then how many still wait.)
+    expect(block('approvals-js')).toContain("function apprLeftSays(n){return 'You dismissed the prompt. '+(n===1?'1 card is still waiting.':n+' cards are still waiting.');}");
+    expect(SAYS.startsWith('You dismissed the prompt. ')).toBe(true);
+    expect(block('approvals-js')).toContain("(unanswered||(e&&promptDismissed(e))?' '+apprLeftSays(queue.length-done):");
+    // A card's own prompt that never answers says the sentence too, once the wait for it has run out.
+    expect(block('approvals-js')).toContain("res.textContent=PROMPT_DISMISSED;res.className='res bad';");
     expect(fn('failed')).toContain('promptDismissed(e)?PROMPT_DISMISSED:errText(e)');
     for (const [id, n] of [['goals-js', 1], ['predictions-js', 1], ['tasks-js', 1]] as const) expect(block(id).split('goalCancelled(e)?gDismissed():').length - 1, id).toBe(n);
     // No panel that signs a card says a dismissed prompt as a cancellation. (The Goals script names the word once, to tell one from any other failure.)

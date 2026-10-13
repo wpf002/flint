@@ -332,6 +332,8 @@ Object.assign(CARDS, {
   'a task to cancel': base({ fullName: 'task.cancel', kind: 'task', mcp: false, reason: 'Approving stops this task.', args: { taskId: TASK } }),
   'a result accepted against its checks': base({ fullName: 'task.bar_override', kind: 'task', mcp: false, consequential: true, reason: 'Approving accepts this result against its checks.', args: { taskId: TASK, to: 'accepted' } }),
   'a result rejected against its checks': base({ fullName: 'task.bar_override', kind: 'task', mcp: false, consequential: true, reason: 'Approving rejects this result against its checks.', args: { taskId: TASK, to: 'rejected' } }),
+  'reviews to require': base({ fullName: 'review.enforce', kind: 'policy', consequential: true, reason: 'Approving makes cards that matter wait for a review.', args: { gate: 'proposal', enforced: true } }),
+  'reviews no longer required': base({ fullName: 'review.enforce', kind: 'policy', consequential: true, reason: 'Approving lets you approve cards before Flint reviews them.', args: { gate: 'proposal', enforced: false } }),
   // A tool on a connected server can be called anything: these two carry the names of Flint's own cards. Each is drawn
   // as a tool's card, so everything it holds is listed like any other tool's, and none of it is said in that card's words.
   'a tool called like a task’s accept card': base({
