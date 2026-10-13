@@ -199,7 +199,8 @@ export function buildServer(call = runtimeCall): McpServer {
         template: ClaimTemplate.optional().describe(`One of the ledger's claim templates: ${CLAIM_TEMPLATE_HELP}`),
         probability: z.number().min(0.05).max(0.95),
         domain: z.enum(['services', 'deploys', 'spend', 'repos', 'projects', 'calendar', 'goals', 'assets', 'selfmod', 'triage', 'recommendation']),
-        type: z.enum(['event_occurs', 'deadline_met', 'threshold_cross', 'trend', 'relevance', 'task_meets_bar', 'effect_given_accept']),
+        // Every type but a task's own: Flint's task job records that one, and the runtime refuses it from here.
+        type: z.enum(['event_occurs', 'deadline_met', 'threshold_cross', 'trend', 'relevance', 'effect_given_accept']),
         resolutionCriteria: z.string().min(1).max(1000),
         resolveBy: z.string().datetime({ offset: true }),
         evidence: z.array(z.object({ kind: z.string().max(40), ref: z.string().max(200), note: z.string().max(200).optional() })).max(20).optional(),

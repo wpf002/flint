@@ -115,6 +115,12 @@ describe('goal args', () => {
     expect(checkFits('pull_request', 'state', 'merged')).toBe(true);
     expect(checkFits('issue', 'state', 'merged')).toBe(false);
     expect(checkFits('person', 'email', 'x')).toBe(false);
+    // A name every object has is no entry of the table: refused, and never a throw.
+    for (const name of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) {
+      expect(checkFits('pull_request', name, 'open'), name).toBe(false);
+      expect(checkFits(name, 'state', 'open'), name).toBe(false);
+      expect(checkFits(name, name, name), name).toBe(false);
+    }
     expect(Object.keys(CHECK_PATHS).sort()).toEqual(['ci_run', 'deployment', 'issue', 'project', 'pull_request', 'service', 'thread']);
   });
 

@@ -105,6 +105,13 @@ describe('the phrase table', () => {
     // Words of chance written by hand are caught, whatever numbers sit beside them.
     expect(hasLoosePrediction('Deploys will probably be about 4.')).toBe(true);
     expect(hasLoosePrediction('Deploys today: about 4.')).toBe(false);
+    // Odds said with "even" are caught as before: the phrases, never the plain word.
+    for (const loose of ['Even money says yes.', 'It’s even money the deploy lands.', 'Even odds it holds.', 'It’s about even.', 'There’s an even chance it slips.']) {
+      expect(hasLoosePrediction(loose), loose).toBe(true);
+    }
+    for (const plain of ['It held even after a restart.', 'Even the backup finished.', 'Not even one failed.', 'Spend is even with last month.']) {
+      expect(hasLoosePrediction(plain), plain).toBe(false);
+    }
   });
 });
 

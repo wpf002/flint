@@ -10,13 +10,17 @@
  *     content pushes, anything about people (but world.person.create, P2.5),
  *     writes to Google, audit edits, prediction edits, and anything under
  *     `prophet.` (P4: Flint forecasts on this Mac and calls no outside forecaster).
+ *     From chat, also anything about a task, an asset or a review (P5): those are
+ *     asked for from the console or by Flint's own task job, never by a chat turn.
  *     Nothing below can loosen these.
  *  2. Context rules. An autonomous context may run only the closed
  *     AUTONOMOUS_ACTIONS list: no MCP tool and nothing else, ever. A tainted chat
  *     turn moves every network-egress tool and every write to at least APPROVAL.
  *  3. An active ActionPolicy row (created only from an approved policy proposal)
  *     may loosen an APPROVAL entry to ALONE, if that entry is promotable. Any row
- *     may tighten. A row can never loosen steps 1 or 2.
+ *     may tighten. A row can never loosen steps 1 or 2. An entry marked `byName`
+ *     is loosened only by a row that names it exactly, and an action in
+ *     ALONE_CAPS always runs alone under that cap.
  *  4. The code table. Every entry the Machine plan adds is APPROVAL or FORBIDDEN.
  *  5. MCP tools in chat or the console (today's behaviour, kept for untainted
  *     turns): `readOnlyHint` from a TRUSTED_READONLY server, or a name that
@@ -188,6 +192,23 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   'ledger.resolve.ask_will': approval({ shadow: true, cap: { limit: 5, period: 'day' }, note: 'a yes/no question for Will about a prediction that is due' }),
   'calibration.note': approval({ write: false, shadow: true, note: "Flint's own track record, as numbers, in chat's context" }),
   'forecast.series.enable': fixed({ note: "turning predictions on is Will's signature, never promoted" }),
+  // Assets, tasks and reviews (P5). An asset does nothing until Will signs asset.enable, and a task goes
+  // out only on its own signed card. The two local dispatches are capped by the day, counted as the task
+  // goes out (a card that is refused uses none). Checking a result runs in shadow at APPROVAL: Flint
+  // computes the bar and files the accept card, and accepts on its own only once Will promotes that check
+  // by name, and then only so many a day (ALONE_CAPS). Turning an asset on, requiring reviews, overruling
+  // a check and anything that spends or leaves this Mac are his signature, never promoted. None of these
+  // is ever asked for from chat (step 1c).
+  'asset.enable': fixed({ note: "turning an asset on is Will's signature, never promoted" }),
+  'review.enforce': fixed({ note: "requiring reviews, or no longer, is Will's signature, never promoted" }),
+  'task.dispatch.local_worker': approval({ cap: { limit: 20, period: 'day' }, note: 'the local model only; each task waits for its own card' }),
+  'task.dispatch.ci_runner': approval({ write: false, cap: { limit: 50, period: 'day' }, note: 'watches a CI run; calls nothing' }),
+  'task.dispatch.nexus_participant': fixed({ egress: true, note: 'spends; stays APPROVAL; no asset of this kind is built' }),
+  'review.local': approval({ write: false, shadow: true, cap: { limit: 20, period: 'day' }, note: 'a review on the local model; advice on a card, one call at a time, yields to chat' }),
+  'review.trident_panel': fixed({ egress: true, note: 'an outside panel; stays APPROVAL; not built' }),
+  'task.check_bar': approval({ shadow: true, byName: true, note: "checks a result against its bar; accepting it waits for Will's card until promoted by name, then at most 20 a day alone" }),
+  'task.cancel': fixed({ note: "stopping a task that went out is Will's signature" }),
+  'task.bar_override': fixed({ note: "ending a task against its check is Will's signature, never promoted" }),
   // Forbidden outright (also caught by step 1; listed so the table is complete).
   // Google is read-only to Flint (P2.5): the scopes are checked in code as well.
   'google.write': forbidden('Flint never writes to Google'),
@@ -246,7 +267,39 @@ export const AUTONOMOUS_ACTIONS: ReadonlySet<string> = new Set([
   'ledger.reason.local',
   'ledger.resolve.ask_will',
   'calibration.note',
+  // P5: checking a task's result, and nothing else yet. No dispatch and no review is asked for by a job
+  // until a part that needs one adds it here.
+  'task.check_bar',
 ]);
+
+/**
+ * Step 3, for the actions where ALONE means Flint settles something for Will
+ * (P5: accepting a task's result with no card). Promoted, such an action runs
+ * under the daily cap here whatever the row says: a row's own cap can lower it
+ * and nothing raises it. The cap counts what Flint does alone, so the entry
+ * carries none at APPROVAL: an accept card Will signs is not counted under it.
+ * (Its entry is `byName` as well: no wildcard row promotes it.)
+ */
+export const ALONE_CAPS: Readonly<Record<string, Cap>> = {
+  'task.check_bar': { limit: 20, period: 'day' },
+};
+
+/**
+ * Is this action named as a task, an asset or a review, known or not, or as
+ * the Hive's dispatch (P5)? These are the names the database reads a card's
+ * subject from when Will signs it. None is ever asked for from chat (step 1c):
+ * a card from chat under a look-alike name could otherwise draw a signature
+ * that stands in a real card's way. Read by how the name begins, in any case
+ * (`Task.cancel`, `hive.dispatch_jobs`): wider than the database, which reads
+ * these names exactly, so a name that only looks like one is caught too. A
+ * name that holds one of them further in (`goal.review.local`) is not one.
+ * Never an MCP tool's name (those live under `mcp:`).
+ */
+const TASK_NAME_PREFIXES = ['task.', 'asset.', 'review.', 'hive.dispatch_job'] as const;
+export function taskNamed(action: string): boolean {
+  const name = action.toLowerCase();
+  return TASK_NAME_PREFIXES.some((p) => name.startsWith(p));
+}
 
 /**
  * Counted, never capped (P3): the counter a goal review's onTrack forecast is
@@ -529,9 +582,13 @@ export function resolveTier(action: string, ctx: TierContext): TierDecision {
     return { tier: 'forbidden', rule: 'forbidden', reason: `${action} is run by Will at the keyboard, and from nowhere else`, key };
   }
 
-  // 1c. Never from chat.
+  // 1c. Never from chat: the names in NEVER_FROM_CHAT, and anything about a task, an asset or a review (P5),
+  // whatever its name. Before any policy row is read.
   if (!ctx.mcp && NEVER_FROM_CHAT.has(action) && ctx.context === 'chat') {
     return { tier: 'forbidden', rule: 'forbidden', reason: `${action} is never asked for from chat`, key };
+  }
+  if (!ctx.mcp && ctx.context === 'chat' && taskNamed(action)) {
+    return { tier: 'forbidden', rule: 'forbidden', reason: 'tasks, assets and reviews are never asked for from chat', key };
   }
 
   // 2a. Autonomous: the closed list, and never an MCP tool. Any context that is
@@ -576,13 +633,15 @@ export function resolveTier(action: string, ctx: TierContext): TierDecision {
   const inScope = (p: PolicyRow): boolean => p.scope == null || ctx.scopeAllows?.(p.scope) === true;
   // An entry promoted by name only is not promoted by a row that covers it with `prefix.*`.
   const promoters = rows.filter((p) => p.tier === 'alone' && inScope(p) && (!base.byName || p.pattern === key));
+  // What Flint may do alone under its own cap (ALONE_CAPS) keeps that cap whatever the row says.
+  const aloneCap = !ctx.mcp && Object.prototype.hasOwnProperty.call(ALONE_CAPS, action) ? ALONE_CAPS[action] : undefined;
   if (tightest && RANK[tightest.tier] > RANK[decision.tier]) {
     decision = { ...decision, tier: tightest.tier, rule: 'policy', reason: `ActionPolicy ${tightest.pattern}`, policyPattern: tightest.pattern };
   } else if (tightest?.tier === 'alone' && promoters.length > 0 && decision.tier === 'approval' && base.promotable && !floored) {
     // Every matching row's cap applies, whatever order the rows came in: the lowest wins.
     const caps = promoters.map((p) => p.dailyCap).filter((c): c is number => c != null && c >= 0);
-    const limit = Math.min(...caps, decision.cap?.limit ?? Infinity);
-    const cap: Cap | undefined = Number.isFinite(limit) ? { limit, period: decision.cap?.period ?? 'day' } : undefined;
+    const limit = Math.min(...caps, decision.cap?.limit ?? Infinity, aloneCap?.limit ?? Infinity);
+    const cap: Cap | undefined = Number.isFinite(limit) ? { limit, period: decision.cap?.period ?? aloneCap?.period ?? 'day' } : undefined;
     const first = promoters[0]!;
     decision = {
       ...decision,

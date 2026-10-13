@@ -20,12 +20,18 @@
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { CHAT_CLAIM_TEMPLATE_IDS, CLAIM_TEMPLATE_PARAMS, RUNTIME_CLAIM_TEMPLATE_IDS, SeriesKey } from '@flint/policy';
+import { CHAT_CLAIM_TEMPLATE_IDS, CLAIM_TEMPLATE_PARAMS, RUNTIME_CLAIM_TEMPLATE_IDS, SeriesKey, TASKS_WRITER, TaskForecastSpec } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 import { forecastSeries } from '../predict/series.js';
 
 export const DOMAINS = ['services', 'deploys', 'spend', 'repos', 'projects', 'calendar', 'goals', 'assets', 'selfmod', 'triage', 'recommendation'] as const;
 export const TYPES = ['event_occurs', 'deadline_met', 'threshold_cross', 'trend', 'relevance', 'task_meets_bar', 'effect_given_accept'] as const;
+/**
+ * The types chat may file under: every one but a task's own (P5), which only
+ * the tasks writer records. The connector's tool offers the same list
+ * (packages/mcp/connectors/runtime-server.ts; a test keeps the two in step).
+ */
+export const CHAT_TYPES = ['event_occurs', 'deadline_met', 'threshold_cross', 'trend', 'relevance', 'effect_given_accept'] as const satisfies ReadonlyArray<(typeof TYPES)[number]>;
 const HORIZON_MS = 180 * 86400_000;
 
 /**
@@ -44,9 +50,11 @@ export const CLAIM_TEMPLATES = {
   series_range: { params: CLAIM_TEMPLATE_PARAMS.series_range, render: (p: { series: string; lo: number; hi: number; on: string }) => `${p.series} is between ${p.lo} and ${p.hi} on ${p.on}` },
   // ...and its yes/no question about the same step (a whole day or week, so never "at the resolve time").
   series_above: { params: CLAIM_TEMPLATE_PARAMS.series_above, render: (p: { series: string; value: number; on: string }) => `${p.series} is above ${p.value} on ${p.on}` },
+  // A task's forecast (P5): the task by its ref, never its title.
+  task_meets_bar: { params: CLAIM_TEMPLATE_PARAMS.task_meets_bar, render: (p: { task: string; by: string }) => `${p.task} meets its bar by ${p.by}` },
 } as const;
 export type ClaimTemplate = keyof typeof CLAIM_TEMPLATES;
-/** Templates only the runtime's own writers fill (a goal review's, the forecaster's): never one a caller of the ledger's route may send. */
+/** Templates only the runtime's own writers fill (a goal review's, the forecaster's, a task's): never one a caller of the ledger's route may send. */
 export const INTERNAL_TEMPLATES: ReadonlySet<string> = new Set<ClaimTemplate>(RUNTIME_CLAIM_TEMPLATE_IDS);
 
 export const METHODS = ['model_reasoning', 'prophet', 'statistical', 'rule', 'base_rate', 'human'] as const;
@@ -114,7 +122,7 @@ export const ChatPrediction = z
     probability: z.number().min(0).max(1),
     method: z.literal('model_reasoning'),
     domain: z.enum(DOMAINS),
-    type: z.enum(TYPES),
+    type: z.enum(CHAT_TYPES),
     evidence: Evidence,
     resolutionCriteria: z.string().max(1000),
     resolver: z.literal('will'),
@@ -168,6 +176,14 @@ export function validatePrediction(p: EmitPrediction, now = new Date(), createdB
     why.push('a yes/no prediction carries no range');
   }
   if ((p.forecastRunId === undefined) !== (p.seriesKey === undefined)) why.push('a forecast names its run and its series together');
+  // P5: a task's forecast is the tasks writer's, under its own template, domain and type, by base rate, settled
+  // from the world under the rule that names its task. That writer records nothing else, and no other writer
+  // (a caller that names none among them) uses the template, or the domain and type together: the database
+  // knows a task's forecast by that pair, and scores one only for its task, so another writer's would never be.
+  const taskPair = p.domain === 'assets' && p.type === 'task_meets_bar';
+  const taskShaped = p.template?.id === 'task_meets_bar' && taskPair && p.kind === 'binary' && p.method === 'base_rate'
+    && p.resolver === 'auto_world' && !p.tainted && TaskForecastSpec.safeParse(p.resolverSpec).success;
+  if (createdBy === TASKS_WRITER ? !taskShaped : p.template?.id === 'task_meets_bar' || taskPair) why.push('a task’s forecast is the tasks writer’s, under the task template with its task’s rule, and only it is');
   // A forecast writer's row always names its run and series: neither has a way to record a series' numbers loose.
   if ((createdBy === FORECAST_WRITER || createdBy === REASON_WRITER) && p.forecastRunId === undefined) why.push(`${createdBy} records only a forecast's predictions, each with its run and series`);
   if (p.method === 'prophet') why.push('no prediction is recorded as prophet: Flint forecasts on this Mac');
@@ -203,7 +219,8 @@ export function renderClaim(p: EmitPrediction): string {
 /**
  * Record a prediction. `own` is the runtime's alone, never read from a request:
  * the goal a review's onTrack forecast is about (P3). A goal's forecast is the
- * goals writer's (the database checks createdBy too) and uses its own template.
+ * goals writer's (the database checks createdBy too) and uses its own template;
+ * a task's (P5) is the tasks writer's, under the task template (validatePrediction).
  */
 export async function emitPrediction(db: Db | Tx, p: EmitPrediction, createdBy: string, now = new Date(), own: { goalId?: string } = {}) {
   const why = validatePrediction(p, now, createdBy);

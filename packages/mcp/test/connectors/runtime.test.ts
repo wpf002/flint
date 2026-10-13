@@ -60,6 +60,13 @@ describe('runtime connector', () => {
     const guessed = await client.callTool({ name: 'ledger_record_prediction', arguments: { ...args, template: { id: 'deploy_success', params: { service: 'api' } } } });
     expect(guessed.isError).toBe(true);
     expect(calls).toHaveLength(n);
+    // A task's forecast is not the model's to record: its type is not in the tool's list, under any domain.
+    expect(JSON.stringify(pred.inputSchema)).not.toContain('task_meets_bar');
+    for (const domain of ['assets', 'services']) {
+      const tasks = await client.callTool({ name: 'ledger_record_prediction', arguments: { ...args, domain, type: 'task_meets_bar' } }).catch(() => ({ isError: true }));
+      expect(tasks.isError, domain).toBe(true);
+    }
+    expect(calls).toHaveLength(n);
     await client.close();
   });
 
