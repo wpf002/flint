@@ -399,6 +399,8 @@
   .ppick{cursor:pointer;}
   @media (max-width:600px){
     .row.gwrap>.pacts{flex:1 1 100%;justify-content:flex-end;} .pacts .btn,.pacts .ghost{min-width:72px;justify-content:center;}
+    /* A row's own action, under its sentence and at the left: apart from the footer's button, which is at the right. */
+    .row.gwrap.pown>.pacts{justify-content:flex-start;} .pown>.pacts .ghost{margin-left:-10px;}
     #predfoot .btn{flex:1;justify-content:center;} #predfoot .note:not(:empty){flex-basis:100%;}
     /* Every target in the panel is at least 44 points tall on a phone: its tabs too. */
     #predseg button{height:44px;padding:0 14px;}
@@ -2692,7 +2694,8 @@ var PRED_SAY={recorded:'Flint recorded your answer.',on:'Approved. Flint starts 
   key:'This device needs an approval key.',offHere:'Predictions are switched off on this Mac.',starts:'It starts once you approve it.',
   answers:'Yes means it happened. Skip leaves it unscored. An answer can’t be changed.',notStarted:'Flint scores its predictions once you turn them on.',
   nightly:'Flint scores its predictions each night, once they come due.',
-  opinion:'The local model also estimates each number, and Flint compares the two.',opinionOff:'The local model stopped estimating this number.'};
+  opinion:'The local model also estimates each number, and Flint compares the two.',opinionOff:'The local model stopped estimating this number.',
+  opinionOnly:'Flint already forecasts this number. Only its second opinion changes.'};
 
 /* ---------- the panel ---------- */
 function predShown(on){var b=document.getElementById('predbtn');if(b)b.hidden=!on;}
@@ -2789,17 +2792,16 @@ function predSeriesShow(s,say){var n=s.number;predHead(n.name,true);var body=pre
   /* The local model's own estimate of the same question, as one sentence from the runtime: on, it can be turned
      off here (unsigned: it only narrows what Flint does); off, turning it on files the card, which Will signs. */
   if(s.opinion){body.appendChild(gEl('div','gsh','Second Opinion'));var o=gEl('div','group'),orow=predRow('Local Model',[s.opinion.says],'');
-    if(s.opinion.on||s.opinion.offer){var oa=gEl('span','pacts');orow.appendChild(oa);
-      /* The footer's Turn Off is the number's own: to a screen reader this one says which it is. */
-      var ob=s.opinion.on?gBtn('ghost','Turn Off',function(b){predOpinionOff(n,b);}):gBtn('btn','Turn On',function(b){predOpinionOn(n,b);});
-      ob.setAttribute('aria-label',s.opinion.on?'Turn Off Second Opinion':'Turn On Second Opinion');oa.appendChild(ob);}
+    if(s.opinion.on||s.opinion.offer){var oa=gEl('span','pacts');orow.className+=' pown';orow.appendChild(oa);
+      /* Each button says what it turns off: this one the second opinion, the footer's the number's forecasts. */
+      oa.appendChild(s.opinion.on?gBtn('ghost','Turn Off Second Opinion',function(b){predOpinionOff(n,b);}):gBtn('btn','Turn On Second Opinion',function(b){predOpinionOn(n,b);}));}
     o.appendChild(orow);body.appendChild(o);}
   body.appendChild(gEl('div','gsh','Record'));var r=gEl('div','group');r.appendChild(predLine(s.record));body.appendChild(r);
   var foot=predFoot();foot.hidden=false;
-  if(n.on){foot.appendChild(gEl('span','note'));foot.appendChild(gBtn('btn','Turn Off',function(b){predTurnOff(n,b);}));}
+  if(n.on){foot.appendChild(gEl('span','note'));foot.appendChild(gBtn('btn','Turn Off Forecasts',function(b){predTurnOff(n,b);}));}
   else if(s.offHere)foot.appendChild(gEl('span','note',PRED_SAY.offHere));
   else if(s.waiting){foot.appendChild(gEl('span','note',PRED_SAY.waiting));foot.appendChild(gBtn('btn','Open Approvals',predToApprovals));}
-  else{foot.appendChild(gEl('span','note'));foot.appendChild(gBtn('btn pri','Turn On',function(){predSheet([n.key]);}));}
+  else{foot.appendChild(gEl('span','note'));foot.appendChild(gBtn('btn pri','Turn On Forecasts',function(){predSheet([n.key]);}));}
   predFocus(document.getElementById('predback'));
   if(say)predMsg(say,'ok');}
 /* Unsigned: it only narrows what Flint does. Turning it on again takes the card. */
@@ -2812,7 +2814,7 @@ function predTurnOff(n,b){if(PRED.busy)return;PRED.busy=true;if(b)b.disabled=tru
 function predOpinionOff(n,b){if(PRED.busy)return;PRED.busy=true;if(b)b.disabled=true;var here=predHere();
   gCall('/predictions/series/'+encodeURIComponent(n.key)+'/second-opinion-off',{}).then(function(){PRED.busy=false;if(here())predSeries(n.key,PRED_SAY.opinionOff);},
     function(e){PRED.busy=false;if(b)b.disabled=false;if(here())predMsg(gSay(e));});}
-function predOpinionOn(n,b){PRED.picked={};PRED.picked[n.key]=true;PRED.opinion=true;predFile(b?[b]:[]);}
+function predOpinionOn(n,b){PRED.picked={};PRED.picked[n.key]=true;PRED.opinion=true;predFile(b?[b]:[],n.on===true);}
 
 /* ---------- turning predictions on: the sheet, then the card, signed here ---------- */
 /* The numbers that are off, each with what it is and a switch. `only`: the ones switched on to begin with (all, unless told). */
@@ -2840,21 +2842,24 @@ function predSheet(only){var numbers=((PRED.page&&PRED.page.numbers)||[]).filter
    local model's when its second opinion is switched on (none otherwise). */
 function predArgs(){var keys=[];for(var k in (PRED.picked||{}))if(Object.prototype.hasOwnProperty.call(PRED.picked,k)&&PRED.picked[k])keys.push(k);
   var series=gSorted(keys);return {series:series,reason:PRED.opinion===true?series.slice():[]};}
-function predFile(buttons){var args=predArgs();if(!args.series.length){predMsg(PRED_SAY.none);return;}
+/* `only`: the card is for a number that is already on (asked for from its own view): its second opinion is all it adds. */
+function predFile(buttons,only){var args=predArgs();if(!args.series.length){predMsg(PRED_SAY.none);return;}
   if(!gKeyed()){predNeedsKey();return;}
   if(PRED.busy)return;PRED.busy=true;buttons.forEach(function(b){b.disabled=true;});var here=predHere();
-  gCall('/predictions/turn-on',args.reason.length?{series:args.series,opinion:true}:{series:args.series}).then(function(d){PRED.busy=false;if(here())predCard(d.id,args);},
+  gCall('/predictions/turn-on',args.reason.length?{series:args.series,opinion:true}:{series:args.series}).then(function(d){PRED.busy=false;if(here())predCard(d.id,args,only===true);},
     function(e){PRED.busy=false;buttons.forEach(function(b){b.disabled=false;});if(here())predMsg(gSay(e));});}
 /* "Approve it with Touch ID to start.": the method this device will ask for, as Approve buttons name it. */
 function predStartSays(){var l=typeof approveLabel==='function'?approveLabel():'Approve';var i=l.indexOf(' with ');return 'Approve it'+(i>0?l.slice(i):'')+' to start.';}
 /* The card, in the Approvals panel's own words for it: what it does, what turning predictions on also does (said
    before the list, so it is never below the fold), and each number by name, spending and calendar numbers marked.
-   Nothing is turned on until Will approves it. */
-function predCard(id,args){predNav('card');predHead('Turn On Predictions',true);var body=predBody(),foot=predFoot();
+   Nothing is turned on until Will approves it. For a number that is already on, the card says so instead: its
+   forecasts and the checks of what Flint predicted are running already, and only the second opinion changes. */
+function predCard(id,args,only){predNav('card');predHead('Turn On Predictions',true);var body=predBody(),foot=predFoot();
   var p={id:id,fullName:typeof APPR_PREDICT==='string'?APPR_PREDICT:'forecast.series.enable',args:args,origin:'console',consequential:true};
   var list=typeof apprPredictList==='function'?apprPredictList(p):{named:[],unknown:0,total:args.series.length};
-  body.appendChild(gEl('p','plead',typeof apprSub==='function'?apprSub(p):''));
-  if(typeof APPR_PREDICT_ALSO==='string')body.appendChild(gEl('p','plead',APPR_PREDICT_ALSO));
+  if(only)body.appendChild(gEl('p','plead',PRED_SAY.opinionOnly));
+  else{body.appendChild(gEl('p','plead',typeof apprSub==='function'?apprSub(p):''));
+    if(typeof APPR_PREDICT_ALSO==='string')body.appendChild(gEl('p','plead',APPR_PREDICT_ALSO));}
   body.appendChild(gEl('div','gsh','Numbers'));var g=gEl('div','group');
   list.named.forEach(function(x){var row=gEl('div','row');var l=gEl('span','lbl');l.appendChild(gEl('b',null,x.name));row.appendChild(l);
     if(x.kind==='money'||x.kind==='calendar')row.appendChild(gEl('span','val',x.kind==='money'?'Spending':'Calendar'));g.appendChild(row);});

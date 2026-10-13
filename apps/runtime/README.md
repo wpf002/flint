@@ -1085,15 +1085,16 @@ Two steps. Claude does the first with your OK; only you can do the second.
    already made. Click **Approve with Touch ID**. Nothing is forecast until you
    do. **Not Now** leaves the card waiting in Approvals for 7 days.
 
-Asking again with other numbers replaces a card that is still waiting, so a
-card you left behind can't be approved later by mistake.
+Asking again replaces a card that is still waiting if the two name any of the
+same numbers, so a card you left behind can't be approved later in place of
+the newer one. A waiting card for other numbers altogether is left waiting.
 
 The first forecasts appear the night after a number has 24 days of history
 (19 weeks for commits). Spend, deploys, downtime, commits and calendar hours
 are filled in from what Flint already has, so most start that night.
 
-To turn one number off: open it in Predictions and click **Turn Off**. No
-signature is needed, because it only narrows what Flint does. Turning it on
+To turn one number off: open it in Predictions and click **Turn Off
+Forecasts**. No signature is needed, because it only narrows what Flint does. Turning it on
 again takes the card.
 
 Claude can still file the same card from the command line, with your OK:
@@ -1129,7 +1130,7 @@ row says one of these, and never a number Flint doesn't have:
 
 Click a number to open it: each day (or week) of its forecast with its range,
 the chance that today runs above its usual level, how many of its last 30
-ranges held, and **Turn Off**.
+ranges held, and **Turn Off Forecasts**.
 
 **Questions** is where Flint asks you about the predictions only you can
 settle: the ones it made in a chat. Each morning at 07:20 it picks up to five
@@ -1221,17 +1222,19 @@ off until you turn it on, number by number.
 **Turning it on.** On the Turn On Predictions sheet, under LOCAL MODEL, switch
 on **Second Opinion**, then **Continue**. The card you approve says so, under
 SECOND OPINION. For a number that's already on: open it in Predictions and
-click **Turn On** under SECOND OPINION. That shows a card for that one number.
+click **Turn On Second Opinion**. That shows a card for that one number, which
+says "Flint already forecasts this number. Only its second opinion changes."
 Either way, nothing changes until you approve the card with Touch ID.
 
 The switch is offered only where a local model is set (`FLINT_TRIAGE_MODEL`,
 the model triage and goal reviews use). Without one, the open number says "No
 local model is set on this Mac."
 
-**Turning it off.** Open the number and click **Turn Off** under SECOND
-OPINION. No signature is needed, because it only narrows what Flint does. The
-number's forecasts stay on, and the estimates already made stay on record.
-Turning the number itself off turns its second opinion off too.
+**Turning it off.** Open the number and click **Turn Off Second Opinion**. No
+signature is needed, because it only narrows what Flint does. The number's
+forecasts stay on, and the estimates already made stay on record. **Turn Off
+Forecasts**, at the bottom, turns the number itself off, and its second
+opinion with it.
 
 **What you see.**
 
@@ -1247,8 +1250,11 @@ Turning the number itself off turns its second opinion off too.
   compared."
 - Nothing is announced: no note, no dot, no line in the morning summary.
 
-An area's own lines under Accuracy count every answer on record, the local
-model's among them.
+An area's own lines under Accuracy don't count the local model's answers:
+each is a second answer to a question the forecast already answered, so the
+question would count twice. They're scored only in the comparison above. The
+scores chat can ask for leave them out for the same reason, so turning a
+second opinion on or off never moves what chat reads of Flint's accuracy.
 
 **What the model is asked.** Each night at 03:50, after the forecasts are
 written, one question for each number with the switch on: the number's name,
@@ -1257,7 +1263,10 @@ own range, and how the question has come out before. Numbers and fixed words
 only. It can reply with only a chance from 5% to 95% and one of six fixed
 reasons. A chance outside that range is thrown away, never rounded into
 range, and so is a reply with any other word in it. It's asked at most twice
-for a number, and at most 30 numbers a day.
+a night for a number, and at most 30 numbers a day. Both limits are counted in
+the database, so a job that fails or is run again can't ask a third time. A
+job that fails is not retried: that night's second opinion is skipped. An
+answer that arrives after the day it's about has ended is thrown away too.
 
 **When there's no answer.** A number with no forecast that night (it hasn't
 changed, it's still waiting for history, or yesterday's value isn't in) gets no
@@ -1287,14 +1296,18 @@ holds:
 
 - the model's name isn't a cloud model's (`-cloud` or `:cloud`);
 - Ollama's address is this Mac, and Node isn't set to send requests through a
-  proxy (`NODE_USE_ENV_PROXY`), which would carry them off this Mac first;
+  proxy (`NODE_USE_ENV_PROXY`), which would carry them off this Mac first. A
+  proxy is fine when `NO_PROXY` names Ollama's host exactly (an IPv6 address
+  with its brackets: `[::1]`);
 - Ollama's own list holds that exact model, and says nothing of a remote host
   for it.
 
-The list is asked again for each request (one answer is shared for two
-seconds, so requests that come together ask once). If the list doesn't come,
-hangs, or doesn't hold the model, the answer is no. What Ollama said a moment
-ago isn't trusted once it stops answering.
+The list is asked before each request, and again at the last moment: after
+the wait for the model's one slot, and before a second try. One answer is
+shared for two seconds, so requests that come together ask once. If the list
+fails at once it's asked one more time. If it still doesn't come, hangs, or
+doesn't hold the model, the answer is no. What Ollama said a moment ago isn't
+trusted once it stops answering.
 
 When the answer is no, nothing is sent to the model, and each caller does what
 it does with no model:
