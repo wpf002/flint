@@ -32,6 +32,8 @@ export interface StubRequest {
   method: string;
   path: string;
   body: Record<string, unknown> | undefined;
+  /** When it arrived (the model server stand-in records it). */
+  at?: number;
 }
 
 export interface OllamaModel {
@@ -64,6 +66,12 @@ export interface OllamaStub {
   chatDelayMs: number;
   /** The models it has, as its listing gives them: a test may change one while the server runs. */
   models: Record<string, OllamaModel>;
+  /**
+   * How it answers the questions a look asks (its GETs), while chat and the embedding calls go on answering: as an
+   * Ollama does (`answers`), with a listing that fails (`listing-fails`: `/api/tags` is a 500), or not at all
+   * (`looks-hang`: no GET is ever answered). A test changes it while the server runs.
+   */
+  looks: 'answers' | 'listing-fails' | 'looks-hang';
   /** Does anything this stub was sent, from request `from` on, contain `needle`? */
   saw(needle: string, from?: number): boolean;
   close(): Promise<void>;
@@ -105,18 +113,21 @@ export async function startOllamaStub(models: Record<string, OllamaModel>): Prom
     replyFor: undefined,
     chatDelayMs: 0,
     models,
+    looks: 'answers',
     saw: (needle, from = 0) => requests.slice(from).some((r) => JSON.stringify(r.body ?? '').includes(needle)),
     close: () => close(server),
   };
   const server = createServer(async (req, res) => {
     const path = (req.url ?? '/').split('?')[0]!;
     const body = parse(await readBody(req));
-    requests.push({ method: req.method ?? 'GET', path, body });
+    requests.push({ method: req.method ?? 'GET', path, body, at: Date.now() });
     const json = (status: number, b: unknown): void => {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(b));
     };
     const named = (name: unknown): OllamaModel | undefined => (typeof name === 'string' ? models[name] : undefined);
+    if (req.method === 'GET' && stub.looks === 'looks-hang') return; // never answered (the connection is dropped when the stub closes)
+    if (req.method === 'GET' && path === '/api/tags' && stub.looks === 'listing-fails') return json(500, { error: 'listing failed' });
     if (req.method === 'GET' && path === '/api/version') return json(200, { version: '0.34.4' });
     if (req.method === 'GET' && path === '/api/tags') {
       return json(200, {

@@ -87,7 +87,7 @@ const CLOUD_MODEL_ROW = "The local model is an Ollama cloud model, which runs on
 
 // ---- the three servers, started together
 
-const runs = { modes: scratch('modes'), remote: scratch('remote'), alias: scratch('alias'), wire: scratch('wire'), late: scratch('late'), tier: scratch('tier'), helper: scratch('helper') };
+const runs = { modes: scratch('modes'), remote: scratch('remote'), alias: scratch('alias'), wire: scratch('wire'), late: scratch('late'), tier: scratch('tier'), helper: scratch('helper'), repoint: scratch('repoint'), quiet: scratch('quiet') };
 const ELSEWHERE = '10.255.255.1';
 /** An address that stands for a second machine: the fence carries it to a stand-in on this one (./guard.mjs GUARD_REMAP). */
 const OTHER_MACHINE = '10.255.255.2';
@@ -111,7 +111,22 @@ const GOAL_SAID = 'I want to finish the PEARLFINCH boat deck by spring, keep tha
 const PRIVATE_LEARNED = 'Will keeps the passport in the JASPERLARK cabinet.';
 const OPEN_LEARNED = 'Will keeps the ladder in the CORALSWIFT garage.';
 
+/** What the `repoint` server's store holds from before: an ordinary turn that sets a goal, and a turn Will kept private. */
+const REPOINT_OPEN = 'I want to restore the UMBERSTOAT canoe by autumn, keep that in mind.';
+const REPOINT_KEPT = 'Keep this private: I keep the deed in the ONYXPIPIT drawer, keep that in mind.';
+/** ...and the `quiet` server's: a turn he kept private, and a fact from one that has no embedding yet. */
+const QUIET_KEPT = 'Keep this private: I keep the will in the AGATEDUNLIN safe, keep that in mind.';
+const QUIET_FACT = 'Will keeps the cash box in the FLINTSHRIKE loft.';
+/** How long after "listening" a server's own first asks of its model server are over (they are a few loopback GETs). */
+const BOOT_SETTLE_MS = 400;
+/** A first extraction pass late enough that what the model server said at boot is too old to use without asking again. */
+const LATE_FIRST_PASS_MS = '3200';
+const NOT_CONFIRMED = 'Flint cannot confirm right now that its local model runs on this Mac, and a private message never leaves this Mac.';
+const NOT_AVAILABLE = "The local model isn't available, and a private message never leaves this Mac.";
+
 let modes: { ollama: OllamaStub; cloud: CloudStub; mcp: ReturnType<typeof writeMcpConfig>; srv: Running };
+let repoint: { ollama: OllamaStub; cloud: CloudStub; runtime: RuntimeStub; srv: Running; flippedAt: number };
+let quiet: { ollama: OllamaStub; cloud: CloudStub; srv: Running; flippedAt: number };
 let remote: { cloud: CloudStub; there: OllamaStub; srv: Running };
 let alias: { ollama: OllamaStub; cloud: CloudStub; runtime: RuntimeStub; srv: Running };
 let wire: { mock: MockLocalServer; cloud: CloudStub; runtime: RuntimeStub; srv: Running };
@@ -148,8 +163,8 @@ const LEAK = {
 const DAY_WORKED_OUT = new Date(Date.now() + 150 * 86_400_000).toISOString().slice(0, 10);
 
 /** A complete stored turn, as the conversation store writes one. */
-const storedTurn = (conversationId: string, id: string, user: string, context?: unknown) => {
-  const at = Date.now() - 60 * 60 * 1000;
+const storedTurn = (conversationId: string, id: string, user: string, context?: unknown, hoursAgo = 1) => {
+  const at = Date.now() - hoursAgo * 60 * 60 * 1000;
   return {
     id, conversationId, status: 'complete', createdAt: at, updatedAt: at, ...(context !== undefined ? { context } : {}),
     messages: [{ id: `${id}_u`, role: 'user', content: user, timestamp: at }, { id: `${id}_a`, role: 'assistant', content: 'Noted.', timestamp: at }],
@@ -313,12 +328,62 @@ beforeAll(async () => {
     });
     return { lm, other, srv };
   };
-  [modes, remote, alias, wire, late, tier, helper] = await Promise.all([startModes(), startRemote(), startAlias(), startWire(), startLate(), startTier(), startHelper()]);
+  // The follow-up review's F3 and F4. Memory extraction on a real local model, with goals from chat on. A moment
+  // after boot the memory model is pointed at a cloud model (`ollama cp gpt-oss:120b-cloud memory-model:7b`), and
+  // nothing asks its Ollama again before the first pass, three seconds later: the pass begins on what was known.
+  const startRepoint = async () => {
+    const ollama = await startOllamaStub({ [MAIN]: { loaded: true, contextLength: 16384 }, [MEMORY_MODEL]: { loaded: false }, 'nomic-embed-text': { family: 'nomic-bert' } });
+    const cloud = await startCloudStub();
+    const runtime = await startRuntimeStub();
+    // Asked for goals or not, the "model" makes one of the ordinary turn.
+    ollama.replyFor = (body, last) => {
+      if (body.format === undefined || !last.includes('TURNS:')) return undefined;
+      const shown = (last.split('TURNS:')[1] ?? '').split('### Turn ').slice(1);
+      const suggestions = shown.flatMap((text, i) => (text.includes('UMBERSTOAT') ? [{ turn: i + 1, kind: 'goal', quote: 'I want to restore the UMBERSTOAT canoe by autumn', text: 'restore the UMBERSTOAT canoe', dueOn: '' }] : []));
+      return JSON.stringify({ facts: [], suggestions });
+    };
+    const srv = await startServer({
+      dir: runs.repoint.dir,
+      env: {
+        OLLAMA_HOST: ollama.origin, OLLAMA_MODEL: MAIN, OLLAMA_NUM_CTX: '16384', ...cloudEnv(cloud),
+        FLINT_MEMORY_BRAIN: 'local', FLINT_MEMORY_MODEL: MEMORY_MODEL, FLINT_EXTRACT_FIRST_PASS_MS: LATE_FIRST_PASS_MS, FLINT_EXTRACT_CANDIDATES: '1', FLINT_RUNTIME_URL: runtime.origin,
+      },
+      // (The ordinary turn is the older one: its call is made first.)
+      seed: [RUNTIME_TOKEN, { path: ['memory', 'conversations.json'], text: JSON.stringify({ conversations: { 'open-1': [storedTurn('open-1', 'turn_open', REPOINT_OPEN, undefined, 2)], 'kept-1': [storedTurn('kept-1', 'turn_kept', REPOINT_KEPT, { private: true })] } }) }],
+    });
+    await sleep(BOOT_SETTLE_MS);
+    const flippedAt = ollama.requests.length;
+    ollama.models[MEMORY_MODEL]!.remoteHost = 'https://ollama.com:443';
+    return { ollama, cloud, runtime, srv, flippedAt };
+  };
+  // The follow-up review's F2. The same Mac without goals from chat. A moment after boot EVERY name on its Ollama is
+  // pointed at a cloud model and the listing begins to fail (a 500), while chat and the embedding calls go on
+  // answering: what the server last said still reads "runs here", and nothing it can be asked now says otherwise.
+  const startQuiet = async () => {
+    const ollama = await startOllamaStub({ [MAIN]: { loaded: true, contextLength: 16384 }, [MEMORY_MODEL]: { loaded: false }, 'nomic-embed-text': { family: 'nomic-bert' } });
+    const cloud = await startCloudStub();
+    ollama.replyFor = (body, last) => (body.format !== undefined && last.includes('TURNS:') ? JSON.stringify({ facts: [] }) : undefined);
+    const srv = await startServer({
+      dir: runs.quiet.dir,
+      env: { OLLAMA_HOST: ollama.origin, OLLAMA_MODEL: MAIN, OLLAMA_NUM_CTX: '16384', ...cloudEnv(cloud), FLINT_MEMORY_BRAIN: 'local', FLINT_MEMORY_MODEL: MEMORY_MODEL, FLINT_EXTRACT_FIRST_PASS_MS: LATE_FIRST_PASS_MS },
+      seed: [
+        { path: ['memory', 'knowledge.json'], text: JSON.stringify({ seq: 2, facts: [{ id: 'k1', text: OPEN_FACT, source: 'history', ts: 1, vector: [] }, { id: 'k2', text: QUIET_FACT, source: 'history', ts: 1, vector: [], fromPrivate: true }], rejected: [] }) },
+        { path: ['memory', 'conversations.json'], text: JSON.stringify({ conversations: { 'kept-1': [storedTurn('kept-1', 'turn_kept', QUIET_KEPT, { private: true })] } }) },
+      ],
+    });
+    await sleep(BOOT_SETTLE_MS);
+    const flippedAt = ollama.requests.length;
+    for (const m of Object.values(ollama.models)) m.remoteHost = 'https://ollama.com:443';
+    ollama.looks = 'listing-fails';
+    return { ollama, cloud, srv, flippedAt };
+  };
+  [modes, remote, alias, wire, late, tier, helper, repoint, quiet] = await Promise.all([startModes(), startRemote(), startAlias(), startWire(), startLate(), startTier(), startHelper(), startRepoint(), startQuiet()]);
 });
 afterAll(async () => {
-  await Promise.all([modes, remote, alias, wire, late, tier, helper, again].map((s) => s?.srv.stop()));
+  await Promise.all([modes, remote, alias, wire, late, tier, helper, repoint, quiet, again].map((s) => s?.srv.stop()));
   await again?.runtime.close();
   await Promise.all([
+    repoint?.ollama.close(), repoint?.cloud.close(), repoint?.runtime.close(), quiet?.ollama.close(), quiet?.cloud.close(),
     modes?.ollama.close(), modes?.cloud.close(), remote?.cloud.close(), remote?.there.close(), alias?.ollama.close(), alias?.cloud.close(), alias?.runtime.close(),
     wire?.mock.close(), wire?.cloud.close(), wire?.runtime.close(), late?.mock.close(), late?.cloud.close(), ...(late?.closers ?? []).map((c) => c()), tier?.ollama.close(), tier?.mock.close(), helper?.lm.close(), helper?.other.close(),
   ]);
@@ -1176,6 +1241,155 @@ describe('the real server, as a process: the local model on this Mac, and OLLAMA
     expect(other.saw('SILVERTERN')).toBe(false);
     expect(srv.log()).not.toMatch(/SILVERTERN|HAZELWREN|PRIVLIVEH|PRIVWORDH|LOCALWORDH|GARNETFINCH|JASPERLARK/);
     // Nothing but this machine and that stand-in was ever reached.
+    expect(blocked(srv)).toEqual([]);
+  });
+});
+
+// The follow-up review's F3 and F4. Whether a pass asks for goals, and whether a turn that stays here may be mined
+// at all, are read when the pass begins, off what the memory model's server last said: a minute old at worst. So
+// each call is decided AGAIN where it is sent (../../src/inference helperFetch), on a listing asked for a moment
+// before: a call that asks for his goals, and a call about turns that stay here, go only to a model that server
+// then lists as its own. The extractor marks those calls (../../src/goals-chat extractor: `kept`); take the mark
+// away and both are sent on the old word.
+describe('the real server, as a process: the memory model pointed at a cloud model while Flint runs', () => {
+  it('the pass asks its Ollama again where each call is sent: no call that asks for goals, and no turn that stays here, reaches that model', async () => {
+    const { ollama, cloud, runtime, srv, flippedAt } = repoint;
+    expect(await waitFor(() => /\[memory-extract\] v2 local pass: /.test(srv.log()), 15_000)).toBe(true);
+    await sleep(200);
+    const after = ollama.requests.slice(flippedAt);
+    // The pass began on what was known (the model was still read as one on this Mac: no turn was skipped as one it
+    // may not read), and the first call that would have carried something to it asked the listing again...
+    expect(srv.log()).toMatch(/\[memory-extract\] v2 local pass: sent 0 turn\(s\) in \d+ call\(s\) \(skipped [^)]*tainted=0\)/);
+    expect(after.filter((r) => r.path === '/api/tags').length).toBeGreaterThan(0);
+    // ...so nothing was sent to that model at all: not the call that asks for his goals, not the turn he kept private.
+    expect(after.filter((r) => r.path === '/api/chat').map((r) => r.body?.model)).toEqual([]);
+    expect(ollama.saw('UMBERSTOAT', flippedAt)).toBe(false);
+    expect(ollama.saw('ONYXPIPIT', flippedAt)).toBe(false);
+    expect(ollama.saw(SUGGEST_GOALS_PROMPT, flippedAt)).toBe(false);
+    expect(runtime.candidates()).toEqual([]);
+    // The turns wait for a pass that can read them, and nothing of them is in the log or went anywhere else.
+    expect(srv.log()).toMatch(/\[memory-extract\] v2 local pass: [^\n]*2 turn\(s\) still queued/);
+    for (const word of ['UMBERSTOAT', 'ONYXPIPIT']) {
+      expect(srv.log(), word).not.toContain(word);
+      expect(cloud.saw(word), word).toBe(false);
+    }
+    expect(blocked(srv)).toEqual([]);
+  });
+
+  // The follow-up review's F5. Every helper request used to wait for the listing first. With a listing that hangs,
+  // each ordinary Cloud-mode turn was held for as long as an ask may take (two seconds, and again for the next one),
+  // though nothing the listing says would have stopped it.
+  it('a model server whose looks hang does not hold up an ordinary Cloud-mode turn: its embeddings are sent as ever, with no ask before them', async () => {
+    const { ollama, srv } = repoint;
+    // (What that server last said is too old to use without asking: a request that waits for the listing would ask now.)
+    const lastLook = ollama.requests.filter((r) => r.path === '/api/tags').at(-1)?.at ?? Date.now();
+    await waitFor(() => Date.now() - lastLook > 2_100, 4_000);
+    ollama.looks = 'looks-hang';
+    const from = ollama.requests.length;
+    const began = Date.now();
+    const r = await srv.post('/chat', { conversationId: 'rp-ordinary', message: 'An ordinary synthetic question about the weather.' });
+    expect(r.events?.[0]).toMatchObject({ brain: 'frontier' });
+    expect(Date.now() - began).toBeLessThan(1_000);
+    expect(ollama.saw('An ordinary synthetic question about the weather', from)).toBe(true);
+    expect(ollama.requests.slice(from).filter((q) => q.path === '/api/tags')).toEqual([]);
+    ollama.looks = 'answers';
+  });
+});
+
+// The follow-up review's F2. What a model server last said used to stand for five minutes after it stopped saying
+// anything: with the listing failing (or hanging) and its names pointed at cloud models, a fact that stays here was
+// embedded there, a stored private turn was mined there, and a Local Only turn was answered there. Now a server
+// that gives no word to an ask somebody waited for is not believed on what it said before, and the turn gets a
+// plain sentence inside the two seconds one look may take.
+describe('the real server, as a process: a model server that stops saying what it lists, with its names pointed at cloud models', () => {
+  let ollama: OllamaStub;
+  let cloud: CloudStub;
+  let srv: Running;
+  let flippedAt: number;
+  beforeAll(() => {
+    ({ ollama, cloud, srv, flippedAt } = quiet);
+  });
+  const REMOTE_HOST = 'https://ollama.com:443';
+  const pointAway = (...names: string[]) => names.forEach((m) => (ollama.models[m]!.remoteHost = REMOTE_HOST));
+  const pointBack = (...names: string[]) => names.forEach((m) => delete ollama.models[m]!.remoteHost);
+  const privately = (word: string) => srv.post('/chat', { conversationId: `q-${word}`, message: `My ${word} account number is nobody else's business.`, localOnly: true });
+  /** The requests that carry something to a model, from request `from` on (chat, the embedding calls, a load): not what a look asks. */
+  const carried = (from: number) => ollama.requests.slice(from).filter((q) => q.method === 'POST' && q.path !== '/api/show').map((q) => q.path);
+
+  it('memory extraction: the turn he kept private is not sent to the memory model on the word of a listing that no longer answers', async () => {
+    expect(await waitFor(() => /\[memory-extract\] v2 local pass: /.test(srv.log()), 15_000)).toBe(true);
+    await sleep(200);
+    const after = ollama.requests.slice(flippedAt);
+    // The pass began on what was known, the call asked the listing again where it was sent, and got no word.
+    expect(srv.log()).toMatch(/\[memory-extract\] v2 local pass: sent 0 turn\(s\) in \d+ call\(s\) \(skipped [^)]*tainted=0\)/);
+    expect(after.filter((r) => r.path === '/api/tags').length).toBeGreaterThan(0);
+    expect(after.filter((r) => r.path === '/api/chat')).toEqual([]);
+    expect(ollama.saw('AGATEDUNLIN', flippedAt)).toBe(false);
+    expect(cloud.saw('AGATEDUNLIN')).toBe(false);
+  });
+
+  it('an ordinary Cloud-mode turn: the fact that stays here is not embedded at that model, and ordinary text goes as ever', async () => {
+    const r = await srv.post('/chat', { conversationId: 'q-open', message: 'Where are the garden shears and the cash box kept?' });
+    expect(r.events?.[0]).toMatchObject({ brain: 'frontier' });
+    await sleep(500); // facts with no embedding are embedded behind the turn
+    expect(ollama.saw('FLINTSHRIKE', flippedAt)).toBe(false);
+    expect(cloud.saw('FLINTSHRIKE')).toBe(false);
+    expect(factsOf(srv).find((f) => f.text === QUIET_FACT)).toMatchObject({ fromPrivate: true, vector: [] });
+    // The turn's own words and the ordinary fact were embedded there, as in Cloud mode they always are.
+    expect(ollama.saw('garden shears and the cash box', flippedAt)).toBe(true);
+    expect(factsOf(srv).find((f) => f.text === OPEN_FACT)?.vector?.length).toBeGreaterThan(0);
+  });
+
+  it('a Local Only turn gets a sentence: it is not sent to the main model, not embedded, and not sent to the cloud; on either route', async () => {
+    const from = ollama.requests.length;
+    expect(await privately('ZIRCONPLOVER')).toMatchObject({ status: 503, json: { error: NOT_CONFIRMED } });
+    expect(await srv.post('/generate', { prompt: 'My ZIRCONPLOVER account number is nobody else’s business.', localOnly: true })).toMatchObject({ status: 503, json: { error: NOT_CONFIRMED } });
+    expect(ollama.saw('ZIRCONPLOVER')).toBe(false);
+    expect(cloud.saw('ZIRCONPLOVER')).toBe(false);
+    // Each of them looked first, and the look came back without a listing.
+    expect(ollama.requests.slice(from).filter((q) => q.path === '/api/tags').length).toBeGreaterThanOrEqual(2);
+    expect(carried(from)).toEqual([]);
+  });
+
+  it('it answers again, with its names pointed back: the very next Local Only turn is answered on this Mac', async () => {
+    pointBack(MAIN, MEMORY_MODEL, 'nomic-embed-text');
+    ollama.looks = 'answers';
+    const r = await privately('JADEPIPIT');
+    expect(r.events?.[0]).toMatchObject({ brain: 'local', route: { mode: 'cloud', private: true } });
+    expect(r.text).toBe(`LOCAL(${MAIN}) reply.`);
+    expect(cloud.saw('JADEPIPIT')).toBe(false);
+  });
+
+  it('only its listing fails, a moment after it said the model runs here: the look a private turn waits for is enough to drop that', async () => {
+    // (Inside the two seconds its word is good for: nothing but this turn's own look can know.)
+    pointAway(MAIN);
+    ollama.looks = 'listing-fails';
+    const from = ollama.requests.length;
+    expect(await privately('RUBYSANDERLING')).toMatchObject({ status: 503, json: { error: NOT_CONFIRMED } });
+    expect(ollama.saw('RUBYSANDERLING')).toBe(false);
+    expect(carried(from)).toEqual([]);
+    expect(cloud.saw('RUBYSANDERLING')).toBe(false);
+  });
+
+  it('no look is answered at all (everything it is asked hangs, and chat still answers): a sentence, within the two seconds one look may take', async () => {
+    pointBack(MAIN);
+    ollama.looks = 'answers';
+    expect((await privately('TEALWHIMBREL')).events?.[0]).toMatchObject({ brain: 'local', route: { private: true } });
+    // A moment ago it said the main model runs here. Now the name is pointed at a cloud model and no GET is answered.
+    pointAway(MAIN);
+    ollama.looks = 'looks-hang';
+    const from = ollama.requests.length;
+    const began = Date.now();
+    expect(await privately('OPALDIPPER')).toMatchObject({ status: 503, json: { error: NOT_AVAILABLE } });
+    // One look, two seconds: the turn waited once for that silence, not once more for each thing that asks.
+    expect(Date.now() - began).toBeLessThan(3_500);
+    expect(ollama.saw('OPALDIPPER')).toBe(false);
+    expect(carried(from)).toEqual([]);
+    expect(cloud.saw('OPALDIPPER')).toBe(false);
+  });
+
+  it('the log holds none of it, and the process reached nothing but this machine', () => {
+    for (const word of ['AGATEDUNLIN', 'FLINTSHRIKE', 'ZIRCONPLOVER', 'JADEPIPIT', 'OPALDIPPER', 'TEALWHIMBREL', 'RUBYSANDERLING']) expect(srv.log(), word).not.toContain(word);
     expect(blocked(srv)).toEqual([]);
   });
 });
