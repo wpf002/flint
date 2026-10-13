@@ -115,7 +115,7 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
     // Something true only while the target migration is applied, to see it go and come back. A new migration names its own here.
     // (P4 part 3's: its two columns, how many of a forecast's steps were filled in and where each number was read to. P5's: its first
     // table. The chat goal floor's: its two triggers on Goal, switched on, and their function. The policy off guard's: its
-    // trigger on ActionPolicy, switched on, and the trigger's function.)
+    // four triggers on ActionPolicy and Proposal, switched on, and their three functions.)
     const applied: Record<string, string> = {
       '20261014000000_p4_forecast_inputs': `(SELECT count(*) = 2 FROM information_schema.columns WHERE table_schema = 'public'
         AND ((table_name = 'ForecastRun' AND column_name = 'filled') OR (table_name = 'MetricSeries' AND column_name = 'readTo')))`,
@@ -123,8 +123,9 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
       '20261015000000_p7_resilience': `to_regclass('public."BackupRun_kind_location_path_key"') IS NOT NULL`,
       [CHAT_GOAL_FLOOR]: `(SELECT to_regprocedure('goal_chat_floor()') IS NOT NULL AND (SELECT count(*) FROM pg_trigger
         WHERE tgrelid = to_regclass('public."Goal"') AND tgname IN ('Goal_chat_floor', 'Goal_chat_floor_bind') AND NOT tgisinternal AND tgenabled = 'O') = 2)`,
-      [POLICY_OFF_GUARD]: `(SELECT to_regprocedure('action_policy_off_guard()') IS NOT NULL AND (SELECT count(*) FROM pg_trigger
-        WHERE tgrelid = to_regclass('public."ActionPolicy"') AND tgname = 'ActionPolicy_off_guard' AND NOT tgisinternal AND tgenabled = 'O') = 1)`,
+      [POLICY_OFF_GUARD]: `(SELECT to_regprocedure('action_policy_off_guard()') IS NOT NULL AND to_regprocedure('action_policy_whole_card()') IS NOT NULL
+        AND to_regprocedure('proposal_policy_shape()') IS NOT NULL AND (SELECT count(*) FROM pg_trigger
+        WHERE tgname IN ('ActionPolicy_off_guard', 'ActionPolicy_card_actor', 'ActionPolicy_whole_card', 'Proposal_policy_shape') AND NOT tgisinternal AND tgenabled = 'O') = 4)`,
     };
     expect(applied[target], `say what ${target} makes true`).toBeTruthy();
     const there = async () => withClient(owner, async (c) => (await c.query<{ t: boolean }>(`SELECT ${applied[target]} AS t`)).rows[0]!.t);
@@ -148,13 +149,29 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
       used: (await c.query(`SELECT to_regclass('public."GoalApprovalUse"') IS NOT NULL AS t`)).rows[0].t as boolean,
     }));
     const goalsBefore = target === CHAT_GOAL_FLOOR ? await goalStore() : undefined;
-    /** The policy table's own triggers and P1's functions under them: what the off guard's rollback must leave exactly as it was. */
+    /**
+     * The policy table's and the card table's own triggers, and the functions under them that the guard does not
+     * replace: what its rollback must leave exactly as it was. (The one it does replace, P1's
+     * action_policy_matches_approval, is compared with P1's own text below.)
+     */
+    const OFF_GUARD_TRIGGERS = `('ActionPolicy_off_guard', 'ActionPolicy_card_actor', 'ActionPolicy_whole_card', 'Proposal_policy_shape')`;
     const policyStore = () => withClient(owner, async (c) => ({
-      triggers: (await c.query(`SELECT tgname, tgenabled, pg_get_triggerdef(oid) AS def FROM pg_trigger WHERE tgrelid = to_regclass('public."ActionPolicy"') AND NOT tgisinternal AND tgname <> 'ActionPolicy_off_guard' ORDER BY 1`)).rows,
-      functions: await functionsNamed(['action_policy_matches_approval', 'action_policy_update_guard', 'row_history', 'p3_args_digest', 'p3_canonical']),
+      triggers: (await c.query(`SELECT tgname, tgenabled, pg_get_triggerdef(oid) AS def FROM pg_trigger WHERE tgrelid IN (to_regclass('public."ActionPolicy"'), to_regclass('public."Proposal"')) AND NOT tgisinternal AND tgname NOT IN ${OFF_GUARD_TRIGGERS} ORDER BY 1`)).rows,
+      functions: await functionsNamed(['action_policy_update_guard', 'row_history', 'p3_args_digest', 'p3_canonical', 'proposal_transition', 'proposal_policy_floor', 'consume_approval']),
       grants: (await grants(owner)).filter((g) => g.includes('ActionPolicy')),
     }));
     const policiesBefore = target === POLICY_OFF_GUARD ? await policyStore() : undefined;
+    // P1's own guard on how a row is made, as P1's migration wrote it.
+    const p1 = readFileSync(join(MIGRATIONS, '20261001000000_p1_governance', 'migration.sql'), 'utf8');
+    const p1From = p1.indexOf('AS $$', p1.indexOf('CREATE FUNCTION action_policy_matches_approval()')) + 'AS $$'.length;
+    const p1Body = p1.slice(p1From, p1.indexOf('\n$$;', p1From) + 1);
+    if (target === POLICY_OFF_GUARD) {
+      // While the guard is applied that function is the guard's: P1's checks, and the card's own beside them.
+      const during = (await functionsNamed(['action_policy_matches_approval']))[0]!;
+      expect([during.provolatile, during.prosecdef, during.config, during.public]).toEqual(['v', false, 'search_path=public, pg_temp', false]);
+      expect(during.prosrc).not.toBe(p1Body);
+      for (const part of ['not in the signed proposal', 'its card is not one Will signed that still stands', 'its card has made this row already', 'no rule covers a policy change']) expect(during.prosrc).toContain(part);
+    }
     /**
      * After `target`'s down.sql (and every newer one's): the catalog is, line for line, that of a database built
      * without it (a restore compares the two). Leaves the database as it found it: everything up, then `target`
@@ -225,14 +242,22 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
       await leavesWhatAnInstallWithoutItHas();
     }
     if (target === POLICY_OFF_GUARD) {
-      // The guard is rules only: its trigger and the trigger's function are gone, and the policy table under it is to
-      // the letter what it was (P1's own triggers, their functions' bodies and grants, what each role may do to it).
+      // The guard is rules only: its four triggers and their three functions are gone, and the policy and card
+      // tables under it are to the letter what they were (their own triggers, those functions' bodies and grants,
+      // what each role may do to the policy table).
       expect(await withClient(owner, async (c) => (await c.query(
-        `SELECT (SELECT count(*)::int FROM pg_trigger WHERE NOT tgisinternal AND tgname = 'ActionPolicy_off_guard') AS triggers,
-                (SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'action_policy_off_guard') AS functions`)).rows[0])).toEqual({ triggers: 0, functions: 0 });
+        `SELECT (SELECT count(*)::int FROM pg_trigger WHERE NOT tgisinternal AND tgname IN ${OFF_GUARD_TRIGGERS}) AS triggers,
+                (SELECT count(*)::int FROM pg_constraint WHERE conname = 'ActionPolicy_whole_card') AS constraints,
+                (SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'
+                   AND p.proname IN ('action_policy_off_guard', 'action_policy_whole_card', 'proposal_policy_shape')) AS functions`)).rows[0])).toEqual({ triggers: 0, constraints: 0, functions: 0 });
       expect(await policyStore()).toEqual(policiesBefore);
-      expect(policiesBefore!.triggers.map((t) => t.tgname)).toEqual(['ActionPolicy_history', 'ActionPolicy_matches_approval', 'ActionPolicy_no_truncate', 'ActionPolicy_update_guard']);
+      expect(policiesBefore!.triggers.filter((t) => t.tgname.startsWith('ActionPolicy_')).map((t) => t.tgname)).toEqual(['ActionPolicy_history', 'ActionPolicy_matches_approval', 'ActionPolicy_no_truncate', 'ActionPolicy_update_guard']);
       expect(policiesBefore!.grants).toEqual(['flint_app INSERT public.ActionPolicy', 'flint_app SELECT public.ActionPolicy', 'flint_app UPDATE public.ActionPolicy.active']);
+      // P1's own guard is back to the letter (as P1's migration wrote it), with the settings and grants it had.
+      const restored = await functionsNamed(['action_policy_matches_approval']);
+      expect(restored.map((r) => [r.proname, r.provolatile, r.prosecdef, r.config, r.public])).toEqual([['action_policy_matches_approval', 'v', false, 'search_path=public, pg_temp', false]]);
+      expect(restored[0]!.prosrc).toBe(p1Body);
+      expect(p1Body).toContain(`RAISE EXCEPTION 'policy row %: inserted inactive', NEW."pattern";`);
       await leavesWhatAnInstallWithoutItHas();
     }
     const status = await prisma(['migrate', 'status'], owner);
@@ -240,7 +265,11 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
     await migrateUp(owner);
     expect(await there()).toBe(true);
     if (goalsBefore) expect(await goalStore()).toEqual(goalsBefore);
-    if (policiesBefore) expect(await policyStore()).toEqual(policiesBefore);
+    if (policiesBefore) {
+      expect(await policyStore()).toEqual(policiesBefore);
+      // Re-applied on top of P1's body: the guard's own is back.
+      expect((await functionsNamed(['action_policy_matches_approval']))[0]!.prosrc).toContain('its card has made this row already');
+    }
     const diff = await prisma(['migrate', 'diff', '--from-url', owner, '--to-schema-datamodel', 'prisma/schema.prisma', '--exit-code'], owner);
     expect(diff.code, diff.stdout + diff.stderr).toBe(0);
     // Re-applied on top of P3's body: P5's rule is back.
@@ -267,10 +296,11 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
     await rollsBack(CHAT_GOAL_FLOOR);
   });
 
-  // Who may switch a policy row off: rules only too. Its down.sql takes one trigger and its function away, leaves
-  // P1's own rules on the policy table to the letter, and gives back the catalog of a database built without it.
-  // Named here for the same reason: these checks keep running once something newer lands.
-  it('the policy off guard\'s down.sql, after any newer one\'s, leaves the policy table\'s own rules as they were and the catalog of a database built without it; a deploy re-applies it', async () => {
+  // Who may make a policy row and who may switch one off: rules only too. Its down.sql takes four triggers and their
+  // three functions away, puts P1's own guard on how a row is made back to the letter, leaves everything else on the
+  // policy and card tables as it was, and gives back the catalog of a database built without it. Named here for the
+  // same reason: these checks keep running once something newer lands.
+  it('the policy off guard\'s down.sql, after any newer one\'s, puts P1\'s own guard back to the letter, leaves the policy table\'s other rules as they were and the catalog of a database built without it; a deploy re-applies it', async () => {
     await rollsBack(POLICY_OFF_GUARD);
   });
 

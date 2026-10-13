@@ -165,6 +165,31 @@ describe.skipIf(NO_DB)('how a policy row is made (flint_test)', () => {
       await k.finish(other.pid);
     });
 
+    // Two rows of one card that differ in one thing only are two rows: each is counted, and made, as itself.
+    const TWINS: Array<[string, (f: string) => [RowSpec, RowSpec]]> = [
+      ['pattern', (f) => [{ pattern: `${f}.a`, tier: 'alone' }, { pattern: `${f}.b`, tier: 'alone' }]],
+      ['tier', (f) => [{ pattern: `${f}.a`, tier: 'alone' }, { pattern: `${f}.a`, tier: 'approval' }]],
+      ['cap', (f) => [{ pattern: `${f}.a`, tier: 'alone' }, { pattern: `${f}.a`, tier: 'alone', dailyCap: 2 }]],
+      ['scope', (f) => [{ pattern: `${f}.a`, tier: 'alone' }, { pattern: `${f}.a`, tier: 'alone', scope: { endpoints: ['a'] } }]],
+      ['end', (f) => [{ pattern: `${f}.a`, tier: 'alone', expiresAt: pk.inDays(30) }, { pattern: `${f}.a`, tier: 'alone', expiresAt: pk.inDays(31) }]],
+    ];
+    it.each(TWINS)('two rows of one card that differ only in their %s: neither lands without the other, both land together, and neither is made again', async (_what, make) => {
+      const k = kit();
+      const [a, b] = pk.listed(make(fam())) as [Listed, Listed];
+      const pc = await pk.rowsCard([a, b]);
+      const rid = id('pol');
+      expect(await failure(makeAlone(pc.aid, a, rid))).toEqual(['42501', NOT_WHOLE(rid), null]);
+      expect(await failure(makeAlone(pc.aid, b, rid))).toEqual(['42501', NOT_WHOLE(rid), null]);
+      // The same one twice is not the two.
+      expect((await pgError(makeAll(pc.aid, [a, a]))).code).toBe('42501');
+      expect(await rowsBy(pc.aid)).toEqual([]);
+      await makeAll(pc.aid, [a, b]);
+      expect((await rowsBy(pc.aid)).length).toBe(2);
+      expect(await failure(makeAlone(pc.aid, a, rid))).toEqual(['42501', MADE_ALREADY(rid), null]);
+      expect(await failure(makeAlone(pc.aid, b, rid))).toEqual(['42501', MADE_ALREADY(rid), null]);
+      await k.finish(pc.pid);
+    });
+
     it('two sessions writing the same row at once: one lands, and the other is refused once it has', async () => {
       const k = kit();
       const [r] = pk.listed([{ pattern: `${fam()}.sync`, tier: 'alone' }]);
@@ -250,6 +275,23 @@ describe.skipIf(NO_DB)('how a policy row is made (flint_test)', () => {
       );
       expect((await rowsBy(two.aid)).length).toBe(2);
       await k.finish(two.pid);
+    });
+
+    it('a row alike made under another card does not stand in for this card’s own', async () => {
+      const k = kit();
+      const f = fam();
+      const [wide, brake] = pk.listed([{ pattern: `${f}.*`, tier: 'alone' }, { pattern: `${f}.propose`, tier: 'approval' }]) as [Listed, Listed];
+      // An earlier table made the very same brake (the same words, limit and end), and it is still on.
+      const earlier = await pk.rowsCard([brake]);
+      await makeAlone(earlier.aid, brake);
+      await k.finish(earlier.pid);
+      // A later table lists the wide row and that brake again. Its wide row alone is still a part of it.
+      const later = await pk.rowsCard([wide, brake]);
+      const rid = id('pol');
+      expect(await failure(makeAlone(later.aid, wide, rid))).toEqual(['42501', NOT_WHOLE(rid), null]);
+      await makeAll(later.aid, [wide, brake]);
+      expect((await rowsBy(later.aid)).length).toBe(2);
+      await k.finish(later.pid);
     });
 
     it('a card whose rows cannot be read when the transaction commits makes none: its args cleared in the same transaction', async () => {
@@ -359,14 +401,28 @@ describe.skipIf(NO_DB)('how a policy row is made (flint_test)', () => {
       for (const other of [{ ...rows[0]!, dailyCap: 5 }, { ...rows[0]!, pattern: rows[0]!.pattern.replace(/\.sync$/, '.*') }, { ...rows[0]!, tier: 'forbidden' as const }, { ...rows[0]!, expiresAt: pk.inDays(31) }, { ...rows[0]!, scope: { endpoints: ['a'] } }]) {
         expect(await failure(makeAlone(listed.aid, other, rid))).toEqual(['42501', NOT_LISTED(rid), null]);
       }
-      // Forged past P1's rule, as the owner: his yes to another action, and to other args.
-      for (const approve of [(pid: string, digest: string) => k.approval(pid, 'world.source.enable', digest), (pid: string) => k.approval(pid, 'policy.change', digestOf({ rows: [] }))]) {
+      // Forged past P1's rule on cards, as the owner (the state a changed backup could bring): a card being carried out
+      // under his signed no, under a signature on something that is not a card, under his yes to another card, to
+      // another action, and to other args.
+      const forgeries: Array<[string, (pid: string, digest: string) => Promise<string>, (aid: string) => string]> = [
+        ['his signed no', (pid, digest) => k.approval(pid, 'policy.change', digest, { decision: 'reject' }), (aid) => `policy row: approval ${aid} is not an approved proposal`],
+        ['a signature on something that is not a card', (pid, digest) => k.approval(pid, 'policy.change', digest, { subjectType: 'policy' }), (aid) => `policy row: approval ${aid} is not an approved proposal`],
+        ['his yes to another card', async (_pid, digest) => k.approval((await k.file('policy.change', { rows: pk.listed([{ pattern: `${fam()}.x`, tier: 'alone' }]) }, { kind: 'policy' })).pid, 'policy.change', digest), () => NOT_EXECUTING(rid)],
+        ['his yes to another action', (pid, digest) => k.approval(pid, 'world.source.enable', digest), () => NOT_STANDING(rid)],
+        ['his yes to other args', (pid) => k.approval(pid, 'policy.change', digestOf({ rows: [] })), () => NOT_STANDING(rid)],
+      ];
+      for (const [what, approve, says] of forgeries) {
         const filed = await k.file('policy.change', { rows }, { kind: 'policy' });
         const aid = await approve(filed.pid, filed.digest);
         await k.without('Proposal_transition', (q) => q(`UPDATE "Proposal" SET status = 'executing', "approvalId" = $2 WHERE id = $1`, [filed.pid, aid]));
-        expect(await failure(makeAlone(aid, rows[0]!, rid))).toEqual(['42501', NOT_STANDING(rid), null]);
+        expect(await failure(makeAlone(aid, rows[0]!, rid)), what).toEqual(['42501', says(aid), null]);
         await k.finish(filed.pid);
       }
+      // A card from before the database held the shape, whose `rows` is not a list: refused as a card, never a fault.
+      const odd = await k.without('Proposal_policy_shape', (q) => k.file('policy.change', { rows: rows[0]! }, { kind: 'policy' }, q));
+      const oddSigned = await k.sign(odd, 'policy.change');
+      expect(await failure(makeAlone(oddSigned.aid, rows[0]!, rid))).toEqual(['42501', NOT_EXECUTING(rid), null]);
+      await k.finish(oddSigned.pid);
       for (const c of [kind, action, listed]) await k.finish(c.pid);
       expect(await pk.exists(rid)).toBe(false);
     });
@@ -385,6 +441,22 @@ describe.skipIf(NO_DB)('how a policy row is made (flint_test)', () => {
   });
 
   describe('what a row is', () => {
+    it('for at most 180 days, and born on (P1’s own rules, as before)', async () => {
+      const rid = id('pol');
+      const [long] = pk.listed([{ pattern: `${fam()}.sync`, tier: 'alone', expiresAt: pk.inDays(182) }]);
+      const card = await pk.rowsCard([long!]);
+      expect(await failure(makeAlone(card.aid, long!, rid))).toEqual(['P0001', `policy row ${rid}: expires more than 180 days out`, null]);
+      const [ok] = pk.listed([{ pattern: `${fam()}.sync`, tier: 'alone', expiresAt: pk.inDays(180) }]);
+      const fine = await pk.rowsCard([ok!]);
+      expect(await failure(app(
+        `INSERT INTO "ActionPolicy" (id, pattern, tier, reason, "approvalId", "expiresAt", active) VALUES ($1, $2, 'alone', 'Synthetic rule', $3, $4, false)`, [rid, ok!.pattern, fine.aid, ok!.expiresAt],
+      ))).toEqual(['P0001', `policy row ${rid}: inserted inactive`, null]);
+      await makeAlone(fine.aid, ok!, rid);
+      expect(await pk.isOn(rid)).toBe(true);
+      await kit().finish(card.pid);
+      await kit().finish(fine.pid);
+    });
+
     it('its id is shaped as an id, so a card can always name it to switch it off', async () => {
       const rows = pk.listed([{ pattern: `${fam()}.sync`, tier: 'approval' }]);
       const card = await pk.rowsCard(rows);

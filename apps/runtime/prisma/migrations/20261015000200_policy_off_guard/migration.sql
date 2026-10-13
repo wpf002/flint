@@ -236,11 +236,9 @@ BEGIN
   IF current_setting('transaction_isolation') <> 'read committed' THEN
     RAISE EXCEPTION 'policy row %: a row is switched off at READ COMMITTED', rid USING ERRCODE = 'insufficient_privilege';
   END IF;
-  IF TG_WHEN = 'BEFORE' AND free THEN
-    RETURN NEW;
-  END IF;
 
-  -- b. The card Will signed that names it: the approval's id, or none.
+  -- b. The card Will signed that names it: the approval's id, or none. (Looked for whatever the row is: a card may
+  -- name a row that needs none, and its history then says so.)
   FOR c IN
     SELECT a."id" AS approval, p."args", p."argsDigest", p."expiresAt" AS card_until, p."origin", p."tainted", p."consequential",
            a."expiresAt" AS signed_until, a."payload", a."credentialId"

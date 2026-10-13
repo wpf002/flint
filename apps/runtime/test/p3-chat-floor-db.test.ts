@@ -121,13 +121,16 @@ describe.skipIf(NO_DB)('a goal from chat rests on a signed card, or on a rule Wi
     const listed = rows.map((r) => ({ ...r, expiresAt }));
     const pc = await card('policy.change', { rows: listed });
     const ids: string[] = [];
-    for (const r of listed) {
-      const rid = id('pol');
-      ids.push(rid);
-      await app(`INSERT INTO "ActionPolicy" (id, pattern, tier, "dailyCap", scope, reason, "approvalId", "expiresAt") VALUES ($1, $2, $3, $4, $5::jsonb, 'Synthetic rule', $6, $7)`, [
-        rid, r.pattern, r.tier, r.dailyCap ?? null, r.scope ? JSON.stringify(r.scope) : null, pc.aid, expiresAt,
-      ]);
-    }
+    // In one transaction: a card's rows are made together or not at all (policy_off_guard).
+    await inTx(async (q) => {
+      for (const r of listed) {
+        const rid = id('pol');
+        ids.push(rid);
+        await q(`INSERT INTO "ActionPolicy" (id, pattern, tier, "dailyCap", scope, reason, "approvalId", "expiresAt") VALUES ($1, $2, $3, $4, $5::jsonb, 'Synthetic rule', $6, $7)`, [
+          rid, r.pattern, r.tier, r.dailyCap ?? null, r.scope ? JSON.stringify(r.scope) : null, pc.aid, expiresAt,
+        ]);
+      }
+    });
     await finish(pc.pid);
     return ids;
   }
@@ -737,7 +740,8 @@ describe.skipIf(NO_DB)('a goal from chat rests on a signed card, or on a rule Wi
           await ended.query('SELECT count(*) FROM "Proposal"');
           // Elsewhere, since: the card fails, and the rule is switched off.
           await app(`UPDATE "Proposal" SET status = 'failed', error = 'Synthetic end', "executedAt" = now() WHERE id = $1`, [mine.pid]);
-          await app(`UPDATE "ActionPolicy" SET active = false WHERE id = $1`, [rid]);
+          // (As the owner: a rule with a cap goes off only on Will's card, and who switches it off is not this test's subject.)
+          await owner(`UPDATE "ActionPolicy" SET active = false WHERE id = $1`, [rid]);
           await entry(on(off), a);
           expect(await failure(flintGoal(on(off), a)), `${level}: rule switched off`).toEqual(['42501', LEVEL(gidOf(a)), null]);
           expect(await failure(flintGoal(on(ended), own)), `${level}: card ended`).toEqual(['42501', LEVEL(gidOf(own)), null]);

@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import pg from 'pg';
+import { digestOf } from '@flint/policy';
 import { NO_DB, URLS, freshDb, withClient, pgConfig, pgError, id, HEX } from './db';
 import { enrollTestKey } from './sign';
 import { createDb } from '../src/db';
@@ -199,8 +200,10 @@ describe.skipIf(NO_DB)('governance in the database', () => {
   describe('action policies', () => {
     /** A signed policy.change proposal listing rows, approved and being executed. */
     async function policyProposal(rows: unknown[]): Promise<{ proposalId: string; approvalId: string }> {
-      const p = await proposal({ kind: 'policy', action: 'policy.change', args: { rows } });
-      const a = await approval('proposal', p, { action: 'policy.change' });
+      // Under its args' own digest: the database computes it again before it makes a row (policy_off_guard).
+      const digest = digestOf({ rows });
+      const p = await proposal({ kind: 'policy', action: 'policy.change', args: { rows }, digest });
+      const a = await approval('proposal', p, { action: 'policy.change', digest });
       await app(`UPDATE "Proposal" SET status = 'approved', "approvalId" = $2 WHERE id = $1`, [p, a]);
       await app(`UPDATE "Proposal" SET status = 'executing' WHERE id = $1`, [p]);
       return { proposalId: p, approvalId: a };

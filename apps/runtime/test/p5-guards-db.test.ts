@@ -1201,7 +1201,7 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
         const plain = await k.card('world.sync.git', { source: 'git', n: 1 }, { kind: 'tool_call', stage: 'approved' });
         expect((await app(`SELECT "reviewRequired", status FROM "Proposal" WHERE id = $1`, [plain.pid])).rows[0]).toEqual({ reviewRequired: false, status: 'approved' });
         // A policy card needs one like any other, except the one that turns the requirement.
-        const policy = await k.file('policy.change', { rows: [] }, { kind: 'policy' });
+        const policy = await k.file('policy.change', { rows: [{ pattern: 'world.sync.git', tier: 'approval', expiresAt: new Date(Date.now() + 30 * 86_400_000).toISOString() }] }, { kind: 'policy' });
         await refused(k.approve(app, policy.pid, await k.approval(policy.pid, 'policy.change', policy.digest)), '42501', `proposal ${policy.pid}: it needs a review before it is approved`);
         expect((await app(`SELECT count(*)::int AS n FROM review_gate_violations`)).rows[0].n).toBe(0);
       } finally {
@@ -1209,7 +1209,7 @@ describe.skipIf(NO_DB)('P5 guards in the database', () => {
         await k.switchOff(app, reviewer.id);
       }
       // Not required any more: the unreviewed policy card is approved as before.
-      const policy = await k.card('policy.change', { rows: [], n: 2 }, { kind: 'policy', stage: 'approved' });
+      const policy = await k.card('policy.change', { rows: [{ pattern: 'world.sync.git', tier: 'approval', dailyCap: 2, expiresAt: new Date(Date.now() + 30 * 86_400_000).toISOString() }] }, { kind: 'policy', stage: 'approved' });
       expect((await app(`SELECT status FROM "Proposal" WHERE id = $1`, [policy.pid])).rows[0].status).toBe('approved');
     });
   });

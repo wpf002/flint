@@ -219,17 +219,19 @@ describe.skipIf(NO_DB)('P5 assets, tasks and reviews on flint_test', () => {
 
       // The promotion table: a policy row Will signed.
       const expiresAt = new Date(Date.now() + 30 * 86_400_000).toISOString();
-      const rows = [{ pattern: 'task.check_bar', tier: 'alone', expiresAt }, { pattern: 'task.*', tier: 'approval', expiresAt }];
-      const pc = await k.card('policy.change', { rows }, { kind: 'policy' });
+      // (Each on a card of its own: a card's rows are made together or not at all.)
+      const pc = await k.card('policy.change', { rows: [{ pattern: 'task.check_bar', tier: 'alone', expiresAt }] }, { kind: 'policy' });
       const alone = id('pol');
       await app(`INSERT INTO "ActionPolicy" (id, pattern, tier, reason, "approvalId", "expiresAt") VALUES ($1, 'task.check_bar', 'alone', 'Synthetic promotion', $2, $3)`, [alone, pc.aid, expiresAt]);
+      await k.finish(pc.pid);
       await k.setStatus(app, before.id, 'accepted', `, "acceptedAuditId" = $3`, [proofBefore]);
       expect((await row('Task', before.id)).status).toBe('accepted');
 
       // A wider row at APPROVAL holds it back: the card is needed again.
+      const hold = await k.card('policy.change', { rows: [{ pattern: 'task.*', tier: 'approval', expiresAt }] }, { kind: 'policy' });
       const held = id('pol');
-      await app(`INSERT INTO "ActionPolicy" (id, pattern, tier, reason, "approvalId", "expiresAt") VALUES ($1, 'task.*', 'approval', 'Synthetic hold', $2, $3)`, [held, pc.aid, expiresAt]);
-      await k.finish(pc.pid);
+      await app(`INSERT INTO "ActionPolicy" (id, pattern, tier, reason, "approvalId", "expiresAt") VALUES ($1, 'task.*', 'approval', 'Synthetic hold', $2, $3)`, [held, hold.aid, expiresAt]);
+      await k.finish(hold.pid);
       const after = await k.taskAt('checked', a);
       const proofAfter = await k.proof(after.id);
       expect(await k.code(k.setStatus(app, after.id, 'accepted', `, "acceptedAuditId" = $3`, [proofAfter]))).toBe('42501');
