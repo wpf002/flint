@@ -1085,9 +1085,11 @@ Two steps. Claude does the first with your OK; only you can do the second.
    already made. Click **Approve with Touch ID**. Nothing is forecast until you
    do. **Not Now** leaves the card waiting in Approvals for 7 days.
 
-Asking again replaces a card that is still waiting if the two name any of the
-same numbers, so a card you left behind can't be approved later in place of
-the newer one. A waiting card for other numbers altogether is left waiting.
+Asking again replaces a card that is still waiting, so a card you left behind
+can't be approved later by mistake. One exception: asking for a second opinion
+on a number that's already on (see "The local model's second opinion")
+replaces only a waiting card that names that number. It doesn't throw away the
+card you haven't approved yet for other numbers.
 
 The first forecasts appear the night after a number has 24 days of history
 (19 weeks for commits). Spend, deploys, downtime, commits and calendar hours
@@ -1223,8 +1225,15 @@ off until you turn it on, number by number.
 on **Second Opinion**, then **Continue**. The card you approve says so, under
 SECOND OPINION. For a number that's already on: open it in Predictions and
 click **Turn On Second Opinion**. That shows a card for that one number, which
-says "Flint already forecasts this number. Only its second opinion changes."
-Either way, nothing changes until you approve the card with Touch ID.
+says "Flint already forecasts this number, so only its second opinion
+changes." Either way, nothing changes until you approve the card with Touch
+ID.
+
+That card does only what it says. If the number is turned off before you
+approve it, it's refused: "This number's forecasts were turned off, so this
+card no longer applies. File it again." It never turns forecasts back on. The
+runtime decides which kind of card it is when it files it, from whether every
+number on it is already on, and the console words the card from that answer.
 
 The switch is offered only where a local model is set (`FLINT_TRIAGE_MODEL`,
 the model triage and goal reviews use). Without one, the open number says "No
@@ -1277,6 +1286,13 @@ the local model's second opinion." A model that isn't set, isn't running or
 isn't on this Mac means no second opinion. It never becomes a call to an
 outside model. The forecast is already written by then, and isn't affected.
 
+If the model answers and its answer can't be saved, that night's second
+opinion is missed, and Forecasts says so for an hour: "The local model's
+second opinion couldn't be saved, so a forecast went without it." A missed
+second opinion is never counted as a failed job under **Settings > Health >
+Job Queue**: nothing runs it again, and one missed answer isn't a failing
+queue.
+
 **What stays on this Mac.** The model reads a number's values, spend and
 calendar hours among them, because it runs here. Its question goes to Ollama
 on this Mac and nowhere else, and isn't kept: not in a log, a job or the audit
@@ -1326,6 +1342,8 @@ The server decides the same question for chat with the same rules (they're
 shared code, in `packages/policy/src/models.ts`). It keeps a watch on the
 list and trusts it for a few minutes, because it reads it on every chat turn.
 The runtime's requests are few and carry your own words, so it asks each time.
+If the Mac's clock is set back, neither trusts what it heard before: an
+answer's age can't be told then, so each asks again.
 
 To fix a model that isn't on this Mac: set `FLINT_TRIAGE_MODEL` in
 `~/.flint/runtime.override.env` to a model `ollama list` shows without a cloud
