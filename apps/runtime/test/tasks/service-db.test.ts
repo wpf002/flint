@@ -19,13 +19,14 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { AssetEnableArgs, AssetsPage, TASK_FORM_ITEMS_MAX, TASK_SAYS, TASK_STATUS_SAYS, TaskAnswer, TaskForm, TasksPage, noteProblems, titleCase } from '@flint/policy';
 import { HEX, NO_DB, freshDb, id, type TestUrls } from '../db';
 import { createDb, type Db } from '../../src/db';
-import { Refused } from '../../src/governance/proposals';
+import { Forbidden, Refused } from '../../src/governance/proposals';
 import { ASSETS, CI_WATCHER, assetDef, assetFor, enableArgsOf, sameAsset } from '../../src/assets/registry';
 import { fileEnable, known, syncAssets, turnOff } from '../../src/assets/service';
 import { WAITING, assetsPage } from '../../src/assets/view';
 import { checkTaskJob } from '../../src/tasks/check';
 import { runTaskJob } from '../../src/tasks/run';
-import { DUE_MAX_MS, TASK_TITLES, cancelTask, createTask, overrideTask, runAgain } from '../../src/tasks/service';
+import { DUE_MAX_MS, TASK_TITLES, againProblem, cancelTask, createTask, overrideTask, runAgain } from '../../src/tasks/service';
+import { FORM_ITEM_KIND, offerProblem } from '../../src/tasks/offer';
 import { taskForm, taskView, tasksPage } from '../../src/tasks/view';
 import { DAY, FakeBus, SHA, draft, taskFixture, type TaskFixture } from './fixture';
 
@@ -286,6 +287,72 @@ describe.skipIf(NO_DB)('the Tasks panel’s writes and views on flint_test', () 
     expect(await db.task.count()).toBe(tasks);
   });
 
+  it('Run Again is held to what New Task would offer today, and to tasks Will asked for: otherwise the view does not offer it and the route says why', async () => {
+    const view = async (taskId: string) => TaskAnswer.parse({ task: await taskView(db, taskId, 'UTC') }).task;
+    const ended = async (item: string, over: Record<string, unknown> = {}) => {
+      const t = await fx.newTask(item, over);
+      await cancelTask(db, t.id);
+      return t.id;
+    };
+    const no = async (taskId: string, say: string) => {
+      const before = await counts();
+      expect((await view(taskId)).can.again, say).toBe(false);
+      expect(await refusal(runAgain(db, taskId, draft())), say).toMatchObject({ status: 409, message: say });
+      expect(await counts(), say).toEqual(before);
+    };
+    // One Flint asked for is not Will's to run again from here. (Its origin is the database's to keep: only its owner, with the guard set aside, can say otherwise.)
+    const flints = await ended(await fx.ciRun('wpf002/again-flint'));
+    expect((await view(flints)).can.again).toBe(true);
+    await fx.owner(`DO $$ BEGIN
+      ALTER TABLE "Task" DISABLE TRIGGER "Task_guard";
+      UPDATE "Task" SET origin = 'flint' WHERE id = '${flints.replace(/[^A-Za-z0-9]/g, '')}';
+      ALTER TABLE "Task" ENABLE TRIGGER "Task_guard";
+    END $$`);
+    expect((await view(flints)).askedBy).toBe('flint');
+    await no(flints, TASK_SAYS.flintAsked);
+
+    // Its item is no longer one the form would list: archived, or no longer the kind this task is about.
+    const own = await fx.entity('ci_run', { workflow: 'ci', status: 'completed' }, { name: 'Synthetic run to archive' });
+    const archived = await ended(own);
+    expect((await view(archived)).can.again).toBe(true);
+    await db.entity.update({ where: { id: own }, data: { status: 'archived' } });
+    expect((await taskForm(db, 'UTC')).templates[0]!.items.some((i) => i.entityId === own)).toBe(false);
+    await no(archived, TASK_SAYS.itemEnded);
+    await db.entity.update({ where: { id: own }, data: { status: 'active' } });
+    expect((await view(archived)).can.again).toBe(true);
+
+    // Its goal is no longer one the form would list.
+    const goal = `go${draft()}`;
+    const g = await fx.file('goal.activate', {
+      goalId: goal, title: 'Synthetic goal to pause', description: '', horizonAt: new Date(Date.now() + 30 * DAY).toISOString(), reviewCadence: 'P1W',
+      successCriteria: [{ id: 'c1', text: 'Synthetic check', check: { kind: 'manual' } }], links: [], plan: null,
+    }, { kind: 'goal', argsProvenance: { args: { source: 'will', tainted: false } }, sensitivity: 'personal' });
+    await fx.signRun(g.id);
+    const withGoal = await ended(await fx.ciRun('wpf002/again-goal'), { goalId: goal });
+    expect((await view(withGoal)).can.again).toBe(true);
+    await db.goal.updateMany({ where: { id: goal }, data: { status: 'paused' } });
+    expect((await taskForm(db, 'UTC')).goals.some((x) => x.id === goal)).toBe(false);
+    await no(withGoal, TASK_SAYS.goalEnded);
+
+    // Its asset is off, or nothing is behind it to run it: the form offers no such task, and neither does the button.
+    const plain = await ended(await fx.ciRun('wpf002/again-plain'));
+    const row = await fx.task(plain);
+    expect(await againProblem(db, row)).toBeUndefined();
+    expect(await againProblem(db, row, { adapters: {} })).toBe(TASK_SAYS.cantRun);
+    expect(await againProblem(db, row, { registry: [] })).toBe(TASK_SAYS.cantRun);
+    expect(await againProblem(db, row, { registry: [{ ...CI_WATCHER, name: 'Another Name' }] })).toBe(TASK_SAYS.assetOff);
+    await turnOff(db, CI_WATCHER.id);
+    await no(plain, TASK_SAYS.assetOff);
+    await fx.watcherOn();
+    expect((await view(plain)).can.again).toBe(true);
+    // The rules are the form's own: one table says what each kind of task is about, and both read it.
+    expect(FORM_ITEM_KIND).toEqual({ watch_ci: 'ci_run' });
+    const spec = { template: 'watch_ci' as const, params: { item: 'no-such-item', sha: null } };
+    expect(await offerProblem(db, spec, null)).toBe(TASK_SAYS.itemGone);
+    expect(await offerProblem(db, { template: 'draft_note', params: { about: 'A note', items: [], titles: false } }, null)).toBe(TASK_SAYS.cantRun);
+    expect(await offerProblem(db, { ...spec, params: { item: await fx.entity('pull_request', { number: 4, state: 'open' }), sha: null } }, null)).toBe(TASK_SAYS.itemEnded);
+  });
+
   it('the New Task form: only what an asset that is on can run, its items by label alone (never a title, a person or a forgotten one), and active goals', async () => {
     const form = async (deps?: Parameters<typeof taskForm>[2]) => TaskForm.parse(await taskForm(db, 'UTC', deps));
     const run = await fx.ciRun('wpf002/form');
@@ -331,5 +398,30 @@ describe.skipIf(NO_DB)('the Tasks panel’s writes and views on flint_test', () 
     expect(await form()).toMatchObject({ templates: [] });
     await fx.watcherOn();
     expect((await form()).templates).toHaveLength(1);
+  });
+
+  it('a card a rule of Will’s forbids is not filed, and neither is its task: no row is left behind, and the same form is refused the same way again', async () => {
+    const item = await fx.ciRun('wpf002/forbidden');
+    const done = await fx.newTask(await fx.ciRun('wpf002/forbidden-again'));
+    await cancelTask(db, done.id);
+    await fx.policy('task.dispatch.ci_runner', 'forbidden');
+    const before = { ...(await counts()), made: await db.auditEntry.count({ where: { action: 'task.create' } }), withdrawn: await db.auditEntry.count({ where: { action: 'task.withdraw' } }) };
+    const f = form(item);
+    for (let press = 0; press < 2; press++) {
+      const err = await refusal(createTask(db, f));
+      // The engine's own refusal, typed: which rule forbade it travels with it, and its words are for the log.
+      expect(err).toBeInstanceOf(Forbidden);
+      expect(err).toMatchObject({ status: 409, rule: 'policy', message: 'forbidden: ActionPolicy task.dispatch.ci_runner' });
+      // Nothing was written: no task (not even a cancelled one), no card, no entry saying a task was made or withdrawn.
+      expect(await db.task.findUnique({ where: { id: `tk${f.draftKey}` } }), `press ${press}`).toBeNull();
+      expect({ ...(await counts()), made: await db.auditEntry.count({ where: { action: 'task.create' } }), withdrawn: await db.auditEntry.count({ where: { action: 'task.withdraw' } }) }).toEqual(before);
+    }
+    // The refusal itself is on record, by ids.
+    const denied = await db.auditEntry.findFirstOrThrow({ where: { action: 'task.dispatch.ci_runner', outcome: 'denied' }, orderBy: { seq: 'desc' } });
+    expect(denied).toMatchObject({ kind: 'decision', tier: 'forbidden', decision: 'deny' });
+    // Run Again goes the same way, with the same key twice.
+    const key = draft();
+    for (let press = 0; press < 2; press++) expect(await refusal(runAgain(db, done.id, key))).toBeInstanceOf(Forbidden);
+    expect(await db.task.findUnique({ where: { id: `tk${key}` } })).toBeNull();
   });
 });

@@ -30,6 +30,7 @@ import {
   type TaskTemplateId,
 } from '@flint/policy';
 import type { Db } from '../db.js';
+import { sqlState } from '../dbcodes.js';
 import { appendAudit } from '../governance/audit.js';
 import { Refused, createProposal, rejectProposal } from '../governance/proposals.js';
 import { ASSETS, assetFor, sameAsset, type AssetDef } from '../assets/registry.js';
@@ -38,6 +39,7 @@ import type { AdapterSet } from './adapters/types.js';
 import { WITHDRAW_ACTION, releaseTaskKeys, type Reserve } from './card.js';
 import { SAY, taskStatusWords } from './errors.js';
 import { ADAPTERS } from './run.js';
+import { offerProblem } from './offer.js';
 
 /** How long a task card waits for Will. */
 const CARD_TTL_MINUTES = 7 * 24 * 60;
@@ -114,10 +116,11 @@ export async function createTask(db: Db, body: NewTaskBody, deps: TaskServiceDep
     sensitivity: mostSensitive([...items.map((e) => e.sensitivity as 'ops' | 'personal' | 'financial'), ...(spec.template === 'draft_note' ? (['personal'] as const) : [])]),
     tainted: specTainted(spec), estCostMicros,
   });
-  const existing = await db.task.findUnique({ where: { id }, select: { status: true } });
-  if (existing && existing.status !== 'proposed') throw new Refused(409, taskStatusWords(existing.status));
-  if (!existing) {
-    await db.$transaction(async (tx) => {
+  // The task and its card are written together or not at all: a card that cannot be filed (a rule forbids it, the
+  // database turns it away) leaves no task behind. The card is checked and filed inside the task's own transaction,
+  // where it reads the row just written.
+  const make = (existing: boolean) => db.$transaction(async (tx) => {
+    if (!existing) {
       await tx.task.create({
         data: {
           id, assetId: asset.id, goalId: args.goalId, stepKey: null, title: args.title, spec: args.spec as Prisma.InputJsonObject, acceptance: args.acceptance as unknown as Prisma.InputJsonArray,
@@ -125,19 +128,25 @@ export async function createTask(db: Db, body: NewTaskBody, deps: TaskServiceDep
         },
       });
       await audit(tx, 'task.create', id, { assetId: asset.id, template: spec.template }, now);
-    }, RC);
-  }
-  try {
+    }
     const filed = await createProposal(db, {
       kind: asset.spends ? 'spend' : 'task', origin: 'console', action: asset.dispatchAction, args,
       // checkTaskCard sets where the args came from, the fixed reason, the sensitivity and (for a paid task) its estimate.
       argsProvenance: {}, tainted: args.tainted, sensitivity: args.sensitivity, destructive: false, consequential: asset.spends, ttlMinutes: CARD_TTL_MINUTES,
-    }, CONSOLE_ACTOR, now);
+    }, CONSOLE_ACTOR, now, undefined, tx);
     return { id, proposalId: filed.id, deduped: filed.deduped };
+  }, RC);
+  const standing = async (): Promise<boolean> => {
+    const existing = await db.task.findUnique({ where: { id }, select: { status: true } });
+    if (existing && existing.status !== 'proposed') throw new Refused(409, taskStatusWords(existing.status));
+    return !!existing;
+  };
+  try {
+    return await make(await standing());
   } catch (err) {
-    // No card, so no way out for it: the task made a moment ago is cancelled (nothing went out).
-    if (!existing) await cancelProposed(db, id, 'card_refused', now).catch(() => {});
-    throw err;
+    // The same form sent twice at once: the other one wrote the task first. This one files (or finds) its card.
+    if (err instanceof Refused || sqlState(err) !== '23505') throw err;
+    return make(await standing());
   }
 }
 
@@ -149,13 +158,28 @@ export async function createTask(db: Db, body: NewTaskBody, deps: TaskServiceDep
  * him to sign. `draftKey` is the button's: pressed twice, it is one task.
  */
 export async function runAgain(db: Db, id: string, draftKey: string, deps: TaskServiceDeps = {}, now = new Date()): Promise<{ id: string; proposalId: string; deduped: boolean }> {
-  const t = await db.task.findUnique({ where: { id }, select: { status: true, spec: true, goalId: true } });
+  const t = await db.task.findUnique({ where: { id }, select: { status: true, spec: true, goalId: true, origin: true } });
   if (!t) throw new Refused(404, SAY.noTask);
-  if (!(TASK_ENDED as readonly string[]).includes(t.status)) throw new Refused(409, taskStatusWords(t.status));
+  const why = await againProblem(db, t, deps);
+  if (why) throw new Refused(409, why);
+  const spec = TaskSpec.parse(t.spec);
+  return createTask(db, { draftKey, template: spec.template, params: spec.params, goalId: t.goalId, dueAt: null, ownCheck: null }, deps, now);
+}
+
+/**
+ * Why a task cannot be run again now, as a sentence, or undefined when it can
+ * (the open task's view offers the button by the same answer). It has ended;
+ * Will asked for it (one Flint asked for is Flint's to ask for again); its
+ * details are still kept; and the New Task form would offer it today: its kind
+ * of task, its items and its goal, each as they stand now.
+ */
+export async function againProblem(db: Db, t: { status: string; spec: unknown; goalId: string | null; origin: string }, deps: Pick<TaskServiceDeps, 'registry' | 'adapters'> = {}): Promise<string | undefined> {
+  if (!(TASK_ENDED as readonly string[]).includes(t.status)) return taskStatusWords(t.status);
+  if (t.origin !== 'will') return SAY.flintAsked;
   // A task's details are cleared some time after it ends: there is then nothing to run again.
   const spec = TaskSpec.safeParse(t.spec);
-  if (!spec.success) throw new Refused(409, SAY.detailsGone);
-  return createTask(db, { draftKey, template: spec.data.template, params: spec.data.params, goalId: t.goalId, dueAt: null, ownCheck: null }, deps, now);
+  if (!spec.success) return SAY.detailsGone;
+  return offerProblem(db, spec.data, t.goalId, deps);
 }
 
 /**

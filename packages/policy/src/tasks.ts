@@ -466,6 +466,11 @@ export const TASK_SAYS = {
   scored: 'Its result is already scored.',
   outputGone: 'Its result is no longer kept, so it can’t be accepted.',
   detailsGone: 'Its details are no longer kept, so it can’t be run again.',
+  flintAsked: 'Flint asked for this task, so it can’t be run again from here.',
+  itemEnded: 'One of its items is no longer active.',
+  goalEnded: 'Its goal is no longer active.',
+  ruleForbids: 'A rule you set doesn’t allow this.',
+  notAllowed: 'Flint may not do this.',
   notChecked: 'Flint hasn’t checked its result yet.',
   notOverride: 'That is already how it ended.',
   decided: 'You already decided this result.',
@@ -608,6 +613,8 @@ export const TaskRow = z
 export type TaskRow = z.infer<typeof TaskRow>;
 export const TasksPage = z.object({ tasks: z.array(TaskRow).max(200), more: z.boolean() }).strict();
 
+/** The most a task's cost can read, in millionths of a dollar: what its row can hold ($999,999.9999). */
+export const TASK_COST_MAX_MICROS = 999_999_999_900;
 /** One task, open. `result` is built by template code from its output, never by a second model call. */
 export const TaskView = TaskRow.extend({
   /** Its result in a sentence or two, always shown as outside text; null until there is one, and once it is cleared. */
@@ -619,8 +626,8 @@ export const TaskView = TaskRow.extend({
   dueAt: IsoMs.nullable(),
   /** Its forecast, from its Prediction row: never a model's words. */
   chance: z.object({ likelihood: z.enum(LIKELIHOODS), percent: z.number().int().min(0).max(100) }).strict().nullable(),
-  /** What it cost, in millionths of a dollar; null until it ends, and for a task that costs nothing. */
-  cost: z.object({ micros: z.number().int().min(0), estimate: z.boolean() }).strict().nullable(),
+  /** What it cost, in millionths of a dollar (at most what a task's row can hold); null until it ends, and for a task that costs nothing. */
+  cost: z.object({ micros: z.number().int().min(0).max(TASK_COST_MAX_MICROS), estimate: z.boolean() }).strict().nullable(),
   /** Its card that is waiting for Will, if one is. */
   card: ProposalRef.nullable(),
   /**
@@ -672,7 +679,8 @@ export const TaskForm = z
           })
           .strict(),
       )
-      .max(TASK_TEMPLATE_IDS.length),
+      .max(TASK_TEMPLATE_IDS.length)
+      .refine((ts) => new Set(ts.map((t) => t.template)).size === ts.length, 'a kind of task is offered once'),
     goals: z.array(z.object({ id: GoalId, title: GoalTitle }).strict()).max(50),
   })
   .strict();

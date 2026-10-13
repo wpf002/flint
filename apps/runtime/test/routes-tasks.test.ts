@@ -370,6 +370,18 @@ describe.skipIf(NO_DB)('the task routes on flint_test', () => {
     await signRun(t.proposalId);
     const forecast = await db.prediction.findFirstOrThrow({ where: { createdBy: 'runtime:tasks', status: 'open', resolverSpec: { path: ['taskId'], equals: t.id } } });
     const mine = (await ok('POST', '/v1/ledger/predictions', { claim: 'the deploy finishes today', probability: 0.7, domain: 'assets', type: 'event_occurs', resolutionCriteria: 'Will says whether it did.', resolveBy: new Date(Date.now() + 86_400_000).toISOString(), method: 'model_reasoning', resolver: 'will', evidence: [], tainted: false })) as { id: string };
+    // A rule of Will's that forbids watching a run: a new task and Run Again are each answered with a sentence and its
+    // code, never the engine's words, and nothing is made. (Last here: the rule stays.)
+    const KEY2 = draft();
+    await fx.signRun((await fx.file('policy.change', { rows: [{ pattern: 'task.dispatch.ci_runner', tier: 'forbidden', expiresAt: new Date(Date.now() + 30 * 86_400_000).toISOString() }] }, { kind: 'policy', consequential: true })).id);
+    for (const [url, body] of [['/v1/tasks', { draftKey: KEY2, template: 'watch_ci', params: { item: await fx.ciRun('wpf002/http-forbidden') } }], [`/v1/tasks/${TASK}/again`, { draftKey: KEY2 }]] as const) {
+      for (let press = 0; press < 2; press++) {
+        const r = await h.call('POST', url, body);
+        expect([r.statusCode, r.json()], `${url} press ${press}`).toEqual([409, { error: 'A rule you set doesn’t allow this.', code: 'ruleForbids' }]);
+        expect(r.body).not.toContain('ActionPolicy');
+      }
+    }
+    expect(await db.task.findUnique({ where: { id: `tk${KEY2}` } })).toBeNull();
     for (const token of [MCP, SERVER]) {
       const open = await h.call('GET', '/v1/ledger/open?limit=200', undefined, token);
       expect(open.statusCode).toBe(200);

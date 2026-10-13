@@ -10,15 +10,13 @@
 import type { z } from 'zod';
 import {
   Acceptance, CHECK_NAMES, GoalTitle, TASK_ENDED, TASK_FORM_ITEMS_MAX, TASK_TEMPLATE_IDS, TaskSpec, likelihoodOf, specItems, taskLine,
-  type AssetKind, type TaskFailure, type TaskForm, type TaskRow, type TaskStatus, type TaskTab, type TaskTemplateId, type TaskView, type TasksPage,
+  type AssetKind, type TaskFailure, type TaskForm, type TaskRow, type TaskStatus, type TaskTab, type TaskView, type TasksPage,
 } from '@flint/policy';
 import type { Db } from '../db.js';
 import { labelFor } from '../goals/items.js';
-import { ASSETS, assetFor, sameAsset, type AssetDef } from '../assets/registry.js';
-import type { AdapterSet } from './adapters/types.js';
 import { ACCEPT_CARD, WILL_ORIGINS, countsOf, microsOf, overrideProblem } from './card.js';
-import { ADAPTERS } from './run.js';
-import { TASK_TITLES } from './service.js';
+import { FORM_ITEM_KIND, OFFERED_STATUS, runnerOf, type OfferDeps } from './offer.js';
+import { TASK_TITLES, againProblem } from './service.js';
 
 const PAGE = 100;
 type Row = z.infer<typeof TaskRow>;
@@ -116,14 +114,12 @@ export async function taskView(db: Db, id: string, tz: string, now = new Date())
     card: card?.id ?? null,
     can: {
       cancel: !ended, accept: await can('accepted'), reject: await can('rejected'),
-      // Run Again: once it has ended, and while its details are still kept (they are what would run).
-      again: ended && TaskSpec.safeParse(t.spec).success,
+      // Run Again: by the same answer its route gives (ended, Will's own, its details kept, and still what New Task would offer).
+      again: !(await againProblem(db, t)),
     },
   };
 }
 
-/** The kind of item each template in the New Task form is about. A template not named here is not offered there yet. */
-const FORM_ITEM_KIND: Readonly<Partial<Record<TaskTemplateId, string>>> = { watch_ci: 'ci_run' };
 const FORM_GOALS_MAX = 50;
 
 /**
@@ -132,23 +128,20 @@ const FORM_GOALS_MAX = 50;
  * latest seen first, each by its label; and Will's active goals for the form's
  * Goal field. With no asset on, there is no template.
  */
-export async function taskForm(db: Db, tz: string, deps: { registry?: readonly AssetDef[]; adapters?: AdapterSet } = {}, now = new Date()): Promise<z.infer<typeof TaskForm>> {
-  const registry = deps.registry ?? ASSETS;
-  const adapters = deps.adapters ?? ADAPTERS;
-  const on = await db.asset.findMany({ where: { id: { in: registry.map((d) => d.id) }, enabled: true } });
+export async function taskForm(db: Db, tz: string, deps: OfferDeps = {}, now = new Date()): Promise<z.infer<typeof TaskForm>> {
   const templates: z.infer<typeof TaskForm>['templates'] = [];
   for (const template of TASK_TEMPLATE_IDS) {
     const kind = FORM_ITEM_KIND[template];
-    const def = assetFor(template, registry);
-    const row = def && on.find((r) => r.id === def.id);
-    if (!kind || !def || !row || !sameAsset(def, row) || !adapters[def.kind]) continue;
+    if (!kind) continue;
+    const runner = await runnerOf(db, template, deps);
+    if ('why' in runner) continue;
     const found = await db.entity.findMany({
-      where: { kind, status: 'active' }, orderBy: [{ lastObservedAt: 'desc' }, { id: 'asc' }], take: TASK_FORM_ITEMS_MAX + 1,
+      where: { kind, status: OFFERED_STATUS }, orderBy: [{ lastObservedAt: 'desc' }, { id: 'asc' }], take: TASK_FORM_ITEMS_MAX + 1,
       select: { id: true, kind: true, key: true, name: true, taintedPaths: true, firstSeenAt: true },
     });
     const items = await Promise.all(found.slice(0, TASK_FORM_ITEMS_MAX).map(async (e) => ({ entityId: e.id, label: await labelFor(db, e, tz, now) })));
-    templates.push({ template, title: TASK_TITLES[template], runsOn: def.name, items, more: found.length > TASK_FORM_ITEMS_MAX });
+    templates.push({ template, title: TASK_TITLES[template], runsOn: runner.def.name, items, more: found.length > TASK_FORM_ITEMS_MAX });
   }
-  const goals = await db.goal.findMany({ where: { status: 'active' }, orderBy: [{ createdAt: 'desc' }, { id: 'asc' }], take: FORM_GOALS_MAX, select: { id: true, title: true } });
+  const goals = await db.goal.findMany({ where: { status: OFFERED_STATUS }, orderBy: [{ createdAt: 'desc' }, { id: 'asc' }], take: FORM_GOALS_MAX, select: { id: true, title: true } });
   return { templates, goals: goals.filter((g) => GoalTitle.safeParse(g.title).success) };
 }

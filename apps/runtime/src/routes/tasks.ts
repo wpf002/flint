@@ -16,8 +16,9 @@
  *   GET  /v1/task-form                    what New Task can offer now (TaskForm)
  *
  * Input is checked with the shared contracts (@flint/policy); a refusal is one
- * of TASK_SAYS's sentences with its code, and a zod failure is logged by field
- * paths and codes only. Answers are checked against their contracts on the way
+ * of TASK_SAYS's sentences with its code (a card the tier engine forbids
+ * included: a rule of Will's is said as that), and a zod failure is logged by
+ * field paths and codes only. Answers are checked against their contracts on the way
  * out. Nothing here logs a task's words. While tasks are switched off (the
  * default; FLINT_ASSETS=on turns them on) every route here answers with one
  * sentence saying so, before it reads its input or the database.
@@ -27,7 +28,7 @@ import { z } from 'zod';
 import { AssetId, AssetsPage, EmptyBody, NewTaskBody, TASK_TABS, TaskAgainBody, TaskAnswer, TaskCardFiled, TaskDone, TaskFiled, TaskForm, TaskId, TasksPage, taskCodeOf } from '@flint/policy';
 import type { RuntimeScope } from '../config.js';
 import type { Db } from '../db.js';
-import { Refused } from '../governance/proposals.js';
+import { Forbidden, Refused } from '../governance/proposals.js';
 import { fileEnable, turnOff } from '../assets/service.js';
 import { assetsPage } from '../assets/view.js';
 import { SAY } from '../tasks/errors.js';
@@ -76,6 +77,11 @@ export function registerTaskRoutes(app: FastifyInstance, d: TaskRouteDeps): void
       return await fn(req);
     } catch (err) {
       if (!(err instanceof Refused)) throw err;
+      // The tier engine forbade the card (already on record, by ids): said as a sentence, never in the engine's words.
+      if (err instanceof Forbidden) {
+        const say = err.rule === 'policy' ? SAY.ruleForbids : SAY.notAllowed;
+        return reply.code(409).send({ error: say, code: taskCodeOf(say) });
+      }
       const code = taskCodeOf(err.message);
       if (err.why) {
         const ref = `ref${Date.now().toString(36)}`;

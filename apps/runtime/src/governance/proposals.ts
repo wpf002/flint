@@ -38,6 +38,21 @@ export class Refused extends Error {
 }
 
 /**
+ * The tier engine forbids the action: the same refusal (its status and its
+ * words are unchanged), carrying which rule forbade it (`policy`: one of Will's
+ * own; anything else is the code's), for a caller that tells him so in a
+ * sentence of its own.
+ */
+export class Forbidden extends Refused {
+  constructor(
+    message: string,
+    readonly rule: string,
+  ) {
+    super(409, message);
+  }
+}
+
+/**
  * Who may file a suggestion from chat (goal.propose, world.commitment.from_chat):
  * the candidates intake, in this process (goals/candidates.ts), and nothing
  * else. It names itself with this mark, which no request can carry: over the
@@ -246,7 +261,8 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
   // args normalized and a fixed reason; one from chat, and one that could not apply, are never filed.
   if (isTaskCard(input.action)) {
     const { checkTaskCard } = await import('../tasks/card.js');
-    input = await checkTaskCard(db, input);
+    // (Through the caller's transaction when there is one: a new task's card is filed with its task, and reads the row just written.)
+    input = await checkTaskCard(q, input);
   }
   // Money and digests, said here so that Will reads a sentence (the database refuses each as the card is filed):
   // a card that spends says an estimate above nothing, and a task or spend card's args hold whole numbers only
@@ -289,7 +305,7 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
       actor, context, kind: 'decision', action: input.action, tier: 'forbidden', decision: 'deny', outcome: 'denied',
       inputs: { argsDigest, origin: input.origin.slice(0, 200), rule: decision.rule }, reasoning: decision.reason, tainted: input.tainted,
     }]);
-    throw new Refused(409, `forbidden: ${decision.reason}`);
+    throw new Forbidden(`forbidden: ${decision.reason}`, decision.rule);
   }
   const expiresAt = new Date(now.getTime() + input.ttlMinutes * 60_000);
   const file = async (tx: Tx) => {
