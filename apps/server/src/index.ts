@@ -41,6 +41,7 @@ import { brainOf } from './policy';
 import { inboxRoutes } from './inbox-routes';
 import { goalsRoutes } from './goals-routes';
 import { predictionsRoutes } from './predictions-routes';
+import { tasksRoutes } from './tasks-routes';
 import { ChatLoad } from './chat-load';
 import { CompleteGate, localBackgroundBrain, localBackgroundModel, readKindCallCaps } from './background-complete';
 import { HOLD_CHECK_EVERY_MS, holdNoteDue } from './deploy-hold';
@@ -2014,6 +2015,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
   // Flint's predictions, for the console's Predictions panel (./predictions-routes): checked both ways, never spooled,
   // and never read here. A forecast's numbers pass from the runtime to the console and go nowhere else.
   if (await predictionsRoutes(req, res, url, { runtime: ctx.runtime, errorRef })) return;
+  // Flint's tasks and assets, for the console's Tasks panel and Settings > Assets (./tasks-routes): checked both ways,
+  // never spooled, and never read here. A task's words and its result pass from the runtime to the console and go nowhere else.
+  if (await tasksRoutes(req, res, url, { runtime: ctx.runtime, errorRef })) return;
 
   // Training corpus stats — the growing seed of Flint's own brain.
   if (req.method === 'GET' && url.startsWith('/training')) {

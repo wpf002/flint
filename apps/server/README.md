@@ -35,6 +35,12 @@ outside model (Claude) answers only as a frontier tier, never as a default: see
 | GET | `/predictions`, `/predictions/series/:key`, `/predictions/questions`, `/predictions/accuracy` | yes | — | Flint's forecasts, one number open, Will's questions, and how Flint has done (`PredictionsPage`, `{ series: SeriesView }`, `QuestionsPage`, `AccuracyView` in @flint/policy). See "Predictions" |
 | POST | `/predictions/turn-on` | yes | `{ series }` | `{ id, deduped }`: the Turn On Predictions card, to sign in the console |
 | POST | `/predictions/series/:key/turn-off`, `/predictions/questions/:id/answer` | yes | `{}`, `{ answer: "yes" \| "no" \| "skip" }` | `{ ok: true }`: unsigned, audited by the runtime |
+| GET | `/assets` | yes | — | Settings > Assets: each asset, whether it is on, and its sentence (`AssetsPage` in @flint/policy). See "Tasks and assets" |
+| POST | `/assets/:id/on`, `/assets/:id/off` | yes | `{}` | `{ proposalId, deduped }`: the card that turns it on, to sign in the console; `{ ok: true }` for off (unsigned, audited by the runtime) |
+| GET | `/tasks?tab=active\|finished`, `/tasks/:id`, `/tasks/form` | yes | — | A tab of the Tasks panel, one task open, and what New Task can offer now (`TasksPage`, `{ task: TaskView }`, `TaskForm`) |
+| POST | `/tasks` | yes | `{ draftKey, template, params, goalId?, dueAt? }` | `{ id, proposalId, deduped }`: a new task and its card, to sign in the console |
+| POST | `/tasks/:id/cancel`, `/tasks/:id/accept\|reject` | yes | `{}` | Cancel: `{ ok: true }` while the task has not gone out, else `{ proposalId, deduped }`. Accept Anyway and Reject Anyway: always that card |
+| POST | `/tasks/:id/again` | yes | `{ draftKey }` | `{ id, proposalId, deduped }`: Run Again, a new task like an ended one, and its card |
 | GET | `/inference` | yes (full token) | — | The routing mode, this machine and the local models: `{ mode, modeSource, modeSentence, hardware: { accelerator, chip, memoryGb, usableGb, tier, tierLabel, recommended, name, sentence, notes }, local: { wire, server, host, model, contextLength, tools, primary, standby, embedding, confined, pull, warnings }, cloud, problems, notices, lines }`. `primary` and `standby` are `{ model, name, state, why?, pull?, downloadGb?, sentence }`. `lines` is the same as sentences for the command line (tags, keys); `name`, `sentence` and `notices` are for the console (display names, no key or tag). `hardware` is absent until the machine has been looked at. It takes one fresh look at the model server, and never starts a model load. See "Local inference", Status. |
 | POST | `/inference/mode` | yes (full token) | `{ mode: "local" \| "hybrid" \| "cloud" }` or `{ reset: true }` | `{ ok, mode, previous, source }`. Switches the mode and saves it; `reset` goes back to `FLINT_INFERENCE_MODE`. Anything else: 400. Audited. |
 
@@ -1984,6 +1990,38 @@ console and go nowhere else in the server: it keeps nothing, pushes no note, put
 in chat context, and logs statuses, field paths and references only. The runtime writes
 every sentence the panel shows about a number, and the contract refuses a raw value beside
 the words. `/predictions` is never reported back to the runtime as a `route.error`.
+
+## Tasks and assets
+
+The console's Tasks panel and Settings > Assets reach the runtime's task and asset routes
+through src/tasks-routes.ts, with the console's full token only (a voice or eval token
+reaches none of them, and no chat tool does: a model can neither read a task nor start
+one). It is the goals and predictions proxies' twin: every id and body (up to 32 KB) is
+checked with @flint/policy's contracts before the runtime sees it, and every answer before
+the console does; a card is filed with the runtime at once and never spooled; a runtime that
+is down is a 503 and nothing changed; a write the runtime doesn't answer is a 504 that says
+Flint isn't sure it went through (the same form sent again is the same task and the same
+card); a refusal reaches the console only as one of the fixed task sentences, by its code;
+and every answer says `Cache-Control: no-store`. The one read with a query is the tab
+(`?tab=active|finished`, and nothing else).
+
+Tasks ship switched off (the runtime's `FLINT_ASSETS`). While they are, the runtime answers
+every one of these routes with the code `off`, and the proxy passes on its one sentence:
+"Tasks are turned off on this Mac." The Tasks panel then says that sentence and offers
+nothing, and so does Settings > Assets.
+
+A server and a runtime of different versions can meet during an update. A runtime without
+these routes answers 404 on a page (the assets, a tab, the form), which is a 501 here, and
+the console hides what it cannot offer. An open task's `can.again` is optional: a runtime
+from before Run Again does not say, and the console reads that as no. If that runtime is
+asked to run a task again anyway, its "invalid" is a 501 here ("This needs a newer
+runtime."), never a mistake of Will's.
+
+A task's title and its result are Will's words, or a watched system's. They pass through
+this proxy from the runtime to the console and go nowhere else in the server: it keeps
+nothing, pushes no note, puts nothing in chat context, and logs statuses, field paths and
+references only. `/tasks` and `/assets` are never reported back to the runtime as a
+`route.error`.
 
 ## Tools / integrations
 

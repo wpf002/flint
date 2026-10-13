@@ -108,6 +108,8 @@ export function routeOf(url: string): 'chat' | 'generate' | 'speak' | 'transcrib
   if (path === '/goals' || path.startsWith('/goals/')) return undefined;
   // And the predictions proxy (P4): the same, and a number's key in a path is never an event's to carry.
   if (path === '/predictions' || path.startsWith('/predictions/')) return undefined;
+  // And the tasks proxy (P5), with Settings' assets: the same, and a task's id in a path is never an event's to carry.
+  if (path === '/tasks' || path.startsWith('/tasks/') || path === '/assets' || path.startsWith('/assets/')) return undefined;
   if (path === '/chat') return 'chat';
   if (path === '/generate') return 'generate';
   if (path === '/speak') return 'speak';
