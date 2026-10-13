@@ -107,14 +107,12 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
       `SELECT count(*)::int AS n FROM "Proposal" WHERE status IN ('approved', 'executing') AND (kind IN ('task', 'spend') OR action ~ '^(task[.]|asset[.]enable$|review[.])' OR action = 'hive.dispatch_job')`)).rows[0].n))).toBe(0);
   });
 
-  // The newest migration is the one a rollback undoes. Its down.sql alone, then a
-  // deploy, gives back exactly the schema: migrate status lists it as not applied,
-  // what it did is undone, and the redeploy diffs empty. (An older migration's
-  // down.sql alone no longer can: p1_ledger's would recreate Prediction without
-  // the columns P3 and P4 add.)
-  it('the newest migration\'s down.sql, then deploy, re-applies it (the documented rollback)', async () => {
-    const newest = migrationDirs().at(-1)!;
-    // Something true only while the newest migration is applied, to see it go and come back. A new migration names its own here.
+  // A migration's down.sql, then a deploy, gives back exactly the schema: migrate status lists it as not
+  // applied, what it did is undone, and the redeploy diffs empty. The newest is the one a rollback undoes, and
+  // its down.sql runs alone; one before it runs after the newer ones' (newest first). (A much older migration's
+  // down.sql alone no longer can: p1_ledger's would recreate Prediction without the columns P3 and P4 add.)
+  const rollsBack = async (target: string): Promise<void> => {
+    // Something true only while the target migration is applied, to see it go and come back. A new migration names its own here.
     // (P4 part 3's: its two columns, how many of a forecast's steps were filled in and where each number was read to. P5's: its first table.)
     const applied: Record<string, string> = {
       '20261014000000_p4_forecast_inputs': `(SELECT count(*) = 2 FROM information_schema.columns WHERE table_schema = 'public'
@@ -122,14 +120,14 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
       [P5]: `(SELECT to_regclass('public."Asset"') IS NOT NULL)`,
       '20261015000000_p7_resilience': `to_regclass('public."BackupRun_kind_location_path_key"') IS NOT NULL`,
     };
-    expect(applied[newest], `say what ${newest} makes true`).toBeTruthy();
-    const there = async () => withClient(owner, async (c) => (await c.query<{ t: boolean }>(`SELECT ${applied[newest]} AS t`)).rows[0]!.t);
+    expect(applied[target], `say what ${target} makes true`).toBeTruthy();
+    const there = async () => withClient(owner, async (c) => (await c.query<{ t: boolean }>(`SELECT ${applied[target]} AS t`)).rows[0]!.t);
     expect(await there()).toBe(true);
     // P5 replaced one of P3's functions. While it is applied, plan_step_guard is P3's body with P5's one rule added before its last line.
     const p3 = readFileSync(join(MIGRATIONS, '20261009000000_p3_goals', 'migration.sql'), 'utf8');
     const p3From = p3.indexOf('AS $$', p3.indexOf('CREATE FUNCTION plan_step_guard()')) + 'AS $$'.length;
     const p3Body = p3.slice(p3From, p3.indexOf('\n$$;', p3From) + 1);
-    if (newest === P5) {
+    if (target === P5) {
       const during = (await functionsNamed(['plan_step_guard']))[0]!.prosrc as string;
       const lastLine = '  RETURN NEW;\nEND;\n';
       expect(p3Body.endsWith(lastLine)).toBe(true);
@@ -137,16 +135,18 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
       expect(during.endsWith(lastLine)).toBe(true);
       expect(during).toContain(`NEW."kind" = 'asset_task'`);
     }
-    await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, newest, 'down.sql'), 'utf8')));
+    // Everything newer goes first, newest first, as a rollback past it would run them.
+    for (const newer of migrationDirs().filter((d) => d > target).reverse()) await runDown(newer);
+    await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, target, 'down.sql'), 'utf8')));
     expect(await there()).toBe(false);
     // Nothing else of the schema went with it.
-    if (newest === '20261014000000_p4_forecast_inputs') {
+    if (target === '20261014000000_p4_forecast_inputs') {
       expect((await objects(owner)).tables).toEqual(expect.arrayContaining(['public.ForecastRun', 'public.MetricSeries']));
       expect(await withClient(owner, async (c) => (await c.query<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.columns WHERE table_schema = 'public' AND column_name IN ('filled', 'readTo')`)).rows[0]!.n)).toBe(0);
     }
     // Run again on what it left (the state a rollback half done would be in): it tolerates that, as its header says.
-    await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, newest, 'down.sql'), 'utf8')));
-    if (newest === P5) {
+    await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, target, 'down.sql'), 'utf8')));
+    if (target === P5) {
       // Its down.sql puts P3's own body back to the letter (as P3's migration wrote it), with the settings and
       // grants it had, and takes away everything it added to older tables.
       const restored = await functionsNamed(['plan_step_guard']);
@@ -171,13 +171,24 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
       expect((await functionsNamed(['p3_bind_approval']))[0]!.prosrc).toContain('pg_trigger_depth()');
     }
     const status = await prisma(['migrate', 'status'], owner);
-    expect(status.stdout + status.stderr).toMatch(new RegExp(`not yet been applied:[\\s\\S]*${newest}`));
+    expect(status.stdout + status.stderr).toMatch(new RegExp(`not yet been applied:[\\s\\S]*${target}`));
     await migrateUp(owner);
     expect(await there()).toBe(true);
     const diff = await prisma(['migrate', 'diff', '--from-url', owner, '--to-schema-datamodel', 'prisma/schema.prisma', '--exit-code'], owner);
     expect(diff.code, diff.stdout + diff.stderr).toBe(0);
     // Re-applied on top of P3's body: P5's rule is back.
-    if (newest === P5) expect((await functionsNamed(['plan_step_guard']))[0]!.prosrc).toContain(`NEW."kind" = 'asset_task'`);
+    if (target === P5) expect((await functionsNamed(['plan_step_guard']))[0]!.prosrc).toContain(`NEW."kind" = 'asset_task'`);
+  
+  };
+
+  // P5 first, on the cards the test above left (each ended): its own checks are in the steps above.
+  it('P5\'s down.sql, after the newer one\'s, then deploy, re-applies it: P3\'s plan_step_guard is back to the letter in between', async () => {
+    expect(migrationDirs().at(-1)).not.toBe(P5);
+    await rollsBack(P5);
+  });
+
+  it('the newest migration\'s down.sql, then deploy, re-applies it (the documented rollback)', async () => {
+    await rollsBack(migrationDirs().at(-1)!);
   });
 
   // P7's one change, on rows that are there: a file recorded twice stops the migration with nothing changed and a
