@@ -394,8 +394,10 @@ export class Inference {
    * review's N5); and one pointed back at a model of its own would keep being
    * refused. So a look taken a moment ago does not stand in for this one (only
    * one already under way does), and the turn waits for it: as long as a look
-   * may take, two seconds, and then goes on with what is known, which ages
-   * into "not known to run here".
+   * may take, two seconds. A look that comes back without the server's
+   * listing leaves nothing it said before believed to run here
+   * (./ollama-locality silent), so the turn is planned on no model, and gets a
+   * sentence: it is never decided on a word the server no longer stands behind.
    *
    * A turn that does not stay here is not held up at all. Neither is one the
    * settings alone already refuse (a model server on another machine, or

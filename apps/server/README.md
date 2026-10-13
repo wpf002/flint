@@ -303,9 +303,9 @@ saved and survives restarts.
   address that passes requests on to a cloud service: it answers like any server that is no
   Ollama. Point the local wire only at a server that runs its models on this Mac.) A tier named `local:<model>` is held to the same rule, and its
   server is asked every minute like any local brain's. A turn that stays
-  here is planned only on a model that is KNOWN to run here (an eval replay too): one the server
-  has not been heard on yet gets "Flint has not confirmed yet that its local model runs on this
-  Mac, and ...". **A turn that stays here asks first.** As soon as it is routed (a private
+  here is planned only on a model that is KNOWN to run here (an eval replay too): one whose
+  server has not been heard on it yet, or has stopped saying, gets "Flint cannot confirm right
+  now that its local model runs on this Mac, and ...". **A turn that stays here asks first.** As soon as it is routed (a private
   message in any mode, and every turn of Local mode), and before it is refused, planned, or a word
   of it is embedded, the model server is asked what runs on it now (`routeFirst` in
   `src/inference.ts`). So a name pointed at a cloud model while Flint runs (`ollama cp`) is caught
@@ -314,12 +314,23 @@ saved and survives restarts.
   its server asked before the tier is asked. A local model that answers an ordinary turn in Cloud
   mode (no cloud model set up, or one that failed) has the model server looked at first. And
   every request of the helpers (the embedder, memory extraction, background calls) is decided
-  where it is sent, after Ollama has been asked. Each asks when the server's last word is more
-  than two seconds old (`fresh` in `src/ollama-locality.ts`; in the background every server is
-  still asked once a minute and believed for five). A request that carries text which stays here
-  whatever the mode (a fact that stays here on its way to the embedder, a call of memory
-  extraction about turns that do) goes only to a model Ollama has just listed as its own. What
-  is left is under "Known limits", below. In Cloud mode an ordinary turn reaches a remote `OLLAMA_HOST` as it always has,
+  where it is sent, after Ollama has been asked when its answer decides anything: a private
+  message's request, one that carries text which stays here, a background call, and every
+  request outside Cloud mode. (An ordinary Cloud-mode request is sent whatever the listing says,
+  so it does not wait for one.) Each asks when the server's last word is more than two seconds
+  old (`fresh` in `src/ollama-locality.ts`; in the background every server is still asked once a
+  minute). A request that carries text which stays here whatever the mode (a fact that stays
+  here on its way to the embedder, a call of memory extraction about turns that do, and any call
+  of it that asks for Will's goals) goes only to a model Ollama has just listed as its own.
+  **A server that gives no word is not believed on what it said before.** When someone waits for
+  its answer and gets none (it is down, its listing fails or hangs, the question is not let
+  through), every model it had listed as its own stops being local at once, and so does "it is
+  no Ollama": a name could have been pointed at a cloud model behind the silence. What it said
+  runs on Ollama's servers is kept. That holds for the health monitor's look too, which is the
+  one a turn that stays here waits for: the turn gets the sentence above, or "The local model
+  isn't available, and ..." when the whole server is silent, inside the two seconds one look may
+  take, and waits once for one silence. The next answer is believed again. What is left is under
+  "Known limits", below. In Cloud mode an ordinary turn reaches a remote `OLLAMA_HOST` as it always has,
   and **a private message does not**: with a model server that is not this Mac, and that Will has
   not allowed, it is refused where it is first routed (503: "The local model server is on another
   machine, and a private message never leaves this Mac."), before a word of it is embedded,
@@ -421,13 +432,21 @@ saved and survives restarts.
 - *Two seconds.* Where something that stays here is handed to a model on a local wire, its
   server's word is two seconds old at most. A name pointed at a cloud model inside those two
   seconds, or while a request to it is already on its way, is seen by the next one.
-- *A server that stops listing.* A model server that still answers and no longer says what it
-  lists is believed for five minutes, and then nothing on it is local. Meanwhile it is asked
-  again at most every two seconds, so it is not asked at every call.
+- *A server that stops listing.* It is no longer believed for five minutes (see above): the
+  first caller that waits for its answer and gets none drops what it said, and it is then left
+  alone for two seconds, so it is not asked at every call. Three things remain. The asks made
+  in the background drop nothing by themselves, so what was last heard stands until someone who
+  needs it asks (five minutes at most). A turn that arrives while a look is already out waits
+  for that look, so a server that has just come back can cost the next turn one more sentence.
+  And in Local and Hybrid modes an ordinary request to a helper model is held only when the
+  model is KNOWN to run on Ollama's servers: one whose server has gone silent is still asked, as
+  one not heard on yet is at boot (a private message, and text that stays here, are not).
 - *A tier on a server that wants a key.* A tier's server is asked for its listing without a key
   (only the main model server's looks carry `FLINT_LOCAL_API_KEY`). A tier on an
   OpenAI-compatible server that wants one on every path, and is not also the main model server,
-  is never heard, so it is never a brain on this Mac.
+  is never heard, so it is never a brain on this Mac. One that IS also the main model server is
+  heard through the main model's looks; a tier's own keyless ask of it, when that word is more
+  than two seconds old, gets no answer and drops it until the next look.
 - *A program that passes requests on.* A program at a loopback address that forwards to a cloud
   service answers like any server that is no Ollama, and Flint cannot tell it from one. Point the
   local wire only at a server that runs its models on this Mac.
@@ -435,7 +454,8 @@ saved and survives restarts.
   fact Will forgot is told "already known" where a fact Flint never held is "saved" (see "Goals
   in chat"). No text is handed out.
 - *Goals from chat.* A turn Will asked to keep private is never asked for a goal, even when it
-  holds one; a turn taken in Local mode is. See "Goals and commitments from chat".
+  holds one, and neither is a turn of Local mode that was handed one; a turn taken in Local mode
+  that read none is. See "Goals and commitments from chat".
 
 **To switch modes** (no code, no restart):
 
@@ -1054,16 +1074,32 @@ yet: no panel lists it and no route forgets it. Leave it off until one does.
   to every brain (`FLINT_GOALS_TO_FRONTIER=on`). A turn taken in Local mode is asked like any
   other. Its suggestion is filed with the runtime on this Mac and needs his signature like any
   other, and **a goal he approves is then a goal like any he typed**: it is in his goals, and
-  goes wherever his goals go.
+  goes wherever his goals go. Once it is approved and active, the runtime's goal review sends
+  its title and description (why it matters, its checks and its steps) to the runtime's review
+  model on this Mac's model server, and the runtime today checks that server's address only,
+  not what the server lists.
   - *How the two are told apart once stored.* The mark is still one (`{ private: true }`). A
-    turn that Local mode alone kept carries a note on it (`byMode`), written from the turn's
-    route. A mark with no note is read as his own word: that is every turn marked before the
-    note existed, and a turn outside Local mode that was marked because its model was handed a
-    private one. Everything else the mark does, it does for both.
+    turn that Local mode alone kept carries a note on it (`byMode`). The note is written only
+    when the turn was handed no turn he asked to keep private: a turn of Local mode whose
+    conversation still holds one in what its model reads is stored as his own word, the same
+    rule as outside Local mode (its model read the private thing, and may have said it back).
+    A mark with no note is read as his own word: that is also every turn marked before the note
+    existed. Everything else the mark does, it does for both.
   - *In a pass that asks,* the turns he asked to keep private are sent in calls of their own,
     and a turn that is shown one of them as its context is held with it. The facts are learned
     and marked as ever, and the pass line counts the turns that were not asked
     (`suggestion-private-turn`).
+  - *What a private turn held stays out of every prompt whose answer can be filed.* A call that
+    asks for goals is shown no known fact that came from a turn he kept private, whatever its
+    own turns are (a fact does not say which kind of private turn it came from). A call that
+    asks for facts alone is shown them as before.
+  - *From a turn taken in Local mode, a card holds his words of that turn and nothing else.*
+    Every word of the short text must be in his own message of that turn (not half, as for an
+    ordinary turn), and a day is kept only when he named it there ("March 3", "3/3", a written
+    date): one the model worked out is left off, and the suggestion goes on without it.
+  - *The call itself is decided where it is sent.* Whether a pass asks is read when it begins;
+    a call that asks is sent as text that stays here, so it goes only to a model its server,
+    asked a moment before, lists as its own.
   - A turn answered with his goals is asked, as before, and every suggestion goes only to a
     runtime on this Mac.
 - **The quote check comes first, and no model takes part in it.** A suggestion is kept only
@@ -1079,12 +1115,13 @@ yet: no panel lists it and no route forgets it. Leave it off until one does.
 - **One sentence, one suggestion.** A quote that overlaps one already kept from the same turn
   is dropped, however it is worded, so three readings of one sentence cannot take the day's
   three goal cards.
-- **The short text is held to his message too:** at least half of its words, and every
-  number in it, are in that same message. It starts with a capital letter, is 3 to 120
+- **The short text is held to his message too:** at least half of its words (all of them from
+  a turn taken in Local mode), and every number in it, are in that same message. It starts with a capital letter, is 3 to 120
   characters as a goal's title is counted, and holds no control or format character (no
   direction override, no zero-width mark).
 - **A day is the model's reading, and is shown as that.** It is kept only if it is a real day,
-  not before the turn and not more than ten years out; one that has passed since is left off.
+  not before the turn and not more than ten years out; one that has passed since is left off,
+  and so is one he did not name himself in a turn taken in Local mode.
   The card and the form say "Flint read the day as Mar 11, 2027.", never that he named it. A
   turn over 30 days old is not suggested from.
 - **It goes to the runtime on this Mac, and nowhere else** (`src/goal-candidates.ts`):
@@ -1121,8 +1158,13 @@ Known limits:
   sentence runs past 300 characters.
 - *Only the first message of a turn is read,* up to 8,000 characters.
 - *A turn he asked to keep private is not asked,* even when it sets a goal, and neither is the
-  turn right after it in a call (it is shown the private one as its context). He can type the
-  goal in the Goals panel.
+  turn right after it in a call (it is shown the private one as its context), nor any turn of
+  Local mode in a conversation that still holds one. He can type the goal in the Goals panel.
+- *What Flint recalled, in a Local-mode turn that is asked.* A turn of Local mode in a
+  conversation of its own can be answered with a fact Flint recalled from a private turn, and
+  that reply is in the call. Nothing of it can reach a card (the card is his words of that
+  turn, and a day he named there), and the fact itself is not in the prompt; the reply's own
+  words are.
 
 | Var | Default | Purpose |
 | --- | --- | --- |
@@ -1487,8 +1529,8 @@ place, `brainIsLocal` in src/policy.ts, and means all four of:
   `ollama cp gpt-oss:120b-cloud mine` gives a cloud model a plain name, and Ollama's own listing
   still says where it runs (the check the model picker already makes). The server asks each local
   brain's Ollama at start and once a minute (src/ollama-locality.ts). It fails closed: until
-  that Ollama has answered, and once it has not answered for five minutes, none of its models
-  counts as local, and a model it does not list never does.
+  that Ollama has answered, and as soon as someone waits for its answer and gets none, none of
+  its models counts as local, and a model it does not list never does.
 
 So a turn Claude answers never holds a goal's words, an `ollama:` tier on this Mac does, and a
 frontier turn that fails over to the local model gets the block only on that last ask. A test

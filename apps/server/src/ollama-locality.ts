@@ -12,7 +12,8 @@
  * So ./policy brainIsLocal asks here as well as looking at the name and the
  * address, and this fails closed:
  *  - a model is local only while a listing no older than a few minutes says it
- *    is there and has no remote host;
+ *    is there and has no remote host, and only until its server is asked by
+ *    someone who waits for the answer and gives none;
  *  - a model the listing does not hold, a listing that could not be read, and
  *    an address nobody has asked are all "not known to be local", which is not
  *    local.
@@ -46,9 +47,9 @@
  *
  * The asking in the background is `watch`: the server names the addresses its
  * local brains use (./goals-chat), each is asked at once and then once a
- * minute. An ask nobody waited for that fails changes nothing by itself (the
- * status page goes on saying what was last heard, for five minutes at most);
- * the next caller that asks first finds the silence and drops it. Only an
+ * minute. An ask nobody waited for that fails changes nothing by itself (what
+ * was last heard stands, for five minutes at most); the next caller that asks
+ * first finds the silence and drops it. Only an
  * address ./policy already took as here is watched (this Mac, or the model
  * server Will said is his).
  *
