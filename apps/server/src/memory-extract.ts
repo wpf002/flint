@@ -552,6 +552,15 @@ export interface ExtractorOptions {
    */
   privateByRequest?: (conversationId: string, turnId: string) => boolean;
   /**
+   * Send a call as one that carries text which stays on this Mac (the server
+   * passes ./goals-chat keptText). A call about turns answered with Will's
+   * goals, or turns he kept private, is made through it: where the request is
+   * sent, it goes only to a model the model server lists as its own at that
+   * moment (./inference helperFetch). `isTainted` read what was known when the
+   * pass began. Default: sent as it is.
+   */
+  kept?: <T>(send: () => T) => T;
+  /**
    * Also ask for the goals Will set (FLINT_EXTRACT_CANDIDATES=1). Only with
    * the local brain (`kind` local) and somewhere to hand them (`onCandidate`):
    * otherwise it is off, and the prompt is what it always was. And never of a
@@ -596,6 +605,7 @@ export class MemoryExtractor {
   private readonly carriedGoals: (conversationId: string, turnId: string) => boolean;
   private readonly keptPrivate: (conversationId: string, turnId: string) => boolean;
   private readonly privateByRequest: (conversationId: string, turnId: string) => boolean;
+  private readonly kept: <T>(send: () => T) => T;
   private readonly candidates: boolean;
   private readonly mayPropose: () => boolean;
   private readonly commitments: boolean;
@@ -642,6 +652,7 @@ export class MemoryExtractor {
     this.carriedGoals = opts.carriedGoals ?? (() => false);
     this.keptPrivate = opts.keptPrivate ?? (() => false);
     this.privateByRequest = opts.privateByRequest ?? this.keptPrivate;
+    this.kept = opts.kept ?? ((send) => send());
     // Goals and commitments are asked of the local model alone, and only with somewhere to hand them.
     const asked = opts.candidates;
     this.candidates = (asked === true || typeof asked === 'function') && local && opts.onCandidate !== undefined;
@@ -855,7 +866,9 @@ export class MemoryExtractor {
           let why: BrainFailure | undefined;
           let detail: string | undefined;
           try {
-            reply = await this.brain.generate({ system: EXTRACT_SYSTEM, prompt: ask.text, ...(asked ? { suggestions: asked } : {}) });
+            const send = (): Promise<BrainReply> => this.brain.generate({ system: EXTRACT_SYSTEM, prompt: ask.text, ...(asked ? { suggestions: asked } : {}) });
+            // (A call's turns all carry the same marks: it stays here, or none of it does.)
+            reply = await (toSend.some((it) => it.goals || it.private) ? this.kept(send) : send());
           } catch (err) {
             why = err instanceof MemoryBrainError ? err.why : 'unavailable';
             detail = err instanceof MemoryBrainError ? err.detail : errorKind(err);

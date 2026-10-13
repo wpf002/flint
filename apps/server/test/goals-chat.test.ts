@@ -301,13 +301,13 @@ describe('recallForAnyBrain: /generate has no per-ask gate, so it is given the f
 describe('plannerHeld: deep_research’s planner is an outside model, and a local model’s turn does not ask it', () => {
   const chat = () => new GoalsChat<Persona>({ memory: tmpStore(), blocks: { goals: false, goalsToFrontier: false }, runtime: () => RT, log: () => {}, locality: { watch: () => Promise.resolve() } });
 
-  it('held on a local model’s turn, with a sentence that says why; not held on any other', () => {
+  it('held on a local model’s turn, with a sentence that says why; not held on any other', async () => {
     const c = chat();
     expect(c.plannerHeld(true)).toBeUndefined();
     expect(asLocalTurn(() => c.plannerHeld(true))).toBe('the local model is answering this turn, so its question stays here');
     // A tier on this Mac answers as a local model's turn, so its research plans by rule too.
-    expect(c.run({ provider: recording('ollama', ['answer'], { baseURL: HERE }).provider, model: 'qwen2.5:72b' }, () => c.plannerHeld(true))).toMatch(/stays here/);
-    expect(c.run({ provider: recording('anthropic', ['answer']).provider, model: 'claude-opus-5-5' }, () => c.plannerHeld(true))).toBeUndefined();
+    expect(await c.run({ provider: recording('ollama', ['answer'], { baseURL: HERE }).provider, model: 'qwen2.5:72b' }, () => c.plannerHeld(true))).toMatch(/stays here/);
+    expect(await c.run({ provider: recording('anthropic', ['answer']).provider, model: 'claude-opus-5-5' }, () => c.plannerHeld(true))).toBeUndefined();
   });
 
   it('with no outside planner there is nothing to hold', () => {

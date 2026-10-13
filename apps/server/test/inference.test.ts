@@ -7,7 +7,7 @@ import { buildInference, helperModel, type Inference } from '../src/inference';
 import type { Hardware } from '../src/hardware';
 import type { ModeRoute } from '../src/mode-route';
 import { OUTSIDE_OFF_LOCAL_MODE, OUTSIDE_OFF_PRIVATE, OUTSIDE_OFF_PRIVATE_SERVER, PRIVATE_TURN_NOTE } from '../src/outside-ai';
-import { asLocalTurn, isPrivateRequest, withTurnTaint } from '../src/turn-taint';
+import { asKeptText, asLocalTurn, carriesKeptText, isPrivateRequest, withTurnTaint } from '../src/turn-taint';
 import { keepsPrivate, staysHere } from '../src/goals-now';
 import { embedderHere } from '../src/goals-chat';
 import { LOCALITY } from '../src/ollama-locality';
@@ -453,6 +453,38 @@ describe('a cloud model under a plain name: the model server says where it runs,
     expect(inference.brainIsLocal(inference.primary.provider, MAIN)).toBe(true);
   });
 
+  // The follow-up to N5: an ordinary turn the local model answers in Cloud mode (no cloud model set up, or one
+  // that failed) took no look, and no timer watches the server there, so the last look could be a minute old.
+  it('before a local model is asked, the model server is looked at again when the last look is more than two seconds old', async () => {
+    // (Its own copy of the models: this test re-points one.)
+    const { inference, s } = await boot(structuredClone(loaded), { FLINT_INFERENCE_MODE: 'cloud', FLINT_LOCAL_FALLBACK_MODEL: 'off' });
+    const looks = () => s.requests.filter((q) => q.path === '/api/tags').length;
+    const kept = inference.keeping(route({ mode: 'cloud', reason: 'mode_cloud' }));
+    expect(kept).toMatchObject({ private: false, staysHere: false });
+    // Just looked at (the boot's own look): nothing is asked.
+    const before = looks();
+    await kept.heard();
+    await inference.heardLately();
+    expect(looks()).toBe(before);
+    // The last look is three seconds old, and the model was pointed at a cloud model since.
+    const monitor = inference.local.monitor as unknown as { snapshot: () => { primary: { checkedAt: number } } };
+    const real = monitor.snapshot.bind(monitor);
+    let age = 3_000;
+    monitor.snapshot = () => {
+      const snap = real();
+      return { ...snap, primary: { ...snap.primary, checkedAt: Date.now() - age } };
+    };
+    s.models.get(MAIN)!.remoteHost = 'https://ollama.com:443';
+    expect(inference.brainIsLocal(inference.primary.provider, MAIN)).toBe(true); // what was known
+    await kept.heard();
+    expect(looks()).toBe(before + 1);
+    expect(inference.brainIsLocal(inference.primary.provider, MAIN)).toBe(false);
+    // Under two seconds old: not looked at again.
+    age = 1_500;
+    await kept.heard();
+    expect(looks()).toBe(before + 1);
+  });
+
   // The privacy review's N10: a standby that is a cloud model under a plain name was still loaded ahead of a turn.
   it('N10: a standby that is a cloud model under a plain name is never warmed, in any mode', async () => {
     const flipped: Record<string, MockModel> = { [MAIN]: { loaded: true, contextLength: 16384 }, [ALIAS]: { loaded: false, remoteHost: 'https://ollama.com:443' }, [EMBED]: {} };
@@ -746,15 +778,121 @@ describe('which brain is on this Mac, as the facade answers it', () => {
 // The routing review: the embedder, local memory extraction and the runtime's background calls read OLLAMA_HOST
 // as it is. With an Ollama on another machine, in Local mode, they still sent it the text of Will's messages.
 describe('the helpers that always talk to Ollama\'s own address', () => {
-  const at = async (env: Record<string, string>) => {
+  const at = async (env: Record<string, string>, listing?: (baseURL: string) => Promise<void>) => {
     const dir = mkdtempSync(join(tmpdir(), 'flint-inference-'));
     dirs.push(dir);
-    const inference = await buildInference({ env: { OLLAMA_MODEL: MAIN, ...env }, modeFile: join(dir, 'm.json'), fetch: offline, detect, observeOnly: true });
+    const inference = await buildInference({ env: { OLLAMA_MODEL: MAIN, ...env }, modeFile: join(dir, 'm.json'), fetch: offline, detect, observeOnly: true, ...(listing ? { listing } : {}) });
     built.push(inference);
     return inference;
   };
   const REMOTE = { OLLAMA_HOST: 'http://gpu-box.invalid:11434' };
   const OFF = 'the Ollama server is on another machine, and in this mode nothing is sent off this Mac';
+
+  // The follow-up to N5 and N9. The helpers' rule read a listing that is asked once a minute, and some of what they
+  // send stays here without being a private message's own request: a fact that stays here on its way to the
+  // embedder, a call of memory extraction about turns that do. Now each request is decided where it is SENT:
+  // Ollama is asked first when its word is more than two seconds old, and text that stays here goes only to a
+  // model it lists as its own.
+  it('helperFetch: Ollama is asked before every request, and the request is decided on what it has just said', async () => {
+    const HERE = 'http://127.0.0.1:11434';
+    const asked: string[] = [];
+    // What Ollama says when it is asked: the test changes it, as `ollama cp` would while Flint runs.
+    let says: Parameters<typeof listed>[1] = ['nomic-embed-text', MAIN];
+    const i = await at({ FLINT_INFERENCE_MODE: 'cloud' }, async (baseURL) => {
+      asked.push(baseURL);
+      listed(baseURL, says);
+    });
+    const sent: Array<string | undefined> = [];
+    const order: string[] = [];
+    const base = (async (_url: unknown, init?: RequestInit) => {
+      order.push('sent');
+      sent.push(helperModel(init?.body));
+      return new Response('{}');
+    }) as unknown as typeof fetch;
+    const f = i.helperFetch('helper', base);
+    const embed = (model: string) => f(`${HERE}/api/embed`, { method: 'POST', body: JSON.stringify({ model, input: 'synthetic words' }) });
+    const privately = <T>(fn: () => Promise<T>): Promise<T> => withTurnTaint(async () => (i.preRoute({ message: 'x', localOnly: true, deep: false, evalMode: false, hasFrontier: true, needs: {}, frontierCan: {} }), fn()));
+    // Asked first, then sent; and nothing at all is known before the ask (no listing was ever handed over here).
+    expect(LOCALITY.said(HERE)).toBeUndefined();
+    const before = asked.length;
+    await embed('nomic-embed-text');
+    expect(asked.slice(before)).toEqual([HERE]);
+    expect(sent).toEqual(['nomic-embed-text']);
+    // A private message, with the model listed as Ollama's own a moment before: sent.
+    await privately(() => embed('nomic-embed-text'));
+    expect(sent).toHaveLength(2);
+    // `ollama cp gpt-oss:120b-cloud nomic-embed-text`. What was known still says "here"; the ask before the request does not.
+    says = [{ name: 'nomic-embed-text', remote_host: 'https://ollama.com:443' }, MAIN];
+    expect(LOCALITY.runsHere(HERE, 'nomic-embed-text')).toBe(true);
+    await expect(privately(() => embed('nomic-embed-text'))).rejects.toThrow('fetch refused: the model asked for is not known to run on this Mac, and a private message is not sent to it');
+    expect(sent).toHaveLength(2);
+    // Text that stays here, on a request that is nobody's private message, in Cloud mode: held the same way.
+    says = ['nomic-embed-text', MAIN];
+    await asKeptText(() => embed('nomic-embed-text'));
+    expect(sent).toHaveLength(3);
+    says = [{ name: 'nomic-embed-text', remote_host: 'https://ollama.com:443' }, MAIN];
+    await expect(asKeptText(() => embed('nomic-embed-text'))).rejects.toThrow('fetch refused: the model asked for is not known to run on this Mac, and what stays on this Mac is not sent to it');
+    await expect(asKeptText(() => embed('never-pulled'))).rejects.toThrow(/what stays on this Mac is not sent to it/);
+    expect(sent).toHaveLength(3);
+    expect(carriesKeptText()).toBe(false); // the mark does not outlive the request it was put on
+    // An ordinary request in Cloud mode is as it always was, whatever the model.
+    await embed('nomic-embed-text');
+    expect(sent).toHaveLength(4);
+    // Local and Hybrid: nothing goes to a model that the ask just before said runs on Ollama's servers.
+    i.mode.set('local', 'console');
+    await expect(embed('nomic-embed-text')).rejects.toThrow("fetch refused: the model asked for runs on Ollama's servers, and in this mode nothing is sent off this Mac");
+    says = ['nomic-embed-text', MAIN];
+    await embed('nomic-embed-text');
+    expect(sent).toHaveLength(5);
+    // A request with no body names no model and carries no text: it is sent.
+    await asKeptText(() => f(`${HERE}/api/tags`));
+    expect(sent.at(-1)).toBeUndefined();
+    // The order, for the last request: asked, then sent.
+    order.length = 0;
+    const n = asked.length;
+    await embed('nomic-embed-text');
+    expect(asked.length).toBe(n + 1);
+    expect(order).toEqual(['sent']);
+  });
+
+  it('helperFetch, for a background call: answered only by a model Ollama has just listed as its own, in every mode', async () => {
+    const HERE = 'http://127.0.0.1:11434';
+    let says: Parameters<typeof listed>[1] = [MAIN];
+    const i = await at({ FLINT_INFERENCE_MODE: 'cloud' }, async (baseURL) => listed(baseURL, says));
+    const sent: Array<string | undefined> = [];
+    const f = i.helperFetch('background', (async (_url: unknown, init?: RequestInit) => (sent.push(helperModel(init?.body)), new Response('{}'))) as unknown as typeof fetch);
+    const chat = (model: string) => f(`${HERE}/api/chat`, { method: 'POST', body: JSON.stringify({ model, messages: [] }) });
+    for (const mode of ['cloud', 'hybrid', 'local'] as const) {
+      i.mode.set(mode, 'console');
+      await chat(MAIN);
+    }
+    expect(sent).toEqual([MAIN, MAIN, MAIN]);
+    // The gate saw a brain a moment ago (helperBrain); the model was pointed at a cloud model before the call was sent.
+    expect(i.helperBrain({ model: MAIN })).toBeDefined();
+    says = [{ name: MAIN, remote_host: 'https://ollama.com:443' }];
+    await expect(chat(MAIN)).rejects.toThrow('fetch refused: the model asked for is not known to run on this Mac, and a background call is answered only by a model that does');
+    await expect(chat('never-pulled')).rejects.toThrow(/a background call is answered only by a model that does/);
+    expect(sent).toHaveLength(3);
+    expect(i.helperBrain({ model: MAIN })).toBeUndefined();
+  });
+
+  it('helperFetch: an Ollama on another machine is never asked what runs on it, and nothing that stays here is sent to it', async () => {
+    const asked: string[] = [];
+    const i = await at({ ...REMOTE, FLINT_INFERENCE_MODE: 'cloud' }, async (baseURL) => void asked.push(baseURL));
+    const sent: Array<string | undefined> = [];
+    const base = (async (_url: unknown, init?: RequestInit) => (sent.push(helperModel(init?.body)), new Response('{}'))) as unknown as typeof fetch;
+    const embed = (kind: 'helper' | 'background') => i.helperFetch(kind, base)('http://gpu-box.invalid:11434/api/embed', { method: 'POST', body: JSON.stringify({ model: 'nomic-embed-text', input: 'x' }) });
+    // Cloud mode, an ordinary request and a background call: as they always were.
+    await embed('helper');
+    await embed('background');
+    expect(sent).toHaveLength(2);
+    await expect(asKeptText(() => embed('helper'))).rejects.toThrow('fetch refused: the Ollama server is on another machine, and what stays on this Mac is not sent to it');
+    i.mode.set('hybrid', 'console');
+    await expect(embed('helper')).rejects.toThrow(`fetch refused: ${OFF}`);
+    await expect(embed('background')).rejects.toThrow(`fetch refused: ${OFF}`);
+    expect(sent).toHaveLength(2);
+    expect(asked).toEqual([]); // nothing that machine says would make its models local
+  });
 
   it('on this Mac: never off, in any mode', async () => {
     for (const mode of ['local', 'hybrid', 'cloud']) expect((await at({ FLINT_INFERENCE_MODE: mode })).helpersOff(), mode).toBeUndefined();

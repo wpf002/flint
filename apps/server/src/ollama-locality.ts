@@ -30,7 +30,11 @@
  * is, nothing on it is known to be local.
  *
  * `runsHere` only reads what is known: it never waits, and it never makes a
- * request. The asking is `watch`: the server names the addresses its local
+ * request. Whoever is about to hand a model something that stays here, and
+ * has not just asked, asks first with `fresh`: the server is asked again when
+ * its last word is more than two seconds old, so a name pointed at a cloud
+ * model while Flint runs (`ollama cp`) is not read as local for the minute
+ * until the next `watch`. The asking in the background is `watch`: the server names the addresses its local
  * brains use (./goals-chat), each is asked at once and then once a minute, and
  * a server that stops answering is believed for five more minutes and then
  * not at all. Only an address ./policy already took as here is watched (this
@@ -64,6 +68,9 @@ export interface OllamaLocalityOptions {
   now?: () => number;
 }
 
+/** How old a server's word may be before a caller that asks with `fresh` has it asked again. */
+export const FRESH_MS = 2_000;
+
 /** What one server last said, and when. */
 interface Heard {
   at: number;
@@ -87,6 +94,8 @@ export class OllamaLocality {
   readonly #asking = new Map<string, Promise<void>>();
   /** The addresses asked every minute: where each server's listing is. */
   readonly #watched = new Set<string>();
+  /** When each address was last asked, answered or not: `fresh` does not ask a silent server at every call. */
+  readonly #askedAt = new Map<string, number>();
   #timer: ReturnType<typeof setInterval> | undefined;
 
   constructor(private readonly opts: OllamaLocalityOptions = {}) {}
@@ -155,6 +164,27 @@ export class OllamaLocality {
     return first || !this.#heard.has(serverOf(at)) ? this.refresh(at) : Promise.resolve();
   }
 
+  /**
+   * Have the server at this address asked again NOW when what it last said is
+   * older than `maxAgeMs` (or it has said nothing), and wait for its answer:
+   * for a caller about to hand one of its models something that stays here.
+   * Fresh enough already: nothing is asked. Asked within `maxAgeMs` and
+   * silent: not asked again (a server that is down is not asked at every
+   * call), and what was known stands until it is too old to believe. Never
+   * rejects; it waits as long as one ask may take.
+   */
+  fresh(baseURL: string, maxAgeMs: number = FRESH_MS): Promise<void> {
+    const at = trimmed(baseURL);
+    const now = this.#now();
+    const heard = this.#heard.get(serverOf(at));
+    if (heard && now - heard.at <= maxAgeMs) return Promise.resolve();
+    const running = this.#asking.get(at);
+    if (running) return running;
+    const asked = this.#askedAt.get(at);
+    if (asked !== undefined && now - asked <= maxAgeMs) return Promise.resolve();
+    return this.refresh(at);
+  }
+
   /** Ask that server for its models. Never throws; an answer that says nothing either way leaves what is known to age out. */
   refresh(baseURL: string): Promise<void> {
     const at = trimmed(baseURL);
@@ -167,6 +197,7 @@ export class OllamaLocality {
 
   async #ask(at: string): Promise<void> {
     const when = this.#now();
+    this.#askedAt.set(at, when);
     try {
       // (A redirect is an error: a listing that came from another address is not this one's word.)
       const r = await (this.opts.fetchImpl ?? fetch)(`${at}/api/tags`, { signal: AbortSignal.timeout(this.opts.timeoutMs ?? 2_000), redirect: 'error' });
@@ -221,6 +252,7 @@ export class OllamaLocality {
     this.#timer = undefined;
     this.#watched.clear();
     this.#heard.clear();
+    this.#askedAt.clear();
   }
 }
 

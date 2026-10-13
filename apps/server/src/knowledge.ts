@@ -78,6 +78,15 @@ export interface KnowledgeOptions {
    * Asked each time. Default: no (an embedder nobody vouched for is not here).
    */
   embedderHere?: () => boolean;
+  /**
+   * Send something as a request that carries text which stays on this Mac
+   * (the server passes ./goals-chat keptText). A fact that stays here is
+   * handed to the embedder through it, so the rule is read again where the
+   * request is made, on what the model server says at that moment
+   * (./inference helperFetch): `embedderHere` reads what was known a moment
+   * before. Default: sent as it is.
+   */
+  kept?: <T>(send: () => T) => T;
 }
 
 /** Why `addDetailed` did or didn't store a fact — the extractor counts these. */
@@ -183,6 +192,12 @@ export class KnowledgeStore {
     this.load();
   }
 
+  /** Hand one fact's text to the embedder: a fact that stays here as a request that carries one (`kept`), any other as it is. */
+  private embed(text: string, marks: Marks): Promise<number[][]> {
+    const send = (): Promise<number[][]> => this.embedder.embed([text]);
+    return mayLeave(marks) || !this.opts.kept ? send() : this.opts.kept(send);
+  }
+
   /** May this fact's text be sent to the embedder? Any fact that may leave this Mac; one that stays here only when the embedder is here too. */
   private mayEmbed(f: Marks): boolean {
     return mayLeave(f) || this.opts.embedderHere?.() === true;
@@ -245,7 +260,7 @@ export class KnowledgeStore {
     // A fact that stays here goes to the embedder only when the embedder is on this Mac too.
     if (this.mayEmbed(marks)) {
       try {
-        vector = (await withTimeout(this.embedder.embed([clean]), this.embedTimeoutMs))[0] ?? [];
+        vector = (await withTimeout(this.embed(clean, marks), this.embedTimeoutMs))[0] ?? [];
       } catch (err) {
         logError('[memory] embed failed for new fact (storing without vector; recall matches it lexically):', err);
       }
@@ -366,7 +381,7 @@ export class KnowledgeStore {
     let healed = 0;
     try {
       for (const f of this.facts.filter((x) => x.vector.length === 0 && this.mayEmbed(x)).slice(0, limit)) {
-        const v = (await withTimeout(this.embedder.embed([f.text]), this.embedTimeoutMs))[0] ?? [];
+        const v = (await withTimeout(this.embed(f.text, f), this.embedTimeoutMs))[0] ?? [];
         if (v.length === 0) break;
         f.vector = v;
         healed++;

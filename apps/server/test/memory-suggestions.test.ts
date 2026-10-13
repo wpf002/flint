@@ -36,7 +36,7 @@ import { ChatCandidate, GoalTitle } from '@flint/policy';
 import { KnowledgeStore } from '../src/knowledge';
 import { localExtractBrain } from '../src/memory-brain';
 import {
-  EXTRACT_SYSTEM, EXTRACT_VERSION, FACTS_SCHEMA, GOAL_SUGGESTIONS_SCHEMA, MemoryExtractor, SUGGESTIONS_SCHEMA, SUGGEST_GOALS_PROMPT, SUGGEST_PROMPT, suggestionOf, suggestionsReply,
+  EXTRACT_SYSTEM, EXTRACT_VERSION, FACTS_SCHEMA, GOAL_SUGGESTIONS_SCHEMA, MemoryBrainError, MemoryExtractor, SUGGESTIONS_SCHEMA, SUGGEST_GOALS_PROMPT, SUGGEST_PROMPT, suggestionOf, suggestionsReply,
   type BrainReply, type ChatSuggestion, type ExtractBrain, type ExtractorOptions, type Suggesting, type SuggestionOutcome, type TurnSource,
 } from '../src/memory-extract';
 
@@ -621,6 +621,36 @@ describe('goals and commitments from chat, in the extractor', () => {
     // The same turns, with the setting off: one call, as it always was (the pass that asks for facts alone batches by the marks only).
     const off = await pass({ 'c-mix': [first, asked, after, later] }, [], { candidates: false, keptPrivate: () => true, privateByRequest: (_cid, tid) => tid === 't-asked' });
     expect(off.calls).toHaveLength(1);
+  });
+
+  // `isTainted` read what the model server had said when the pass began. A call about turns that stay here is also
+  // SENT as one that carries them, so where the request is made it goes only to a model listed as the server's own
+  // at that moment (../src/inference helperFetch). An ordinary turn's call is sent as it always was.
+  it('a call about turns that stay here is sent as one that carries them; refused where it is sent, its turns wait and nothing is lost', async () => {
+    const convs = { 'c-open': [turn('c-open', SAID)], 'c-goals': [turn('c-goals', `${CANARY} I keep a Mac Studio in the office and it matters to my goals.`)], 'c-kept': [turn('c-kept', `${CANARY} I keep a spare key in the blue tin by the door.`)] };
+    let carrying = false;
+    const sentAs: Array<[string, boolean]> = [];
+    const brain: ExtractBrain = { generate: async (i) => (sentAs.push([['Mac Studio', 'spare key', 'half marathon'].find((w) => i.prompt.includes(w))!, carrying]), { facts: [] } as BrainReply) };
+    const kept = <T>(send: () => T): T => {
+      carrying = true;
+      try {
+        return send();
+      } finally {
+        carrying = false;
+      }
+    };
+    const opts: ExtractorOptions = { now: () => NOW, carriedGoals: (cid) => cid === 'c-goals', keptPrivate: (cid) => cid === 'c-kept', kept };
+    await new MemoryExtractor(source(convs), new KnowledgeStore(join(dir, 'k-kept.json'), downEmbedder), brain, join(dir, 's-kept.json'), opts).run();
+    expect(sentAs.sort()).toEqual([['Mac Studio', true], ['half marathon', false], ['spare key', true]]);
+    // The request is refused where it is sent (the model was pointed at a cloud model since the pass began): no
+    // reply, no strike against the turns, and the watermark does not move past them.
+    const refusing = new MemoryExtractor(source({ 'c-kept': convs['c-kept'] }), new KnowledgeStore(join(dir, 'k-kept2.json'), downEmbedder), brain, join(dir, 's-kept2.json'), {
+      ...opts, kept: (() => Promise.reject(new MemoryBrainError('unavailable', 'fetch refused'))) as never,
+    });
+    await refusing.run();
+    expect(refusing.lastStats).toMatchObject({ turnsSent: 0, failed: 1, calls: 0 });
+    const state = JSON.parse(readFileSync(join(dir, 's-kept2.json'), 'utf8')) as { watermarks: Record<string, number> };
+    expect(state.watermarks['c-kept']).toBeUndefined();
   });
 
   it('the knowledge facts are stored exactly as with it off', async () => {

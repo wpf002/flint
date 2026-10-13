@@ -468,6 +468,21 @@ describe('runLocalPlan', () => {
     // A hybrid turn the rules kept local: neither.
     expect(await seen({})).toEqual([['primary', false, false], ['cloud', false, false]]);
     expect(isStaysHereTurn()).toBe(false);
+    // Before each LOCAL step is asked, the model server is heard from (./inference heardLately): what it says of where
+    // its models run decides, inside the ask, what that model is handed. A cloud step waits for nothing.
+    const order: string[] = [];
+    await runLocalPlan(
+      steps,
+      async (step) => {
+        order.push(`ask ${step.kind === 'cloud' ? 'cloud' : step.which}`);
+        if (step.kind !== 'cloud') throw new FlintError(makeAiError('provider_unavailable', 'down', { retryable: true }));
+        return 'ok';
+      },
+      { progressed: () => false, heard: async () => void order.push('heard') },
+    );
+    expect(order).toEqual(['heard', 'ask primary', 'ask cloud']);
+    // A look that fails holds nothing up.
+    await expect(runLocalPlan(steps, async (step) => step.kind, { progressed: () => false, heard: () => Promise.reject(new Error('the look failed')) })).resolves.toMatchObject({ result: 'local' });
   });
 
   it('a plan with no steps cannot run: the caller refused before this', async () => {

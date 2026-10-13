@@ -163,6 +163,25 @@ export function isPrivateRequest(): boolean {
   return scope.getStore()?.private === true;
 }
 
+const keptScope = new AsyncLocalStorage<true>();
+
+/**
+ * Run `fn` as a request that CARRIES TEXT WHICH STAYS ON THIS MAC, whoever
+ * makes it and in whatever mode: a fact that stays here being embedded, a
+ * turn that stays here being mined for memory. It is no turn of Will's, so
+ * `markPrivateRequest` does not cover it. The helpers that talk to Ollama read
+ * it where the request is sent (./inference helperFetch): such a request goes
+ * only to a model that Ollama, asked a moment ago, lists as its own.
+ */
+export function asKeptText<T>(fn: () => T): T {
+  return keptScope.run(true, fn);
+}
+
+/** Is the request being made one that carries text which stays on this Mac (asKeptText)? */
+export function carriesKeptText(): boolean {
+  return keptScope.getStore() === true;
+}
+
 /** This turn is an eval replay. */
 export function markEval(): void {
   const t = scope.getStore();

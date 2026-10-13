@@ -53,7 +53,7 @@ import { brainIsLocal, brainOf, listedAt, placeUnknown, placedHere, type Answeri
 import { LOCAL_MODE_TURN, PRIVATE_TURN, corpusMark, keptByModeAlone, privateByRequest, turnStaysHere, type StayRoute } from './private-turns';
 import type { PaidToolSpec } from './spend';
 import { isPartOf } from './spoken-text';
-import { asLocalTurn, isLocalTurn } from './turn-taint';
+import { asKeptText, asLocalTurn, isLocalTurn } from './turn-taint';
 
 /** What the gate reads off a persona to size its prompt. */
 export interface Speaker {
@@ -119,6 +119,15 @@ export function embedderHere(host: string | undefined, model?: string): boolean 
   if (model === undefined) return placedHere(host);
   return brainIsLocal({ provider: 'ollama', model, baseURL: host });
 }
+
+/**
+ * Send something as a request that carries text which stays on this Mac: a
+ * fact that stays here on its way to the embedder, a call of memory
+ * extraction about turns that do. The helpers' rule reads it where the
+ * request is made (./inference helperFetch): it goes only to a model that
+ * Ollama, asked a moment ago, lists as its own, in every mode.
+ */
+export const keptText = <T>(send: () => T): T => asKeptText(send);
 
 /** A recall with the part of it any brain may be given (./grounding recallContext). */
 interface Recalled {
@@ -231,7 +240,7 @@ export interface GoalsChatOptions {
   runtime: () => Runtime | undefined;
   log: (msg: string) => void;
   /** What each brain's Ollama says runs on it. Default: the server's own record. */
-  locality?: Pick<OllamaLocality, 'watch'>;
+  locality?: Pick<OllamaLocality, 'watch'> & Partial<Pick<OllamaLocality, 'fresh'>>;
   fetchImpl?: typeof fetch;
 }
 
@@ -377,8 +386,21 @@ export class GoalsChat<P extends Speaker> {
    * anything that stays here, and what keeps the turn's question from an
    * outside AI. Any other brain's ask runs as it is.
    */
-  run<T>(brain: { provider: { readonly name: string }; model: string }, ask: () => T): T {
-    return brainIsLocal(brainOf(brain.provider, brain.model)) ? asLocalTurn(ask) : ask();
+  async run<T>(brain: { provider: { readonly name: string }; model: string }, ask: () => T | Promise<T>): Promise<T> {
+    const named = brainOf(brain.provider, brain.model);
+    // Before a tier on a local wire is asked, its server says what runs on it NOW when its word is more than a few
+    // seconds old (./ollama-locality fresh). Whether it is handed the turns and facts that stay here is decided
+    // inside the ask, on that word: a name pointed at a cloud model since the last minute's listing is found here.
+    await this.#fresh(named);
+    return brainIsLocal(named) ? asLocalTurn(ask) : ask();
+  }
+
+  /** Have this brain's server asked what runs on it, when it has one that is here and its word is not fresh. Never rejects. */
+  async #fresh(brain: AnsweringBrain | undefined): Promise<void> {
+    const url = listedAt(brain);
+    if (!url) return;
+    const locality = this.#o.locality ?? LOCALITY;
+    await (locality.fresh ? locality.fresh(url) : locality.watch(url)).catch(() => {});
   }
 
   /**
@@ -404,6 +426,7 @@ export class GoalsChat<P extends Speaker> {
     isTainted: (conversationId: string, turnId: string) => boolean;
     carriedGoals: (conversationId: string, turnId: string) => boolean;
     keptPrivate: (conversationId: string, turnId: string) => boolean;
+    kept: <T>(send: () => T) => T;
     privateByRequest: (conversationId: string, turnId: string) => boolean;
     holdOff: () => string | undefined;
   } {
@@ -415,6 +438,9 @@ export class GoalsChat<P extends Speaker> {
       isTainted: (cid, tid) => o.tainted(cid, tid) || (goals(cid, tid) && !staysHere(o.brain, this.#out)) || (kept(cid, tid) && !keepsPrivate(o.brain)),
       carriedGoals: goals,
       keptPrivate: kept,
+      // A call about turns that stay here is sent as one that carries them (./turn-taint asKeptText): where the
+      // request is made, it goes only to a model its Ollama, asked a moment ago, lists as its own.
+      kept: keptText,
       // The narrower notion, as stored: a turn Will himself asked to keep private is never asked for a goal.
       privateByRequest: (cid, tid) => this.#o.memory.matches(cid, tid, privateByRequest),
       holdOff: () => {

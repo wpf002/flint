@@ -4,7 +4,7 @@
  * what it is told to watch, and fails closed.
  */
 import { afterEach, describe, it, expect, vi } from 'vitest';
-import { OllamaLocality, placeSaid } from '../src/ollama-locality';
+import { FRESH_MS, OllamaLocality, placeSaid } from '../src/ollama-locality';
 
 const HERE = 'http://127.0.0.1:11434';
 const tags = (models: unknown) => new Response(JSON.stringify({ models }));
@@ -246,6 +246,85 @@ describe('OllamaLocality', () => {
     l.clear();
     await vi.advanceTimersByTimeAsync(180_000);
     expect(asked).toBe(2); // cleared: it asks no more
+  });
+
+  // The follow-up to the privacy review's N5. `watch` asks once a minute, so a name pointed at a cloud model while
+  // Flint runs was read as local for up to a minute by whoever did not ask first. `fresh` is how they ask first.
+  it('fresh: a caller about to use a model has its server asked again when its word is more than two seconds old, and not when it is not', async () => {
+    let now = 1_000_000;
+    let rows: unknown[] = [{ name: 'qwen2.5:14b' }];
+    let asked = 0;
+    const l = new OllamaLocality({
+      now: () => now,
+      fetchImpl: (async () => {
+        asked++;
+        return tags(rows);
+      }) as unknown as typeof fetch,
+    });
+    expect(FRESH_MS).toBe(2_000);
+    // Never heard: asked now, and the answer is there when it returns.
+    await l.fresh(HERE);
+    expect(asked).toBe(1);
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(true);
+    // Fresh enough: nothing is asked, through any path of that server.
+    now += 2_000;
+    await l.fresh(HERE);
+    await l.fresh(`${HERE}/v1`);
+    expect(asked).toBe(1);
+    // `ollama cp gpt-oss:120b-cloud qwen2.5:14b`. A moment later the word is too old to use without asking.
+    rows = [{ name: 'qwen2.5:14b', remote_host: 'https://ollama.com:443' }];
+    now += 1;
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(true); // what was known
+    await l.fresh(HERE);
+    expect(asked).toBe(2);
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(false);
+    expect(l.runsElsewhere(HERE, 'qwen2.5:14b')).toBe(true);
+    // A word that came another way (the health monitor's look hands its listing over) counts as heard.
+    now += 60_000;
+    l.learn(`${HERE}/v1`, [{ name: 'qwen2.5:14b' }]);
+    await l.fresh(HERE);
+    expect(asked).toBe(2);
+    // A caller's own window.
+    now += 500;
+    await l.fresh(HERE, 100);
+    expect(asked).toBe(3);
+    l.clear();
+  });
+
+  it('fresh: a server that does not answer is not asked at every call, what was known stands until it is too old to believe, and nothing rejects', async () => {
+    let now = 1_000_000;
+    let up = true;
+    let asked = 0;
+    const l = new OllamaLocality({
+      now: () => now,
+      fetchImpl: (async () => {
+        asked++;
+        if (!up) throw new Error('ECONNREFUSED');
+        return tags([{ name: 'qwen2.5:14b' }]);
+      }) as unknown as typeof fetch,
+    });
+    await l.fresh(HERE);
+    up = false;
+    now += 3_000;
+    await expect(l.fresh(HERE)).resolves.toBeUndefined();
+    expect(asked).toBe(2);
+    // Asked a moment ago and silent: not asked again for as long as an answer would have been fresh.
+    now += 1_000;
+    await l.fresh(HERE);
+    await l.fresh(HERE);
+    expect(asked).toBe(2);
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(true); // believed, as ever, for five minutes
+    now += 1_500;
+    await l.fresh(HERE);
+    expect(asked).toBe(3);
+    now += 5 * 60_000;
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(false);
+    // Two callers at once are one request.
+    up = true;
+    const before = asked;
+    await Promise.all([l.fresh(HERE), l.fresh(`${HERE}/`)]);
+    expect(asked).toBe(before + 1);
+    l.clear();
   });
 
   it('two asks of one Ollama at once are one request', async () => {

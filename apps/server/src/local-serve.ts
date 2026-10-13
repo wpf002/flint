@@ -244,6 +244,11 @@ export interface RunOptions<P> {
    * changed while the turn is still running (./turn-taint isStaysHereTurn).
    */
   staysHere?: boolean;
+  /**
+   * Awaited before each local step is asked: has the model server been heard from lately (./inference
+   * heardLately)? What it says of where its models run decides, inside the ask, what that model is handed.
+   */
+  heard?: () => Promise<void>;
   onMove?: (from: LocalStep<P>, to: LocalStep<P>, err: unknown) => void;
   now?: () => number;
 }
@@ -275,6 +280,8 @@ export async function runLocalPlan<P, T>(plan: LocalPlan<P>, attempt: (step: Loc
   for (let n = 0; n < plan.steps.length; n++) {
     const step = plan.steps[n]!;
     const last = n === plan.steps.length - 1;
+    // (Before the meter starts: the look is not the model's time to first token. A look that fails holds nothing up.)
+    if (step.kind === 'local') await opts.heard?.().catch(() => {});
     const meter = step.kind === 'local' ? { which: step.which, state: step.state, startedAt: now() } : undefined;
     try {
       const result = meter ? await asLocalTurn(() => meters.run(meter, () => attempt(step, last)), { private: opts.private === true, staysHere: opts.staysHere === true }) : await attempt(step, last);

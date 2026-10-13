@@ -73,7 +73,7 @@ import { startInternal } from './internal';
 import { RuntimeProposals } from './runtime-proposals';
 import { RuntimeEvents, chatTurnEvent, routeOf, thresholdEventId } from './runtime-events';
 import { WorldNow, estimateTokens } from './world-now';
-import { GoalsChat, SPEECH_STAYS_HERE, embedderHere, recallForAnyBrain, toolsKeptHere } from './goals-chat';
+import { GoalsChat, SPEECH_STAYS_HERE, embedderHere, keptText, recallForAnyBrain, toolsKeptHere } from './goals-chat';
 import { readContextBlocks } from './context-blocks';
 import { brainOf } from './policy';
 import { inboxRoutes } from './inbox-routes';
@@ -105,7 +105,7 @@ import { Notifications, Watcher, signalNote, upcomingNote, watcherEnabled, type 
 import { stampUiVersion, uiVersionOf } from './ui-version';
 import { TrainingLogger } from './training';
 import { LocalPersonaCache, localDefaultNote, overridePersonaCache, parseLocalModelRequest, type OverridePersona } from './local-model';
-import { buildInference, helperModel, type Inference } from './inference';
+import { buildInference, type Inference } from './inference';
 import { OUTSIDE_OFF_PRIVATE, keptHereOnPrivate, notOfferedOnPrivate } from './outside-ai';
 import { inferenceRoutes } from './inference-routes';
 import type { ModelSource } from './local-brains';
@@ -601,11 +601,9 @@ async function main(): Promise<void> {
   // helpersOff): their requests then fail like an Ollama that is down, which each of them already lives with
   // (recall goes lexical, only the core tools are offered, extraction waits). Read on every request.
   // (...and the model matters as well as the address: a cloud model under a plain name answers at this Mac's own
-  // Ollama. The request's own `model` is read, and the facade asks what Ollama says of it.)
-  const helperFetch = ((url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-    const off = inference.helpersOff(helperModel(init?.body));
-    return off ? Promise.reject(new TypeError(`fetch refused: ${off}`)) : fetch(url, init);
-  }) as typeof fetch;
+  // Ollama. The request's own `model` is read, and Ollama is asked what it says of it when its word is more than
+  // two seconds old: each request is decided where it is sent, ./inference helperFetch.)
+  const helperFetch = inference.helperFetch('helper');
   const embedHost = process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434';
   const embedder = new OllamaEmbedder({
     // The tier table's embedding model (@flint/core EMBEDDING_MODEL), or the one FLINT_EMBED_MODEL names (./inference-config checks it).
@@ -619,7 +617,7 @@ async function main(): Promise<void> {
   // A fact that stays on this Mac is embedded only when the embedder is here too (./goals-chat embedderHere).
   // (...and when its model really runs there: its Ollama is asked, like a brain's.)
   goalsChat.hears({ provider: 'ollama', model: inference.embedModel, baseURL: embedHost });
-  const knowledge = new KnowledgeStore(join(dataDir, 'knowledge.json'), embedder, undefined, undefined, { embedderHere: () => embedderHere(embedHost, inference.embedModel) });
+  const knowledge = new KnowledgeStore(join(dataDir, 'knowledge.json'), embedder, undefined, undefined, { embedderHere: () => embedderHere(embedHost, inference.embedModel), kept: keptText });
 
   // Action approval — read-only tools run freely; any write the model attempts is
   // captured as a proposal for one-tap approval (see ActionQueue). This is what
@@ -957,7 +955,8 @@ async function main(): Promise<void> {
     // local model to ask, so the gate answers no_local_model. The stand-in's name is never asked for.
     if (!b.settled) return undefined;
     const backgroundModel = localBackgroundModel(b.env, b.model, (m) => console.error(m));
-    return backgroundModel && localBackgroundBrain(backgroundModel, { chatActive });
+    // (Each request is decided again where it is sent, on a listing two seconds old at most: ./inference helperFetch.)
+    return backgroundModel && localBackgroundBrain(backgroundModel, { chatActive, fetch: inference.helperFetch('background') });
   };
   let backgroundBrain = makeBackground();
   // The local model costs nothing, so a kind is bounded by its calls a day, not its dollars.
