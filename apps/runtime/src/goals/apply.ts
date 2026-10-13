@@ -326,7 +326,7 @@ export async function applyGoal(tx: Tx, action: GoalSignedAction, raw: unknown, 
         nextReviewAt: now,
       },
     });
-    // One signature, not two: the suggestion's own card is replaced by this one.
+    // This card's signature is the only one needed: the suggestion's own card is set aside here, unsigned.
     if (suggested) {
       const card = await tx.proposal.findUniqueOrThrow({ where: { id: suggested.id }, select: { id: true, action: true, argsDigest: true, origin: true, tainted: true } });
       await tx.proposal.update({ where: { id: card.id }, data: { status: 'rejected', error: SAY.replaced } });
