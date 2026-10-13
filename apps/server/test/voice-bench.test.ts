@@ -17,6 +17,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSy
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { SERVER_HOST, main, serverArgs, startWhisperServer } from '../scripts/voice-bench';
+import { NO_PROXY_SPELLINGS } from './no-proxy-spellings';
 import {
   CLIP_RATES,
   CLIP_VOICES,
@@ -527,6 +528,68 @@ describe('a whole run, on stand-ins', () => {
     const more = rig();
     const two = await runBench(args({ out: more.out, clips: mine, stt: ['whisper-cpp'], tts: [] }), more.deps);
     expect(two.notes).toEqual(['2 clips had no text file beside them saying what was said, so they were left out.', '2 clips could not be read and were left out.']);
+  });
+
+  // The review's M1, for the benchmark. With `--clips` what is posted to the transcription server it starts is
+  // WILL'S OWN VOICE. That server is at this Mac's own address, and a request for that address goes wherever Node
+  // sends it: through its env proxy, when that is on and the no-proxy list does not name the address as Node needs
+  // it named. Six spellings used to be read as "direct" while Node proxied them.
+  describe('--clips and a proxy: his recordings are posted to this Mac’s own address only when Node would reach it directly', () => {
+    const ON = { NODE_USE_ENV_PROXY: '1', HTTP_PROXY: 'http://proxy.example:3128' };
+    const own = (): string => {
+      const mine = join(dir, `clips-${++rigs}`);
+      mkdirSync(mine);
+      writeFileSync(join(mine, 'kitchen.wav'), fakeWav('Turn off the lights in the kitchen.', 3));
+      writeFileSync(join(mine, 'kitchen.txt'), 'Turn off the lights in the kitchen.\n');
+      return mine;
+    };
+
+    it.each(NO_PROXY_SPELLINGS.map((s) => [s.label, s] as const))('%s', async (_label, s) => {
+      const r = rig({ env: { ...ON, ...s.env } });
+      const result = await runBench(args({ out: r.out, clips: own(), stt: ['whisper-cpp', 'local'], tts: [] }), r.deps);
+      // One run per clip is a program on this Mac: no address, no proxy, measured either way.
+      expect(result.stt.filter((x) => x.engine === 'whisper-cpp').map((x) => [x.model, x.n])).toEqual([
+        ['ggml-base.en.bin', 1],
+        ['ggml-small.en.bin', 1],
+      ]);
+      if (s.direct.v4) {
+        // Node reaches 127.0.0.1 directly: the server is started, his clip is posted to it, and to nothing else.
+        expect(r.started.map((x) => x.stopped)).toEqual([true, true]);
+        expect(result.stt.filter((x) => x.engine === 'local').map((x) => [x.model, x.n, x.failed])).toEqual([
+          ['ggml-base.en.bin', 1, 0],
+          ['ggml-small.en.bin', 1, 0],
+        ]);
+        expect(r.fetched.length).toBeGreaterThan(0);
+        for (const url of r.fetched) expect(new URL(url).hostname).toBe('127.0.0.1');
+        expect(result.notes.join(' ')).not.toContain('proxy');
+      } else {
+        // Node would hand the request to the proxy: the server is never started, and not one request is made.
+        expect(r.started).toEqual([]);
+        expect(r.fetched).toEqual([]);
+        expect(result.stt.filter((x) => x.engine === 'local')).toEqual([]);
+        expect(result.notes).toEqual(["This Mac's own address is reached through a proxy here, so the local transcription server was not started and no clip was sent to it."]);
+      }
+      expect(JSON.stringify(result)).not.toContain('proxy.example');
+    });
+
+    it('a transcription server Will already runs is asked through the same settings: proxied, it is not sent a clip', async () => {
+      const got: string[] = [];
+      const s = createServer((req, res) => {
+        got.push(req.url ?? '');
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ text: 'Turn off the lights in the kitchen.' }));
+      });
+      servers.push(s);
+      const port = await new Promise<number>((resolve) => s.listen(0, '127.0.0.1', () => resolve((s.address() as AddressInfo).port)));
+      const set = { FLINT_STT_PROVIDER: 'local', FLINT_LOCAL_STT_BASE_URL: `http://127.0.0.1:${port}/v1` };
+      const proxied = rig({ env: { ...ON, NO_PROXY: ' * ', ...set }, server: false });
+      const none = await runBench(args({ out: proxied.out, clips: own(), stt: ['local'], tts: [] }), proxied.deps);
+      expect([none.stt, got, proxied.fetched]).toEqual([[], [], []]);
+      const direct = rig({ env: { ...ON, NO_PROXY: '127.0.0.1', ...set }, server: false });
+      const heard = await runBench(args({ out: direct.out, clips: own(), stt: ['local'], tts: [] }), direct.deps);
+      expect(heard.stt.map((x) => [x.engine, x.n, x.errors])).toEqual([['local', 1, 0]]);
+      expect(got.length).toBeGreaterThan(0);
+    });
   });
 
   it('the options choose what is measured, and voices this Mac does not have are said, not spoken', async () => {

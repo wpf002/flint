@@ -40,7 +40,7 @@
  * whole run is unit-tested with stand-ins: the tests run no program.
  */
 import { ttsCostOf } from '@flint/core';
-import { readInferenceConfig, SAY_VOICE_RE } from './inference-config';
+import { readInferenceConfig, SAY_VOICE_RE, viaProxy } from './inference-config';
 import { buildVoice, fileNameOf, openAiSpeech, planVoice, whisperPaths, type Run, type SttProvider, type TtsProvider } from './voice';
 import { wordErrorRate, wordErrors, type WordErrors } from './wer';
 
@@ -420,6 +420,9 @@ export function hintsFor(found: { whisperCli: boolean; whisperServer: boolean; s
 // ---------------------------------------------------------------------------
 // the run
 
+/** The one address the transcription server a run starts listens on, and is asked at: this Mac, and nothing a network can reach. */
+export const BENCH_SERVER_HOST = '127.0.0.1';
+
 /** A local transcription server this run started, on this Mac alone. */
 export interface StartedServer {
   /** `http://127.0.0.1:<port>/v1` */
@@ -766,6 +769,14 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
   // ---- hearing
   const stt: SttRow[] = [];
   let hearBack: { stt: SttProvider; label: string } | undefined;
+  // The server this run would start is at this Mac's own address. When Node's env proxy would carry a request for
+  // that address (the shared rule, @flint/policy, through ./inference-config), it is not "this Mac": the server is
+  // not started, it is not asked whether it is up, and no clip is posted to it. (Config refuses the same address a
+  // moment later for the same reason; this is the same question asked before anything is started.)
+  const serverProxied = viaProxy(BENCH_SERVER_HOST, cfg.local.proxy);
+  if (serverProxied && clips.length > 0 && haveCli && haveServer && models.length > 0 && args.stt.includes('local') && deps.startServer) {
+    remarks.push("This Mac's own address is reached through a proxy here, so the local transcription server was not started and no clip was sent to it.");
+  }
   if (clips.length > 0 && haveCli) {
     for (const file of models) {
       const model = deps.join(modelsDir, file);
@@ -775,7 +786,7 @@ export async function runBench(args: BenchArgs, deps: BenchDeps): Promise<BenchR
         stt.push(await hear(deps, provider, PROVIDER, file, clips));
         hearBack ??= { stt: provider, label: `${ENGINE} ${file}` };
       }
-      if (args.stt.includes('local') && haveServer && deps.startServer) {
+      if (args.stt.includes('local') && haveServer && deps.startServer && !serverProxied) {
         deps.log(`Starting a transcription server on this Mac with ${file}.`);
         const server = await deps.startServer(serverBin, model);
         if (!server) {

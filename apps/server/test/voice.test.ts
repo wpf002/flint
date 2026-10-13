@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, s
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { readInferenceConfig } from '../src/inference-config';
+import { NO_PROXY_SPELLINGS, REVIEW_SIX } from './no-proxy-spellings';
 import {
   AUDIO_TYPES,
   CannotTranscribe,
@@ -1005,6 +1006,62 @@ describe('a refused voice setting never lands on a less private choice, and neve
     const direct = plan({ ...env, NODE_USE_ENV_PROXY: '1', HTTP_PROXY: 'http://proxy.example:3128', NO_PROXY: '127.0.0.1' });
     expect(direct.cfg.problems).toEqual([]);
     expect(direct.plan.tts).toMatchObject({ name: 'local', local: true });
+  });
+
+  // The review's M1. The rule that reads NO_PROXY disagreed with Node for six spellings: each read as "this
+  // address is direct", so the speech server at it was accepted, and Node then sent the request through the proxy:
+  // a reply that stays on this Mac, and the speech server's key. The rule is @flint/policy's now, one copy for the
+  // model server and for speech, and it says what Node does (test/process/voice-proxy.test.ts sees Node do it).
+  describe('the proxy rule is the shared one, and it reads NO_PROXY as Node does', () => {
+    const ON = { NODE_USE_ENV_PROXY: '1', HTTP_PROXY: 'http://proxy.example:3128' };
+    const at = { v4: 'http://127.0.0.1:8880/v1', v6: 'http://[::1]:8880/v1' } as const;
+
+    it('there are six of them, and for each at least one of this Mac’s two addresses is one Node proxies', () => {
+      expect(REVIEW_SIX).toHaveLength(6);
+      for (const s of REVIEW_SIX) expect(s.direct.v4 && s.direct.v6, s.label).toBe(false);
+    });
+
+    it.each(NO_PROXY_SPELLINGS.map((s) => [s.label, s] as const))('%s: a speech server is taken exactly when Node would reach it directly, for speaking and for hearing', (_label, s) => {
+      for (const family of ['v4', 'v6'] as const) {
+        const env = { ...ON, ...s.env, FLINT_TTS_PROVIDER: 'local', FLINT_STT_PROVIDER: 'local', FLINT_LOCAL_TTS_BASE_URL: at[family], FLINT_LOCAL_STT_BASE_URL: at[family], FLINT_LOCAL_VOICE_API_KEY: 'voice-KEY', OPENAI_API_KEY: 'sk-x' };
+        const { plan: p, cfg, warned } = plan(env);
+        if (s.direct[family]) {
+          expect(cfg.problems, `${s.label} ${family}`).toEqual([]);
+          expect([p.tts.name, p.stt.name], `${s.label} ${family}`).toEqual(['local', 'local']);
+        } else {
+          // Refused, both of them, by name: speech is off (never OpenAI in its place) and hearing stays on whisper.cpp.
+          expect(cfg.problems.map((x) => [x.key, x.kind]), `${s.label} ${family}`).toEqual([
+            ['FLINT_LOCAL_STT_BASE_URL', 'proxied'],
+            ['FLINT_LOCAL_TTS_BASE_URL', 'proxied'],
+          ]);
+          expect(p.tts, `${s.label} ${family}`).toEqual({ name: 'off', local: true, why: 'no_server' });
+          expect(p.stt.name, `${s.label} ${family}`).toBe('whisper-cpp');
+          // Nothing built from that plan holds the address or the key: there is no provider to send them with.
+          expect(JSON.stringify(p), `${s.label} ${family}`).not.toMatch(/8880|voice-KEY/);
+          expect(warned.join('\n'), `${s.label} ${family}`).not.toMatch(/proxy\.example|voice-KEY/);
+        }
+      }
+    });
+
+    it('`localhost` is this Mac’s IPv4 address, pinned, so it is that address the list has to name', () => {
+      const env = { ...ON, FLINT_TTS_PROVIDER: 'local', FLINT_LOCAL_TTS_BASE_URL: 'http://localhost:8880/v1' };
+      expect(plan({ ...env, NO_PROXY: 'localhost' }).plan.tts).toEqual({ name: 'off', local: true, why: 'no_server' });
+      expect(plan({ ...env, NO_PROXY: '127.0.0.1' }).plan.tts).toMatchObject({ name: 'local' });
+    });
+
+    it('there is one copy of the rule: this module reads the proxy through @flint/policy, and so does everything that asks about a speech address', () => {
+      const config = readFileSync(join(__dirname, '..', 'src', 'inference-config.ts'), 'utf8');
+      expect(config).toContain("import { readEnvProxy as policyEnvProxy, viaProxy, type EnvProxy } from '@flint/policy';");
+      expect(config).toContain('export { viaProxy, type EnvProxy };');
+      // The no-proxy list is read nowhere in the server's own code (comments aside): not by config, the seam, the
+      // route, the guard or the benchmark. Whoever asks whether an address is proxied asks that one function.
+      const code = (path: string): string => readFileSync(join(__dirname, '..', path), 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
+      for (const file of ['src/inference-config.ts', 'src/voice.ts', 'src/speech-route.ts', 'src/voice-bench.ts', 'src/local-backend.ts', 'scripts/voice-bench.ts']) {
+        expect(code(file), file).not.toMatch(/NO_PROXY|no_proxy|HTTPS?_PROXY|https?_proxy/);
+      }
+      // The benchmark asks the same function about the address of the server it would start.
+      expect(readFileSync(join(__dirname, '..', 'src', 'voice-bench.ts'), 'utf8')).toContain('const serverProxied = viaProxy(BENCH_SERVER_HOST, cfg.local.proxy);');
+    });
   });
 
   it('a key is never sent in the clear to another machine: it is dropped, and the log says so without the key', () => {

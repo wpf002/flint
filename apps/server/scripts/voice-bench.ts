@@ -38,7 +38,7 @@ import { cpus, homedir, platform, release, tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readInferenceConfig } from '../src/inference-config';
-import { SENTENCES, USAGE, defaultOut, paidPlan, parseBenchArgs, renderBench, runBench, type BenchDeps, type BenchResult, type StartedServer } from '../src/voice-bench';
+import { BENCH_SERVER_HOST, SENTENCES, USAGE, defaultOut, paidPlan, parseBenchArgs, renderBench, runBench, type BenchDeps, type BenchResult, type StartedServer } from '../src/voice-bench';
 import { openAiSpeech, runFile } from '../src/voice';
 
 type Env = Record<string, string | undefined>;
@@ -72,7 +72,7 @@ function freePort(): Promise<number> {
 const SERVER_START_MS = 90_000;
 
 /** The one address the transcription server this run starts may listen on: this Mac, and nothing a network can reach. */
-export const SERVER_HOST = '127.0.0.1';
+export const SERVER_HOST = BENCH_SERVER_HOST;
 
 /** What whisper.cpp's server is started with: one model, this Mac alone, a port of its own, and the path an OpenAI-compatible client asks. */
 export function serverArgs(model: string, port: number): string[] {
