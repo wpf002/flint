@@ -281,15 +281,19 @@ if [ -n "$OFFSITE" ] && [ -d "$(dirname "$OFFSITE")" ]; then
       name="flint-$TS.tar.gz.age"
       # From here an archive is being written offsite: a run stopped part way takes it away and says so (finish).
       NAME_OFFSITE="$name"; STAGE=offsite
-      # Both sides must succeed: zsh's set -e sees only the last command of a pipe,
+      # Every side must succeed: zsh's set -e sees only the last command of a pipe,
       # and age would happily encrypt a truncated tar stream.
+      # The fingerprint is taken from the bytes as they are written, never read back: launchd's zsh may
+      # write into iCloud Drive by path, but macOS refuses it the file's contents afterwards (Operation
+      # not permitted). Read back, the fingerprint came out empty and the copy was never recorded.
+      sum=""
       set +e
-      tar -czf - -C "$SRC" "${EXCLUDES[@]}" "${SECRETS[@]}" . | "$AGE_BIN" -r "$AGE_RECIPIENT" -o "$OFFSITE/$name"
+      tar -czf - -C "$SRC" "${EXCLUDES[@]}" "${SECRETS[@]}" . | "$AGE_BIN" -r "$AGE_RECIPIENT" | tee "$OFFSITE/$name" | shasum -a 256 | read -r sum _
       st=("${pipestatus[@]}")
       set -e
-      if [ "${st[1]}" != 0 ] || [ "${st[2]}" != 0 ]; then
+      if [ "${st[1]}" != 0 ] || [ "${st[2]}" != 0 ] || [ "${st[3]}" != 0 ] || [ "${st[4]}" != 0 ]; then
         rm -f "$OFFSITE/$name"
-        echo "$(date '+%F %T') offsite FAILED: tar exited ${st[1]}, age ${st[2]}; nothing recorded" >&2
+        echo "$(date '+%F %T') offsite FAILED: tar exited ${st[1]}, age ${st[2]}, the write ${st[3]}, the fingerprint ${st[4]}; nothing recorded" >&2
         backup_event icloud failed "$name" encrypt
         name=""
       fi
@@ -305,7 +309,14 @@ if [ -n "$OFFSITE" ] && [ -d "$(dirname "$OFFSITE")" ]; then
   fi
   if [ -n "$name" ]; then
     echo "$name" >> "$MANIFEST"
-    backup_event icloud ok "$name" "$(size_of "$OFFSITE/$name")" "$(hash_of "$OFFSITE/$name")"
+    bytes="$(size_of "$OFFSITE/$name")"
+    if [[ $bytes =~ '^(0|[1-9][0-9]{0,14})$' && $sum =~ '^[0-9a-f]{64}$' ]]; then
+      backup_event icloud ok "$name" "$bytes" "$sum"
+    else
+      # A copy whose size or fingerprint cannot be stated is said to be unreadable, never left unsaid.
+      echo "$(date '+%F %T') offsite written, but its size or fingerprint could not be taken; recorded as unreadable" >&2
+      backup_event icloud failed "$name" unreadable
+    fi
     prune_offsite
     echo "$(date '+%F %T') offsite $(du -h "$OFFSITE/$name" | cut -f1)  $OFFSITE/$name"
   fi
