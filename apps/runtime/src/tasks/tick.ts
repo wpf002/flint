@@ -41,7 +41,7 @@ import type { Db } from '../db.js';
 import type { Bus } from '../bus.js';
 import { appendAudit } from '../governance/audit.js';
 import { TASKS_ORIGIN } from '@flint/policy';
-import { RUN_QUEUE, WITHDRAW_ACTION } from './card.js';
+import { ACCEPT_CARD, RUN_QUEUE, WILL_ORIGINS, WITHDRAW_ACTION, releaseTaskKeys, type Reserve } from './card.js';
 import { OVERRIDE_WINDOW_MS, TASK_FORECAST, expireCancelledForecast, mayExpire, mayScore, scoreTaskForecast } from './forecast.js';
 import { CHECK_QUEUE, failTask } from './run.js';
 import { taskLog } from './errors.js';
@@ -66,6 +66,8 @@ export interface TaskTickDeps {
   log?: (msg: string) => void;
   /** How many tasks one read answers (TASKS_PER_PAGE; a test's seam, to walk pages without hundreds of tasks). */
   pageSize?: number;
+  /** What sets a paid task's money aside, when there is one: a task withdrawn before it went out gives back what its cards hold. */
+  reserve?: Reserve;
 }
 
 export interface TaskTickCounts {
@@ -98,15 +100,20 @@ export async function taskTick(d: TaskTickDeps): Promise<TaskTickCounts> {
   };
 
   // 1. Proposed, with no card left that could send it out. Read by what it lacks: a task whose card still waits
-  // for Will is not in the answer, so cards that wait never crowd out one whose card is gone.
+  // for Will is not in the answer, so cards that wait never crowd out one whose card is gone. Only a card filed
+  // for him counts: one written under another origin could never be approved, and would keep the task for good.
   const proposed = await db.$queryRaw<Array<{ id: string }>>`
     SELECT t.id FROM "Task" t
     WHERE t.status = 'proposed' AND t."createdAt" < ${new Date(now.getTime() - FILING_GRACE_MS)}
       AND NOT EXISTS (
         SELECT 1 FROM "Proposal" p
-        WHERE p.action LIKE 'task.dispatch.%' AND p.status IN ('pending', 'approved', 'executing') AND p.args->>'taskId' = t.id)
+        WHERE p.action LIKE 'task.dispatch.%' AND p.origin IN (${Prisma.join([...WILL_ORIGINS])})
+          AND p.status IN ('pending', 'approved', 'executing') AND p.args->>'taskId' = t.id)
     ORDER BY t."createdAt" ASC, t.id ASC LIMIT ${pageSize}`;
   for (const t of proposed) {
+    // What its cards set aside is given back first: none of them can send it out any more. A release that does not
+    // go through leaves the task as it is, for the next tick.
+    if (!(await releaseTaskKeys(db, d.reserve, t.id).catch(() => false))) continue;
     const done = await db.$transaction(async (tx) => {
       const r = await tx.task.updateMany({ where: { id: t.id, status: 'proposed' }, data: { status: 'cancelled' } });
       // `now` decides what is overdue; what is written carries the time it is written.
@@ -151,15 +158,18 @@ export async function taskTick(d: TaskTickDeps): Promise<TaskTickCounts> {
   // read here at all.) Two reads, each of what needs one thing done, so neither kind waits behind the other:
   // a card he turned down, or let lapse, is his answer, and the wait ends; one with no such card is sent to its
   // check, which files one (again, when the last one failed).
+  // (An accept card is the check's own, as check.ts reads it: one written under another origin is neither
+  // waiting for him nor his answer when it lapses.)
+  const theCheckFiled = Prisma.sql`p.action = ${ACCEPT_CARD.action} AND p.origin = ${ACCEPT_CARD.origin} AND p."templateId" = ${ACCEPT_CARD.templateId}`;
   const passedWithout = (declined: boolean) => db.$queryRaw<Array<{ id: string }>>`
     SELECT t.id FROM "Task" t
     WHERE t.status = 'checking' AND t."metBar" = true
       AND NOT EXISTS (
         SELECT 1 FROM "Proposal" p
-        WHERE p.action = 'task.check_bar' AND p.status IN ('pending', 'approved', 'executing') AND p.args->>'taskId' = t.id)
+        WHERE ${theCheckFiled} AND p.status IN ('pending', 'approved', 'executing') AND p.args->>'taskId' = t.id)
       AND ${declined} = EXISTS (
         SELECT 1 FROM "Proposal" p
-        WHERE p.action = 'task.check_bar' AND p.status IN ('rejected', 'expired') AND p.args->>'taskId' = t.id)
+        WHERE ${theCheckFiled} AND p.status IN ('rejected', 'expired') AND p.args->>'taskId' = t.id)
     ORDER BY t."updatedAt" ASC, t.id ASC LIMIT ${pageSize}`;
   for (const t of await passedWithout(true)) await fail({ id: t.id, status: 'checking' }, 'expired');
   for (const t of await passedWithout(false)) await send(CHECK_QUEUE, t.id);

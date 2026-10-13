@@ -9,6 +9,7 @@ import type { AssetRow, AssetsPage } from '@flint/policy';
 import type { Db } from '../db.js';
 import { ASSETS, sameAsset, type AssetDef } from './registry.js';
 import { enableProblem, syncAssets } from './service.js';
+import { WILL_ORIGINS } from '../tasks/card.js';
 
 /** What an asset's row says while its card waits for Will. */
 export const WAITING = 'A card is waiting for your approval.';
@@ -17,7 +18,8 @@ export const WAITING = 'A card is waiting for your approval.';
 export async function assetsPage(db: Db, registry: readonly AssetDef[] = ASSETS): Promise<z.infer<typeof AssetsPage>> {
   await syncAssets(db, registry);
   const rows = await db.asset.findMany({ where: { id: { in: registry.map((d) => d.id) } } });
-  const pending = await db.proposal.findMany({ where: { action: 'asset.enable', status: 'pending', expiresAt: { gt: new Date() } }, select: { args: true } });
+  // A card he can approve: one filed for him. (One written under another origin would say "waiting" and withhold Turn On for a card that never runs.)
+  const pending = await db.proposal.findMany({ where: { action: 'asset.enable', origin: { in: [...WILL_ORIGINS] }, status: 'pending', expiresAt: { gt: new Date() } }, select: { args: true } });
   const waiting = new Set(pending.map((p) => (p.args as { assetId?: unknown } | null)?.assetId).filter((x): x is string => typeof x === 'string'));
   const assets: Array<z.infer<typeof AssetRow>> = [];
   for (const def of registry) {

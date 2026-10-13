@@ -34,7 +34,7 @@ import { Refused, createProposal, rejectProposal } from '../governance/proposals
 import { ASSETS, assetFor, sameAsset, type AssetDef } from '../assets/registry.js';
 import { CONSOLE_ACTOR } from '../assets/service.js';
 import type { AdapterSet } from './adapters/types.js';
-import { WITHDRAW_ACTION } from './card.js';
+import { WITHDRAW_ACTION, releaseTaskKeys, type Reserve } from './card.js';
 import { SAY, taskStatusWords } from './errors.js';
 import { ADAPTERS } from './run.js';
 
@@ -55,6 +55,8 @@ export const TASK_TITLES: Readonly<Record<TaskTemplateId, string>> = {
 export interface TaskServiceDeps {
   registry?: readonly AssetDef[];
   adapters?: AdapterSet;
+  /** What sets a paid task's money aside, when there is one. */
+  reserve?: Reserve;
 }
 
 const RC = { maxWait: 10_000, timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted } as const;
@@ -143,12 +145,14 @@ export async function createTask(db: Db, body: NewTaskBody, deps: TaskServiceDep
  * that is still waiting is turned away; one that has gone out gets a card for
  * Will to sign.
  */
-export async function cancelTask(db: Db, id: string, now = new Date()): Promise<{ ok: true } | { proposalId: string; deduped: boolean }> {
+export async function cancelTask(db: Db, id: string, now = new Date(), deps: Pick<TaskServiceDeps, 'reserve'> = {}): Promise<{ ok: true } | { proposalId: string; deduped: boolean }> {
   const t = await db.task.findUnique({ where: { id }, select: { status: true, sensitivity: true } });
   if (!t) throw new Refused(404, SAY.noTask);
   if (t.status === 'proposed' && (await cancelProposed(db, id, 'will', now))) {
     const waiting = await db.proposal.findMany({ where: { action: { startsWith: 'task.dispatch.' }, status: 'pending', args: { path: ['taskId'], equals: id } }, select: { id: true } });
     for (const p of waiting) await rejectProposal(db, p.id, { error: taskStatusWords('cancelled') }, undefined, CONSOLE_ACTOR).catch(() => {});
+    // It will never go out: what any of its cards set aside is given back.
+    await releaseTaskKeys(db, deps.reserve, id).catch(() => false);
     return { ok: true };
   }
   const filed = await createProposal(db, {

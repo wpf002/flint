@@ -31,7 +31,7 @@ import { appendAudit } from '../governance/audit.js';
 import { activePolicies, createProposal } from '../governance/proposals.js';
 import { claim } from '../governance/counters.js';
 import { sqlState } from '../dbcodes.js';
-import { countsOf, endingCost, writeProof } from './card.js';
+import { ACCEPT_CARD, countsOf, endingCost, writeProof } from './card.js';
 import { taskLog } from './errors.js';
 import { failTask, itemFacts, type TaskJob } from './run.js';
 
@@ -65,10 +65,14 @@ export async function checkTier(db: Db, now: Date): Promise<{ standing: Standing
 }
 export const checkStanding = async (db: Db, now: Date): Promise<Standing> => (await checkTier(db, now)).standing;
 
-/** The accept card of a task that is waiting, approved or running, if there is one. */
+/**
+ * The accept card of a task that is waiting, approved or running, if there is
+ * one: a card the check itself filed (ACCEPT_CARD). One written under another
+ * origin is not it, and never holds the real card back.
+ */
 export async function liveAcceptCard(db: Db, taskId: string): Promise<string | undefined> {
   const p = await db.proposal.findFirst({
-    where: { action: 'task.check_bar', status: { in: ['pending', 'approved', 'executing'] }, args: { path: ['taskId'], equals: taskId } },
+    where: { ...ACCEPT_CARD, status: { in: ['pending', 'approved', 'executing'] }, args: { path: ['taskId'], equals: taskId } },
     select: { id: true },
   });
   return p?.id;
@@ -80,11 +84,12 @@ export async function liveAcceptCard(db: Db, taskId: string): Promise<string | u
  * failed, for whatever reason (he signed something newer about the task, a
  * rule of his stopped it after he approved it, the database refused it), is
  * not an answer about the result: the task keeps waiting, and is offered to
- * him again.
+ * him again. Nor is a card the check did not file (ACCEPT_CARD): he could not
+ * have approved it, so its lapsing says nothing.
  */
 export async function acceptDeclined(db: Db, taskId: string): Promise<boolean> {
   const dead = await db.proposal.findFirst({
-    where: { action: 'task.check_bar', args: { path: ['taskId'], equals: taskId }, status: { in: ['rejected', 'expired'] } },
+    where: { ...ACCEPT_CARD, args: { path: ['taskId'], equals: taskId }, status: { in: ['rejected', 'expired'] } },
     select: { id: true },
   });
   return dead !== null;

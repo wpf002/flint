@@ -94,17 +94,60 @@ export interface TaskCardDeps {
  * asked inside the dispatch's transaction, before anything is written, and is
  * idempotent: asked again under the same key (a card run again after a fault)
  * it answers as it did and sets nothing more aside. `release` gives back what a
- * key holds, and nothing when it holds nothing; it is called whenever the
- * dispatch did not happen (a refusal, a fault, the day's cap). When it cannot
- * be told whether the dispatch happened, nothing is released: the same card's
- * next run takes nothing more, and a reservation is never short of a task that
- * went out.
+ * key holds, and nothing when it holds nothing.
+ *
+ * A key is kept only for the card whose dispatch happened. The runtime gives a
+ * card's key back, whether or not the run at hand was the one that took it:
+ *  - whenever a run of the card ends and the card is known not to have sent
+ *    its task out (a refusal, a fault, the day's cap);
+ *  - when the task goes out on another card (that card's run gives back the
+ *    keys of the task's other dispatch cards);
+ *  - when the task is withdrawn before it went out, because its card lapsed
+ *    (expired, turned down, set aside) or Will cancelled it: the tick, or his
+ *    cancellation, gives back the keys of all its dispatch cards
+ *    (releaseTaskKeys).
+ * When a run ends and it cannot be told whether the card ran (the card cannot
+ * be read), nothing is released then: a reservation is never short of a task
+ * that went out. That key is given back by whichever of the three comes next.
+ * One case is left to whoever keeps the money: a card the runtime can no
+ * longer tie to its task (its item forgotten, so its args are gone) that never
+ * runs again. An implementation lets a key lapse by itself once its card's
+ * expiry has passed (a week from filing at most): no card runs after that.
  */
 export interface Reserve {
   /** `key` is the card's id; `micros` is millionths of a dollar. */
   take(key: string, micros: number): Promise<boolean>;
   release(key: string): Promise<void>;
 }
+
+/**
+ * Give back what the dispatch cards of a task hold, all of them or all but
+ * one: for a task that was withdrawn before it went out, or that went out on
+ * the card left out. Only cards that spend can hold anything. True when every
+ * release went through.
+ */
+export async function releaseTaskKeys(db: Db, reserve: Reserve | undefined, taskId: string, except?: string): Promise<boolean> {
+  if (!reserve) return true;
+  const cards = await db.proposal.findMany({
+    where: { kind: 'spend', action: { startsWith: 'task.dispatch.' }, args: { path: ['taskId'], equals: taskId }, ...(except ? { NOT: { id: except } } : {}) },
+    select: { id: true },
+  });
+  let all = true;
+  for (const c of cards) await reserve.release(c.id).catch(() => { all = false; });
+  return all;
+}
+
+/**
+ * Whose cards the executor carries out (cardProblem): an accept card is the
+ * task job's own, under its template; every other is filed for Will, from the
+ * console or the CLI. Anything that asks whether a task or an asset has a card
+ * waiting, or had one turned down, reads only these: a card written under
+ * another origin can never be approved or run, so it must never stand for
+ * one that can (hold a real card back, show as waiting, or end a task when it
+ * lapses).
+ */
+export const WILL_ORIGINS = ['console', 'cli'] as const;
+export const ACCEPT_CARD = { action: 'task.check_bar', origin: TASKS_ORIGIN, templateId: ACCEPT_TEMPLATE } as const;
 
 /** A provenance ref on a card is an id: a proposal's provenance is kept for good. */
 const PROVENANCE_REF = /^[A-Za-z0-9_.:@-]{1,120}$/;
@@ -287,8 +330,6 @@ interface ApplyContext {
   tz: string;
   deps: TaskCardDeps;
   hooks: TaskHooks;
-  /** The reservation this run asked for, by its key: set before the asking, so a fault while asking is covered too. */
-  held: { reservation?: string };
 }
 type Result = Record<string, string | number | boolean>;
 type Applied = { result: Result } | { refusal: string };
@@ -332,16 +373,38 @@ async function signedOver(db: Db, id: string): Promise<boolean> {
   return !!p && p.status === 'approved' && !!p.approvalId && !!subject && superseded(db, p.approvalId, subject);
 }
 
+/** A card that is about a task by its name: a task's own cards, a review of it, the Hive's dispatch. (It says which task in its args.) */
+const ABOUT_A_TASK = Prisma.sql`(action LIKE 'task.%' OR action LIKE 'review.%' OR action = 'hive.dispatch_job')`;
+
+/**
+ * Before a cancellation or an override touches anything: lock the task's
+ * waiting cards together with the card's own, in id order, and before the
+ * task's row. That is the order a forget takes them in (its cards by id, then
+ * its tasks), so a forget that lands while the card runs waits for it, or the
+ * card for the forget, and neither for the other. No other card needs this:
+ * only these two write to cards besides their own.
+ */
+async function lockCards(tx: Tx, own: string): Promise<void> {
+  const [card] = await tx.$queryRaw<Array<{ action: string; taskId: string | null }>>`SELECT action, args->>'taskId' AS "taskId" FROM "Proposal" WHERE id = ${own}`;
+  if (!card?.taskId || (card.action !== 'task.cancel' && card.action !== 'task.bar_override')) return;
+  await tx.$queryRaw`
+    SELECT id FROM "Proposal"
+    WHERE id = ${own} OR (status = 'pending' AND ${ABOUT_A_TASK} AND args->>'taskId' = ${card.taskId})
+    ORDER BY id FOR UPDATE`;
+}
+
 /**
  * A task has ended by Will's own card (a cancellation, an override): his other
  * cards about it that were still waiting are set aside, with a sentence, in
- * the same transaction. None of them could act any more, and one left waiting
- * would only be refused when he approved it.
+ * the same transaction: its accept card, another cancellation or override,
+ * and a review that names it. None of them could act any more, and one left
+ * waiting would only be refused when he approved it. (Their rows were locked
+ * before the task's: lockCards. One filed since is locked here.)
  */
 async function setAside(tx: Tx, taskId: string, own: string, actor: string, now: Date): Promise<number> {
   const waiting = await tx.$queryRaw<Array<{ id: string; action: string; origin: string; argsDigest: string; tainted: boolean }>>`
     SELECT id, action, origin, "argsDigest", tainted FROM "Proposal"
-    WHERE status = 'pending' AND id <> ${own} AND action LIKE 'task.%' AND args->>'taskId' = ${taskId}
+    WHERE status = 'pending' AND id <> ${own} AND ${ABOUT_A_TASK} AND args->>'taskId' = ${taskId}
     ORDER BY id FOR UPDATE`;
   for (const p of waiting) {
     await tx.proposal.update({ where: { id: p.id }, data: { status: 'rejected', error: SAY.setAside } });
@@ -424,7 +487,6 @@ async function applyTask(tx: Tx, action: string, raw: unknown, ctx: ApplyContext
     // Money first: a spending asset's task goes out only once its amount is set aside, under this card's id.
     if (asset.spends) {
       if (!ctx.deps.reserve) return { refusal: SAY.paidOff };
-      ctx.held.reservation = ctx.proposalId;
       if (!(await ctx.deps.reserve.take(ctx.proposalId, args.estCostMicros))) return { refusal: SAY.paidOff };
     }
     const forecast = await recordForecast(tx, { id: t.id, assetKind: asset.kind, template: args.spec.template, dueAt: t.dueAt }, ctx.tz, now);
@@ -531,15 +593,24 @@ export interface TaskHooks {
 export async function runTask(db: Db, id: string, rp: WebAuthnRelyingParty | undefined, tz: string, actor: string, deps: TaskCardDeps = {}, hooks: TaskHooks = {}): Promise<Result> {
   if (deps.assets !== true) throw new Refused(409, SAY.off);
   const now = new Date();
-  const held: ApplyContext['held'] = {};
-  /** Give back what this run set aside. Never throws: a release that fails leaves the key held, and the next run takes nothing more. */
-  const release = async () => {
-    if (held.reservation) await deps.reserve?.release(held.reservation).catch(() => {});
+  /**
+   * A run of the card has ended without sending its task out, as far as can be told: give back what the card
+   * holds, whether this run took it or an earlier one did. Only a dispatch that spends can hold anything. A
+   * card that ran keeps its reservation, and so does one that cannot be read (it cannot be told). Never throws.
+   */
+  const giveBack = async () => {
+    if (!deps.reserve) return;
+    const card = await db.proposal.findUnique({ where: { id }, select: { status: true, action: true, kind: true } }).catch(() => undefined);
+    if (!card || card.status === 'executed' || card.status === 'executing') return;
+    if (card.kind === 'spend' && isTaskDispatch(card.action)) await deps.reserve.release(id).catch(() => {});
   };
   let out: { refused: Refused } | { done: Result };
+  /** A dispatch that spent, once it is made: the task it sent out. */
+  let paid: string | undefined;
   try {
     out = await db.$transaction(
       async (tx) => {
+        await lockCards(tx, id);
         // A card whose subject Will had Flint forget since he approved it: its args are gone (only a forget clears
         // them before a card has ended). It does not run, and ends with a sentence and no result.
         const [gone] = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Proposal" WHERE id = ${id} AND status = 'approved' AND "argsPurgedAt" IS NOT NULL FOR UPDATE`;
@@ -556,7 +627,7 @@ export async function runTask(db: Db, id: string, rp: WebAuthnRelyingParty | und
               const why = cardProblem(c.claimed.action, p);
               if (why) return { refusal: why };
               await tx.$queryRaw`SELECT set_config('flint.actor', ${`will:approval:${p.approvalId}`}, true)`;
-              return applyTask(tx, c.claimed.action, c.claimed.args, { proposalId: id, approvalId: p.approvalId!, argsDigest: c.claimed.argsDigest, actor, now, tz, deps, hooks, held });
+              return applyTask(tx, c.claimed.action, c.claimed.args, { proposalId: id, approvalId: p.approvalId!, argsDigest: c.claimed.argsDigest, actor, now, tz, deps, hooks });
             })();
         if ('refusal' in r) {
           await completeIn(tx, id, { ok: false, error: r.refusal }, actor, now);
@@ -567,24 +638,23 @@ export async function runTask(db: Db, id: string, rp: WebAuthnRelyingParty | und
         if (c.cap && isTaskDispatch(c.claimed.action)) await claimCap(tx, c.cap, tz, now);
         await hooks.afterWrites?.(tx);
         await completeIn(tx, id, { ok: true, result: r.result }, actor, now);
+        if (p.kind === 'spend' && isTaskDispatch(c.claimed.action) && typeof r.result.taskId === 'string') paid = r.result.taskId;
         return { done: r.result };
       },
       // READ COMMITTED, said out loud: the database refuses these changes above it (its guards read what is committed now).
       { maxWait: 10_000, timeout: 30_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
     );
   } catch (err) {
-    // Nothing was changed, unless the failure was the commit's own and it cannot be told: only a card that is
-    // known not to have run gives its reservation back.
-    if (held.reservation) {
-      const ran = await db.proposal.findUnique({ where: { id }, select: { status: true } }).then((p) => p?.status === 'executed', () => undefined);
-      if (ran === false) await release();
-    }
+    // Nothing was changed, unless the failure was the commit's own: giveBack looks at the card to tell.
+    await giveBack();
     throw sanitize(err);
   }
   if ('refused' in out) {
-    await release();
+    await giveBack();
     throw out.refused;
   }
+  // The task went out on this card: its other dispatch cards can never send it, and hold nothing from here on.
+  if (paid) await releaseTaskKeys(db, deps.reserve, paid, id).catch(() => false);
   return out.done;
 }
 

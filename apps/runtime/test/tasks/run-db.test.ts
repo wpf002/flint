@@ -25,7 +25,7 @@ import { CI_WATCHER } from '../../src/assets/registry';
 import { ciSummary, ciWatch } from '../../src/tasks/adapters/ci-watch';
 import type { TaskAdapter } from '../../src/tasks/adapters/types';
 import { checkStanding, checkTaskJob } from '../../src/tasks/check';
-import { ADAPTERS, TaskJob, itemFacts, plainData, runTaskJob } from '../../src/tasks/run';
+import { ADAPTERS, TaskJob, itemFacts, plainData, runTaskJob, thrownKind } from '../../src/tasks/run';
 import { TASK_TICK_CRON } from '../../src/tasks/tick';
 import { taskLog, taskStatusWords } from '../../src/tasks/errors';
 import { taskView } from '../../src/tasks/view';
@@ -187,7 +187,9 @@ describe.skipIf(NO_DB)('running and checking a task on flint_test', () => {
       ['a function inside', () => ({ output: { ...good, run: () => `${CANARY}` }, summary: 'ok.' }), 'not plain data'],
       ['something that is not plain data inside', () => ({ output: { ...good, at: new Date() }, summary: 'ok.' }), 'not plain data'],
       ['a number that is not one', () => ({ output: { ...good, sha: Number.NaN }, summary: 'ok.' }), 'not plain data'],
-      ['a value that throws when it is read', () => ({ get output(): unknown { throw new RangeError(`${CANARY} getter`); }, summary: 'ok.' }), 'RangeError'],
+      ['a value that throws when it is read', () => ({ get output(): unknown { throw new RangeError(`${CANARY} getter`); }, summary: 'ok.' }), 'unreadable'],
+      // What is thrown is the adapter's to choose, down to the error's own name: none of it is written down.
+      ['a value that throws an error named by the adapter', () => ({ get output(): unknown { throw Object.assign(new Error('x'), { name: `${CANARY} named error` }); }, summary: 'ok.' }), 'unreadable'],
     ];
     const logs: string[] = [];
     for (const [name, give, says] of unusable) {
@@ -222,7 +224,15 @@ describe.skipIf(NO_DB)('running and checking a task on flint_test', () => {
     const refused: string[] = [];
     await expect(runTaskJob({ db, bus, log: (m) => refused.push(m) }, { taskId: twice.id })).resolves.toBe('failed');
     expect(await fx.task(twice.id)).toMatchObject({ status: 'failed', failure: 'invalid', outputRef: null });
-    expect(refused).toEqual([expect.stringMatching(new RegExp(`^task ${twice.id}: result unusable \\(PrismaClient[A-Za-z]+ P\\d+\\)$`)), `task ${twice.id}: failed (invalid)`]);
+    expect(refused).toEqual([`task ${twice.id}: result unusable (refused by the database)`, `task ${twice.id}: failed (invalid)`]);
+    // An adapter that throws is told by what kind of error it was: one of JavaScript's own, or just "error".
+    const named = await fx.dispatched(await fx.ciRun('wpf002/named-throw', { status: 'completed', conclusion: 'success' }));
+    const thrown: string[] = [];
+    const throws = { ci_runner: { kind: 'ci_runner' as const, estimate: () => 0, run: (async () => { throw Object.assign(new TypeError(`${CANARY} words`), { name: `${CANARY} a name of its own` }); }) as TaskAdapter['run'] } };
+    await expect(runTaskJob({ db, bus, adapters: throws, log: (m) => thrown.push(m) }, { taskId: named.id })).resolves.toBe('failed');
+    expect(thrown).toEqual([`task ${named.id}: adapter threw (error)`, `task ${named.id}: failed (error)`]);
+    expect([thrownKind(new TypeError('x')), thrownKind(new RangeError('x')), thrownKind(new Error('x')), thrownKind('words'), thrownKind(null), thrownKind(Object.assign(new Error('x'), { name: 'x'.repeat(60) }))])
+      .toEqual(['TypeError', 'RangeError', 'Error', 'error', 'error', 'error']);
     // plainData itself: plain JSON within its depth and size, and nothing else.
     expect([plainData(good), plainData({ a: [1, 'x', null, true, { b: [] }] }), plainData(Object.create(null))]).toEqual([true, true, true]);
     expect([plainData(deep(12)), plainData(deep(13)), plainData(undefined), plainData(10n), plainData(Symbol('x')), plainData(new Map())]).toEqual([true, false, false, false, false, false]);

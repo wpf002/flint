@@ -45,7 +45,8 @@ import { NEVER_PROMOTED } from '../../src/governance/promotion';
 import { ASSETS, CI_WATCHER, assetOf, type AssetDef, enableArgsOf } from '../../src/assets/registry';
 import { fileEnable, syncAssets, turnOff } from '../../src/assets/service';
 import { cardProblem, checkTaskCard, runTask, runTaskCard } from '../../src/tasks/card';
-import { acceptDeclined, checkTaskJob } from '../../src/tasks/check';
+import { acceptDeclined, checkTaskJob, liveAcceptCard } from '../../src/tasks/check';
+import { WAITING, assetsPage } from '../../src/assets/view';
 import { taskTick } from '../../src/tasks/tick';
 import { taskView } from '../../src/tasks/view';
 import { runTaskJob } from '../../src/tasks/run';
@@ -78,13 +79,13 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
   afterAll(async () => db?.$disconnect());
 
   /** A card as chat or a broken caller might plant it: written straight into the table, pending. */
-  async function planted(action: string, args: Record<string, unknown>, over: Record<string, unknown> = {}): Promise<string> {
+  async function planted(action: string, args: Record<string, unknown>, over: Record<string, unknown> = {}, life = '1 hour'): Promise<string> {
     const pid = id('pr');
     const o = { kind: 'task', origin: 'chat:turn1', templateId: null, tainted: false, consequential: false, sensitivity: 'ops', ...over };
     await withClient(urls.app, (c) => c.query(
       `INSERT INTO "Proposal" (id, kind, origin, action, "templateId", args, "argsDigest", "argsProvenance", tainted, sensitivity, consequential, "expiresAt")
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, '{}'::jsonb, $8, $9, $10, now() + interval '1 hour')`,
-      [pid, o.kind, o.origin, action, o.templateId, JSON.stringify(args), digestOf(args), o.tainted, o.sensitivity, o.consequential],
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, '{}'::jsonb, $8, $9, $10, now() + $11::interval)`,
+      [pid, o.kind, o.origin, action, o.templateId, JSON.stringify(args), digestOf(args), o.tainted, o.sensitivity, o.consequential, life],
     ));
     return pid;
   }
@@ -693,9 +694,13 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     const stop = await fx.file('task.cancel', { taskId: passed });
     const bystander = await fx.checked('wpf002/aside-other');
     const theirs = (await fx.cardFor('task.check_bar', bystander))!;
+    // And a review that names the task, waiting (no reviewer is built: written as the console would file one).
+    const review = await planted('review.local', { taskId: passed }, { origin: 'console', kind: 'tool_call' });
+    const theirReview = await planted('review.local', { taskId: bystander }, { origin: 'console', kind: 'tool_call' });
     const reject = await fx.file('task.bar_override', { taskId: passed, to: 'rejected' });
     expect(await fx.signRun(reject.id)).toEqual({ taskId: passed, to: 'rejected' });
-    for (const pid of [accept.id, stop.id]) {
+    expect(await card(theirReview)).toMatchObject({ status: 'pending', error: null });
+    for (const pid of [accept.id, stop.id, review]) {
       expect(await card(pid), pid).toMatchObject({ status: 'rejected', error: TASK_SAYS.setAside, approvalId: null });
       const entry = await db.auditEntry.findFirstOrThrow({ where: { correlationId: pid, kind: 'rejection' } });
       expect(entry).toMatchObject({ decision: 'deny', outcome: 'denied' });
@@ -710,8 +715,103 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
     const cancelled = (await fx.cardFor('task.cancel', bystander)) ?? (await fx.file('task.cancel', { taskId: bystander }));
     expect(await fx.signRun(cancelled.id)).toEqual({ taskId: bystander, cancelled: true });
     expect(await card(theirs.id)).toMatchObject({ status: 'rejected', error: TASK_SAYS.setAside });
+    expect(await card(theirReview)).toMatchObject({ status: 'rejected', error: TASK_SAYS.setAside });
     // Nothing is filed again for a task that has ended.
     expect(await checkTaskJob({ db }, { taskId: passed })).toBe('skipped');
+  });
+
+  it('a forget that lands while a cancellation or an override runs waits for it: both complete, in the order a forget takes its locks', async () => {
+    await fx.watcherOn();
+    // A result that passed, with its accept card waiting (filed first, so the forget reaches it before the card
+    // that is running). The forget starts once the running card has looked for a later signature, and the card
+    // goes on to set the accept card aside: with the cards locked after the task, each would wait for the other.
+    for (const [action, more, result] of [['task.cancel', {}, { cancelled: true }], ['task.bar_override', { to: 'rejected' }, { to: 'rejected' }]] as const) {
+      const item = await fx.ciRun(`wpf002/forget-during-${action}`, { status: 'completed', conclusion: 'success' });
+      const t = await fx.dispatched(item);
+      await runTaskJob({ db, bus }, { taskId: t.id });
+      await checkTaskJob({ db }, { taskId: t.id });
+      const accept = (await fx.cardFor('task.check_bar', t.id))!.id;
+      const ends = await fx.file(action, { taskId: t.id, ...more });
+      await fx.approve(ends.id);
+      let forget: Promise<unknown> = Promise.resolve('not started');
+      const ran = await runTaskCard(db, ends.id, undefined, 'UTC', 'test', { assets: true, bus }, {
+        afterOrderCheck: async () => {
+          forget = fx.forget(item).then(() => 'forgotten', (e: unknown) => (e instanceof Error ? e.message : 'failed'));
+          await new Promise((r) => setTimeout(r, 400));
+        },
+      });
+      expect(ran, action).toEqual({ taskId: t.id, ...result });
+      // The forget waited for the card, then cleared what was left: no "deadlock detected".
+      expect(await forget, action).toBe('forgotten');
+      expect(await fx.task(t.id), action).toMatchObject({ status: action === 'task.cancel' ? 'cancelled' : 'rejected', spec: null });
+      expect(await db.proposal.findUniqueOrThrow({ where: { id: ends.id } }), action).toMatchObject({ status: 'executed' });
+      expect(await db.proposal.findUniqueOrThrow({ where: { id: accept } }), action).toMatchObject({ status: 'rejected', args: null });
+      expect((await db.entity.findUniqueOrThrow({ where: { id: item } })).status, action).toBe('forgotten');
+    }
+  });
+
+  it('a card written under another origin never stands for one Will can approve: it holds no real card back, is not shown as waiting, and its lapsing is not his answer', async () => {
+    await fx.watcherOn();
+    // A result is handed in, and an accept card for it is already there under chat's origin (written straight
+    // into the table): nobody can approve it. The check files its own card all the same.
+    const t = await fx.dispatched(await fx.ciRun('wpf002/other-origin', { status: 'completed', conclusion: 'success' }));
+    await runTaskJob({ db, bus }, { taskId: t.id });
+    const args = { taskId: t.id, outputRef: (await fx.task(t.id)).outputRef, metBar: true, checks: 2, met: 2, by: 'flint:rule' };
+    const fake = await planted('task.check_bar', args, {}, '2 seconds');
+    // Nor one Will "filed" himself, or one under the job's origin and another template: the executor runs neither.
+    const others = [await planted('task.check_bar', args, { origin: 'console' }, '2 seconds'), await planted('task.check_bar', args, { origin: TASKS_ORIGIN, templateId: 'task.other.v1' }, '2 seconds')];
+    expect(await liveAcceptCard(db, t.id)).toBeUndefined();
+    expect(await checkTaskJob({ db }, { taskId: t.id })).toBe('filed');
+    const real = await db.proposal.findFirstOrThrow({ where: { action: 'task.check_bar', origin: TASKS_ORIGIN, templateId: ACCEPT_TEMPLATE, args: { path: ['taskId'], equals: t.id } } });
+    expect([fake, ...others]).not.toContain(real.id);
+    expect(await liveAcceptCard(db, t.id)).toBe(real.id);
+    // The panel shows the card he can approve, and says it is waiting for him because that one is.
+    expect(await taskView(db, t.id, 'UTC')).toMatchObject({ line: 'It passed its checks and is waiting for you.', card: real.id });
+    expect((await refusal(fx.approve(fake))).message).toBe('Flint isn’t allowed to run this.');
+    // The others lapse. That is nobody's answer: the task is not ended, and nothing more is filed.
+    await new Promise((r) => setTimeout(r, 2300));
+    expect(await expireProposals(db)).toBeGreaterThanOrEqual(3);
+    for (const pid of [fake, ...others]) expect(await db.proposal.findUniqueOrThrow({ where: { id: pid } })).toMatchObject({ status: 'expired' });
+    expect(await acceptDeclined(db, t.id)).toBe(false);
+    bus.clear();
+    await taskTick({ db, bus });
+    expect(await fx.task(t.id)).toMatchObject({ status: 'checking', failure: null });
+    expect(await checkTaskJob({ db }, { taskId: t.id })).toBe('waiting');
+    expect(await fx.signRun(real.id)).toEqual({ taskId: t.id, accepted: true });
+
+    // With only such a card and no real one (the same, the other way round): the result is still offered.
+    const u = await fx.dispatched(await fx.ciRun('wpf002/other-origin-only', { status: 'completed', conclusion: 'success' }));
+    await runTaskJob({ db, bus }, { taskId: u.id });
+    await db.task.update({ where: { id: u.id }, data: { status: 'checking' } });
+    await db.task.update({ where: { id: u.id }, data: { metBar: true, barCheckedBy: 'flint:rule', barEvidence: [{ id: 'a1', op: 'ci', met: true }, { id: 'a2', op: 'refs_known', met: true }] } });
+    await planted('task.check_bar', { ...args, taskId: u.id, outputRef: (await fx.task(u.id)).outputRef });
+    expect((await taskView(db, u.id, 'UTC'))!).toMatchObject({ line: 'Flint is checking the result.', card: null });
+    bus.clear();
+    await taskTick({ db, bus });
+    expect(bus.of('tasks.check').some((j) => j.data.taskId === u.id)).toBe(true);
+    expect(await checkTaskJob({ db }, { taskId: u.id })).toBe('filed');
+
+    // A new task whose only waiting dispatch card is such a card: no card of Will's can send it out, so the
+    // tick withdraws it once its own card is gone, instead of keeping it for as long as the other waits.
+    const orphan = await fx.newTask(await fx.ciRun('wpf002/other-origin-dispatch'));
+    const dispatchArgs = (await db.proposal.findUniqueOrThrow({ where: { id: orphan.proposalId } })).args as Record<string, unknown>;
+    await planted('task.dispatch.ci_runner', dispatchArgs);
+    expect((await taskView(db, orphan.id, 'UTC'))!.card).toBe(orphan.proposalId);
+    await rejectProposal(db, orphan.proposalId, { approvalId: await fx.sign(orphan.proposalId, 'reject') }, undefined, 'test');
+    expect((await taskView(db, orphan.id, 'UTC'))!.card).toBeNull();
+    await taskTick({ db, bus, now: () => new Date(Date.now() + 11 * 60_000) });
+    expect(await fx.task(orphan.id)).toMatchObject({ status: 'cancelled' });
+
+    // Settings: a card to turn the watcher on under chat's origin does not say "waiting", and does not withhold Turn On.
+    await turnOff(db, CI_WATCHER.id);
+    await planted('asset.enable', enableArgsOf(CI_WATCHER), { kind: 'policy', consequential: true });
+    const row = async () => (await assetsPage(db)).assets.find((a) => a.id === CI_WATCHER.id)!;
+    expect(await row()).toMatchObject({ on: false, waiting: false, canTurnOn: true, line: CI_WATCHER.line });
+    // His own card does.
+    const own = await fileEnable(db, CI_WATCHER.id);
+    expect(await row()).toMatchObject({ on: false, waiting: true, canTurnOn: false, line: WAITING });
+    await fx.signRun(own.proposalId);
+    expect(await row()).toMatchObject({ on: true, waiting: false });
   });
 
   it('what the executor’s own checks say when they refuse a signed card: one it reads differently, one for another task or another result, and a result no longer kept', async () => {

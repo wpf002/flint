@@ -25,17 +25,18 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { PAID_DISPATCH, TASK_FAILURES, TASK_OUTPUTS, TASK_REASONS, TASK_SAYS, TaskSpec, digestOf, noteProblems } from '@flint/policy';
 import { NO_DB, freshDb, id, withClient, type TestUrls } from '../db';
 import { createDb, type Db } from '../../src/db';
-import { Refused } from '../../src/governance/proposals';
+import { Refused, expireProposals, rejectProposal } from '../../src/governance/proposals';
 import { runInternal } from '../../src/governance/internal';
 import { jsonbBytes } from '../../src/jsonsize';
-import { ASSETS, assetOf, type AssetDef, enableArgsOf } from '../../src/assets/registry';
+import { ASSETS, CI_WATCHER, assetOf, type AssetDef, enableArgsOf } from '../../src/assets/registry';
 import { syncAssets, turnOff } from '../../src/assets/service';
 import { ciWatch } from '../../src/tasks/adapters/ci-watch';
 import type { AdapterInput, ItemFact, TaskAdapter } from '../../src/tasks/adapters/types';
 import { runTaskCard, type Reserve } from '../../src/tasks/card';
 import { checkTaskJob } from '../../src/tasks/check';
 import { runTaskJob } from '../../src/tasks/run';
-import { createTask } from '../../src/tasks/service';
+import { cancelTask, createTask } from '../../src/tasks/service';
+import { taskTick } from '../../src/tasks/tick';
 import { CANARY, FakeBus, SHA, draft, taskFixture, type TaskFixture } from './fixture';
 
 /** A stand-in for an asset that spends: it "writes" a note and says what that cost. It calls nothing. */
@@ -109,6 +110,12 @@ function adapterTreeProblems(dir: string): string[] {
     reaches('require or import(', /\brequire\b|\bimport\s*\(|\bimport\.meta\b/);
     reaches('a node module', /['"`]node:/);
     reaches('process, a global or eval', /\bprocess\b|\bglobalThis\b|\bglobal\b|\beval\b|\bFunction\s*\(|new\s+Function\b/);
+    // A function's constructor makes code from text, and with it the global object, whatever the names are split into.
+    reaches('constructor', /\bconstructor\b/);
+    // An escape spells a name the rules above would not see (`f\u0065tch`): none is needed here, so none is allowed.
+    reaches('an escape', /\\u|\\x/);
+    // The log is a place too: an adapter hands back a result, and writes nowhere.
+    reaches('console', /\bconsole\b/);
     reaches('the database', /Prisma|\$queryRaw|\$executeRaw|\$transaction/);
   }
   return problems;
@@ -206,6 +213,13 @@ describe('the adapter contract', () => {
       ['a helper in a sub-directory', { 'lib/helper.ts': `import { execSync } from 'node:child_process';\nexport const run = execSync;\n` }, /lib\/helper\.ts: not one of the adapters/],
       ['a file under another extension', { 'net.mts': `import { connect } from 'node:net';\nexport const c = connect;\n` }, /net\.mts: not one of the adapters/],
       ['a compiled file', { 'ci-watch.js': `require('node:child_process');\n` }, /ci-watch\.js: not one of the adapters/],
+      // Ways around the names above: code made from text, a name spelled with an escape, and the log.
+      ['the global object through a function’s constructor, its names split', added(`const G = (() => {}).constructor('return this')() as any;\nexport const a = () => G['fe' + 'tch']('http://127.0.0.1:9/', { method: 'POST', body: G['pro' + 'cess'].env.HOME });`), /ci-watch\.ts: names constructor/],
+      ['a built-in module through the split global', added(`const G = (async () => {}).constructor('return this')() as any;\nexport const a = () => G['pro' + 'cess']['getBuiltin' + 'Module']('no' + 'de:child_' + 'pro' + 'cess');`), /ci-watch\.ts: names constructor/],
+      ['constructor by bracket', added(`const F = (() => {})['constructor'];`), /ci-watch\.ts: names constructor/],
+      ['fetch spelled with an escape in the name', added(`export const a = () => f\\u0065tch('http://127.0.0.1:9/');`), /ci-watch\.ts: names an escape/],
+      ['a name spelled with an escape in a string', added(`const k = '\\x66etch';`), /ci-watch\.ts: names an escape/],
+      ['the log', added(`export const a = (input: unknown) => console.log(JSON.stringify(input));`), /ci-watch\.ts: names console/],
     ];
     for (const [name, files, says] of cases) expect(tree(files).join('\n'), name).toMatch(says);
     // A file that is new is read too, not only named: what it reaches for is said as well.
@@ -361,13 +375,130 @@ describe.skipIf(NO_DB)('the path money takes, on flint_test', () => {
       expect(await runTaskCard(db, x.proposalId, undefined, 'UTC', 'test', deps(untold))).toMatchObject({ taskId: x.id });
       expect([...untold.held]).toEqual([[x.proposalId, 250_000]]);
 
-      // A card refused before the money is asked for (its asset turned off) asks for none.
+      // A card refused before the money is asked for (its asset turned off) asks for none, and gives back
+      // whatever it might hold: a refused card keeps nothing.
       const off = reserveBook();
       const v = await newTask();
       await fx.approve(v.proposalId);
       await turnOff(db, asset.id);
       expect(await refusal(runTaskCard(db, v.proposalId, undefined, 'UTC', 'test', deps(off)))).toMatchObject({ status: 409, message: TASK_SAYS.assetOff });
-      expect(off.calls).toEqual([]);
+      expect(off.calls).toEqual([`release ${v.proposalId}`]);
+      await again();
+
+      // So a key kept because it could not be told is given back by the card's next run, when that run is refused
+      // before it asks for anything.
+      const kept = reserveBook();
+      const y = await newTask();
+      await fx.approve(y.proposalId);
+      expect(await refusal(runTaskCard(unreadable, y.proposalId, undefined, 'UTC', 'test', deps(kept), fault))).toMatchObject({ status: 409 });
+      expect([...kept.held]).toEqual([[y.proposalId, 250_000]]);
+      await turnOff(db, asset.id);
+      expect(await refusal(runTaskCard(db, y.proposalId, undefined, 'UTC', 'test', deps(kept)))).toMatchObject({ status: 409, message: TASK_SAYS.assetOff });
+      expect(await db.proposal.findUniqueOrThrow({ where: { id: y.proposalId } })).toMatchObject({ status: 'failed', error: TASK_SAYS.assetOff });
+      expect(kept.calls).toEqual([`take ${y.proposalId} 250000`, `release ${y.proposalId}`]);
+      expect(kept.held.size).toBe(0);
+      // Only a dispatch that spends holds anything: a card of another kind that is refused asks for no release.
+      const none = reserveBook();
+      await fx.watcherOn();
+      const free = await fx.newTask(await fx.ciRun('wpf002/no-key'));
+      await fx.approve(free.proposalId);
+      await turnOff(db, CI_WATCHER.id);
+      expect(await refusal(runTaskCard(db, free.proposalId, undefined, 'UTC', 'test', deps(none)))).toMatchObject({ status: 409, message: TASK_SAYS.assetOff });
+      expect(none.calls).toEqual([]);
+    } finally {
+      errs.mockRestore();
+      await again();
+    }
+  });
+
+  it('a key whose card never runs again is given back when its task can no longer go out on it: the card lapsed, Will cancelled the task, or it went out on another card', async () => {
+    const errs = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const fault = { afterWrites: async () => { throw new Error('a fault after the writes'); } };
+      const deps = (book: ReturnType<typeof reserveBook>) => ({ assets: true, registry, bus, reserve: book.reserve });
+      const unreadable = new Proxy(db, {
+        get: (t, key) => {
+          if (key === 'proposal') return new Proxy(t.proposal, { get: (pt, pk) => (pk === 'findUnique' ? async () => { throw new Error('the connection is gone'); } : Reflect.get(pt, pk)) });
+          const v = Reflect.get(t, key) as unknown;
+          return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+        },
+      });
+      /** A card whose run failed where it could not be told whether it ran: its key is kept. */
+      const untold = async (pid: string, book: ReturnType<typeof reserveBook>) => {
+        expect(await refusal(runTaskCard(unreadable, pid, undefined, 'UTC', 'test', deps(book), fault))).toMatchObject({ status: 409 });
+        expect([...book.held.keys()]).toEqual([pid]);
+      };
+      /** The same dispatch card again, as the console files it, with a life of its own. */
+      const spendCard = async (args: Record<string, unknown>, life: string): Promise<string> => {
+        const pid = id('pr');
+        await withClient(urls.app, (c) => c.query(
+          `INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", tainted, sensitivity, consequential, "estCostUsd", "expiresAt")
+           VALUES ($1, 'spend', 'console', $2, $3::jsonb, $4, '{}'::jsonb, false, $5, true, 0.25, now() + $6::interval)`,
+          [pid, PAID_DISPATCH, JSON.stringify(args), digestOf(args), args.sensitivity, life],
+        ));
+        return pid;
+      };
+      const later = (ms: number) => new Date(Date.now() + ms);
+
+      // The card lapses. Its task is still proposed, and no card of Will's is left that could send it out: the
+      // tick withdraws the task, and gives back what its cards hold first.
+      const lapses = reserveBook();
+      const t = await newTask();
+      const args = (await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } })).args as Record<string, unknown>;
+      const brief = await spendCard(args, '2 seconds');
+      await fx.approve(brief);
+      await untold(brief, lapses);
+      await rejectProposal(db, t.proposalId, { approvalId: await fx.sign(t.proposalId, 'reject') }, undefined, 'test');
+      // While the card could still run, the tick leaves the task and the key alone.
+      await taskTick({ db, bus, now: () => later(11 * 60_000), reserve: lapses.reserve });
+      expect(await fx.task(t.id)).toMatchObject({ status: 'proposed' });
+      expect([...lapses.held.keys()]).toEqual([brief]);
+      await new Promise((r) => setTimeout(r, 2300));
+      expect(await expireProposals(db)).toBeGreaterThanOrEqual(1);
+      expect(await db.proposal.findUniqueOrThrow({ where: { id: brief } })).toMatchObject({ status: 'expired' });
+      await taskTick({ db, bus, now: () => later(11 * 60_000), reserve: lapses.reserve });
+      expect(await fx.task(t.id)).toMatchObject({ status: 'cancelled' });
+      expect(lapses.held.size).toBe(0);
+      expect(lapses.calls).toContain(`release ${brief}`);
+      // A release that does not go through leaves the task for the next tick, so the key is tried again.
+      const stuck = reserveBook({ releaseFails: true });
+      const s2 = await newTask();
+      await fx.approve(s2.proposalId);
+      await untold(s2.proposalId, stuck);
+      await db.$transaction(async (tx) => { await tx.proposal.update({ where: { id: s2.proposalId }, data: { status: 'failed', error: 'a test ends it' } }); });
+      await taskTick({ db, bus, now: () => later(11 * 60_000), reserve: stuck.reserve });
+      expect(await fx.task(s2.id)).toMatchObject({ status: 'proposed' });
+      expect([...stuck.held.keys()]).toEqual([s2.proposalId]);
+      const works = reserveBook();
+      works.held.set(s2.proposalId, 250_000);
+      await taskTick({ db, bus, now: () => later(11 * 60_000), reserve: works.reserve });
+      expect(await fx.task(s2.id)).toMatchObject({ status: 'cancelled' });
+      expect(works.held.size).toBe(0);
+
+      // Will cancels the task before it went out: what its card holds is given back with it.
+      const cancels = reserveBook();
+      const u = await newTask();
+      await fx.approve(u.proposalId);
+      await untold(u.proposalId, cancels);
+      expect(await cancelTask(db, u.id, new Date(), { reserve: cancels.reserve })).toEqual({ ok: true });
+      expect(await fx.task(u.id)).toMatchObject({ status: 'cancelled' });
+      expect(cancels.held.size).toBe(0);
+      expect(cancels.calls).toEqual([`take ${u.proposalId} 250000`, `release ${u.proposalId}`]);
+
+      // The task goes out on another card: that card keeps its reservation, and the first card's is given back.
+      const two = reserveBook();
+      const draftKey = draft();
+      const form = { draftKey, template: 'draft_note' as const, params: { about: 'What to write' }, goalId: null, dueAt: null, ownCheck: null };
+      const first = await createTask(db, form, { registry, adapters });
+      await fx.approve(first.proposalId);
+      await untold(first.proposalId, two);
+      const second = await createTask(db, form, { registry, adapters });
+      expect(second).toMatchObject({ id: first.id, deduped: false });
+      expect(second.proposalId).not.toBe(first.proposalId);
+      await fx.approve(second.proposalId);
+      expect(await runTaskCard(db, second.proposalId, undefined, 'UTC', 'test', deps(two))).toMatchObject({ taskId: first.id });
+      expect([...two.held]).toEqual([[second.proposalId, 250_000]]);
+      expect(two.calls).toEqual([`take ${first.proposalId} 250000`, `take ${second.proposalId} 250000`, `release ${first.proposalId}`]);
     } finally {
       errs.mockRestore();
       await again();
@@ -383,7 +514,8 @@ describe.skipIf(NO_DB)('the path money takes, on flint_test', () => {
       ['words', async () => `${CANARY} a lot` as never, 'cost'],
       ['nothing', async () => undefined as never, 'cost'],
       ['more beside it', async () => ({ micros: 100, estimate: true, note: `${CANARY}` }) as never, 'cost'],
-      ['a throw', async () => { throw new TypeError(`${CANARY} secret words`); }, 'TypeError'],
+      ['a throw', async () => { throw new TypeError(`${CANARY} secret words`); }, 'unreadable'],
+      ['a throw under a name of its own', async () => { throw Object.assign(new Error('x'), { name: `${CANARY}Error` }); }, 'unreadable'],
     ];
     const logs: string[] = [];
     for (const [name, meter, says] of meters) {

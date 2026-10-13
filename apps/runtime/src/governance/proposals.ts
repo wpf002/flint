@@ -292,15 +292,17 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
     // and never takes its place (the job claims only a card of its own origin, so a look-alike that stood in for
     // it would be approved and never run). Neither is the job's card ever handed back for a filing from elsewhere.
     const fromJob = input.origin.startsWith('runtime:');
-    // Nor does a card about a task, an asset or a review (P5) take the place of one filed from anywhere else: a
-    // card under another origin (one planted as chat's, which is never approved or run) would hold the filing
-    // from the console back for as long as it waits.
-    const ownOrigin = goalCard || fromJob || taskNamed(input.action);
+    // Nor does a card about a task, an asset or a review (P5) take the place of one filed from anywhere else, or
+    // under another template: a card the executor would never run (one planted as chat's, or as the job's under a
+    // template that is not its own) would hold the real filing back for as long as it waits.
+    const taskCard = taskNamed(input.action);
+    const ownOrigin = goalCard || fromJob || taskCard;
     const same = await tx.proposal.findFirst({
       // A goal card from Will and the same one from a review are two cards: their reasons and their marks differ.
       where: {
         action: input.action, argsDigest, tainted: input.tainted, status: 'pending', expiresAt: { gt: now },
         ...(ownOrigin ? { origin: input.origin } : { NOT: { origin: { startsWith: 'runtime:' } } }),
+        ...(taskCard ? { templateId: input.templateId ?? null } : {}),
       },
       orderBy: { createdAt: 'asc' },
       select: { id: true, expiresAt: true },

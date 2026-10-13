@@ -33,7 +33,7 @@ import type { Db, Tx } from '../db.js';
 import { inTx, type Bus } from '../bus.js';
 import { jsonbBytes } from '../jsonsize.js';
 import { clip, wellFormedDeep } from '../sources/text.js';
-import { failureClass, schemaSkew, sqlState } from '../dbcodes.js';
+import { schemaSkew, sqlState } from '../dbcodes.js';
 import { ciWatch } from './adapters/ci-watch.js';
 import type { AdapterSet, ItemFact } from './adapters/types.js';
 import { endingCost } from './card.js';
@@ -76,6 +76,21 @@ const AdapterReturn = z.union([
   z.object({ failure: z.enum(TASK_FAILURES) }).strict(),
 ]);
 const Metered = z.object({ micros: z.number().int().min(0).max(1_000_000_000_000), estimate: z.boolean() }).strict();
+
+/** Why a result was not usable, as the log says it: one of these words and nothing else. */
+const UNUSABLE = ['shape', 'not plain data', 'size', 'cost', 'unreadable', 'refused by the database'] as const;
+type Unusable = (typeof UNUSABLE)[number];
+/**
+ * What kind of error an adapter threw, as the log says it: the name of one of
+ * JavaScript's own error kinds, or `error`. An error's name is whatever the
+ * thrower set it to (an adapter's words, a model's), so no other name is
+ * written down.
+ */
+const THROWN = ['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError', 'EvalError', 'URIError', 'AggregateError'] as const;
+export function thrownKind(err: unknown): string {
+  const name = err instanceof Error ? err.name : undefined;
+  return (THROWN as readonly unknown[]).includes(name) ? (name as string) : 'error';
+}
 
 /**
  * Is a value plain JSON data, no deeper than `OUTPUT_MAX_DEPTH` and no larger
@@ -154,8 +169,8 @@ export async function runTaskJob(d: RunDeps, job: TaskJob): Promise<RunOutcome> 
   if (!spec.success) return fail('invalid');
   if (!adapter) return fail('error');
   const input = { taskId: task.id, spec: spec.data, items: await itemFacts(db, specItems(spec.data)), now };
-  /** What the adapter gave is not a result: the task ends, told by a class of ours or an error's, never by any of its text. */
-  const unusable = async (what: string): Promise<RunOutcome> => {
+  /** What the adapter gave is not a result: the task ends, told by one of UNUSABLE's words, never by any text of its own. */
+  const unusable = async (what: Unusable): Promise<RunOutcome> => {
     d.log?.(taskLog(task.id, 'result unusable', what));
     return fail('invalid');
   };
@@ -163,12 +178,12 @@ export async function runTaskJob(d: RunDeps, job: TaskJob): Promise<RunOutcome> 
   try {
     given = await adapter.run(input);
   } catch (err) {
-    // An adapter gives a failure's class; one that throws instead is a bug, told by its class only.
-    d.log?.(taskLog(task.id, 'adapter threw', failureClass(err)));
+    // An adapter gives a failure's class; one that throws instead is a bug, told by what kind of error it was.
+    d.log?.(taskLog(task.id, 'adapter threw', thrownKind(err)));
     return fail('error');
   }
   // Read first, with nothing written while reading: whatever it is, the outcome is one of these four.
-  type Read = { wait: true } | { failure: TaskFailure } | { unusable: string } | { body: string; summary: string; cost?: z.infer<typeof Metered> };
+  type Read = { wait: true } | { failure: TaskFailure } | { unusable: Unusable } | { body: string; summary: string; cost?: z.infer<typeof Metered> };
   let read: Read;
   try {
     read = await (async (): Promise<Read> => {
@@ -186,9 +201,10 @@ export async function runTaskJob(d: RunDeps, job: TaskJob): Promise<RunOutcome> 
       const metered = Metered.safeParse(await adapter.meter(input));
       return metered.success ? { body: JSON.stringify(shaped.data), summary, cost: metered.data } : { unusable: 'cost' };
     })();
-  } catch (err) {
-    // Reading it threw (a value that throws when read, an adapter's meter): the same end, by the error's class.
-    read = { unusable: failureClass(err) };
+  } catch {
+    // Reading it threw (a value that throws when read, an adapter's meter): the same end. What was thrown is the
+    // adapter's to choose, down to its name, so none of it is said.
+    read = { unusable: 'unreadable' };
   }
   if ('wait' in read) return 'waiting';
   if ('failure' in read) return fail(read.failure);
@@ -222,7 +238,7 @@ export async function runTaskJob(d: RunDeps, job: TaskJob): Promise<RunOutcome> 
     // be refused again, so the task ends here. Anything else (a lost connection, a conflict) is left to run again.
     const state = sqlState(err);
     if (!state || !/^(22|23|42|P0)/.test(state) || schemaSkew(state)) throw err;
-    return unusable(failureClass(err));
+    return unusable('refused by the database');
   }
   if (!submitted) return 'skipped';
   d.log?.(taskLog(task.id, 'submitted'));

@@ -11,7 +11,7 @@ import type { z } from 'zod';
 import { Acceptance, CHECK_NAMES, TASK_ENDED, TaskSpec, likelihoodOf, specItems, taskLine, type AssetKind, type TaskFailure, type TaskRow, type TaskStatus, type TaskTab, type TaskView, type TasksPage } from '@flint/policy';
 import type { Db } from '../db.js';
 import { labelFor } from '../goals/items.js';
-import { countsOf, microsOf, overrideProblem } from './card.js';
+import { ACCEPT_CARD, WILL_ORIGINS, countsOf, microsOf, overrideProblem } from './card.js';
 
 const PAGE = 100;
 type Row = z.infer<typeof TaskRow>;
@@ -22,7 +22,8 @@ const load = (db: Db, id: string) => db.task.findUnique({ where: { id }, include
 /** The ids of the tasks, among these, whose accept card is waiting for Will. */
 async function waitingOn(db: Db, ids: readonly string[]): Promise<Map<string, string>> {
   if (!ids.length) return new Map();
-  const cards = await db.proposal.findMany({ where: { action: 'task.check_bar', status: 'pending', expiresAt: { gt: new Date() } }, select: { id: true, args: true } });
+  // Only a card he can approve is waiting for him: the check's own (not one written under another origin).
+  const cards = await db.proposal.findMany({ where: { ...ACCEPT_CARD, status: 'pending', expiresAt: { gt: new Date() } }, select: { id: true, args: true } });
   const out = new Map<string, string>();
   for (const c of cards) {
     const taskId = (c.args as { taskId?: unknown } | null)?.taskId;
@@ -82,9 +83,13 @@ export async function taskView(db: Db, id: string, tz: string, now = new Date())
   const acceptance = Acceptance.safeParse(t.acceptance);
   const found = new Map((Array.isArray(t.barEvidence) ? (t.barEvidence as Array<{ id?: unknown; met?: unknown }>) : []).map((f) => [f.id, f.met === true]));
   const forecast = t.predictionId ? await db.prediction.findUnique({ where: { id: t.predictionId }, select: { probability: true } }) : null;
-  // His card for this task that is waiting: the newest of any kind (to run it, to accept it, to stop it, to overrule its check).
+  // His card for this task that is waiting: the newest of any kind (to run it, to accept it, to stop it, to overrule
+  // its check), among the cards he can approve: the check's accept card, and any other filed for him.
   const card = await db.proposal.findFirst({
-    where: { status: 'pending', expiresAt: { gt: now }, action: { startsWith: 'task.' }, args: { path: ['taskId'], equals: id } },
+    where: {
+      status: 'pending', expiresAt: { gt: now }, args: { path: ['taskId'], equals: id },
+      OR: [ACCEPT_CARD, { action: { startsWith: 'task.' }, NOT: { action: ACCEPT_CARD.action }, origin: { in: [...WILL_ORIGINS] } }],
+    },
     orderBy: { createdAt: 'desc' }, select: { id: true },
   });
   const can = async (to: 'accepted' | 'rejected') => !(await overrideProblem(db, t, to));
