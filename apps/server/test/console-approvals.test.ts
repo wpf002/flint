@@ -571,6 +571,9 @@ describe('the console Approvals panel', () => {
     const rule = (patterns: string[]) => run(`apprTitle(${JSON.stringify(card({ fullName: 'policy.change', kind: 'policy', consequential: true, args: { rows: patterns.map((pattern) => ({ pattern, tier: 'alone', expiresAt: until })) } }))})`);
     expect(rule(['backup.nexus', 'backup.nexus.offsite', 'restore.drill.nexus'])).toBe('Run Nexus Backups on Their Own');
     expect(rule(['backup.local', 'backup.offsite', 'restore.drill'])).toBe('Run Backups on Their Own');
+    // Flint's own rules are titled exactly as before Nexus had any: every row a backup or anything under `restore.`.
+    for (const own of [['restore.drill'], ['restore.*'], ['restore.production'], ['backup.offsite', 'restore.*'], ['backup.local']]) expect(rule(own), own.join(' ')).toBe('Run Backups on Their Own');
+    for (const other of [['backup.local', 'backup.prune'], ['backup.*'], ['backup.local.more'], ['restore']]) expect(rule(other), other.join(' ')).not.toBe('Run Backups on Their Own');
     expect(rule(['backup.local', 'backup.offsite', 'restore.drill', 'restore.drill.nexus'])).not.toMatch(/^Run (Nexus )?Backups on Their Own$/);
     expect(rule(['backup.local', 'backup.nexus'])).not.toMatch(/^Run (Nexus )?Backups on Their Own$/);
     for (const [pattern, words] of [['backup.nexus', 'Nexus Backup'], ['backup.nexus.offsite', 'Nexus Offsite Copy'], ['restore.drill.nexus', 'Nexus Restore Test']] as const) {

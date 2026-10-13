@@ -1967,8 +1967,9 @@ function apprTitle(p){var a=p.args||{};var n=function(x){return Array.isArray(x)
     if(kind==='approval')return 'Ask Before '+many.text;
     if(kind==='forbidden')return 'Stop '+many.text;
     if(kind!=='alone')return c===1?'Change 1 Rule':'Change '+c+' Rules';
-    if(rows.every(function(r){return /^(backup\.(local|offsite)|restore\.drill)$/.test(String(r.pattern||''));}))return 'Run Backups on Their Own';
-    /* Nexus's three are a group of their own: never said as Flint's own backups, and never folded into them. */
+    /* Every rule is titled as it always was. Nexus's three are a group of their own: never said as Flint's own
+       backups, and never folded into them. */
+    if(rows.every(function(r){var pat=String(r.pattern||'');return /^(backup\.(local|offsite)$|restore\.)/.test(pat)&&apprGet(APPR_NEXUS,pat)===undefined;}))return 'Run Backups on Their Own';
     if(rows.every(function(r){return apprGet(APPR_NEXUS,String(r.pattern||''))!==undefined;}))return 'Run Nexus Backups on Their Own';
     var pr=apprPromotes(rows);if(pr)return pr[0];
     return 'Let '+many.text+' Run on '+(many.one?'Its':'Their')+' Own';}
