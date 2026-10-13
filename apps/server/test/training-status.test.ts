@@ -122,7 +122,7 @@ describe('readTrainingStatus', () => {
     const s = await readTrainingStatus({
       brainDir: dir,
       corpus: () => ({ total: 900, teacher: 800, student: 100 }),
-      serving: () => ({ local: 'ollama:muse-glimmer:30b' }),
+      serving: () => ({ local: 'ollama:muse-glimmer:30b', mode: 'hybrid', localState: 'loaded' }),
       isRunning: async () => false,
       trainingJobs: async () => undefined,
     });
@@ -137,6 +137,8 @@ describe('readTrainingStatus', () => {
       training: { exit: 'CANDIDATE', bestVal: 1.71, bestStep: 400, peakMemoryGb: 27.4 },
       gate: { verdict: 'REJECT' },
     });
+    // The routing mode and the local model's state ride along, so "what are you running on?" has a true answer.
+    expect(s.servingNow).toMatchObject({ local: 'ollama:muse-glimmer:30b', mode: 'hybrid', localState: 'loaded' });
     expect(s.servingNow.fineTunedServing).toBe(false);
   });
 

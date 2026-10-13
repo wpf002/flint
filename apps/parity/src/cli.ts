@@ -126,7 +126,7 @@ function buildPrompts(argv: string[]): void {
   };
   writeFileAtomic(out.replace(/\.jsonl$/, '.meta.json'), JSON.stringify(meta, null, 2) + '\n');
   log(`froze ${prompts.length} prompts -> ${out}`);
-  log(`  corpus ${stats.corpusRows} rows; dropped ${stats.trivial} trivial, ${stats.duplicates} near-duplicate; ${stats.candidates} candidates`);
+  log(`  corpus ${stats.corpusRows} rows; left out ${stats.keptHere} from turns that stayed on this Mac; dropped ${stats.trivial} trivial, ${stats.duplicates} near-duplicate; ${stats.candidates} candidates`);
   for (const [c, s] of Object.entries(stats.byCategory)) log(`  ${c.padEnd(22)} ${String(s.selected).padStart(4)} of ${s.available}`);
 }
 

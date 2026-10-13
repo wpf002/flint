@@ -463,8 +463,10 @@ export function localBackgroundBrain(m: LocalMemoryModel, deps: LocalBackgroundD
         });
         const text = r.message.content;
         // The model's own count of the prompt, not the estimate it was sized by: with the reply's
-        // budget it must leave room in the window, or Ollama cut the prompt to make some.
-        if (r.usage.input + o.maxTokens >= numCtx) throw new ReplyError('WindowFull');
+        // budget it must leave room in the window, or Ollama cut the prompt to make some. It is the
+        // LAST request's count: a reply the adapter had to ask for again sums its tries in `input`,
+        // and three tries of a prompt that fits are not a prompt three times the size.
+        if ((r.usage.lastInput ?? r.usage.input) + o.maxTokens >= numCtx) throw new ReplyError('WindowFull');
         if (r.reason === 'max_tokens') throw new ReplyError('Truncated');
         if (text.trim().length === 0) throw new ReplyError('EmptyReply');
         if (input.schema) {

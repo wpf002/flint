@@ -71,6 +71,21 @@ describe('ToolRouter', () => {
     expect(scored.appended).toEqual([{ name: 'prophet.forecast', score: 1 }]);
     expect(await router.selectScored('hello there')).toEqual({ tools: [tools[0]], appended: [] });
   });
+
+  // The final review's M3d: a small window sheds tools last listed first, and the matched ones are listed last.
+  it('a tool matched to the message is marked to be kept: on a small window the core gives way before it', async () => {
+    const { state, embedder } = fakeEmbedder();
+    state.up = true;
+    const router = await ToolRouter.build(tools, embedder, ['remember'], { maxAppend: 4, floor: 0.5 });
+    const picked = await router.select('forecast please');
+    expect(picked.map((t) => [t.definition.name, t.keep === true])).toEqual([['remember', false], ['prophet.forecast', true]]);
+    // The core tool is the server's own object, untouched; the matched one is a copy with the same handler and definition.
+    expect(picked[0]).toBe(tools[0]);
+    const original = tools.find((t) => t.definition.name === 'prophet.forecast')!;
+    expect(picked[1]!.definition).toBe(original.definition);
+    expect(picked[1]!.handler).toBe(original.handler);
+    expect(original.keep).toBeUndefined();
+  });
 });
 
 // The server builds its router before it listens. An Ollama that took the embedding request and

@@ -195,10 +195,13 @@ struct BuildStamp: Equatable {
   }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, NSMenuItemValidation {
   var window: NSWindow!
   var web: WKWebView!
   let approvalKey = ApprovalKey()
+  /// Flint is in Local mode, as the console last said (window.webkit.messageHandlers.flintMode). The menu's
+  /// "Local Only" item is off while it is: every answer already stays on this Mac, and the item would change nothing.
+  var localMode = false
   /// The build this process runs, and whether it is already restarting onto a newer one.
   let launchedBuild = BuildStamp.current()
   var relaunching = false
@@ -220,6 +223,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     let cfg = WKWebViewConfiguration()
     cfg.userContentController.addScriptMessageHandler(approvalKey, contentWorld: .page, name: "flintApproval")
+    cfg.userContentController.add(self, name: "flintMode")
     web = WKWebView(frame: frame, configuration: cfg)
     web.navigationDelegate = self
     web.uiDelegate = self
@@ -392,6 +396,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     command(win, "Activity", "openActivity", "n", shift: true)
     command(win, "Local Only", "toggleLocalOnly", "l", shift: true)
     NSApp.mainMenu = main
+  }
+  /// The console says which routing mode Flint is in (local, hybrid or cloud). Only the Flint console is heard.
+  func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
+    let origin = message.frameInfo.securityOrigin
+    guard message.name == "flintMode", let flint = URL(string: FLINT_URL),
+          origin.protocol == flint.scheme, origin.host == flint.host, origin.port == (flint.port ?? 0) else { return }
+    localMode = (message.body as? String) == "local"
+  }
+  /// "Local Only" changes nothing in Local mode, so there it is shown as off, and its shortcut with it.
+  func validateMenuItem(_ item: NSMenuItem) -> Bool {
+    if (item.representedObject as? String) == "toggleLocalOnly" { return !localMode }
+    return true
   }
   @objc func reloadFlint() { web.reload() }
   /// Hands a menu command to the page, bringing the window back first if it was minimized.

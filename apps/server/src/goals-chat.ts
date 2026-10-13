@@ -6,6 +6,11 @@
  * themselves are in ./goals-now (the gate), ./goals-tools, ./knowledge and
  * ./policy; this is where they meet a chat turn.
  *
+ * The turns Will kept private (./private-turns: Local Only, the words, any
+ * turn of Local mode) stay here by the same calls, under a mark of their own
+ * that FLINT_GOALS_TO_FRONTIER never lifts: index.ts tells `forTurn` the
+ * turn's route, and everything below then holds for it too.
+ *
  * What it decides, and where index.ts asks:
  *  - which history a brain reads (`history`): every Flint client is built on
  *    it, the adopted local brain's and an eval candidate's included;
@@ -22,7 +27,8 @@
  *  - whether an ask runs as a local model's turn (`run`): for a tier whose
  *    brain is on this Mac, on /chat and on /generate;
  *  - the tools an ask that carries what stays here is offered (`toolsKeptHere`:
- *    the two local builds, and none an outside AI answers);
+ *    the two local builds, and none an outside AI answers), and the same for a
+ *    one-shot answer that stays here (`oneShotTools`);
  *  - what the memory extractor skips and marks (`extractor`);
  *  - whether deep_research's planner, an outside model, is asked (`plannerHeld`);
  *  - recall for a one-shot answer (`recallForAnyBrain`): /generate has no
@@ -37,13 +43,14 @@ import { estimateTokens } from '@flint/policy';
 import type { Runtime } from './audit-sink';
 import type { BrainSet } from './brains';
 import { deepResearchTool, type DeepResearchDeps } from './deep-research';
-import { GOALS_TURN, chatBrains, describeGoals, goalsForChat, historyFor, keptHere, staysHere, type GoalsNow, type LocalBrain, type TurnGoals } from './goals-now';
+import { carriedGoals, chatBrains, describeGoals, goalsForChat, historyFor, keepsPrivate, keptHere, keptStrictly, staysHere, type GoalsNow, type LocalBrain, type StayMark, type TurnGoals } from './goals-now';
 import { isAiBacked, withoutOutsideAi } from './goals-tools';
 import { contextOutside } from './grounding';
 import { rememberTool, type KnowledgeStore } from './knowledge';
 import { LOCALITY, type OllamaLocality } from './ollama-locality';
 import type { PersistentStore } from './persistent-store';
-import { brainIsLocal, brainOf, listedAt, onThisMachine, type AnsweringBrain } from './policy';
+import { brainIsLocal, brainOf, listedAt, placeUnknown, placedHere, type AnsweringBrain } from './policy';
+import { PRIVATE_TURN, corpusMark, turnStaysHere, type StayRoute } from './private-turns';
 import type { PaidToolSpec } from './spend';
 import { asLocalTurn, isLocalTurn } from './turn-taint';
 
@@ -53,14 +60,20 @@ export interface Speaker {
   readonly engine?: string | undefined;
 }
 
-/** The tools an ask that carries what stays here is offered, from what the turn would offer. */
-export type KeptTools = (offered: readonly Tool[]) => readonly Tool[];
+/**
+ * The tools an ask that carries what stays here is offered, from what the turn
+ * would offer. `marks`: which marks the turn carries, and so which marks what
+ * `remember` saves on it carries (Will's goals alone when left out).
+ */
+export type KeptTools = (offered: readonly Tool[], marks?: { goals?: boolean; private?: boolean }) => readonly Tool[];
 
 /**
  * The tools for an ask that carries what stays on this Mac (./goals-tools):
  * none that an outside AI answers, and local builds of two. `deep_research`
  * with no planner (it plans by rule) and only the search tools that are left;
- * `remember` saving what it is told as a fact that stays here.
+ * `remember` saving what it is told as a fact that stays here, under the marks
+ * of the turn it is called on (a turn answered with Will's goals, one he kept
+ * private, or both).
  */
 export function toolsKeptHere(o: {
   /** The tools deep_research searches with (the server's MCP tools). */
@@ -72,21 +85,30 @@ export function toolsKeptHere(o: {
   /** The server's gate for its built-in tools (./tier-gate gateBuiltins). */
   gate?: (tools: Tool[]) => Tool[];
 }): KeptTools {
-  const builds = [
-    deepResearchTool({ tools: o.search.filter((t) => !isAiBacked(t.definition.name, o.specs)), ...(o.embedder ? { embedder: o.embedder } : {}) }),
-    rememberTool(o.knowledge, { fromGoals: true }),
-  ];
-  return withoutOutsideAi({ specs: o.specs, local: o.gate ? o.gate(builds) : builds });
+  const research = deepResearchTool({ tools: o.search.filter((t) => !isAiBacked(t.definition.name, o.specs)), ...(o.embedder ? { embedder: o.embedder } : {}) });
+  const build = (marks: { fromGoals?: boolean; fromPrivate?: boolean }) => {
+    const builds = [research, rememberTool(o.knowledge, marks)];
+    return withoutOutsideAi({ specs: o.specs, local: o.gate ? o.gate(builds) : builds });
+  };
+  const goals = build({ fromGoals: true });
+  // The builds for a turn Will kept private are made when the first such turn asks for them.
+  let kept: ReturnType<typeof build> | undefined;
+  let both: ReturnType<typeof build> | undefined;
+  return (offered, marks = { goals: true }) => {
+    if (!marks.private) return goals(offered);
+    return marks.goals ? (both ??= build({ fromGoals: true, fromPrivate: true }))(offered) : (kept ??= build({ fromPrivate: true }))(offered);
+  };
 }
 
 /**
- * Is the embedder on this Mac? It is an Ollama at OLLAMA_HOST, whatever any
- * brain's own address is: with that host on another machine, the text it is
- * sent leaves this Mac. A fact that stays here is then stored without an
+ * Is the embedder here? It is an Ollama at OLLAMA_HOST, whatever any brain's
+ * own address is: with that host on another machine, the text it is sent
+ * leaves this Mac (unless that machine is the model server Will said is his:
+ * ./policy placedHere). A fact that stays here is then stored without an
  * embedding (./knowledge), and recall matches it by its words.
  */
 export function embedderHere(host: string | undefined): boolean {
-  return onThisMachine(host);
+  return placedHere(host);
 }
 
 /** A recall with the part of it any brain may be given (./grounding recallContext). */
@@ -155,8 +177,8 @@ export interface ChatAsk {
   context: string;
   /** The tools it is offered. */
   tools: readonly Tool[];
-  /** For the call's options: marks the stored turn as one that stays here. Empty for an ordinary ask. */
-  mark: { context?: typeof GOALS_TURN };
+  /** For the call's options: marks the stored turn as one that stays here (with each mark that applies). Empty for an ordinary ask. */
+  mark: { context?: StayMark };
   /** Does this ask carry anything that stays on this Mac? Its reply then stays here too. */
   staysHere: boolean;
   /** The goals block's size in the prompt as it was really sent (0: it went without). */
@@ -183,6 +205,7 @@ export interface GoalsChatOptions {
 
 export class GoalsChat<P extends Speaker> {
   #gate: GoalsNow<P> | undefined;
+  #tools: KeptTools | undefined;
   #named: Promise<void> = Promise.resolve();
   readonly #o: GoalsChatOptions;
 
@@ -195,7 +218,7 @@ export class GoalsChat<P extends Speaker> {
     return this.#o.blocks.goalsToFrontier;
   }
 
-  /** Ask this brain's Ollama what runs on it, when it has one on this Mac (./policy listedAt). */
+  /** Ask this brain's Ollama what runs on it, when it has one that is here (./policy listedAt). */
   #watch(brain: AnsweringBrain | undefined): Promise<void> {
     const url = listedAt(brain);
     return url ? (this.#o.locality ?? LOCALITY).watch(url) : Promise.resolve();
@@ -213,16 +236,24 @@ export class GoalsChat<P extends Speaker> {
   }
 
   /**
-   * Name the brains /chat can ask: the local one and every tier's. Called at
-   * boot, and again whenever the local brain is swapped, so the gate decides
-   * for the brain that answers. Nothing waits for it: the gate is there at
-   * once and hands out nothing until a brain's Ollama has said the model runs
-   * on it. The boot log's line follows that answer (`settled`).
+   * Name the brains /chat can ask: the local one and every tier's, and the
+   * other local models that can answer a turn (`others`: the standby). Called
+   * at boot, and again whenever the local brain is swapped, so the gate
+   * decides for the brain that answers. Nothing waits for it: the gate is
+   * there at once and hands out nothing until a brain's Ollama has said the
+   * model runs on it. The boot log's line follows that answer (`settled`).
    */
-  name(local: LocalBrain<P>, tiers: BrainSet<P> | undefined, tools: KeptTools): void {
-    const wiring = { on: this.#o.blocks.goals, runtime: this.#o.runtime, local, tiers, toFrontier: this.#out, tools, localTurn: isLocalTurn, ...(this.#o.fetchImpl ? { fetchImpl: this.#o.fetchImpl } : {}) };
+  name(local: LocalBrain<P>, tiers: BrainSet<P> | undefined, tools: KeptTools, others: ReadonlyArray<LocalBrain<P>> = []): void {
+    const wiring = {
+      on: this.#o.blocks.goals, runtime: this.#o.runtime, local, tiers, others, toFrontier: this.#out, localTurn: isLocalTurn,
+      tools: (offered: readonly Tool[]) => tools(offered),
+      // A turn Will kept private: what `remember` saves on it carries that mark (and the goals mark when it carries them too).
+      toolsPrivate: (offered: readonly Tool[], goals: boolean) => tools(offered, { private: true, goals }),
+      ...(this.#o.fetchImpl ? { fetchImpl: this.#o.fetchImpl } : {}),
+    };
     this.#gate = goalsForChat<P>(wiring);
-    const asked = [...chatBrains(local, tiers).values()].map((b) => this.#watch(b));
+    this.#tools = tools;
+    const asked = [...chatBrains(local, tiers, others).values()].map((b) => this.#watch(b));
     const named: Promise<void> = Promise.all(asked)
       .then(() => {
         // Only the newest naming speaks: a swap that came first has been replaced.
@@ -242,13 +273,39 @@ export class GoalsChat<P extends Speaker> {
 
   /**
    * One /chat turn: Will's goals, fetched or cached once, for whichever brain
-   * ends up asked. Each ask then goes through `ChatTurn.ask`.
+   * ends up asked. Each ask then goes through `ChatTurn.ask`. `route`: how the
+   * turn was routed; one that stays here by its route (Will kept it private,
+   * or Flint is in Local mode: ./private-turns turnStaysHere) is marked
+   * whichever brain is asked.
    */
-  async forTurn(conversationId: string, message: string): Promise<ChatTurn<P>> {
+  async forTurn(conversationId: string, message: string, route?: StayRoute): Promise<ChatTurn<P>> {
     const goals = await this.#gate?.forTurn();
     // With the persona's own words, the rest of the prompt: what the block's room is measured against.
     const restChars = message.length + this.#o.memory.historyChars(conversationId);
-    return new ChatTurn<P>(this.#o.memory, goals, conversationId, restChars);
+    return new ChatTurn<P>(this.#o.memory, goals, conversationId, restChars, route !== undefined && turnStaysHere(route), this.#tools);
+  }
+
+  /**
+   * The tools for a one-shot answer (/generate, which has no per-ask gate and
+   * stores no turn). One that stays here by its route is offered the tools
+   * that keep it here: what its `remember` saves is marked like a fact learned
+   * from a private turn, so it is not recalled for a brain off this Mac a turn
+   * later. Any other answer: the same tools.
+   */
+  oneShotTools<T extends Tool>(route: StayRoute, offered: readonly T[]): readonly Tool[] {
+    if (!turnStaysHere(route)) return offered;
+    // Before the brains are named there are no builds to offer: then nothing that saves is offered at all.
+    return this.#tools ? this.#tools(offered, { private: true }) : offered.filter((t) => t.definition.name !== 'remember');
+  }
+
+  /**
+   * The mark a one-shot answer's entry in the training corpus carries when its
+   * route keeps it here (./private-turns corpusMark). A /chat turn asks its
+   * own turn instead (`ChatTurn.corpus`), which also knows what its brain was
+   * given.
+   */
+  corpus(route: StayRoute): { staysHere?: true } {
+    return corpusMark(route);
   }
 
   /**
@@ -268,18 +325,40 @@ export class GoalsChat<P extends Speaker> {
    * it runs on. A brain that may not read such a turn never mines one (it is
    * skipped as a tainted turn is, and is not context for the next either);
    * what a brain that may read one learns from it is marked, and stays on this
-   * Mac (./knowledge fromGoals). `tainted` is the server's own rule, kept.
+   * Mac (./knowledge fromGoals, fromPrivate). Each mark by its own rule: a
+   * turn answered with Will's goals is read by a brain on this Mac, or by any
+   * once he set FLINT_GOALS_TO_FRONTIER=on; a turn he kept private only by a
+   * brain on this Mac, whatever he set. So an extractor on an Ollama on
+   * another machine reads neither. `tainted` is the server's own rule, kept.
+   *
+   * `holdOff`: a turn that is skipped is never mined (the pass moves on past
+   * it), so "this brain may not read it" must be a settled answer. While where
+   * the extractor's own model runs is simply not known (its Ollama has not been
+   * heard from yet, or not for a few minutes: ./policy placeUnknown), the pass
+   * does not run at all, and comes back in a moment. Otherwise a pass that
+   * began while Ollama was restarting would skip every turn taken in Local
+   * mode, for good.
    */
   extractor(o: { brain: AnsweringBrain | undefined; tainted: (conversationId: string, turnId: string) => boolean }): {
     isTainted: (conversationId: string, turnId: string) => boolean;
     carriedGoals: (conversationId: string, turnId: string) => boolean;
+    keptPrivate: (conversationId: string, turnId: string) => boolean;
+    holdOff: () => string | undefined;
   } {
     void this.#watch(o.brain);
-    const kept = (cid: string, tid: string) => this.#o.memory.matches(cid, tid, keptHere);
+    const goals = (cid: string, tid: string) => this.#o.memory.matches(cid, tid, carriedGoals);
+    const kept = (cid: string, tid: string) => this.#o.memory.matches(cid, tid, keptStrictly);
     return {
       // Asked each time: whether the extractor's brain is on this Mac is its Ollama's word.
-      isTainted: (cid, tid) => o.tainted(cid, tid) || (kept(cid, tid) && !staysHere(o.brain, this.#out)),
-      carriedGoals: kept,
+      isTainted: (cid, tid) => o.tainted(cid, tid) || (goals(cid, tid) && !staysHere(o.brain, this.#out)) || (kept(cid, tid) && !keepsPrivate(o.brain)),
+      carriedGoals: goals,
+      keptPrivate: kept,
+      holdOff: () => {
+        if (!placeUnknown(o.brain)) return undefined;
+        // (That Ollama is being asked: at once when it has never answered, and every minute after.)
+        void this.#watch(o.brain);
+        return 'the model server has not said that the memory model runs on this Mac';
+      },
     };
   }
 
@@ -302,34 +381,51 @@ export class GoalsChat<P extends Speaker> {
 
 /** One /chat turn's asks. */
 export class ChatTurn<P extends Speaker> {
+  /** Did the ask made last (the one whose answer the turn ends with) carry a mark that keeps its turn here? */
+  #stays = false;
+
   constructor(
     private readonly memory: PersistentStore,
     private readonly goals: TurnGoals<P> | undefined,
     private readonly conversationId: string,
     private readonly restChars: number,
+    /** The turn stays here by its route: Will kept it private, or Flint is in Local mode. */
+    private readonly kept = false,
+    private readonly keptTools?: KeptTools,
   ) {}
 
   /**
    * One ask of one brain. `context` is the turn's whole context for it, which
    * begins with the turn's recalled block (`whole`); `outside` is that block
-   * without the facts that stay here. Any brain may be given the outside twin.
-   * Only the gate hands out the whole one, Will's goals, and the mark: to a
-   * brain that may read them, asked as a local model's turn. An ask whose
-   * history holds a turn that stays here carries the mark too.
+   * without the facts that stay here, and `lifted` is it without the facts
+   * from a turn Will kept private only (left out: no fact is told apart that
+   * way). Any brain may be given the outside twin. Only the gate hands out the
+   * others, Will's goals, and the mark: to a brain that may read them, asked
+   * as a local model's turn. An ask whose history holds a turn that stays here
+   * carries that turn's mark too, and a turn that stays here by its route is
+   * marked whichever brain is asked.
    */
-  ask(persona: P, a: { context: string; whole: string; outside: string; tools: readonly Tool[] }): ChatAsk {
+  ask(persona: P, a: { context: string; whole: string; outside: string; lifted?: string; tools: readonly Tool[] }): ChatAsk {
     const open = contextOutside(a.context, a.whole, a.outside);
     const asked = this.goals
       ? this.goals.ask(persona, {
           context: open,
           here: a.context,
+          ...(a.lifted !== undefined ? { lifted: contextOutside(a.context, a.whole, a.lifted) } : {}),
           // The history this brain is about to be handed, as the store will hand it.
-          carried: this.memory.windowHas(this.conversationId, keptHere),
+          carried: this.memory.windowHas(this.conversationId, carriedGoals),
+          carriedPrivate: this.memory.windowHas(this.conversationId, keptStrictly),
+          kept: this.kept,
           tools: a.tools,
           promptChars: persona.styleGuide.length + (persona.engine?.length ?? 0) + this.restChars,
         })
-      : { context: open, tools: a.tools, tokens: 0, mark: {} };
+      : // No brain has been named yet: nothing that stays here is handed out. A turn its route keeps here is still
+        // marked, and saves nothing unmarked.
+        this.kept
+        ? { context: open, tools: this.keptTools ? this.keptTools(a.tools, { private: true }) : a.tools.filter((t) => t.definition.name !== 'remember'), tokens: 0, mark: { context: PRIVATE_TURN } }
+        : { context: open, tools: a.tools, tokens: 0, mark: {} };
     const staysHere = asked.mark.context !== undefined;
+    this.#stays = staysHere;
     // Measured from the context as it is sent, not from what the gate meant to add: a block that came out
     // larger than its limit shows in the number.
     const added = staysHere && asked.context.length > a.context.length && asked.context.startsWith(a.context) ? asked.context.slice(a.context.length).trim() : '';
@@ -340,7 +436,8 @@ export class ChatTurn<P extends Speaker> {
       tools: asked.tools,
       mark: asked.mark,
       staysHere,
-      tokens: added ? estimateTokens(added) : 0,
+      // (A brain that was given the context without Will's private facts does not start with the whole one: the gate's own count stands.)
+      tokens: added ? estimateTokens(added) : staysHere && !asked.context.startsWith(a.context) ? asked.tokens : 0,
       meta: () => {
         if (given) return undefined;
         const begun = this.memory.turnIds(this.conversationId).filter((id) => !before.has(id));
@@ -350,5 +447,17 @@ export class ChatTurn<P extends Speaker> {
         return { type: 'meta', staysHere, ...(begun.length === 1 ? { turn: begun[0]! } : {}) };
       },
     };
+  }
+
+  /**
+   * The mark this turn's entry in the training corpus carries (./training
+   * `staysHere`): set when the turn stays on this Mac, by its route or because
+   * the brain that answered was given something that stays here (Will's
+   * goals, a fact or a turn that does). Local training uses the example; no
+   * set that leaves this Mac takes it. Asked once the turn has been answered:
+   * it speaks for the ask made last.
+   */
+  corpus(): { staysHere?: true } {
+    return this.kept || this.#stays ? { staysHere: true } : {};
   }
 }

@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { Flint, type GenerateArgs, type ProviderAdapter, type StreamEvent } from '@flint/core';
+import { Flint, HARDWARE_TIERS, type GenerateArgs, type ProviderAdapter, type StreamEvent } from '@flint/core';
 import { FLINT_LOCAL_STYLE_GUIDE, FLINT_STYLE_GUIDE, FLINT_STYLE_GUIDE_V2, Persona } from '@flint/persona';
 import {
   DEFAULT_STYLE_VARIANT,
+  GUIDE_MAX_SHARE,
+  STANDBY_STYLE,
   STYLE_VARIANTS,
   StyledPersonas,
   chooseStyles,
   echoStyle,
   engineLineFor,
+  localStyleFor,
   promptRevision,
   parseStyleVariantRequest,
   readStyleDefaults,
@@ -499,3 +502,40 @@ describe('promptRevision (which exact prompt a persona speaks with)', () => {
     expect(promptRevision({ styleGuide: 'Will', engine: 'Will' })).not.toMatch(/will/i);
   });
 });
+
+describe('localStyleFor: the main local model\'s guide follows its window', () => {
+  it("at the 16,384 tokens Will's model runs at, the guide asked for is the guide used", () => {
+    for (const v of STYLE_VARIANTS) expect(localStyleFor(v, 16384), v).toBe(v);
+    expect(localStyleFor('v1', 32768)).toBe('v1');
+  });
+
+  it('in a 4,096-token window the default guide is the whole window: the compact one is used', () => {
+    // About 3,980 tokens at 4 characters a token, more as a fitted prompt counts it.
+    expect(Math.ceil(styleGuideFor('v1').length / 4)).toBeGreaterThan(3900);
+    expect(localStyleFor('v1', 4096)).toBe('local-v1');
+    expect(localStyleFor('v2', 4096)).toBe('local-v1');
+    expect(localStyleFor('local-v2', 4096)).toBe('local-v1');
+    expect(localStyleFor('local-v1', 4096)).toBe('local-v1');
+  });
+
+  it('every hardware tier: the guide its model is given takes at most half its window, counted on the safe side', () => {
+    for (const tier of HARDWARE_TIERS) {
+      const guide = localStyleFor(DEFAULT_STYLE_VARIANT, tier.contextLength);
+      expect(Math.ceil(styleGuideFor(guide).length / 3), tier.id).toBeLessThanOrEqual(tier.contextLength * GUIDE_MAX_SHARE);
+      expect(guide, tier.id).toBe(tier.contextLength >= 16384 ? 'v1' : 'local-v1');
+    }
+  });
+
+  it('at 8,192 the default guide leaves too little: compact; the second compact guide fits and is kept', () => {
+    expect(localStyleFor('v1', 8192)).toBe('local-v1');
+    expect(localStyleFor('local-v2', 8192)).toBe('local-v2');
+  });
+
+  it('the compact guide is the standby\'s, and a window that is not known changes nothing', () => {
+    expect(STANDBY_STYLE).toBe('local-v1');
+    expect(localStyleFor('v1', 0)).toBe('v1');
+    expect(localStyleFor('v1', NaN)).toBe('v1');
+    expect(localStyleFor('v1', Infinity)).toBe('v1');
+  });
+});
+

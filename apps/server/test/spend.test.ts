@@ -32,6 +32,7 @@ import {
   type BrainChooser,
   type TurnBudgetInput,
 } from '../src/spend';
+import { OUTSIDE_OFF_LOCAL_MODE, OUTSIDE_OFF_PRIVATE, PRIVATE_TOOL_REFUSED } from '../src/outside-ai';
 import { FALLBACK, type BrainTier, type Tier } from '../src/brains';
 import { planQueries, deepResearch, DEFAULT_LIMITS } from '../src/deep-research';
 
@@ -986,6 +987,92 @@ describe('meterPaidTools with a keyless-capable web_search (SearXNG fallback)', 
     expect(Object.keys((t!.definition.inputSchema as { properties: object }).properties)).toEqual(['query']);
     await t!.handler({ id: '1', toolName: 'web.web_search', args: { query: 'q', keyless: true } });
     expect(seen).toEqual([{ query: 'q' }]);
+  });
+
+  // The routing review's M3: Tavily stayed callable in Local mode, and it returns a model-written answer.
+  // Local mode (no outside AI and no paid service) acts on a paid tool exactly like a spent budget.
+  describe('in Local mode: no outside AI and no paid service', () => {
+    const OFF = OUTSIDE_OFF_LOCAL_MODE;
+    const searxng = { content: [{ type: 'text', text: '{"results":[{"title":"t"}],"source":"searxng"}' }] };
+
+    it('web.web_search searches keyless (SearXNG on this Mac alone), bills nothing, and never reaches Tavily, whatever its budget', async () => {
+      const l = ledgerAt({ now: NOON });
+      const seen: unknown[] = [];
+      const [t] = meterPaidTools([keylessSearch(searxng, seen)], { guard: new SpendGuard(l, caps()), specs, outsideOff: () => OFF });
+      const out = (await t!.handler({ id: '1', toolName: 'web.web_search', args: { query: 'q' } })) as { isError?: boolean };
+      expect(out.isError).toBeUndefined();
+      // The one call the tool got carried the keyless switch: the web server then asks no metered provider.
+      expect(seen).toEqual([{ query: 'q', keyless: true }]);
+      expect(l.totals('tavily').day.calls).toBe(0);
+    });
+
+    it('trident.web_search has no keyless switch: it refuses before its vendor is called, and so does Perplexity', async () => {
+      const l = ledgerAt({ now: NOON });
+      const seen: unknown[] = [];
+      const refused: string[] = [];
+      const tools = meterPaidTools([stubTool('trident.web_search', '{"results":[]}', seen), stubTool('trident.perplexity_search', 'answer', seen), keylessSearch(searxng), stubTool('web.fetch_url', 'page')], {
+        guard: new SpendGuard(l, caps()),
+        specs,
+        outsideOff: () => OFF,
+        onOutsideRefused: (name, why) => refused.push(`${name}: ${why}`),
+      });
+      for (const name of ['trident.web_search', 'trident.perplexity_search']) {
+        const r = (await tools.find((t) => t.definition.name === name)!.handler({ id: 'x', toolName: name, args: { query: 'q' } })) as { isError: boolean; content: string };
+        expect(r, name).toEqual({ isError: true, content: `${OFF} Use web.web_search or web.fetch_url instead, or answer from what you already know and say that live research is limited right now.` });
+      }
+      expect(seen).toEqual([]); // no vendor was ever called
+      expect(refused).toEqual([`trident.web_search: ${OFF}`, `trident.perplexity_search: ${OFF}`]);
+      expect(l.totals('tavily').day.calls + l.totals('perplexity').day.calls).toBe(0);
+    });
+
+    it('an older web_search with no keyless switch refuses too', async () => {
+      const seen: unknown[] = [];
+      const [t] = meterPaidTools([stubTool('web.web_search', 'hits', seen)], { guard: new SpendGuard(ledgerAt({ now: NOON }), caps()), specs, outsideOff: () => OFF });
+      expect(await t!.handler({ id: '1', toolName: 'web.web_search', args: { query: 'q' } })).toMatchObject({ isError: true });
+      expect(seen).toEqual([]);
+    });
+
+    it('it is read on every call: when the mode changes back, the same tools reach their vendors again', async () => {
+      const l = ledgerAt({ now: NOON });
+      const seen: unknown[] = [];
+      let off: string | undefined = OFF;
+      const [pplx, tav] = meterPaidTools([stubTool('trident.perplexity_search', 'answer', seen), keylessSearch({ content: [{ type: 'text', text: '{"results":[],"source":"tavily"}' }] }, seen)], { guard: new SpendGuard(l, caps()), specs, outsideOff: () => off });
+      expect(await pplx!.handler({ id: '1', toolName: 'trident.perplexity_search', args: { query: 'q' } })).toMatchObject({ isError: true });
+      off = undefined;
+      expect(await pplx!.handler({ id: '2', toolName: 'trident.perplexity_search', args: { query: 'q' } })).toBe('answer');
+      await tav!.handler({ id: '3', toolName: 'web.web_search', args: { query: 'q' } });
+      expect(seen).toEqual([{ query: 'q' }, { query: 'q' }]);
+      expect(l.totals('perplexity').day.calls).toBe(1);
+      expect(l.totals('tavily').day.calls).toBe(1);
+    });
+
+    // The final review's M2: a private turn still sent its question to search engines, keyless.
+    it('a private turn is stricter: the keyless search does not run either, and no tool is named in the refusal', async () => {
+      const l = ledgerAt({ now: NOON });
+      const seen: unknown[] = [];
+      const refused: string[] = [];
+      const tools = meterPaidTools([keylessSearch(searxng, seen), stubTool('trident.perplexity_search', 'answer', seen), stubTool('web.fetch_url', 'page')], {
+        guard: new SpendGuard(l, caps()),
+        specs,
+        outsideOff: () => OUTSIDE_OFF_PRIVATE,
+        onOutsideRefused: (name) => refused.push(name),
+      });
+      for (const name of ['web.web_search', 'trident.perplexity_search']) {
+        const r = await tools.find((t) => t.definition.name === name)!.handler({ id: 'x', toolName: name, args: { query: 'my diagnosis' } });
+        expect(r, name).toEqual({ isError: true, content: PRIVATE_TOOL_REFUSED });
+      }
+      expect(seen).toEqual([]); // nothing was searched, keyless or not
+      expect(refused).toEqual(['web.web_search', 'trident.perplexity_search']);
+      expect(PRIVATE_TOOL_REFUSED).not.toMatch(/web\.|fetch_url/);
+    });
+
+    it('it is not a budget refusal: an eval replay is not marked as having run without its budget', async () => {
+      const l = ledgerAt({ now: NOON });
+      const [pplx] = meterPaidTools([stubTool('trident.perplexity_search', 'answer')], { guard: new SpendGuard(l, caps()), specs, outsideOff: () => OFF });
+      const turn = new TurnSpend('eval');
+      await turn.run(async () => pplx!.handler({ id: '1', toolName: 'trident.perplexity_search', args: { query: 'q' } }));
+      expect(turn.fields().budgetBlocked).toBeUndefined();
+    });
   });
 
   it("a spent Perplexity still points at web_search when Tavily is spent too, because web_search stays keyless", async () => {

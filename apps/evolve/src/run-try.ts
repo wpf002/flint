@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fsyncSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync, writeSync, unlinkSync, mkdirSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { TIERS } from '@flint/core';
 import type { DailyRow } from './measure.js';
@@ -35,6 +35,16 @@ import { type Candidate, localOnly, parseCandidate, tierEnvVar } from './promote
  * it at every start. It is never rewritten in place: the new contents go to a
  * temp file beside it, mode 600, and are renamed over it (writeSecrets). A
  * crash mid-write leaves the old file whole, not half of the new one.
+ *
+ * THE TEMP FILE holds every key too, for as long as it exists, and a hard kill
+ * (or a power cut) between the write and the rename leaves it behind. So:
+ *  - its name ends in `.env`, which the offsite backup already leaves out at
+ *    any depth (apps/studio/backup_flint.sh: `--exclude './*.env'`); under its
+ *    old name, `.secrets.env.<pid>.<hex>.tmp`, a stray one went offsite;
+ *  - the next write sweeps any that are left (older than a minute, so a write
+ *    in flight in another process is not touched), under both names;
+ *  - the contents are fsynced before the rename, so a crash just after it
+ *    cannot leave an empty secrets.env where the keys were.
  */
 
 export interface Rollback {
@@ -54,20 +64,73 @@ const PARKED = '#evolve-parked ';
  * whatever the umask, then renamed over the old one. A symlinked secrets.env
  * keeps being a symlink: the file it points at is the one replaced.
  */
-export function writeSecrets(path: string, content: string): void {
+export function writeSecrets(path: string, content: string, opts: { now?: () => number } = {}): void {
   const target = existsSync(path) ? realpathSync(path) : path;
-  const tmp = join(dirname(target), `.${basename(target)}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
+  sweepSecretsTemps(target, (opts.now ?? Date.now)());
+  const tmp = join(dirname(target), secretsTempName(basename(target)));
+  let fd: number | undefined;
   try {
-    writeFileSync(tmp, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    chmodSync(tmp, 0o600);
+    // 'wx': never follows or reuses something already at that name.
+    fd = openSync(tmp, 'wx', 0o600);
+    chmodSync(tmp, 0o600); // whatever the umask
+    writeSync(fd, content, null, 'utf8');
+    fsyncSync(fd); // on disk before it takes the old file's place
+    closeSync(fd);
+    fd = undefined;
     renameSync(tmp, target);
   } catch (err) {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* already closed */
+      }
+    }
     try {
       unlinkSync(tmp);
     } catch {
       /* it was never created, or the rename already took it */
     }
     throw err;
+  }
+}
+
+/** How old a left-over temp file must be before a later write removes it: a write in flight is seconds old at most. */
+export const SECRETS_TEMP_STALE_MS = 60_000;
+
+/**
+ * The temp file's name for a secrets file: hidden, unique to this write, and
+ * ending in `.env` so that everything that leaves `*.env` out (the offsite
+ * backup) leaves it out too.
+ */
+export function secretsTempName(base: string): string {
+  return `.${base}.${process.pid}.${randomBytes(4).toString('hex')}.tmp.env`;
+}
+
+/** Is this file name a secrets temp file for `base`, under today's name or the one before it? */
+export function isSecretsTemp(name: string, base: string): boolean {
+  if (!name.startsWith(`.${base}.`)) return false;
+  return /^\.\d+\.[0-9a-f]{8}\.tmp(\.env)?$/.test(name.slice(base.length + 1));
+}
+
+/** Remove temp files an earlier write left beside `target` when it was killed. Never throws. */
+function sweepSecretsTemps(target: string, now: number): void {
+  const dir = dirname(target);
+  const base = basename(target);
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!isSecretsTemp(name, base)) continue;
+    try {
+      const st = statSync(join(dir, name));
+      if (st.isFile() && now - st.mtimeMs >= SECRETS_TEMP_STALE_MS) unlinkSync(join(dir, name));
+    } catch {
+      /* gone already, or not ours to remove */
+    }
   }
 }
 

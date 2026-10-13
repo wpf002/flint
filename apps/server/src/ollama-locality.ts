@@ -21,7 +21,14 @@
  * request. The asking is `watch`: the server names the addresses its local
  * brains use (./goals-chat), each is asked at once and then once a minute, and
  * an Ollama that stops answering is believed for five more minutes and then
- * not at all. Only an address ./policy already took for this Mac is watched.
+ * not at all. Only an address ./policy already took as here is watched (this
+ * Mac, or the model server Will said is his).
+ *
+ * The local model's own server is also heard from another way: every look the
+ * health monitor takes at it reads the same listing (./local-backend), and
+ * hands it here (`learn`). That is the only way an Ollama asked over the
+ * OpenAI-compatible wire is known (its address there is not one this can ask),
+ * and it keeps what is known of the main server fresher than a minute.
  */
 import { sameModel } from './memory-brain';
 
@@ -75,6 +82,31 @@ export class OllamaLocality {
     if (!listing || this.#now() - listing.at > (this.opts.maxAgeMs ?? 5 * 60_000)) return false;
     const row = listing.models.find((m) => sameModel(m.name, model));
     return row?.here === true;
+  }
+
+  /**
+   * Is this model known, now, to run somewhere ELSE than the Ollama at this
+   * address: its listing, recent enough to believe, gives it a remote host?
+   * This is the other definite answer. Everything in between (no listing, an
+   * old one, a model it does not hold) is neither: `runsHere` and this are
+   * then both false, and whoever asks decides what not knowing means.
+   */
+  runsElsewhere(baseURL: string | undefined, model: string): boolean {
+    if (!baseURL || !model) return false;
+    const listing = this.#listings.get(base(baseURL));
+    if (!listing || this.#now() - listing.at > (this.opts.maxAgeMs ?? 5 * 60_000)) return false;
+    const row = listing.models.find((m) => sameModel(m.name, model));
+    return row?.here === false;
+  }
+
+  /**
+   * Has the server at this address ever listed its models as an Ollama does?
+   * Then it is an Ollama, whatever wire it is asked through, and a model on it
+   * is local only on its word (./policy brainIsLocal). It stays one once it
+   * was: an old listing is not believed, but it is not forgotten either.
+   */
+  isOllama(baseURL: string | undefined): boolean {
+    return !!baseURL && this.#listings.has(base(baseURL));
   }
 
   /**

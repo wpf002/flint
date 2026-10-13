@@ -236,7 +236,9 @@ export class ToolRouter {
       .slice(0, this.maxAppend);
     if (appends.length === 0) return none;
     return {
-      tools: [...this.core, ...appends.map((x) => x.t)],
+      // An appended tool was matched to THIS message: on a small window it is the last to be left out
+      // (@flint/core Tool.keep), where it used to be the first (it is listed last).
+      tools: [...this.core, ...appends.map((x) => ({ ...x.t, keep: true }))],
       appended: appends.map((x) => ({ name: x.t.definition.name, score: x.score })),
     };
   }

@@ -298,6 +298,9 @@ describe('the context says when earlier turns were left out', () => {
       expect(s).toMatchObject({ sent: 0, leftOut: 3 });
       expect(withHistoryNote('[Context]', s)).toContain('3 earlier turns of this conversation are not shown to you');
       expect(store.historyStats('never-seen')).toMatchObject({ sent: 0, leftOut: 0 });
+      // historyChars counts only what the window sends: nothing here, the turns are too old.
+      expect(store.historyChars('console')).toBe(0);
+      expect(store.historyChars('never-seen')).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -337,5 +340,28 @@ describe('the deep-thread rule, fed from the windowed history', () => {
     const { sent } = store.historyStats('console');
     expect(sent).toBe(0);
     expect(classifyMessage('How are you doing today Flint?', { turns: sent })).toBe('routine');
+  });
+});
+
+describe('historyChars: how long the history a turn carries is (the hybrid rules size a long conversation with it)', () => {
+  it('is the characters of the messages in the window, and reading it hands nothing out', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'flint-hist-'));
+    try {
+      const store = new PersistentStore(join(dir, 'c.json'), { history: { maxTurns: 2, maxAgeMs: 48 * HOUR }, now: () => NOW });
+      let handedOut = 0;
+      store.onHistory = () => {
+        handedOut += 1;
+      };
+      for (let i = 0; i < 3; i++) {
+        await store.beginTurn({ conversationId: 'c', turnId: `t${i}`, userMessage: { id: `u${i}`, role: 'user', content: 'q'.repeat(10 * (i + 1)), timestamp: NOW }, createdAt: NOW });
+        await store.commitTurn({ conversationId: 'c', turnId: `t${i}`, responseMessages: [{ id: `a${i}`, role: 'assistant', content: 'aaaaa', timestamp: NOW }], usage: { input: 1, output: 1 }, updatedAt: NOW });
+      }
+      // The window is the last two turns: (20 + 5) + (30 + 5).
+      expect(store.historyChars('c')).toBe(60);
+      // A count only: the turn is not marked as having read its history (./conversation-taint).
+      expect(handedOut).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

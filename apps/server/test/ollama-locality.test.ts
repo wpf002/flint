@@ -59,6 +59,30 @@ describe('OllamaLocality', () => {
     }
   });
 
+  it('the other definite answer: a model its listing gives a remote host runs elsewhere; what is not known is neither', () => {
+    let now = 1_000_000;
+    const l = new OllamaLocality({ now: () => now });
+    expect(l.runsElsewhere(HERE, 'mine')).toBe(false); // nothing heard yet
+    expect(l.isOllama(HERE)).toBe(false);
+    l.learn(HERE, [{ name: 'qwen2.5:14b' }, { name: 'mine:latest', remote_host: 'https://ollama.com:443' }]);
+    expect(l.isOllama(`${HERE}/`)).toBe(true);
+    expect(l.runsElsewhere(HERE, 'mine')).toBe(true);
+    expect(l.runsElsewhere(HERE, 'MINE:latest')).toBe(true);
+    expect(l.runsElsewhere(HERE, 'qwen2.5:14b')).toBe(false);
+    // A model the listing does not hold: not here, and not known to be elsewhere either.
+    expect(l.runsElsewhere(HERE, 'not-pulled')).toBe(false);
+    expect(l.runsHere(HERE, 'not-pulled')).toBe(false);
+    expect(l.runsElsewhere(undefined, 'mine')).toBe(false);
+    expect(l.runsElsewhere(HERE, '')).toBe(false);
+    // An old listing is believed for neither answer, and the server is still known to be an Ollama.
+    now += 5 * 60_000 + 1;
+    expect(l.runsElsewhere(HERE, 'mine')).toBe(false);
+    expect(l.runsHere(HERE, 'qwen2.5:14b')).toBe(false);
+    expect(l.isOllama(HERE)).toBe(true);
+    l.clear();
+    expect(l.isOllama(HERE)).toBe(false);
+  });
+
   it('an Ollama that is down, slow, or answers with something else teaches nothing', async () => {
     for (const fetchImpl of [
       async () => { throw new Error('ECONNREFUSED'); },

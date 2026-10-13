@@ -12,6 +12,22 @@ export interface TrainingRecord {
   output: string;
   tools?: Array<{ tool: string; outcome?: string; ms?: number }>;
   usage?: unknown;
+  /**
+   * The turn stayed on Will's Mac (he kept it private, or Flint was in Local
+   * mode). Such a row is training data for a model on that Mac and nothing
+   * else: it is never a prompt in a set, because a set's prompts go to outside
+   * competitors and judges (`staysOnThisMac`).
+   */
+  staysHere?: unknown;
+}
+
+/**
+ * Is this corpus row one that must not leave Will's Mac? Anything but an
+ * absent or false mark counts: a mark this code does not understand is kept
+ * here, not sent.
+ */
+export function staysOnThisMac(r: { staysHere?: unknown }): boolean {
+  return r.staysHere !== undefined && r.staysHere !== false && r.staysHere !== null;
 }
 
 /** One frozen eval prompt. */
@@ -140,6 +156,8 @@ export interface BuildResult {
   prompts: EvalPrompt[];
   stats: {
     corpusRows: number;
+    /** Rows left out because their turn stayed on Will's Mac: never a prompt for an outside model or judge. */
+    keptHere: number;
     trivial: number;
     duplicates: number;
     candidates: number;
@@ -155,7 +173,10 @@ export interface BuildResult {
  * id, so the file itself is deterministic, not just its contents.
  */
 export function buildPromptSet(records: readonly TrainingRecord[], opts: BuildOptions): BuildResult {
-  const usable = records.filter((r) => typeof r.input === 'string' && r.input.trim());
+  // First, before anything reads a row's words: a turn that stayed on Will's Mac is never a prompt here. The set
+  // is sent to outside competitors and judges. (Dropped before the dedupe, so it cannot stand in for a later row.)
+  const shareable = records.filter((r) => !staysOnThisMac(r));
+  const usable = shareable.filter((r) => typeof r.input === 'string' && r.input.trim());
   const nonTrivial = usable.filter((r) => !isTrivial(r.input));
   const ordered = nonTrivial
     .slice()
@@ -220,6 +241,7 @@ export function buildPromptSet(records: readonly TrainingRecord[], opts: BuildOp
     prompts,
     stats: {
       corpusRows: records.length,
+      keptHere: records.length - shareable.length,
       trivial: usable.length - nonTrivial.length,
       duplicates: nonTrivial.length - unique.length,
       candidates: unique.length,

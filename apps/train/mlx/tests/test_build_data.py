@@ -56,6 +56,17 @@ class Filters(BuildBase):
         self.assertEqual(len(res.sampling_prompts), 4)
         self.assertEqual(res.status, "NO_DATA")
 
+    def test_a_row_from_a_turn_that_stayed_on_this_mac_is_still_training_data(self):
+        # The server marks such a row (`staysHere`: a private turn, or any turn of Local mode). The eval harness
+        # drops it from every set it sends out (apps/parity buildPromptSet); this build runs on this Mac and keeps it.
+        marked = dict(corpus_row(TOPICS[0], cid=next(self.cids), ts=1), staysHere=True)
+        plain = corpus_row(TOPICS[1], cid=next(self.cids), ts=2)
+        path = write_jsonl(os.path.join(self.dir, "corpus.jsonl"), [marked, plain])
+        rows = load_corpus(path)
+        self.assertEqual([r.prompt for r in rows], [TOPICS[0], TOPICS[1]])
+        res = self.run_build([], corpus=rows)
+        self.assertEqual(len(res.sampling_prompts), 2)
+
     def test_a_vendor_answer_labelled_human_is_still_a_vendor_answer(self):
         # e.g. a correction flow that records "Will edited Claude's reply" as kind human.
         rows = self._rows([sample_row(TOPICS[i], kind="human", model="claude-opus-5-5", cid=next(self.cids), ts=i) for i in range(8)])

@@ -177,6 +177,20 @@
   .seg button{height:24px;border-radius:6px;padding:0 12px;color:var(--t2);font-weight:500;display:inline-flex;align-items:center;gap:6px;}
   .seg button.on{background:var(--s4);color:var(--t1);}
   .seg em{font-style:normal;color:var(--t3);font-variant-numeric:tabular-nums;}
+  /* A row whose sentence gets a line of its own under the label and its control (Settings: Brain). */
+  .row .seg{margin:0;flex:none;background:var(--s1);}
+  .row.stack{flex-wrap:wrap;row-gap:2px;padding-top:10px;padding-bottom:10px;}
+  .row.stack .lbl{flex:1 1 auto;}
+  .row.stack .sub{flex:1 1 100%;display:flex;align-items:center;gap:8px;min-width:0;font-size:12px;line-height:16px;color:var(--t3);}
+  .row.stack .sub span{flex:1;min-width:0;}
+  .row.stack .val{overflow:hidden;text-overflow:ellipsis;min-width:0;}
+  /* A row that starts with a status dot: its sentence starts under the label, not under the dot. */
+  .row.stack.dot .sub{padding-left:18px;}
+  .row.stack.dotin .sub{padding-left:16px;}
+  /* Things to know about the brain, each a sentence, under its group. */
+  .bnotes{margin-top:8px;display:flex;flex-direction:column;gap:6px;padding:0 16px;}
+  .bnote{display:flex;align-items:flex-start;gap:8px;font-size:12px;line-height:16px;color:var(--t2);}
+  .bnote .st{height:16px;flex:none;}
   .gsh{font-size:11px;line-height:14px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--gold);margin:24px 0 8px;}
   .mb>.gsh:first-child,#sethealth:empty+.gsh,#sethealth>.gsh:first-child{margin-top:8px;}
   .group{background:var(--s2);border-radius:8px;}
@@ -211,6 +225,12 @@
   .toggle::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:var(--t1);transition:transform .15s;}
   .toggle[aria-checked="true"]{background:var(--gold);}
   .toggle[aria-checked="true"]::after{transform:translateX(16px);background:var(--on-gold);}
+  /* The Local Only row's line is a whole sentence, and the server's can be a long one: it wraps, and is never cut short. */
+  .row .lbl #losub{white-space:normal;overflow:visible;}
+  /* On, and not Will's to change here: Local mode already keeps every answer on this Mac. */
+  .toggle[aria-disabled="true"]{opacity:.5;cursor:default;}
+  /* A message that is empty takes no room, and stays in the page so that it is announced when it is filled. */
+  .bmsg{margin-top:8px;} .bmsg:empty{margin-top:0;}
   .mono{font-family:var(--mono);font-size:12px;}
 
   /* approvals: cards in words */
@@ -355,6 +375,9 @@
     .ct{align-items:flex-start;} .ct b{white-space:normal;} .ct .sub{white-space:normal;} .ct svg.i{margin-top:2px;}
     #apprfoot{flex-wrap:wrap;} #apprfoot .note{flex-basis:100%;}
     .row.gwrap{flex-wrap:wrap;} .row.gwrap .lbl{flex:1 1 55%;} .row.gwrap>.ghost{margin-left:auto;}
+    /* Settings rows with a sentence: the mode's three choices take a line of their own, each a full-height target. */
+    .row.stack{row-gap:4px;} .row.stack .sub,.bnote{font-size:14px;line-height:19px;} .bnote .st{height:19px;}
+    #modeseg{flex:1 1 100%;display:flex;} #modeseg button{flex:1;justify-content:center;height:44px;}
     .row.gsug .lbl{flex-basis:100%;} .row.gsug .gsact{flex-basis:100%;margin-top:4px;} .row.gsug .gsact .btn{flex:1;justify-content:center;}
     .fl:has(>.field.gempty:not(:focus))::after{font-size:16px;}
     #goalfoot .gconfirm{flex-basis:100%;} #goalfoot .btn{flex:1;justify-content:center;}
@@ -459,8 +482,26 @@
     <div id="keyapprovals" hidden></div>
     <div class="gsh">Connected Systems</div>
     <div class="group" id="systems"><div class="row"><span class="lbl"><b>Checking…</b></span></div></div>
+    <div class="gsh">Brain</div>
+    <div class="group" id="brainset">
+      <div id="brainrows">
+        <div class="row stack"><span class="lbl"><b>Mode</b></span>
+          <div class="seg" id="modeseg" role="radiogroup" aria-label="Mode" aria-describedby="modesub" onkeydown="modeKey(event)"><button role="radio" aria-checked="false" tabindex="0" data-mode="local" onclick="setMode('local')" disabled>Local</button><button role="radio" aria-checked="false" tabindex="-1" data-mode="hybrid" onclick="setMode('hybrid')" disabled>Hybrid</button><button role="radio" aria-checked="false" tabindex="-1" data-mode="cloud" onclick="setMode('cloud')" disabled>Cloud</button></div>
+          <div class="sub"><span id="modesub" aria-live="polite">Flint is checking.</span></div></div>
+        <div class="row stack dot"><span class="st unknown" id="lmdot"><i></i></span><span class="lbl"><b>Local Model</b></span><span class="val" id="lmval"></span>
+          <div class="sub"><span id="lmsub">Flint is checking.</span><button class="ghost" id="lmcopy" aria-label="Copy Local Model Command" onclick="copyPull('main')" hidden>Copy Command</button></div></div>
+        <div class="row stack dot" id="sbrow" hidden><span class="st unknown" id="sbdot"><i></i></span><span class="lbl"><b>Standby Model</b></span><span class="val" id="sbval"></span>
+          <div class="sub"><span id="sbsub"></span><button class="ghost" id="sbcopy" aria-label="Copy Standby Model Command" onclick="copyPull('standby')" hidden>Copy Command</button></div></div>
+        <div class="row stack"><span class="lbl"><b>Hardware</b></span><span class="val" id="hwval"></span>
+          <div class="sub"><span id="hwsub">Flint is checking.</span></div></div>
+      </div>
+      <div class="row stack" id="brainerr" hidden><span class="lbl"><b id="brainerrttl">Couldn’t Load Brain</b></span><button class="ghost" id="brainretry" onclick="loadBrain()">Try Again</button>
+        <div class="sub"><span id="brainerrsub">Flint isn’t answering.</span></div></div>
+    </div>
+    <div class="bnotes" id="brainnotes" hidden></div>
+    <div class="err bmsg" id="brainmsg" role="status" aria-live="polite"></div>
     <div class="gsh">Privacy</div>
-    <div class="group"><div class="row"><span class="lbl"><b>Local Only</b><span>Answers stay on this Mac.</span></span><button class="toggle" id="lotoggle" role="switch" aria-checked="false" aria-label="Local Only" onclick="toggleLO()"></button></div></div>
+    <div class="group"><div class="row"><span class="lbl"><b>Local Only</b><span id="losub">Answers stay on this Mac.</span></span><button class="toggle" id="lotoggle" role="switch" aria-checked="false" aria-label="Local Only" aria-describedby="losub" onclick="toggleLO()"></button></div></div>
     <div class="gsh">Access</div>
     <div class="group" id="access">
       <div class="row" id="tokrow-signed"><span class="lbl"><b>Access Token</b></span><span class="val">Signed In</span></div>
@@ -531,13 +572,14 @@ function newChat(){
 var PANELS=['approvals','settings','activity','goals'];
 function panelOpen(){return PANELS.some(function(id){return $(id).classList.contains('open');});}
 function showPanel(id,on){if(on)PANELS.forEach(function(p){if(p!==id)$(p).classList.remove('open');});$(id).classList.toggle('open',!!on);document.body.classList.toggle('panel-open',panelOpen());}
-function openSettings(){showPanel('settings',true);loadCreds();loadHealth();refresh();syncAccess();}
+function openSettings(){showPanel('settings',true);loadCreds();loadHealth();if(typeof loadBrain==='function')loadBrain();refresh();syncAccess();}
 function closeSettings(){showPanel('settings',false);}
 /* The app's menu bar and keyboard shortcuts land here. */
 function flintCommand(name){
   if(name==='newChat')newChat();else if(name==='toggleSidebar')toggleSidebar();else if(name==='openSettings')openSettings();
   else if(name==='openApprovals')openApprovals();else if(name==='openActivity')openNotifs();else if(name==='toggleLocalOnly')toggleLO();
-  else if(name==='openGoals'&&typeof openGoals==='function')openGoals();}
+  else if(name==='openGoals'&&typeof openGoals==='function')openGoals();
+  else if(name==='modeLocal')setMode('local');else if(name==='modeHybrid')setMode('hybrid');else if(name==='modeCloud')setMode('cloud');}
 document.addEventListener('keydown',function(e){
   var mod=e.metaKey||e.ctrlKey;
   if(e.key==='Escape'){if(window.innerWidth<=600&&$('app').classList.contains('side-open')){setSidebar(false);return;}if($('approvals').classList.contains('open'))closeApprovals();else if($('activity').classList.contains('open'))closeActivity();else if($('goals').classList.contains('open')&&typeof closeGoals==='function')closeGoals();else if($('settings').classList.contains('open')&&TOKEN)closeSettings();return;}
@@ -550,6 +592,8 @@ document.addEventListener('keydown',function(e){
 /* ---------- live data ---------- */
 function refresh(){
   fetch(BASE+'/health').then(function(r){return r.json();}).then(function(h){
+    /* The mode, for the Local Only switch and the attachment note: known here without Settings ever being opened. */
+    if(h&&typeof setLocalMode==='function')setLocalMode(h.mode);
     var sys=$('systems');sys.textContent='';
     (h.servers||[]).forEach(function(s){var row=el('div','row');var l=el('span','lbl');l.appendChild(el('b',null,sysName(s)));row.appendChild(l);
       var st=el('span','st ok');st.appendChild(el('i'));st.appendChild(document.createTextNode('Connected'));row.appendChild(st);sys.appendChild(row);});
@@ -601,11 +645,25 @@ $('transcript').addEventListener('click',function(e){var b=e.target&&e.target.cl
 function copyText(t,btn){try{navigator.clipboard.writeText(t).then(function(){btn.setAttribute('data-tip','Copied');setTimeout(function(){btn.setAttribute('data-tip','Copy');},1500);});}catch(e){}}
 /* ---------- brain: local vs frontier ---------- */
 var LOCAL_ONLY=false;localStorage.setItem('flint_lo','0');/* always start on the full brain (Claude); lock is per-session, never sticky */
-function applyLO(){$('lopill').hidden=!LOCAL_ONLY;$('lotoggle').setAttribute('aria-checked',LOCAL_ONLY?'true':'false');}
-function toggleLO(){LOCAL_ONLY=!LOCAL_ONLY;localStorage.setItem('flint_lo',LOCAL_ONLY?'1':'0');applyLO();}
-/* Flint is just Flint: no tag for the frontier brain; an on-device answer says "Local". */
-function setBrainChip(bodyEl,brain){try{var meta=bodyEl.parentNode.querySelector('.meta');if(!meta)return;var ex=meta.querySelector('.tag');if(ex)ex.remove();
-  if(brain==='frontier')return;meta.appendChild(el('span','tag','Local'));}catch(e){}}
+/* The mode the server is in, as /health and Settings last said it. In Local mode every answer already stays on this Mac,
+   so the Local Only switch shows ON and cannot be changed, and its line says why. Will's own choice (LOCAL_ONLY) is not
+   touched: when the mode changes, the switch is what he left it. LO_LINE is the server's sentence for the row, when it sent one. */
+var LOCAL_MODE=false,LO_LINE='';
+function applyLO(){var t=$('lotoggle');$('lopill').hidden=!LOCAL_ONLY||LOCAL_MODE;
+  t.setAttribute('aria-checked',LOCAL_ONLY||LOCAL_MODE?'true':'false');
+  if(LOCAL_MODE)t.setAttribute('aria-disabled','true');else t.removeAttribute('aria-disabled');
+  $('losub').textContent=LO_LINE||(LOCAL_MODE?'Local mode keeps every answer on this Mac.':'Answers stay on this Mac.');}
+function setLocalMode(mode,line){if(typeof mode!=='string')return;var local=mode==='local';
+  /* A sentence written for the other mode is not kept past it. */
+  LO_LINE=typeof line==='string'&&line?line:(local===LOCAL_MODE?LO_LINE:'');LOCAL_MODE=local;applyLO();
+  /* The Mac app is told the mode, so its menu shows Local Only as off while Flint is in Local mode (flint.swift). */
+  try{var app=window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.flintMode;if(app)app.postMessage(mode);}catch(e){}}
+/* In Local mode the switch, the pill, the shortcut and the app's menu command all change nothing. */
+function toggleLO(){if(LOCAL_MODE)return;LOCAL_ONLY=!LOCAL_ONLY;localStorage.setItem('flint_lo',LOCAL_ONLY?'1':'0');applyLO();}
+/* Flint is just Flint: no tag for the frontier brain; an on-device answer says "Local", or "Standby" when the
+   small standby model answered because the main local model was still loading. */
+function setBrainChip(bodyEl,brain,standby){try{var meta=bodyEl.parentNode.querySelector('.meta');if(!meta)return;var ex=meta.querySelector('.tag');if(ex)ex.remove();
+  if(brain==='frontier')return;meta.appendChild(el('span','tag',standby===true?'Standby':'Local'));}catch(e){}}
 applyLO();
 
 /* ---------- proposed actions in chat ---------- */
@@ -779,7 +837,7 @@ function send(speakBack){
       if(r.done){$('think').textContent='';setTalk(0);loadThreads();if(!raw)body.textContent='';if(sb){var tail=raw.slice(spoken);if(tail.trim())speakSynced(tail,body,vctx);}return;}
       buf+=dec.decode(r.value,{stream:true});var parts=buf.split('\n\n');buf=parts.pop();
       parts.forEach(function(p){var m=p.match(/^data: (.*)$/m);if(!m)return;try{var ev=JSON.parse(m[1]);
-        if(ev.type==='meta'){if(ev.brain)setBrainChip(body,ev.brain);voiceMeta(vctx,ev);}
+        if(ev.type==='meta'){if(ev.brain)setBrainChip(body,ev.brain,ev.standby);voiceMeta(vctx,ev);}
         if(ev.type==='pending'){renderProposals(ev.actions,body);}
         if(ev.type==='text'){raw+=ev.delta;setTalk(1);
           if(!sb){body.innerHTML=md(raw);$('transcript').scrollTop=9e9;}
@@ -829,7 +887,7 @@ function addFiles(list){
     r.readAsDataURL(f);
   });
   renderChips();
-  if(PENDING.some(function(a){return a.kind!=='text';})&&LOCAL_ONLY)attNote('Local Only is on, so Flint can’t read images or PDFs.');
+  if(PENDING.some(function(a){return a.kind!=='text';})&&(LOCAL_ONLY||LOCAL_MODE))attNote(LOCAL_MODE?'Flint is in Local mode, so it can’t read images or PDFs.':'Local Only is on, so Flint can’t read images or PDFs.');
 }
 function chipHtml(a,removable,i){
   var lead=a.kind==='image'&&a.url?'<img src="'+a.url+'" alt="">':'<span class="ck">'+(a.kind==='document'?'PDF':a.kind==='image'?'IMG':'TXT')+'</span>';
@@ -854,22 +912,31 @@ document.getElementById('input').addEventListener('paste',function(e){var f=e.cl
 })();
 
 /* ---------- voice (speak to Flint, Flint speaks back) ---------- */
-var mediaRec=null,voChunks=[],_flintVoice=null;
-function pickVoice(){
-  if(_flintVoice)return _flintVoice;
+var mediaRec=null,voChunks=[],_flintVoice=null,_flintVoiceHere=null;
+/* "male" or "man" as a word of a voice's name: "Female" is not one, and neither is "Samantha". */
+function _maleVoice(name){return /(^|[^a-z])(male|man)([^a-z]|$)/i.test(String(name||''));}
+/* The browser voice a sentence is spoken with. `here`: the reply stays on this Mac, so only a voice this device
+   makes itself is used (localService). A browser's network voice sends the words to its maker, which is exactly
+   what such a reply must not do: with no voice of the device's own, null, and the sentence is shown and not spoken. */
+function pickVoice(here){
+  if(here?_flintVoiceHere:_flintVoice)return here?_flintVoiceHere:_flintVoice;
   var vs=(window.speechSynthesis&&window.speechSynthesis.getVoices())||[];
-  var prefer=['Aaron','Daniel','Fred','Alex','Tom','Oliver','Arthur','Reed','Gordon','Rishi'];
-  for(var i=0;i<prefer.length;i++)for(var j=0;j<vs.length;j++)if(vs[j].name.indexOf(prefer[i])>=0){_flintVoice=vs[j];return _flintVoice;}
-  for(var k=0;k<vs.length;k++)if(/^en/i.test(vs[k].lang)&&/male|man/i.test(vs[k].name)){_flintVoice=vs[k];return _flintVoice;}
-  for(var l=0;l<vs.length;l++)if(/^en/i.test(vs[l].lang)){_flintVoice=vs[l];return _flintVoice;}
-  return null;
+  if(here)vs=Array.prototype.filter.call(vs,function(v){return v&&v.localService===true;});
+  var prefer=['Aaron','Daniel','Fred','Alex','Tom','Oliver','Arthur','Reed','Gordon','Rishi'],v=null;
+  for(var i=0;i<prefer.length&&!v;i++)for(var j=0;j<vs.length&&!v;j++)if(vs[j].name.indexOf(prefer[i])>=0)v=vs[j];
+  for(var k=0;k<vs.length&&!v;k++)if(/^en/i.test(vs[k].lang)&&_maleVoice(vs[k].name))v=vs[k];
+  for(var l=0;l<vs.length&&!v;l++)if(/^en/i.test(vs[l].lang))v=vs[l];
+  if(here)_flintVoiceHere=v;else _flintVoice=v;
+  return v;
 }
-if(window.speechSynthesis)window.speechSynthesis.onvoiceschanged=function(){_flintVoice=null;pickVoice();};
+if(window.speechSynthesis)window.speechSynthesis.onvoiceschanged=function(){_flintVoice=null;_flintVoiceHere=null;pickVoice();};
 // Speech output: prefer the server's neural voice (human); fall back to the
 // local browser voice. Sentences are chained so they always play in order.
 var _ttsChain=Promise.resolve(),_ttsGen=0,_ttsAudio=null,_ttsQueued=0;/* sentences of this generation not yet spoken (update-js: not quiet) */
 function stopSpeech(){_ttsGen++;_ttsQueued=0;_ttsChain=Promise.resolve();try{if(_ttsAudio){_ttsAudio.pause();_ttsAudio=null;}}catch(e){}try{if(window.speechSynthesis)window.speechSynthesis.cancel();}catch(e){}}
-function _localSpeak(clean){return new Promise(function(res){try{var u=new SpeechSynthesisUtterance(clean);var v=pickVoice();if(v)u.voice=v;u.rate=1.05;u.pitch=0.92;u.onend=u.onerror=function(){res();};window.speechSynthesis.speak(u);}catch(e){res();}});}
+/* `here`: the reply stays on this Mac. It is then spoken by a voice of this device's own or not at all (pickVoice):
+   an utterance with no voice set takes the browser's default, which can be a network voice. */
+function _localSpeak(clean,here){return new Promise(function(res){try{var v=pickVoice(here);if(here&&!v){res();return;}var u=new SpeechSynthesisUtterance(clean);if(v)u.voice=v;u.rate=1.05;u.pitch=0.92;u.onend=u.onerror=function(){res();};window.speechSynthesis.speak(u);}catch(e){res();}});}
 // A 503 (no TTS key, or OpenAI's spend cap reached) means the browser voice for a while:
 // skip the neural request for 10 minutes instead of asking again every sentence.
 var _ttsSkipUntil=0;
@@ -912,7 +979,7 @@ function speakSynced(sentence,body,vctx){
           a.onplay=reveal; // text shows up exactly as the voice begins it
           a.onended=a.onerror=function(){URL.revokeObjectURL(url);if(_ttsAudio===a)_ttsAudio=null;res();};
           a.play().catch(function(){reveal();res();});
-        }else{reveal();_localSpeak(clean).then(res);} // no neural voice → local, still synced
+        }else{reveal();_localSpeak(clean,vctx.here===true).then(res);} // no neural voice → local, still synced
       });
     });
   }).then(spoken,spoken);
@@ -1224,6 +1291,8 @@ function healthDetail(d){d=String(d||'').replace(/\s*\([^)]*\)/g,'').replace(/\b
   if(!d)return '';d=d.charAt(0).toUpperCase()+d.slice(1);return /[.!?…]$/.test(d)?d:d.replace(/[,:;]$/,'')+'.';}
 function healthName(c){c=String(c||'');if(HEALTH_NAMES[c])return HEALTH_NAMES[c];if(c.indexOf('source:')===0)return SOURCE_NAMES[c.slice(7)]||titleCase(laneWords(c.slice(7)));return titleCase(laneWords(c));}
 function healthDot(status,text){var cls={ok:'ok',degraded:'degraded',down:'down',unknown:'unknown',disabled:'off'}[status]||'unknown';var s=laneEl('span','st '+cls);s.appendChild(laneEl('i'));if(text)s.appendChild(document.createTextNode(text));return s;}
+/* When Flint last checked, as a sentence: "Flint checked just now." */
+function healthChecked(at,stale){if(!at)return 'Flint has never checked.';var p=agoPhrase(at);return p?(stale?'Flint last checked ':'Flint checked ')+p+'.':'Flint has checked.';}
 var HEALTH_ALL=false;
 function loadHealth(){var top=document.getElementById('sethealth'),last=document.getElementById('sethealth-last');
   laneCall('/runtime/health').then(function(h){top.textContent='';last.textContent='';
@@ -1233,11 +1302,13 @@ function loadHealth(){var top=document.getElementById('sethealth'),last=document
     var host=(issues.length||stale)?top:last;
     host.appendChild(laneEl('div','gsh','Health'));
     var g=laneEl('div','group');host.appendChild(g);
-    var sum=laneEl('div','row');var worst=stale?'unknown':issues.length?issues[0].status:'ok';
+    /* A stacked row: the label and Refresh on the first line, when Flint last checked on its own line, as a sentence.
+       (On one line the three ran into each other at phone width.) */
+    var sum=laneEl('div','row stack dotin');var worst=stale?'unknown':issues.length?issues[0].status:'ok';
     var label=stale?'Checks Stopped':issues.length?issues.length+' Issue'+(issues.length===1?'':'s'):'All Systems Normal';
     var lb=laneEl('span','lbl');var st=healthDot(worst,label);st.style.color='var(--t1)';st.style.fontWeight='500';lb.appendChild(st);sum.appendChild(lb);
-    sum.appendChild(laneEl('span','val',h.lastHealthRun?(stale?'Last check ':'Checked ')+agoPhrase(h.lastHealthRun):'Never Checked'));
-    var again=laneEl('button','ghost','Refresh');again.onclick=loadHealth;sum.appendChild(again);g.appendChild(sum);
+    var again=laneEl('button','ghost','Refresh');again.onclick=loadHealth;sum.appendChild(again);
+    var when=laneEl('div','sub');when.appendChild(laneEl('span',null,healthChecked(h.lastHealthRun,stale)));sum.appendChild(when);g.appendChild(sum);
     issues.forEach(function(c){var row=laneEl('div','row two');row.appendChild(healthDot(c.status));var l=laneEl('span','lbl');l.appendChild(laneEl('b',null,healthName(c.component)));
       l.appendChild(laneEl('span',null,(c.detail&&healthDetail(c.detail))||HEALTH_LINES[c.status]||''));row.appendChild(l);row.appendChild(laneEl('span','val',laneAgo(c.at)));g.appendChild(row);});
     var rest=comps.filter(function(c){return issues.indexOf(c)<0;});
@@ -1247,6 +1318,126 @@ function loadHealth(){var top=document.getElementById('sethealth'),last=document
       g.appendChild(box);all.onclick=function(){HEALTH_ALL=!HEALTH_ALL;box.hidden=!HEALTH_ALL;};}
   }).catch(function(e){top.textContent='';last.textContent='';top.appendChild(laneEl('div','gsh','Health'));var g=laneEl('div','group');var row=laneEl('div','row');var l=laneEl('span','lbl');
     l.appendChild(laneEl('b',null,"Couldn't Load Health"));l.appendChild(laneEl('span',null,"The runtime isn't answering."));row.appendChild(l);var again=laneEl('button','ghost','Try Again');again.onclick=loadHealth;row.appendChild(again);g.appendChild(row);top.appendChild(g);});}
+/* ---------- Settings: Brain (the routing mode, and the local model's state) ----------
+   GET /inference and POST /inference/mode. The mode is Will's to set, here or from the app's
+   commands; no model can change it. The server writes every sentence and every name shown here
+   (a model's display name, never its tag); this section shows them, each set with textContent.
+   The one thing that is not shown is the download command: it goes to the clipboard, and only
+   when it is exactly "ollama pull" and a model's tag. */
+var BRAIN_DOTS={loaded:'ok',cold:'off',loading:'degraded',unavailable:'down',checking:'unknown'};
+/* The standby is optional: missing, it is not a failure, and never a red dot. */
+var STANDBY_DOTS={loaded:'ok',cold:'off',loading:'degraded',unavailable:'off',checking:'unknown'};
+var BRAIN_CHECKING='Flint is checking.';
+var BRAIN_PULL={main:'',standby:''},BRAIN_SEQ=0,BRAIN_SHOWN=false,BRAIN_REFOCUS=false,BRAIN_TIMER=0;
+/* The mode a save asked for, when the save's answer was a failure: if the server turns out to be in it, the save landed. */
+var BRAIN_ASKED='';
+/* How often the section looks again while Settings is open and something on it is still on its way. */
+var BRAIN_AGAIN_MS=5000;
+var PULL_RE=/^ollama pull [A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/;
+function brainEl(id){return document.getElementById(id);}
+/* A sentence or a name from the server, as this page writes its own: the apostrophe is the curly one. */
+function brainText(v){return typeof v==='string'?v.replace(/'/g,'’'):'';}
+/* A dot's colour for a state: only a state this page knows (never a word that happens to name something every object has). */
+function brainDot(dots,state){return typeof state==='string'&&Object.prototype.hasOwnProperty.call(dots,state)?dots[state]:'unknown';}
+/* Empty, the message takes no room and stays in the page, so a reader hears it when it is filled (it is a live region). */
+function brainMsg(t){brainEl('brainmsg').textContent=t?errText(t):'';}
+/* Flint's own sentence when it sent one. Anything else is never shown: a browser's "Load failed.", a server's raw
+   words, or the status code this page's own request helper reports for an answer it could not read. */
+function brainOwn(e,fallback){var m=e&&typeof e.message==='string'?e.message:'';
+  return /^(Flint |The access token )/.test(m)&&!/^Flint returned error \d+\.?$/.test(m)?errText(m):fallback;}
+function modeButtons(){return brainEl('modeseg').querySelectorAll('button');}
+function pullOf(m){var c=m&&m.pull;return typeof c==='string'&&PULL_RE.test(c)?c:'';}
+function brainShow(which){brainEl('brainrows').hidden=which!=='rows';brainEl('brainerr').hidden=which!=='err';}
+function brainOpen(){var s=brainEl('settings');return !!(s&&s.classList&&s.classList.contains('open'));}
+/* The things to know, under the group: each one sentence, with a dot. */
+function brainNotes(list){var box=brainEl('brainnotes');box.textContent='';var n=0;list=list||[];
+  for(var i=0;i<list.length;i++){var t=brainText(list[i]);if(!t)continue;var row=document.createElement('div');row.className='bnote';
+    var dot=document.createElement('span');dot.className='st degraded';dot.appendChild(document.createElement('i'));row.appendChild(dot);
+    var line=document.createElement('span');line.textContent=t;row.appendChild(line);box.appendChild(row);n++;}
+  box.hidden=!n;}
+/* Nothing of an earlier answer stays on screen, and nothing is left to copy. The line given is what each row says meanwhile. */
+function brainClear(line){BRAIN_PULL.main='';BRAIN_PULL.standby='';
+  var bs=modeButtons();for(var i=0;i<bs.length;i++){bs[i].classList.toggle('on',false);bs[i].setAttribute('aria-checked','false');bs[i].disabled=true;}
+  brainEl('modesub').textContent=line;brainEl('lmsub').textContent=line;brainEl('hwsub').textContent=line;
+  brainEl('lmval').textContent='';brainEl('hwval').textContent='';brainEl('sbval').textContent='';brainEl('sbsub').textContent='';
+  brainEl('lmdot').className='st unknown';brainEl('sbdot').className='st unknown';
+  brainEl('lmcopy').hidden=true;brainEl('sbcopy').hidden=true;brainEl('sbrow').hidden=true;brainNotes([]);}
+/* The section could not be shown: one row that says why, with Try Again when trying again can help. */
+function brainFail(title,line,retry){brainClear('');var bs=modeButtons();for(var i=0;i<bs.length;i++)bs[i].disabled=false;
+  brainEl('brainerrttl').textContent=title;brainEl('brainerrsub').textContent=line;brainEl('brainretry').hidden=!retry;brainShow('err');BRAIN_SHOWN=false;
+  /* The choice that was in focus is gone with the rows: focus goes to the one control that is left. */
+  var again=brainEl('brainretry');if(BRAIN_REFOCUS&&retry&&again.focus)again.focus();BRAIN_REFOCUS=false;}
+/* Focus goes back to the choice in the tab order only when saving took it away (a disabled button cannot hold it).
+   If Will has moved on to another field meanwhile, it stays where he put it. */
+function brainRefocus(){var bs=modeButtons(),at=-1;for(var i=0;i<bs.length;i++)if(bs[i].getAttribute('tabindex')==='0')at=i;
+  var a=document.activeElement,lost=!a||a===document.body||(a.getAttribute&&a.getAttribute('role')==='radio');
+  if(BRAIN_REFOCUS&&lost&&at>=0&&bs[at].focus)bs[at].focus();BRAIN_REFOCUS=false;}
+/* The mode, on the three choices and in its sentence. Used for the whole status, and at once for a mode that was just saved. */
+function brainMode(mode,sentence){var bs=modeButtons(),at=-1;
+  for(var i=0;i<bs.length;i++){var on=bs[i].getAttribute('data-mode')===mode;if(on)at=i;bs[i].classList.toggle('on',on);bs[i].setAttribute('aria-checked',on?'true':'false');bs[i].disabled=false;}
+  /* One of the three is in the tab order: the chosen one. The arrow keys reach the others. */
+  for(var j=0;j<bs.length;j++)bs[j].setAttribute('tabindex',j===(at<0?0:at)?'0':'-1');
+  brainRefocus();
+  brainEl('modesub').textContent=brainText(sentence)||BRAIN_CHECKING;}
+/* Is anything shown still on its way (a model loading, a look not taken yet, a download Will may be running)? */
+function brainPending(d){var l=d.local||{},p=l.primary||{},sb=l.standby,ing=function(m){return !!m&&(m.state==='loading'||m.state==='checking'||!!pullOf(m));};
+  return !d.hardware||ing(p)||ing(sb);}
+function renderBrain(d){d=d||{};var l=d.local||{},p=l.primary||{},h=d.hardware,sb=l.standby;
+  brainShow('rows');
+  /* A save whose answer never arrived, and the server is in the mode that was asked for: it was saved after all,
+     and the sentence that said otherwise is taken down. */
+  if(BRAIN_ASKED){if(d.mode===BRAIN_ASKED)brainMsg('');BRAIN_ASKED='';}
+  brainMode(d.mode,d.modeSentence);
+  if(typeof setLocalMode==='function')setLocalMode(d.mode,brainText(d.localOnlySentence));
+  brainEl('lmval').textContent=brainText(p.name);
+  brainEl('lmsub').textContent=brainText(p.sentence)||BRAIN_CHECKING;
+  brainEl('lmdot').className='st '+(l.confined===false?'down':brainDot(BRAIN_DOTS,p.state));
+  BRAIN_PULL.main=pullOf(p);var cp=brainEl('lmcopy');cp.hidden=!BRAIN_PULL.main;cp.textContent='Copy Command';
+  brainEl('sbrow').hidden=!sb;
+  brainEl('sbval').textContent=sb?brainText(sb.name):'';brainEl('sbsub').textContent=sb?brainText(sb.sentence):'';
+  /* A standby on a server Flint will not use is not a green dot: it is not in use, whatever its state. */
+  brainEl('sbdot').className='st '+(sb?(l.confined===false?'off':brainDot(STANDBY_DOTS,sb.state)):'unknown');
+  BRAIN_PULL.standby=sb?pullOf(sb):'';var sc=brainEl('sbcopy');sc.hidden=!BRAIN_PULL.standby;sc.textContent='Copy Command';
+  /* The machine is looked at behind Flint's start: until then, the row says Flint is checking. */
+  brainEl('hwval').textContent=h?brainText(h.name):'';brainEl('hwsub').textContent=(h&&brainText(h.sentence))||BRAIN_CHECKING;
+  brainNotes(d.notices);BRAIN_SHOWN=true;
+  /* While Settings stays open and something is still on its way, the section looks again by itself. */
+  if(BRAIN_TIMER){clearTimeout(BRAIN_TIMER);BRAIN_TIMER=0;}
+  if(brainPending(d)&&brainOpen())BRAIN_TIMER=setTimeout(function(){BRAIN_TIMER=0;if(brainOpen())loadBrain(true);},BRAIN_AGAIN_MS);}
+/* quiet: a look of the page's own (after a save, or while something loads). What is shown and any message under it
+   stay until the answer comes, and if that look fails the section is left as it is: only Will's own asking can end in
+   "Couldn't Load Brain". */
+function loadBrain(quiet){var seq=++BRAIN_SEQ;if(BRAIN_TIMER){clearTimeout(BRAIN_TIMER);BRAIN_TIMER=0;}if(quiet!==true)brainMsg('');
+  if(!TOKEN){brainFail('Not Signed In','Add your access token below to see this.',false);return;}
+  /* The first time, and after a failure, every row says Flint is checking. A later reload keeps what is shown until the answer comes. */
+  if(!BRAIN_SHOWN){brainClear(BRAIN_CHECKING);brainShow('rows');}
+  laneCall('/inference').then(function(d){if(seq!==BRAIN_SEQ)return;
+    /* An answer with no mode in it is not a status (an empty reply, a page from something in between). */
+    if(!d||typeof d.mode!=='string')throw new Error('no status');
+    renderBrain(d);}).catch(function(e){if(seq!==BRAIN_SEQ)return;
+    if(quiet===true&&BRAIN_SHOWN){var bs=modeButtons();for(var i=0;i<bs.length;i++)bs[i].disabled=false;brainRefocus();return;}
+    /* Flint's own sentence when it sent one; a request that never arrived is "Flint isn't answering." */
+    brainFail('Couldn’t Load Brain',brainOwn(e,'Flint isn’t answering.'),true);});}
+function setMode(mode){if(!TOKEN){openSettings();return;}var bs=modeButtons();
+  try{BRAIN_REFOCUS=!!(document.activeElement&&document.activeElement.getAttribute&&document.activeElement.getAttribute('role')==='radio');}catch(e){BRAIN_REFOCUS=false;}
+  for(var i=0;i<bs.length;i++)bs[i].disabled=true;brainMsg('');BRAIN_ASKED='';
+  laneCall('/inference/mode',{mode:mode}).then(function(r){
+    /* The mode that is now in force is shown at once, from the save's own answer; the rest follows. */
+    if(r&&typeof r.mode==='string'){brainMode(r.mode,r.modeSentence);if(typeof setLocalMode==='function')setLocalMode(r.mode,brainText(r.localOnlySentence));}
+    loadBrain(true);
+  }).catch(function(e){
+    /* One plain sentence, then what the server says the mode is: the save may have landed although its answer was lost. */
+    brainMsg(brainOwn(e,'Flint couldn’t save the mode.'));BRAIN_ASKED=mode;loadBrain(true);});}
+/* The arrow keys move among the three choices, as in any radio group; Space or Return chooses the one in focus. */
+function modeKey(e){var k=e&&e.key,bs=modeButtons(),n=bs.length,at=-1;for(var i=0;i<n;i++)if(bs[i]===document.activeElement)at=i;if(at<0)return;
+  var to=(k==='ArrowRight'||k==='ArrowDown')?(at+1)%n:(k==='ArrowLeft'||k==='ArrowUp')?(at+n-1)%n:k==='Home'?0:k==='End'?n-1:-1;if(to<0)return;
+  if(e.preventDefault)e.preventDefault();for(var j=0;j<n;j++)bs[j].setAttribute('tabindex',j===to?'0':'-1');if(bs[to].focus)bs[to].focus();}
+/* Will runs the download himself: Flint only hands him the command, and says so when it could not. */
+function copyPull(which){var std=which==='standby';var cmd=BRAIN_PULL[std?'standby':'main'];if(!cmd||!PULL_RE.test(cmd))return;
+  var b=brainEl(std?'sbcopy':'lmcopy'),sub=brainEl(std?'sbsub':'lmsub');brainMsg('');
+  var failed=function(){brainMsg('Flint couldn’t copy the command.');};
+  var done=function(){b.textContent='Copied';sub.textContent='Paste it in Terminal to download the model.';setTimeout(function(){b.textContent='Copy Command';},1500);};
+  try{navigator.clipboard.writeText(cmd).then(done,failed);}catch(e){failed();}}
 pollNotifs();setInterval(pollNotifs,60000);
 </script>
 <script id="approvals-js">

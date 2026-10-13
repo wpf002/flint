@@ -32,9 +32,100 @@ but are called out explicitly here.
   embedders and cloud models; never a hosted model. The result says where the
   model came from (`from`), the context size a loaded model has (`numCtx`, so
   asking it does not make Ollama reload it), and whether Ollama answered at all
-  (`answered`, to tell "down" from "empty").
+  (`answered`, to tell "down" from "empty"). `skip` names models never to pick:
+  a helper model the caller loads itself is in Ollama's memory too.
+- **`LocalOpenAiProvider`, `localCapabilities`, `isLoopbackHost`**: one adapter
+  for any OpenAI-compatible local model server (Ollama's `/v1`, llama.cpp's
+  `llama-server`). The caller supplies each model's capabilities; a model with
+  `tools: false` is `toolCalling: 'unsupported'` and is never offered tools.
+  It connects to this machine only unless `allowRemote` is set, and never
+  follows a redirect.
+- **Deadlines on the chat-completions wire** (`ChatWire.firstTokenTimeoutMs`,
+  `toolPassTimeoutMs`, `requestTimeoutMs`): a stalled call ends with a
+  non-retryable `timeout` whose `providerCode` is `FIRST_TOKEN_TIMEOUT` or
+  `REQUEST_TIMEOUT`. Also `toolChoiceNone: 'drop_tools'` and `refuseRedirects`.
+  All optional; unset, requests are unchanged. A deadline is a number or a
+  function read on every call (`DeadlineMs`).
+- **The same deadlines on `OllamaProvider`** (`firstTokenTimeoutMs`,
+  `toolPassTimeoutMs`, `requestTimeoutMs`). A thinking model's reasoning counts
+  as a first token. The tool-decision pass is not streamed, so it is under the
+  request deadline, and a stalled one is asked once, not three times.
+- **`HARDWARE_TIERS`, `hardwareTierFor`, `hardwareTier`,
+  `hardwareTiersMarkdown`**: one table from a class of machine to a recommended
+  local model, its context length and a small standby model.
+  `DEFAULT_OLLAMA_MODEL` reads its 8 GB row. A machine is sorted by the memory
+  a model can use (`usableMemoryGb`): an NVIDIA GPU's VRAM, or three quarters
+  of an Apple Silicon Mac's unified memory (`APPLE_USABLE_FRACTION`). A tier is
+  reached at 93% of its number (`TIER_TOLERANCE`), since a card sold as 16 GB
+  reports 15,360 MiB. A machine with no usable GPU is one of two CPU rows,
+  chosen by its RAM (`TierMachine.systemMemoryGb`).
+- **`modelDisplayName`, `derivedModelName`, `modelDownloadGb`,
+  `EMBEDDING_MODEL`, `isTopTier`**: each row names its model for a screen
+  ("Qwen 2.5 7B") as well as by tag; a tag the table does not list gets a
+  readable name derived from it. The embedding model is named in the same
+  file, with its download size.
+- **`FlintConfig.fitToWindow`**: size the whole prompt to the model's window,
+  for a model whose window is small enough to matter. Tools give way (the last
+  listed first) until the messages keep a quarter of the input window, the
+  messages get exactly what is left, and a system prompt that leaves no room
+  for the question fails with `context_overflow` before anything is sent. A
+  fitted prompt is counted on the safe side (each tool as it goes on the wire,
+  at 3 characters a token, and 5% of the window left free). Off by default.
+- **`AiObserver.onContext`** (`ContextEvent`): once per call, how the prompt was
+  sized: the window, the reply's reserve, the fixed part, how many messages
+  were kept and dropped, which tools were left out. Numbers and tool names.
+- **`OllamaProvider`'s window is bounded by the model's own maximum** when the
+  caller's `capabilities` gives it as `maxContextTokens`: Ollama gives a model
+  no more than that, whatever `num_ctx` asks.
+- **`idleTimeoutMs`** on the OpenAI-compatible wire, `LocalOpenAiProvider` and
+  `OllamaProvider`: how long a reply may go quiet once it has begun
+  (`providerCode: 'idle_timeout'`, exported as `IDLE_TIMEOUT`). A model that
+  sent one delta and then nothing was bounded only by the caller.
+- **`OllamaProviderOptions.onFirstOutput`**: called when a request's first sign
+  of output arrives, for a caller that measures time to first token.
+- **`OllamaProvider.baseURL` and `.numCtx`, `LocalOpenAiProvider.baseURL`** are
+  readable: the server every request goes to, and the context window the
+  client asks for on every call. A caller can tell a model on this machine
+  from one elsewhere, and size a prompt to the window the model really has.
+- **`TokenUsage.lastInput`**: the input tokens of the last request when a
+  call made more than one of its own (Ollama's constrained replies are asked
+  for again, up to three times, when the JSON does not parse). `input` stays
+  the sum. A caller that compares the prompt with the model's window reads
+  `lastInput ?? input`. Optional; absent when the call made one request.
 
 ### Changed
+
+- **`OllamaProvider`'s first-token deadline covers the calls that answer
+  whole.** The tool-decision pass (tools offered, no tool result yet, which is
+  the first pass of nearly every chat turn), a constrained reply and
+  `generate()` were bounded only by `requestTimeoutMs`. With
+  `firstTokenTimeoutMs` set they are sent `stream: true`, timed on their first
+  line, and folded back into the one object a non-streamed call returns, so
+  nothing changes for the caller. Without it they are the non-streamed calls
+  they were.
+- **An error object inside a 200 stream is a failure**, on both wires. It was
+  read as a chunk with nothing in it, and the turn ended `complete` with
+  whatever had arrived.
+- **Two tool calls that share an index, or have none, are two tool calls** on
+  the OpenAI-compatible wire. Keyed by index alone, the second overwrote the
+  first.
+- **The message budget follows the window the model really runs with.**
+  `OllamaProvider.getCapabilities` reports `defaultOptions.num_ctx` as the
+  context window when it is set (that is what every call asks Ollama for), in
+  place of the built-in table's per-family guess, and holds the reply's reserve
+  to a quarter of it. The client's budget now also counts the system prompt and
+  the tool schemas, which share the window with the messages (never more than
+  half of it, so a large prompt on a small window still leaves room for the
+  newest messages). An app that sets no `num_ctx` sees the table, as before.
+- **An Ollama model the table has never heard of is `toolCalling:
+  'unsupported'`**, not `'native'`. Requests do not change (the adapter sends
+  the tools it is given, as before); the capability a router reads is now
+  honest. `OllamaProviderOptions.capabilities` lets the caller say what it
+  knows (Ollama's own `/api/show`); a model it marks `unsupported` is not sent
+  tools.
+- **Ollama calls never follow a redirect** (`redirect: 'error'` on the chat
+  calls, the model list and the embedder). A redirect is reported as a
+  `validation` error with `providerCode: 'redirect'`.
 
 - **The tool loop no longer fails a turn at its iteration limit outright.** It
   makes one more call with `toolChoice: 'none'` and a note asking for an answer

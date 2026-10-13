@@ -178,7 +178,12 @@ export class FrontierBreaker {
    * holds until that check is answered.
    */
   paused(provider: string, model?: string): BreakerReason | undefined {
-    return this.pausedAt(provider) ?? (model !== undefined ? this.pausedAt(scopeOf(provider, model)) : undefined);
+    // Both are looked at, whichever answers: a model's own check must start when its cool-down is over
+    // even while the whole provider is paused too. Reading only the provider's left the model's check
+    // waiting on the provider's, which could not pass while every model on it was paused.
+    const whole = this.pausedAt(provider);
+    const own = model !== undefined ? this.pausedAt(scopeOf(provider, model)) : undefined;
+    return whole ?? own;
   }
 
   private pausedAt(scope: string): BreakerReason | undefined {

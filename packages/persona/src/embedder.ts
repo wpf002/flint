@@ -4,13 +4,15 @@
  * runs entirely locally; swap in a hosted embedder later with zero change to
  * the retriever.
  */
+import { EMBEDDING_MODEL } from '@flint/core';
+
 export interface Embedder {
   /** Embed each text into a vector. Order matches the input. */
   embed(texts: string[]): Promise<number[][]>;
 }
 
 export interface OllamaEmbedderOptions {
-  /** Embedding model, e.g. 'nomic-embed-text' (pull it first: `ollama pull nomic-embed-text`). */
+  /** Embedding model. Default: the one the hardware tier table names (@flint/core EMBEDDING_MODEL). Pull it first with `ollama pull`. */
   model?: string;
   /** Ollama base URL. Default 127.0.0.1 (not 'localhost' — IPv4, to dodge Node's IPv6 quirk). */
   baseURL?: string;
@@ -25,7 +27,7 @@ export class OllamaEmbedder implements Embedder {
   private readonly fetchImpl: typeof fetch;
 
   constructor(opts: OllamaEmbedderOptions = {}) {
-    this.model = opts.model ?? 'nomic-embed-text';
+    this.model = opts.model ?? EMBEDDING_MODEL.model;
     this.baseURL = (opts.baseURL ?? 'http://127.0.0.1:11434').replace(/\/$/, '');
     this.fetchImpl = opts.fetch ?? fetch;
   }
@@ -37,6 +39,7 @@ export class OllamaEmbedder implements Embedder {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ model: this.model, prompt: text }),
+        redirect: 'error', // Ollama is at a fixed address: a redirect is never followed
       });
       if (!res.ok) {
         throw new Error(`Ollama embeddings failed: HTTP ${res.status}`);

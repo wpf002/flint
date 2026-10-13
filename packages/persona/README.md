@@ -96,7 +96,8 @@ new Persona(flint, {
 open model (muse-glimmer:30b) that Will runs himself with Ollama. It is not Claude ..."), `Persona`
 places it right after the guide on every call, and it tells the model that it wins where the guide
 describes the engines differently. For a Claude tier it names Claude; for another vendor, that
-vendor. `persona.styleGuide` is still the guide's own text, so every pin above holds, the server
+vendor; for a model on an OpenAI-compatible local server (`provider: 'local'`), an open model Will
+runs himself on his own model server. `persona.styleGuide` is still the guide's own text, so every pin above holds, the server
 still names a persona's variant by its guide, and a variant name still means one text. Without
 `engine` the prompt is byte-for-byte what it was.
 

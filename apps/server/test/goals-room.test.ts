@@ -27,8 +27,9 @@ describe('chatBrain: the context a brain really has', () => {
     expect(chatBrain(new OllamaProvider(liveOllamaOptions({})), 'qwen2.5:14b')).toMatchObject({ numCtx: 4096, window: 4096, reserve: 1024 });
     expect(chatBrain(new OllamaProvider(liveOllamaOptions({ OLLAMA_NUM_CTX: '16384' })), 'qwen2.5:14b')).toMatchObject({ numCtx: 16384, window: 16384, reserve: 4096 });
     expect(chatBrain(new OllamaProvider(liveOllamaOptions({ OLLAMA_NUM_CTX: '32768' })), 'muse-glimmer:30b')).toMatchObject({ window: 32768 });
-    // A table says qwen2.5 holds 32,768. The client asked Ollama for 4,096, so that is what it has.
-    expect(new OllamaProvider(liveOllamaOptions({})).getCapabilities('qwen2.5:14b').maxContextTokens).toBe(32_768);
+    // A table says qwen2.5 holds 32,768. The client asked Ollama for 4,096, so that is what it has, and the
+    // adapter's own capabilities now say so too (@flint/core: an Ollama client's window is its num_ctx).
+    expect(new OllamaProvider(liveOllamaOptions({})).getCapabilities('qwen2.5:14b').maxContextTokens).toBe(4096);
   });
 
   it('an `ollama:` tier’s window is the num_ctx its own client sends', () => {

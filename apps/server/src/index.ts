@@ -46,11 +46,11 @@ async function synthesizeSpeech(text: string): Promise<Buffer | null> {
 }
 import {
   Flint,
-  OllamaProvider,
   InMemoryStore,
   ActionLogObserver,
   FlintError,
   combineObservers,
+  isFlintError,
   vendorOfProvider,
   type ProviderAdapter,
   type Tool,
@@ -64,7 +64,7 @@ import { McpRegistry, type McpServerSpec } from '@flint/mcp';
 import { AuditSink, runtimeFromDisk, type Runtime } from './audit-sink';
 import { gateBuiltins, tierGate, type TierEvent, type TierOutcome } from './tier-gate';
 import { RuntimePolicies, capClaimer } from './runtime-link';
-import { asLocalTurn, currentTurn, historyOrigin, markEval, taintFromHistory, taintSources, turnProposals, turnTainted, turnTools, withTurnTaint } from './turn-taint';
+import { currentTurn, historyOrigin, isPrivateTurn, markEval, noteFit, noteFitInput, taintFromHistory, taintSources, turnFit, turnProposals, turnTainted, turnTools, withTurnTaint } from './turn-taint';
 import { ConversationTaint } from './conversation-taint';
 import { Approvals, rpFromDisk } from './approvals';
 import { approvalRoutes } from './approval-routes';
@@ -81,7 +81,7 @@ import { goalsRoutes } from './goals-routes';
 import { ChatLoad } from './chat-load';
 import { CompleteGate, localBackgroundBrain, localBackgroundModel, readKindCallCaps } from './background-complete';
 import { HOLD_CHECK_EVERY_MS, holdNoteDue } from './deploy-hold';
-import { FrontierBreaker, FrontierPaused, breakerNote, gateChain, gateTurn, pausedCode } from './frontier-breaker';
+import { FrontierBreaker, FrontierPaused, breakerNote, gateChain, gateTurn, gated, pausedCode } from './frontier-breaker';
 import { errorSummary, logError } from './error-log';
 import { createHash } from 'node:crypto';
 import { parseMcpConfig } from './mcp-config';
@@ -94,16 +94,22 @@ import { deepResearchTool } from './deep-research';
 import { calculateTool } from './calculate';
 import { answerWithFallback, guardAnswer, type Unanswered } from './unanswered';
 import { ToolRouter } from './router';
-import { attribution, chatOutcome, movedBy, routeLine, type Outcome } from './route-log';
+import { attribution, chatOutcome, fitFields, fitObserver, movedBy, routeLine, servedBy, type Outcome } from './route-log';
 import { ensureScopedTokens } from './scoped-tokens';
 import { allowedTailnetUser, bearerScope, bindHost, scopeAllows, type Scope, bearerMatches, consoleGetsToken, hostName, tailnetAllowed } from './access';
 import { safeHandler } from './safe-handler';
-import { STYLE_VARIANTS, StyledPersonas, echoStyle, engineLineFor, parseStyleVariantRequest, promptRevision, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
+import { STANDBY_STYLE, STYLE_VARIANTS, StyledPersonas, echoStyle, engineLineFor, localStyleFor, parseStyleVariantRequest, promptRevision, readStyleDefaults, styleGuideFor, turnPersonas, type StyleVariant } from './style-variant';
 import { ActionQueue } from './actions';
 import { Notifications, Watcher, signalNote, upcomingNote, watcherEnabled, type Check } from './notifications';
 import { stampUiVersion, uiVersionOf } from './ui-version';
 import { TrainingLogger } from './training';
-import { LocalPersonaCache, chooseLocalBrain, keepPickingLocal, localDefaultNote, overridePersonaCache, parseLocalModelRequest, type LocalBrain, type OverridePersona } from './local-model';
+import { LocalPersonaCache, localDefaultNote, overridePersonaCache, parseLocalModelRequest, type OverridePersona } from './local-model';
+import { buildInference, type Inference } from './inference';
+import { OUTSIDE_OFF_PRIVATE, keptHereOnPrivate } from './outside-ai';
+import { inferenceRoutes } from './inference-routes';
+import type { ModelSource } from './local-brains';
+import { mayUseCloud } from './mode-route';
+import { routeLocal, runLocalPlan, standbyNote, stepName, type LocalStep, type RunResult } from './local-serve';
 import { MemoryExtractor } from './memory-extract';
 import { GoalCandidates, candidateOptions, serverZone } from './goal-candidates';
 import { chooseMemoryBrain, frontierExtractBrain, liveChat, memoryBrainSetting } from './memory-brain';
@@ -134,15 +140,17 @@ import {
   readJsonLimited,
   mediaNeeds,
   summarizeAttachments,
+  textChars,
   MAX_BODY_BYTES,
 } from './attachments';
 
 /**
  * Hosted Flint — the always-on shared service. Wraps the Flint client behind an
  * authenticated HTTP/SSE API so your apps and devices can talk to one Flint.
- * Provider, memory, and tools all come from env. The local brain is always an
- * Ollama model (this Mac's, or a remote Ollama at OLLAMA_HOST); an outside model
- * answers only as a frontier tier Will configured, never as a default.
+ * Provider, memory, and tools all come from env. The local brain is always a
+ * model on Will's hardware: Ollama's own API by default, or an OpenAI-compatible
+ * local server (./local-brains). An outside model answers only as a frontier tier
+ * Will configured, never as a default.
  *
  * Endpoints (all but /health require `Authorization: Bearer $FLINT_TOKEN`):
  *   GET  /health   → liveness + which provider/model/tools are active
@@ -192,18 +200,6 @@ function errorRef(tag: string, err: unknown): string {
 }
 
 /**
- * The local brain: an Ollama model, always (./local-model chooseLocalBrain).
- * OLLAMA_MODEL names it; unset, Ollama is asked which chat model it has. It is
- * never Anthropic, whatever keys are present.
- */
-async function buildProvider(): Promise<{ provider: ProviderAdapter; model: string; local: LocalBrain }> {
-  // OLLAMA_HOST, OLLAMA_NUM_CTX (keep it at 4096, see liveOllamaOptions) and
-  // OLLAMA_THINK=true|false (unset sends no `think`, as before).
-  const local = await chooseLocalBrain(process.env, { log: (m) => console.error(m) });
-  return { provider: new OllamaProvider(local.options), model: local.model, local };
-}
-
-/**
  * Load extra secrets from ~/.flint/secrets.env (KEY=value per line, # comments)
  * into process.env without overriding anything already set. This is where the
  * ANTHROPIC_API_KEY for frontier escalation lives — kept OUT of the launchd
@@ -238,7 +234,7 @@ function loadSecrets(): void {
  * to retire it. Everything routes through one seam (judgeBrain) so flipping the
  * bridge off later — or repointing it at a self-hosted model — is a one-liner.
  */
-import { routeTurn, isSafeTool, type Brain, type MediaFlags } from './policy';
+import { isLocalWire, isSafeTool, type MediaFlags } from './policy';
 import { buildTiers, buildFrontierProvider, envProviderFactory, classifyMessage, runWithFallback, mayAskAnother, providerFailure, NoFallback, type BrainSet, mediaOf, canReadMedia } from './brains';
 
 // SMART-FIRST routing. The local 7B is reliable on a narrow band — simple live
@@ -404,10 +400,11 @@ function buildChecks(tools: Tool[], _knowledge: KnowledgeStore): Check[] {
 
 /** Build the per-request context block, injecting any long-term memory that's
  *  relevant to this message so Flint "remembers" without bloating the prompt. */
-async function contextFor(message: string, knowledge: KnowledgeStore): Promise<{ block: string; mode: string; outside: string }> {
+async function contextFor(message: string, knowledge: KnowledgeStore): Promise<{ block: string; mode: string; outside: string; lifted: string }> {
   const r = await recallContext(userContext(), message, knowledge);
-  // `outside`: the same block without the facts that stay on this Mac (./knowledge fromGoals).
-  return { block: r.block, mode: r.mode, outside: r.outside.block };
+  // `outside`: the same block without the facts that stay on this Mac (./knowledge fromGoals, fromPrivate).
+  // `lifted`: without the ones from a turn Will kept private only (what FLINT_GOALS_TO_FRONTIER=on may send out).
+  return { block: r.block, mode: r.mode, outside: r.outside.block, lifted: r.lifted.block };
 }
 
 async function main(): Promise<void> {
@@ -426,10 +423,18 @@ async function main(): Promise<void> {
       ? '[access] tailnet: only FLINT_TAILNET_USER may use Flint, and gets the console token'
       : '[access] FLINT_TAILNET_USER unset: the console carries its token only for this Mac; tailnet devices paste it in Settings',
   );
-  // The local brain, as the NEXT turn uses it. These four change once at most: when Ollama did not
-  // answer at boot, the server starts on a stand-in default (it never waits for Ollama before it
-  // listens), and adoptLocal below swaps in Ollama's own answer when it comes.
-  let { provider, model, local: localBrain } = await buildProvider();
+  // The local brain (./local-brains): a model on Will's hardware, on Ollama's own API unless
+  // FLINT_LOCAL_PROVIDER=openai. Never Anthropic, whatever keys are present (./local-model
+  // chooseLocalBrain). OLLAMA_HOST, OLLAMA_NUM_CTX and OLLAMA_THINK are read as before.
+  // The routing mode (local, cloud, hybrid) comes with it: FLINT_INFERENCE_MODE, or the one Will saved in Settings.
+  // This waits for one thing at most, the model pick, which the clock cuts off: the server never waits for
+  // the model server or for a look at this machine before it listens. What lands behind the boot (this
+  // machine's tier's model, or the model server's own answer when it was silent) is swapped in by adoptLocal
+  // below, for the next turn. `localSeen` is the brain these variables were built from.
+  const inference = await buildInference({ env: process.env, modeFile: join(homedir(), '.flint', 'inference.json'), log: (m) => console.error(m) });
+  let localSeen = inference.local;
+  let { provider, model } = inference.primary;
+  let localBrain = inference.primary;
   // The local model as it was settled (OLLAMA_MODEL, or what Ollama had, at the window it is loaded
   // with): what memory extraction and background calls read, so all three ask the same model alike.
   let localEnv: Record<string, string | undefined> = { ...process.env, ...localBrain.env };
@@ -443,7 +448,7 @@ async function main(): Promise<void> {
   // Nothing was set and Ollama had no model to offer: the local brain is a guess until the next
   // restart, and Will is told once a day, in the console only. (Not when Ollama simply has not
   // answered yet: that is a stand-in for some seconds, and the log says so.)
-  const noteLocalDefault = (b: LocalBrain): void => {
+  const noteLocalDefault = (b: { from: ModelSource; settled: boolean }): void => {
     if (b.from !== 'default' || !b.settled) return;
     const note = localDefaultNote();
     notes.push(note.title, note.body, 'brain', `local-default:${new Date().toISOString().slice(0, 10)}`, { channels: ['inapp'] });
@@ -493,7 +498,8 @@ async function main(): Promise<void> {
   });
   // Every Flint client shares this: the audit trail, one ledger row per paid provider pass,
   // and each provider request's outcome for the breaker.
-  const observer = combineObservers(actionLog, spendObserver(ledger), breaker.observer());
+  // ...and how each local model's prompt was sized to its window, for the turn's [route] line (./route-log).
+  const observer = combineObservers(actionLog, spendObserver(ledger), breaker.observer(), fitObserver(isLocalWire, noteFit, noteFitInput));
   // Durable conversation memory — survives restarts/reboots/crashes (was RAM
   // only). Shared across both brains so a conversation stays coherent no matter
   // which one answers a given turn. Each turn is sent only the recent part of its
@@ -520,7 +526,9 @@ async function main(): Promise<void> {
   // The conversation as each brain may read it: all of it for a brain on this Mac; for any other, without
   // the turns that stay here.
   const historyOf = (p: ProviderAdapter, m: string) => goalsChat.history(p, m);
-  let flint = new Flint({ provider, defaultModel: model, memory: historyOf(provider, model), observer });
+  // A local model's whole prompt is sized to its real window (fitToWindow): tools give way, then the oldest
+  // history, and nothing is sent that Ollama would have to cut the start of. What was left out is logged.
+  let flint = new Flint({ provider, defaultModel: model, memory: historyOf(provider, model), observer, fitToWindow: true });
   // No voice-exemplar retriever here on purpose: with 42 tool schemas already in
   // the prompt, injecting 3 more writing samples bloats it enough that the local
   // model degrades to empty turns. The style guide alone carries the voice.
@@ -530,14 +538,42 @@ async function main(): Promise<void> {
   const styles = readStyleDefaults(process.env, (m) => console.error(m));
   // Each persona also says which model is answering (engineLineFor): the guides name Claude as
   // the engine "for most questions", and a local model must not take that for its own name.
-  const localPersonaFor = (f: Flint, variant: StyleVariant, m: string) =>
+  // (`p`: the provider the engine line is written for. The local brain's, unless a brain that is not in use yet is being built.)
+  const localPersonaFor = (f: Flint, variant: StyleVariant, m: string, p: ProviderAdapter = provider) =>
     new Persona(f, {
       name: 'Flint',
       styleGuide: styleGuideFor(variant),
-      engine: engineLineFor(provider, m),
+      engine: engineLineFor(p, m),
       lessonStore,
     });
-  let persona = localPersonaFor(flint, styles.local, model);
+  // The main local model's guide follows its window (./style-variant localStyleFor): the one asked for where it
+  // leaves room to work, the compact one in a small window. Decided again whenever the local brain changes.
+  // (`settled`: a stand-in is never asked, so what guide it would speak with is not said: the line used to print
+  // once for the stand-in's first name and again for the one this machine's tier gave it.)
+  let saidGuide: string | undefined;
+  const localGuideFor = (p: ProviderAdapter, m: string, settled: boolean): StyleVariant => {
+    const window = p.getCapabilities(m).maxContextTokens;
+    const guide = localStyleFor(styles.local, window);
+    const said = `${m}:${window}:${guide}`;
+    if (settled && guide !== styles.local && said !== saidGuide) {
+      saidGuide = said;
+      console.error(`[style] the local model's window is ${window} tokens, too small for the ${styles.local} guide: the local brain speaks with ${guide}`);
+    }
+    return guide;
+  };
+  let localGuide = localGuideFor(provider, model, localBrain.settled);
+  let persona = localPersonaFor(flint, localGuide, model);
+  // The standby local model (./local-serve): it answers while the main one loads. It shares the conversation store,
+  // so a conversation stays coherent whichever answers, and carries its own engine line, so it never claims to be the main model.
+  const makeStandby = () =>
+    inference.standby && {
+      model: inference.standby.model,
+      provider: inference.standby.provider,
+      // The compact local guide, whatever the main model's: the standby's window is small, and the default
+      // guide alone (about 3,980 tokens) would leave it no room for the question.
+      persona: localPersonaFor(new Flint({ provider: inference.standby.provider, defaultModel: inference.standby.model, memory: historyOf(inference.standby.provider, inference.standby.model), observer, fitToWindow: true }), STANDBY_STYLE, inference.standby.model),
+    };
+  let standby = makeStandby();
   // Eval-only local-model override (apps/parity --local-model / --local-think, see
   // local-model.ts): the same local persona, memory and action log, with a different
   // default model. Built lazily per (model, think, style variant); never used by normal traffic.
@@ -546,14 +582,25 @@ async function main(): Promise<void> {
   const localModels =
     provider.name === 'ollama'
       ? overridePersonaCache(process.env, (candidate, m, variant) =>
-          localPersonaFor(new Flint({ provider: candidate, defaultModel: m, memory: historyOf(candidate, m), observer }), variant ?? styles.local, m),
+          localPersonaFor(new Flint({ provider: candidate, defaultModel: m, memory: historyOf(candidate, m), observer, fitToWindow: true }), variant ?? localStyleFor(styles.local, candidate.getCapabilities(m).maxContextTokens), m),
         )
       : undefined;
 
+  // The helpers that always talk to Ollama's own address (the embedder here, local memory extraction and the
+  // runtime's background calls below) are older than the modes and read OLLAMA_HOST as it is. In the local and
+  // hybrid modes nothing is sent to an Ollama on another machine that Will has not said is his (./inference
+  // helpersOff): their requests then fail like an Ollama that is down, which each of them already lives with
+  // (recall goes lexical, only the core tools are offered, extraction waits). Read on every request.
+  const helperFetch = ((url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const off = inference.helpersOff();
+    return off ? Promise.reject(new TypeError(`fetch refused: ${off}`)) : fetch(url, init);
+  }) as typeof fetch;
   const embedHost = process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434';
   const embedder = new OllamaEmbedder({
-    model: process.env.FLINT_EMBED_MODEL?.trim() || 'nomic-embed-text',
+    // The tier table's embedding model (@flint/core EMBEDDING_MODEL), or the one FLINT_EMBED_MODEL names (./inference-config checks it).
+    model: inference.embedModel,
     baseURL: embedHost,
+    fetch: helperFetch,
   });
 
   // Long-term compounding memory: durable facts Flint learns about Will, pulled
@@ -670,15 +717,29 @@ async function main(): Promise<void> {
   // Perplexity / Tavily searches run in the MCP processes: metered per successful
   // call here, and refused with a routable error once their vendor's cap is spent.
   // deep_research gets the same wrapped tools, so its searches count too.
-  const mcpTools = meterPaidTools(registry?.tools() ?? [], { guard: spend, specs: paidToolSpecs(process.env) });
+  // In Local mode no outside AI and no paid service is asked (./outside-ai): a paid search with a keyless
+  // switch runs keyless, and any other paid tool refuses, whoever calls it (deep_research too).
+  const wiredMcp = registry?.tools() ?? [];
+  inference.declareTools(wiredMcp);
+  // On a private turn nothing leaves this Mac: every tool that does not run here refuses when it is called,
+  // whoever calls it (./outside-ai keptHereOnPrivate). It is the outer wrapper, so it is asked first.
+  const heldOnPrivate = <T extends Tool>(list: readonly T[]): T[] => keptHereOnPrivate(list, { isPrivate: isPrivateTurn, allowedRemote: () => inference.allowedRemote(), onRefused: (name) => inference.outsideRefused(name, OUTSIDE_OFF_PRIVATE) });
+  const mcpTools = heldOnPrivate(
+    meterPaidTools(wiredMcp, {
+      guard: spend,
+      specs: paidToolSpecs(process.env),
+      outsideOff: () => inference.outsideOff(),
+      onOutsideRefused: (name, why) => inference.outsideRefused(name, why),
+    }),
+  );
   const tools: Tool[] = [
     ...mcpTools,
-    ...gateBuiltins([
+    ...heldOnPrivate(gateBuiltins([
     rememberTool(knowledge),
     trainingStatusTool({
       brainDir: join(homedir(), '.flint', 'brain'),
       corpus: () => training.stats(),
-      serving: () => ({ local: `${provider.name}:${model}`, frontier: frontierModel }),
+      serving: () => ({ local: `${provider.name}:${model}`, frontier: frontierModel, ...inference.serving() }),
     }),
     deepResearchTool({
       tools: mcpTools,
@@ -696,6 +757,8 @@ async function main(): Promise<void> {
         () => {
           const held = goalsChat.plannerHeld(plannerVendor !== undefined);
           if (held) return held;
+          const localMode = inference.cloudRefused('plan'); // Local mode never plans on the cloud: the heuristic queries run
+          if (localMode) return localMode;
           const paused = plannerProvider ? breaker.paused(plannerProvider) : undefined;
           return paused ? `the frontier is paused (${paused})` : undefined;
         },
@@ -703,7 +766,7 @@ async function main(): Promise<void> {
     }),
     calculateTool(),
     spendStatusTool(spend),
-    ], tierOpts),
+    ], tierOpts)),
   ];
   if (registry) console.error(`[mcp] connected: ${registry.connectedServers().join(', ') || '(none)'}; ${tools.length} tool(s)`);
 
@@ -752,10 +815,11 @@ async function main(): Promise<void> {
     makePersona: (fProvider, fModel) => frontierPersonaFor(fProvider, fModel, styles.frontier),
   });
   // Eval requests may name another style variant; built per (brain, variant) on first use.
-  const makeStyled = () =>
-    new StyledPersonas<Persona>(styles, {
-      local: persona,
-      buildLocal: (v) => localPersonaFor(flint, v, model),
+  // (Its parts are the local brain's, read when it is built: a brain that is not in use yet passes its own.)
+  const makeStyled = (b: { guide: StyleVariant; persona: Persona; flint: Flint; model: string; provider: ProviderAdapter } = { guide: localGuide, persona, flint, model, provider }) =>
+    new StyledPersonas<Persona>({ ...styles, local: b.guide }, {
+      local: b.persona,
+      buildLocal: (v) => localPersonaFor(b.flint, v, b.model, b.provider),
       buildFrontier: frontierPersonaFor,
     });
   let styled = makeStyled();
@@ -807,8 +871,10 @@ async function main(): Promise<void> {
   const startMemory = (): void => {
     memoryStarted = true;
     const memoryPlan = chooseMemoryBrain(localEnv, {
-      frontier: extractWith && frontierExtractBrain((input) => extractWith.generate(input, { context: spendContext('extract') })),
+      // In Local mode the frontier is not asked: the extractor waits, as it does through an outage.
+      frontier: extractWith && frontierExtractBrain(inference.cloudOnly('extract', (input: { system: string; prompt: string }) => extractWith.generate(input, { context: spendContext('extract') }))),
       chatActive,
+      fetch: helperFetch,
       log: (m) => console.error(m),
     });
     if (memoryPlan.kind === 'none') {
@@ -842,14 +908,18 @@ async function main(): Promise<void> {
       }),
     }).start();
   };
-  // On the local model it reads the model that was settled, so it starts once there is one: now,
-  // or when Ollama answers (adoptLocal). On the frontier, or off, the local model is no part of it.
-  if (localBrain.settled || memoryBrainSetting(process.env, () => {}) !== 'local') startMemory();
-  else console.error('[memory-extract] waiting for Ollama to answer before it picks the local model');
+  // On the local model it reads the model that was settled, so it starts once there is one: now when
+  // Will named it, else when the first pass behind the boot is over (this machine's tier may choose
+  // another), or when the model server answers (adoptLocal). On the frontier, or off, the local model
+  // is no part of it.
+  if (memoryBrainSetting(process.env, () => {}) !== 'local' || (localBrain.settled && localBrain.from === 'env')) startMemory();
+  else console.error('[memory-extract] waiting for the local model to be settled before it starts');
 
   const servers = registry?.connectedServers() ?? [];
   const convos: Convo[] = [];
   const budgetNotes = new NoteOnce(() => ledger.period().day);
+  // The standby model's line under its answer (./local-serve standbyNote), once per conversation per day, like the budget note.
+  const standbyNotes = new NoteOnce(() => ledger.period().day);
   // The runtime's calls back into the server (./internal): [::1]:8081 only, with
   // the token install-runtime.sh writes; the server keeps just its digest.
   const internalTokenFile = join(homedir(), '.flint', 'tokens', 'internal.token');
@@ -868,14 +938,18 @@ async function main(): Promise<void> {
   })();
   // The runtime's background calls (./background-complete): answered by the local model, never an
   // outside one, yielding to Will's chat like memory extraction. Every kind is off until Will raises its cap.
-  const makeBackground = () => {
-    const backgroundModel = localBackgroundModel(localEnv, model, (m) => console.error(m));
+  const makeBackground = (b: { settled: boolean; env: Record<string, string | undefined>; model: string } = { settled: localBrain.settled, env: localEnv, model }) => {
+    // No model is settled yet (nothing names one, and the model server has not said what it has): there is no
+    // local model to ask, so the gate answers no_local_model. The stand-in's name is never asked for.
+    if (!b.settled) return undefined;
+    const backgroundModel = localBackgroundModel(b.env, b.model, (m) => console.error(m));
     return backgroundModel && localBackgroundBrain(backgroundModel, { chatActive });
   };
   let backgroundBrain = makeBackground();
   // The local model costs nothing, so a kind is bounded by its calls a day, not its dollars.
   const callCaps = readKindCallCaps(process.env, (m) => console.error(`[spend] ${m}`));
-  const completeGate = new CompleteGate({ guard: spend, kindCaps, callCaps, audit, brain: () => backgroundBrain, log: (m) => console.error(m) });
+  // (With the Ollama server on another machine in a mode that sends nothing off this Mac, there is no local model to ask.)
+  const completeGate = new CompleteGate({ guard: spend, kindCaps, callCaps, audit, brain: () => (inference.helpersOff() ? undefined : backgroundBrain), log: (m) => console.error(m) });
   startInternal({
     tokenSha256: internalSha,
     // The runtime's words stay in the console; the phone only ever gets the content-free ping.
@@ -892,8 +966,9 @@ async function main(): Promise<void> {
   // (./goals-chat toolsKeptHere): deep_research with no frontier planner and only the search tools that are left,
   // and `remember` saving what it is told as a fact that stays here.
   const keptTools = toolsKeptHere({ search: mcpTools, embedder, knowledge, specs: paidToolSpecs(process.env), gate: (list) => gateBuiltins(list, tierOpts) });
-  // Every brain /chat can ask is named for the gate, as it is NOW: named again when Ollama's own answer is adopted (adoptLocal).
-  goalsChat.name({ persona, provider, model }, brains, keptTools);
+  // Every brain /chat can ask is named for the gate, as it is NOW (the standby local model too): named again when
+  // Ollama's own answer is adopted (adoptLocal).
+  goalsChat.name({ persona, provider, model }, brains, keptTools, standby ? [standby] : []);
 
   // One request is one turn, with its own taint state (./turn-taint).
   const server = createServer(safeHandler((req, res) => withTurnTaint(() => {
@@ -904,7 +979,7 @@ async function main(): Promise<void> {
     res.once('finish', () => {
       if (res.statusCode >= 500 && res.statusCode <= 599 && route && !turn?.eval) events.push({ type: 'route.error', route, status: res.statusCode });
     });
-    return handle(req, res, { persona, localModels, styled, provider, model, localFrom: localBrain.from, tools, router, actionLog, servers, convos, frontier, brains, breaker, memory, knowledge, actions, notes, training, spend, budgetNotes, audit, approvals, proposals, convTaint, events, worldNow, goals: goalsChat, chatLoad, runtime: runtimeLink });
+    return handle(req, res, { inference, standby, standbyNotes, persona, localModels, styled, provider, model, localFrom: localBrain.from, tools, router, actionLog, servers, convos, frontier, brains, breaker, memory, knowledge, actions, notes, training, spend, budgetNotes, audit, approvals, proposals, convTaint, events, worldNow, goals: goalsChat, chatLoad, runtime: runtimeLink });
   })));
   // Bind loopback only: the device app reaches it via localhost and remote
   // devices reach it through Tailscale (which proxies to localhost). Nothing on
@@ -914,25 +989,54 @@ async function main(): Promise<void> {
   const HOST = bindHost(process.env);
   server.listen(PORT, HOST, () => console.error(`Flint listening on ${HOST}:${PORT} (provider=${provider.name}, model=${model})`));
 
-  // Ollama did not answer at boot, so the local brain is a stand-in default. Nothing waited for it
-  // (the server is listening, and the installer's /health poll has its answer): it is asked again
-  // in the background, and its own answer becomes the local brain for the NEXT turn. Each request
-  // reads these variables when it arrives, so a turn already running finishes on what it started with.
-  const adoptLocal = (next: LocalBrain): void => {
-    localBrain = next;
-    provider = new OllamaProvider(next.options);
-    model = next.model;
-    localEnv = { ...process.env, ...next.env };
-    flint = new Flint({ provider, defaultModel: model, memory: historyOf(provider, model), observer });
-    persona = localPersonaFor(flint, styles.local, model);
-    styled = makeStyled();
-    backgroundBrain = makeBackground();
-    // The local brain is another one now: who may read what stays here is named again (./goals-chat).
-    goalsChat.name({ persona, provider, model }, brains, keptTools);
-    noteLocalDefault(next);
-    if (!memoryStarted) startMemory();
+  // The local brain changed behind the boot (./local-brains): this machine's tier's model, or the model
+  // server's own answer when it was silent at boot. Nothing waited for it (the server is listening, and the
+  // installer's /health poll has its answer). ./inference built the new brain the way it built the first
+  // (the guarded fetch, the deadlines, the server's own word on tools, the monitor), and here it becomes the
+  // local brain for the NEXT turn: each request reads these variables when it arrives, so a turn already
+  // running finishes on what it started with.
+  const adoptLocal = (): void => {
+    try {
+      // Everything is BUILT first, from the new brain, into names of its own: if any of it throws, nothing has
+      // been assigned, and /health, the turns and the helpers all still describe the brain that is in use. (They
+      // used to be assigned one by one: a throw midway left /health naming the new model over the old persona.)
+      const seen = inference.local;
+      const next = inference.primary;
+      const nextEnv = { ...process.env, ...next.env };
+      const nextFlint = new Flint({ provider: next.provider, defaultModel: next.model, memory: historyOf(next.provider, next.model), observer, fitToWindow: true });
+      const nextGuide = localGuideFor(next.provider, next.model, next.settled);
+      const nextPersona = localPersonaFor(nextFlint, nextGuide, next.model, next.provider);
+      const nextStandby = makeStandby();
+      const nextStyled = makeStyled({ guide: nextGuide, persona: nextPersona, flint: nextFlint, model: next.model, provider: next.provider });
+      const nextBackground = makeBackground({ settled: next.settled, env: nextEnv, model: next.model });
+      // ...and then it becomes the local brain, all of it at once (nothing between these lines can throw).
+      localSeen = seen;
+      localBrain = next;
+      provider = next.provider;
+      model = next.model;
+      localEnv = nextEnv;
+      flint = nextFlint;
+      localGuide = nextGuide;
+      persona = nextPersona;
+      standby = nextStandby;
+      styled = nextStyled;
+      backgroundBrain = nextBackground;
+      // The local brain is another one now: who may read what stays here is named again (./goals-chat).
+      goalsChat.name({ persona, provider, model }, brains, keptTools, standby ? [standby] : []);
+      noteLocalDefault(localBrain);
+      if (!memoryStarted && localBrain.settled) startMemory();
+    } catch (err) {
+      // Never an unhandled rejection, which would end the process: the log says it, by class only.
+      logError('[brain] the local brain that was settled could not be adopted:', err);
+    }
   };
-  if (!localBrain.settled) keepPickingLocal(process.env, adoptLocal, { log: (m) => console.error(m) });
+  inference.onAdopt(adoptLocal);
+  // Something landed while main() was still booting, before anything listened for it.
+  if (inference.local !== localSeen) adoptLocal();
+  // The first pass behind the boot is over: memory extraction on the local model starts on the model that was settled.
+  void inference.ready.then(() => {
+    if (!memoryStarted && localBrain.settled) startMemory();
+  });
 }
 
 /** One completed exchange — what the Action Log shows, click-to-read the full text. */
@@ -944,6 +1048,12 @@ interface Convo {
 }
 
 interface Ctx {
+  /** The routing mode, the local brain's health, and every decision the handlers take from them (./inference). */
+  inference: Inference;
+  /** The standby local model's persona (./local-serve): it answers while the main one loads. Undefined: none is configured. */
+  standby: { persona: Persona; model: string } | undefined;
+  /** The "answered by my standby model" line, once per conversation per day. */
+  standbyNotes: NoteOnce;
   persona: Persona;
   /** Eval-only local-model override personas; undefined when the local brain isn't Ollama. */
   localModels: LocalPersonaCache<OverridePersona<Persona>> | undefined;
@@ -952,7 +1062,7 @@ interface Ctx {
   provider: ProviderAdapter;
   model: string;
   /** Where the local model's name came from: `env` (OLLAMA_MODEL), or what Ollama had (`loaded`, `pulled`), or the `default` guess. */
-  localFrom: LocalBrain['from'];
+  localFrom: ModelSource;
   tools: Tool[];
   router: ToolRouter;
   actionLog: ActionLogObserver;
@@ -1009,6 +1119,17 @@ function logFallback(from: { label: string }, to: { label: string }, err: unknow
 function logToLocal(how: string, err: unknown): void {
   if (err instanceof FrontierPaused) console.error(`[brain] ${err.brain.label} is paused (${err.brain.reason}); the local model answers`);
   else logError(`[brain] ${how}, falling back to local:`, err);
+}
+
+/** What the breaker has paused right now (a provider, or one model on it), as `scope:reason` codes, for the status. Reads only. */
+function pausedNow(ctx: Ctx): { paused?: string } {
+  const codes = ctx.breaker.snapshot().map((p) => `${p.scope}:${p.reason}`);
+  return codes.length ? { paused: codes.join(',') } : {};
+}
+
+/** One line when a local step gives way to the next (./local-serve): which models, and the failure's code words. */
+function logLocalMove(from: LocalStep<Persona>, to: LocalStep<Persona>, err: unknown): void {
+  logError(`[local] ${stepName(from)} did not answer, moving on to ${stepName(to)}:`, err);
 }
 
 /** One log line when the spend guard changed a turn's route (./spend). */
@@ -1152,6 +1273,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       // Where the local model's name came from: `env` (OLLAMA_MODEL), `loaded` or `pulled` (Ollama
       // was asked), or `default` (nothing was set and Ollama offered none: a guess until restart).
       localModelFrom: ctx.localFrom,
+      // False while nothing names the local model and the model server has not said what it has: `model` is
+      // then a stand-in's name, which is never asked, and local turns wait.
+      localModelSettled: ctx.inference.primary.settled,
+      // The routing mode: local, cloud or hybrid (./inference-mode).
+      mode: ctx.inference.mode.current(),
       tools: ctx.tools.length,
       servers: ctx.servers,
       // Lets apps/eval check, BEFORE sending anything, that /generate honours
@@ -1235,8 +1361,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const body = read.body;
     const text = String(body.text ?? '').trim();
     if (!text) return json(res, 400, { error: 'text required' });
-    // Speech is an outside service. A reply that stays on this Mac is never sent to it (./goals-chat
-    // speechStaysHere): the client names the conversation and the turn, and speaks with its own voice instead.
+    // Speech is an outside service: in Local mode the client speaks with its own voice instead.
+    const noCloud = ctx.inference.cloudRefused('tts');
+    if (noCloud) return json(res, 503, { error: noCloud, fallback: 'browser' });
+    // ...and a reply that stays on this Mac is never sent to it, in any mode (./goals-chat speechStaysHere): a
+    // private turn's, any turn's from Local mode, one answered with Will's goals. The client names the
+    // conversation and the turn, and speaks with its own voice instead.
     // 409, not 503: a 503 tells the client the neural voice is out for the next ten minutes.
     if (ctx.goals.speechStaysHere({ conversationId: body.conversationId, turnId: body.turnId })) return json(res, 409, { error: SPEECH_STAYS_HERE, fallback: 'browser' });
     try {
@@ -1293,20 +1423,32 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const personas = turnPersonas({ styleVariant: sv.variant, localModel: lm.model, localThink: lm.think }, ctx);
     if (!personas.ok) return json(res, personas.status, { error: personas.error });
     const local = personas.local;
-    const route = routeTurn({ message: prompt, hasFrontier: !!ctx.frontier, localOnly, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
-    if ('error' in route) return json(res, 422, { error: route.error });
+    // The mode decides first (./mode-route): cloud is routeTurn as before, local never leaves this Mac,
+    // and a hybrid turn is finished below, once its tier and tools are known.
+    const pre = ctx.inference.preRoute({ message: prompt, localOnly, deep: body.deep === true, evalMode, hasFrontier: !!ctx.frontier, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
+    if ('error' in pre) return json(res, pre.status, { error: pre.error });
     const asText = [prompt, summarizeAttachments(attachments)].filter(Boolean).join(' ');
     const scored = await ctx.router.selectScored(asText);
-    const routed = scored.tools;
-    const selected = evalMode ? routed.filter((t) => t.definition.name !== 'remember') : routed;
+    // A private turn: only the tools that run on this Mac; Local mode: none that is an outside AI or a paid service.
+    // And on either, the tools that keep the answer here (./goals-chat oneShotTools): what `remember` saves is marked.
+    const routed = ctx.goals.oneShotTools(pre, ctx.inference.offer(scored.tools, pre));
+    const selected = evalMode ? routed.filter((t) => t.definition.name !== 'remember') : [...routed];
     // Same block contextFor builds; the facts are kept for the eval response's `grounding`.
     // A one-shot answer gets recall as ANY brain may have it: without the facts that stay on this Mac
     // (./goals-chat recallForAnyBrain). Only /chat's per-ask gate hands those out, to a brain that may read
     // them; here there is no such gate, and an eval replay's answer and grounding go on to its judges.
     const recalled = recallForAnyBrain(await recallContext(userContext(), asText, ctx.knowledge, { skip: !rc.recall }));
-    const ctxBlock = recalled.block;
+    const ctxBlock = ctx.inference.withPrivateNote(recalled.block, pre); // a private turn's model is told, in one sentence, that nothing outside is asked for it
     const toolsLikely = ctx.router.toolsLikely(scored.appended);
     const tier = classifyMessage(prompt, { toolsLikely });
+    const route = ctx.inference.finishRoute(pre, { tier, toolsLikely, promptChars: asText.length + textChars(attachments) });
+    // Which local model would answer (./local-serve): the main one when it is ready, else the standby. Decided once, from
+    // the models' state now. A turn that must be local with none to answer it gets a sentence, never the cloud.
+    // The plan is made from what the monitor last saw of the model server: when that is more than a moment old,
+    // it looks again first (a model that left memory since is not planned as loaded). Never in the cloud mode.
+    await ctx.inference.freshen(route);
+    const localPlan = ctx.inference.planLocal(route, { primary: local, standby: ctx.standby, evalOwnModel: lm.model !== undefined });
+    if (route.brain === 'local' && localPlan.steps.length === 0) return json(res, 503, { error: localPlan.refusal });
     // Everything the spend caps decide about this turn, before any call (./spend budgetTurn).
     // Eval replays are exempt (the eval harness budgets them) and their calls are tagged `eval`.
     const budget = budgetTurn({
@@ -1320,7 +1462,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       canRead: canReadMedia(mediaNeeds(attachments)),
     });
     if (!budget.ok) return json(res, budget.status, { error: budget.error });
-    const { plan, note } = budget; // /generate is one-shot: each answer carries the note
+    const { plan } = budget;
+    let note = budget.note; // /generate is one-shot: each answer carries the note
+    // May a local model answer this turn if the cloud can't: no image or PDF on it, a local brain that is not a
+    // paid one out of budget, and a local model that is there to answer.
+    const toLocal = route.localFallback && !budget.localRefusal && localPlan.steps.some((s) => s.kind === 'local');
     if (plan) logPlan(plan);
     // The breaker's say (./frontier-breaker gateTurn): brains whose provider is paused are left
     // out, and with none left the local model answers at once instead of after their failures.
@@ -1328,7 +1474,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // apply to it): every brain it planned is asked. If they fail and the local model answers
     // while a provider is paused, the answer is MARKED (evalPaused, `frontierPaused` in the
     // response), so apps/parity does not file a local answer under a frontier contestant.
-    const gate = gateTurn({ brain: budget.brain, chain: plan?.chain, canLocal: route.localFallback && !budget.localRefusal && !evalMode, breaker: ctx.breaker });
+    const gate = gateTurn({ brain: budget.brain, chain: plan?.chain, canLocal: toLocal && !evalMode, breaker: ctx.breaker });
     const evalPaused = () => (evalMode && plan ? pausedCode(gateChain(plan.chain, ctx.breaker).paused) : undefined);
     let brain = gate.brain;
     let paused = gate.paused; // also set when a brain's provider is paused while the turn runs
@@ -1341,6 +1487,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       console.error(
         routeLine({
           path: 'generate',
+          ...ctx.inference.routeFields(route),
           tier,
           ...(moved ? { movedBy: moved } : {}),
           appended: scored.appended,
@@ -1348,6 +1495,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           brain,
           ...(paused ? { paused } : {}),
           ...attribution(outcome, lastTried),
+          ...servedBy(outcome, brain, lastTried, ctx.provider.name),
+          ...routeLocal(localRun, localPlan, route.brain === 'frontier'),
+          ...fitFields(turnFit()),
           ...(lastPersona ? { promptRev: promptRevision(lastPersona) } : {}),
           outcome,
           recall: recalled.mode,
@@ -1377,6 +1527,33 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     const answered = echoStyle(ask);
     let out;
     let unanswered: Unanswered | undefined; // set when `out.text` is the honest message, not an answer
+    // The local side of the turn (./local-serve runLocalPlan): the plan's steps in order, moving on only while no tool
+    // was called. A local step runs as the local model's turn (nothing it sets off sends the question to an outside
+    // AI); in hybrid, the last step of a turn that is not private may be the cloud.
+    let localRun: RunResult<Persona, Awaited<ReturnType<typeof ask>>> | undefined;
+    const askLocal = async () => {
+      localRun = await runLocalPlan(
+        localPlan,
+        async (step) => {
+          if (step.kind === 'cloud') {
+            const cloud = ctx.inference.cloudChain({ brains: ctx.brains, tier, guard: ctx.spend, breaker: ctx.breaker, canRead: canReadMedia(mediaNeeds(attachments)) });
+            if (!cloud) throw new Error('no local model answered, and no cloud brain can answer either');
+            brain = 'frontier';
+            // (A tier whose brain is on this Mac answers as a local model's turn here too: ./goals-chat run.)
+            const won = await answerWithFallback(cloud.chain, gated(ctx.breaker, (b) => ((lastTried = b.label), ctx.goals.run(b, () => answered.ask(personas.frontier(b))))), { signal: abort.signal, acted: () => turn.acted, onFallback: logFallback });
+            unanswered = won.unanswered;
+            answeredBy = won.brain.label;
+            return won.result;
+          }
+          lastTried = answeredBy = step.model;
+          return answered.ask(step.persona);
+        },
+        { signal: abort.signal, progressed: () => turn.acted, onMove: logLocalMove, ...ctx.inference.keeping(route) },
+      );
+      // The standby answered: say so with the answer (shown, never stored as it).
+      if (localRun.step.kind === 'local' && localRun.step.which === 'fallback') note ??= standbyNote(localPlan);
+      return localRun.result;
+    };
     try {
       if (brain === 'frontier' && plan) {
         try {
@@ -1402,7 +1579,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           // An image/PDF turn has no honest fallback — the local brain can't see it. Nor does a
           // turn that already called a tool (the local brain would call it again), or one whose
           // failure is not the provider's (a tool's own error): ./brains mayAskAnother.
-          if (!route.localFallback || !mayAskAnother(err, { acted: turn.acted })) {
+          if (!route.localFallback || localPlan.steps.length === 0 || !mayAskAnother(err, { acted: turn.acted })) {
             logRoute('error');
             return json(res, 502, { error: 'frontier failed', ref: errorRef('generate', err), ...evalFields() });
           }
@@ -1415,13 +1592,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           if (err instanceof FrontierPaused) paused ??= pausedCode([err.brain]);
           paused ??= evalPaused(); // a replay the local model answers because the provider is paused
           brain = 'local';
-          lastTried = local.model;
-          out = await asLocalTurn(() => answered.ask(local.persona));
+          out = await askLocal();
         }
       } else {
-        lastTried = local.model;
-        // The local model's turn: nothing it sets off sends the question to an outside AI (asLocalTurn).
-        out = await asLocalTurn(() => answered.ask(local.persona));
+        // The local model's turn: nothing it sets off sends the question to an outside AI (asLocalTurn, in runLocalPlan).
+        out = await askLocal();
       }
     } catch (err) {
       if (abort.signal.aborted) {
@@ -1445,6 +1620,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         // 'refusal' | 'empty' when `text` is the honest "no model answered" message, so apps/parity doesn't judge it.
         ...(unanswered ? { unanswered } : {}),
         brain,
+        // The routing mode, and the rule (or mode) that sent the turn where it went. An eval replay's reason is `eval`.
+        route: ctx.inference.routeFields(route),
         ...(brain === 'frontier' ? { tier: plan?.tier ?? tier } : {}),
         // `provider:reason` codes when the breaker left outside brains out of this turn.
         ...(paused ? { frontierPaused: paused } : {}),
@@ -1471,17 +1648,24 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       });
     }
     recordConvo(ctx.convos, asText, out.text);
-    ctx.training.log(
-      { conversationId: 'generate', brain, model: answeredBy, input: asText, output: out.text, tools: toolsUsed, usage: out.usage },
-      Date.now(),
-    );
+    // A standby model's answer is not an example to learn from: it stays out of the training corpus.
+    // (A turn that stayed on this Mac is written WITH that mark: local training uses it, no outside set takes it.)
+    const byStandby = localRun?.step.kind === 'local' && localRun.step.which === 'fallback';
+    if (!byStandby) {
+      ctx.training.log(
+        { conversationId: 'generate', brain, model: answeredBy, input: asText, output: out.text, tools: toolsUsed, usage: out.usage, ...ctx.goals.corpus(route) },
+        Date.now(),
+      );
+    }
     return json(res, 200, {
       text: note ? `${out.text}\n\n${note}` : out.text,
       usage: out.usage,
       reason: out.reason,
       brain,
+      ...(byStandby ? { standby: true } : {}),
       ...(brain === 'frontier' ? { tier: plan?.tier ?? tier } : {}),
       ...budget.fields,
+      route: ctx.inference.routeFields(route),
       ...(paused ? { frontierPaused: paused } : {}),
       model: answeredBy,
       pending: proposed,
@@ -1501,23 +1685,32 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     if (!message && attachments.length === 0) return json(res, 400, { error: 'message required' });
     const localOnly = body.localOnly === true;
     // Image/PDF turns must reach a frontier that can see them — or be refused, never answered blind.
-    const route = routeTurn({ message, hasFrontier: !!ctx.frontier, localOnly, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
-    if ('error' in route) return json(res, 422, { error: route.error });
+    // (And the mode decides first, ./mode-route: cloud is routeTurn as before, local never leaves this Mac, hybrid is finished below.)
+    const pre = ctx.inference.preRoute({ message, localOnly, deep: body.deep === true, evalMode: false, hasFrontier: !!ctx.frontier, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
+    if ('error' in pre) return json(res, pre.status, { error: pre.error });
     // From here until the turn ends, however it ends, it is a chat turn in flight
     // (POST /internal/load): the runtime's triage leaves the local model to it.
     return ctx.chatLoad.run(async () => {
       // Router, recall, the Action Log and the training corpus see names, never file bodies.
       const asText = [message, summarizeAttachments(attachments)].filter(Boolean).join(' ');
       const scored = await ctx.router.selectScored(asText);
-      const selected = scored.tools;
+      const selected = ctx.inference.offer(scored.tools, pre); // a private turn: only the tools that run on this Mac; Local mode: none that is an outside AI or a paid service
       // The history this turn will actually carry (windowed), not the whole stored thread:
       // its complete turns size the "deep thread" rule, and the ones left out get a context line.
       const history = ctx.memory.historyStats(conversationId);
       // (The history is checked for untrusted text when the model is handed it: memory.onHistory.)
       const turnsBefore = new Set(ctx.memory.turnIds(conversationId));
-      const turns = route.brain === 'frontier' && ctx.brains?.tiered ? history.sent : 0;
+      const turns = mayUseCloud(pre) && ctx.brains?.tiered ? history.sent : 0;
       const toolsLikely = ctx.router.toolsLikely(scored.appended);
       const tier = classifyMessage(message, { turns, toolsLikely });
+      const route = ctx.inference.finishRoute(pre, { tier, toolsLikely, promptChars: asText.length + textChars(attachments) + ctx.memory.historyChars(conversationId) });
+      // Which local model would answer (./local-serve): the main one when it is ready, else the standby. Decided once, from
+      // the models' state now. A turn that must be local with none to answer it gets a sentence, never the cloud.
+      // The plan is made from what the monitor last saw of the model server: when that is more than a moment old,
+      // it looks again first (a model that left memory since is not planned as loaded). Never in the cloud mode.
+      await ctx.inference.freshen(route);
+      const localPlan = ctx.inference.planLocal(route, { primary: { persona: ctx.persona, model: ctx.model }, standby: ctx.standby });
+      if (route.brain === 'local' && localPlan.steps.length === 0) return json(res, 503, { error: localPlan.refusal });
       // Everything the spend caps decide about this turn, before anything streams (./spend budgetTurn);
       // the honest note once per conversation per day.
       const budget = budgetTurn({
@@ -1531,11 +1724,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         once: { notes: ctx.budgetNotes, conversationId },
       });
       if (!budget.ok) return json(res, budget.status, { error: budget.error });
-      const { plan, note } = budget;
+      const { plan } = budget;
+      let note = budget.note;
       if (plan) logPlan(plan);
       // May the local model answer this turn if the frontier can't: no image or PDF on it, and
       // (a paid local brain) its budget not spent.
-      const toLocal = route.localFallback && !budget.localRefusal;
+      const toLocal = route.localFallback && !budget.localRefusal && localPlan.steps.some((s) => s.kind === 'local');
       // The breaker's say (./frontier-breaker gateTurn): brains whose provider is paused are left
       // out, and with none left the local model answers at once instead of after their failures.
       const gate = gateTurn({ brain: budget.brain, chain: plan?.chain, canLocal: toLocal, breaker: ctx.breaker });
@@ -1556,13 +1750,19 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       const [recalled, world, goals] = await Promise.all([
         contextFor(asText, ctx.knowledge),
         brain === 'frontier' && plan && ctx.worldNow ? ctx.worldNow.block() : Promise.resolve(''),
-        // Will's goals (./goals-chat), for whichever brain ends up asked: handed out per ask, in pump, never here.
-        ctx.goals.forTurn(conversationId, message),
+        // What stays on this Mac (./goals-chat), for whichever brain ends up asked: Will's goals, handed out per ask,
+        // in pump, never here; and the turn's own route, which keeps a turn he asked to keep private, and every
+        // turn of Local mode, here whichever brain answers.
+        ctx.goals.forTurn(conversationId, message, route),
       ]);
-      const ctxBlock = withHistoryNote(recalled.block, history);
+      // (A private turn's model is told, in one sentence, that nothing outside is asked for it: ./outside-ai.)
+      const ctxBlock = ctx.inference.withPrivateNote(withHistoryNote(recalled.block, history), route);
       // The same block as a brain that is not on this Mac may have it: without the recalled facts that stay
-      // here (./knowledge fromGoals). The very same text when none was recalled.
-      const outsideCtx = withHistoryNote(recalled.outside, history);
+      // here (./knowledge fromGoals, fromPrivate). The very same text when none was recalled.
+      const outsideCtx = ctx.inference.withPrivateNote(withHistoryNote(recalled.outside, history), route);
+      // ...and without only the ones from a turn Will kept private: what a brain off this Mac may have once he
+      // set FLINT_GOALS_TO_FRONTIER=on, which is about his goals and lifts nothing private.
+      const liftedCtx = ctx.inference.withPrivateNote(withHistoryNote(recalled.lifted, history), route);
       // It rides in the persona context (the system prompt's per-turn suffix): never stored in
       // the history, so the memory extractor never reads it, and a local fallback goes without.
       const frontierCtx = world ? `${ctxBlock}\n\n${world}` : ctxBlock;
@@ -1581,6 +1781,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       // from here no other brain is asked. It would start the turn over and call it again.
       let acted = false;
       const noAnswers: Unanswered[] = []; // the tiers that refused / came back empty, for the honest message's wording
+      // Set while the standby local model is the one answering (./local-serve): the line its answer may end with.
+      let standbyLine: string | undefined;
       // `tried` (frontier tiers only): a refused / empty reply falls back or gets the honest message (./unanswered).
       const pump = async (persona: Persona, recoverable = false, tried?: number, context = ctxBlock) => {
         lastPersona = persona;
@@ -1589,8 +1791,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
         // /chat is made through here, so a frontier tier goes without and the local model it falls back to does
         // not. An ask that carries any of it is sized to that brain's real context, is offered only the tools that
         // keep it here, and marks its turn, which keeps the turn out of an outside brain's history and recall.
-        const asked = goals.ask(persona, { context, whole: ctxBlock, outside: outsideCtx, tools: selected });
+        const asked = goals.ask(persona, { context, whole: ctxBlock, outside: outsideCtx, lifted: liftedCtx, tools: selected });
         goalsTokens = asked.tokens;
+        // (The mark is stored with the turn from the moment it begins: a goals turn's, a private turn's, or both.)
         const events = persona.chat(
           { conversationId, message, context: asked.context, ...(asked.tools.length ? { tools: [...asked.tools] } : {}), ...(attachments.length ? { attachments } : {}) },
           { signal: ac.signal, ...asked.mark },
@@ -1599,6 +1802,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           // Ahead of the reply: whether it stays on this Mac, and which stored turn it is, for the client's voice.
           const here = asked.meta();
           if (here) res.write(`data: ${JSON.stringify(here)}\n\n`);
+          // The standby's line is said only once it has actually answered, and once per conversation per day:
+          // a standby that failed, or gave way to the next step, uses up nothing.
+          if (ev.type === 'done' && !note && standbyLine && answer.trim() && ctx.standbyNotes.take(conversationId)) note = standbyLine;
           // The budget note rides just ahead of `done`: shown, but never stored as the answer.
           if (note && ev.type === 'done') res.write(`data: ${JSON.stringify({ type: 'text', delta: `\n\n${note}` })}\n\n`);
           if (ev.type === 'text') answer += ev.delta;
@@ -1612,6 +1818,51 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           res.write(`data: ${JSON.stringify(ev)}\n\n`);
         }
       };
+      // The local side of the turn (./local-serve runLocalPlan): the plan's steps in order, moving on only while nothing
+      // was shown and no tool was called. A local step runs as the local model's turn (nothing it sets off sends the
+      // question to an outside AI); in hybrid, the last step of a turn that is not private may be the cloud.
+      let localRun: RunResult<Persona, void> | undefined;
+      const askLocal = async (meta: Record<string, unknown>) => {
+        localRun = await runLocalPlan(
+          localPlan,
+          async (step, last) => {
+            // Each step starts with the turn's own note: a standby's line never rides on another model's answer.
+            note = budget.note;
+            standbyLine = undefined;
+            if (step.kind === 'cloud') {
+              const cloud = ctx.inference.cloudChain({ brains: ctx.brains, tier, guard: ctx.spend, breaker: ctx.breaker, canRead: canReadMedia(mediaNeeds(attachments)) });
+              if (!cloud) throw new Error('no local model answered, and no cloud brain can answer either');
+              brain = 'frontier';
+              const chain = cloud.chain;
+              const won = await runWithFallback(
+                chain,
+                gated(ctx.breaker, async (b) => {
+                  lastTried = b.label;
+                  res.write(`data: ${JSON.stringify({ type: 'meta', brain, tier: cloud.tier, model: b.label, route: ctx.inference.routeFields(route) })}\n\n`);
+                  try {
+                    // (A tier whose brain is on this Mac is asked as a local model's turn, as on the cloud-first path.)
+                    await ctx.goals.run(b, () => pump(b.persona, b !== chain[chain.length - 1], chain.indexOf(b) + 1));
+                  } catch (err) {
+                    if (answer.length > 0) throw new NoFallback(err); // text already streamed
+                    throw err;
+                  }
+                }),
+                { signal: ac.signal, acted: () => acted, onFallback: logFallback },
+              );
+              answeredBy = won.brain.label;
+              return;
+            }
+            lastTried = answeredBy = step.model;
+            const byStandby = step.which === 'fallback';
+            // The standby says so once per conversation per day: shown with the answer, never stored as it.
+            // (Taken where the answer ends, in pump: only a standby that answered uses the day's one line.)
+            if (byStandby) standbyLine = standbyNote(localPlan);
+            res.write(`data: ${JSON.stringify({ type: 'meta', brain, ...meta, ...(byStandby ? { standby: true } : {}), route: ctx.inference.routeFields(route) })}\n\n`);
+            await pump(step.persona, !last); // not the last step: a failure before any output goes to the next
+          },
+          { signal: ac.signal, progressed: () => answer.length > 0 || acted, onMove: logLocalMove, ...ctx.inference.keeping(route) },
+        );
+      };
       try {
         if (brain === 'frontier' && plan) {
           try {
@@ -1620,7 +1871,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
               chain,
               gate.attempt(async (b) => {
                 lastTried = b.label;
-                res.write(`data: ${JSON.stringify({ type: 'meta', brain, tier: plan.tier, model: b.label, ...budget.fields, ...(paused ? { frontierPaused: paused } : {}) })}\n\n`);
+                res.write(`data: ${JSON.stringify({ type: 'meta', brain, tier: plan.tier, model: b.label, ...budget.fields, ...(paused ? { frontierPaused: paused } : {}), route: ctx.inference.routeFields(route) })}\n\n`);
                 try {
                   await ctx.goals.run(b, async () => {
                     await pump(b.persona, b !== chain[chain.length - 1], chain.indexOf(b) + 1, frontierCtx); // last tier: no answer → honest message; an error → the local model, when it may answer
@@ -1640,9 +1891,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
               logToLocal('frontier failed pre-output', err);
               if (err instanceof FrontierPaused) paused ??= pausedCode([err.brain]);
               brain = 'local';
-              lastTried = ctx.model;
-              res.write(`data: ${JSON.stringify({ type: 'meta', brain, ...(paused ? { frontierPaused: paused } : {}) })}\n\n`);
-              await asLocalTurn(() => pump(ctx.persona));
+              await askLocal({ ...(paused ? { frontierPaused: paused } : {}) });
             } else if (answer.length === 0 && route.localFallback && budget.localRefusal && mayAskAnother(err, { acted, signal: ac.signal })) {
               stopWords = budget.localRefusal;
               throw new Error(`frontier failed: ${String(err)}. ${budget.localRefusal}`);
@@ -1651,17 +1900,21 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
             }
           }
         } else {
-          lastTried = ctx.model;
-          res.write(`data: ${JSON.stringify({ type: 'meta', brain, ...budget.fields, ...(paused ? { frontierPaused: paused } : {}) })}\n\n`);
-          // The local model's turn: nothing it sets off sends the question to an outside AI (asLocalTurn).
-          await asLocalTurn(() => pump(ctx.persona));
+          // The local model's turn: nothing it sets off sends the question to an outside AI (asLocalTurn, in runLocalPlan).
+          await askLocal({ ...budget.fields, ...(paused ? { frontierPaused: paused } : {}) });
         }
         if (answer.trim()) {
           recordConvo(ctx.convos, asText, answer);
-          ctx.training.log(
-            { conversationId, brain, model: answeredBy, input: asText, output: answer, tools: toolsSince(ctx, beforeLog) },
-            Date.now(),
-          );
+          // A standby model's answer is not an example to learn from: it stays out of the training corpus.
+          // (A turn that stayed on this Mac is written WITH that mark, by its route or by what its brain was
+          // given: local training uses it, no outside set takes it. ./goals-chat ChatTurn.corpus)
+          const byStandby = localRun?.step.kind === 'local' && localRun.step.which === 'fallback';
+          if (!byStandby) {
+            ctx.training.log(
+              { conversationId, brain, model: answeredBy, input: asText, output: answer, tools: toolsSince(ctx, beforeLog), ...goals.corpus() },
+              Date.now(),
+            );
+          }
         }
         // This turn's own proposals only (a concurrent turn's are its own).
         const proposed = turnProposals();
@@ -1676,6 +1929,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       console.error(
         routeLine({
           path: 'chat',
+          ...ctx.inference.routeFields(route),
           tier,
           ...(moved ? { movedBy: moved } : {}),
           appended: scored.appended,
@@ -1684,6 +1938,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           brain,
           ...(paused ? { paused } : {}),
           ...attribution(outcome, lastTried),
+          ...servedBy(outcome, brain, lastTried, ctx.provider.name),
+          ...routeLocal(localRun, localPlan, route.brain === 'frontier'),
+          ...fitFields(turnFit()),
           ...(lastPersona ? { promptRev: promptRevision(lastPersona) } : {}),
           outcome,
           ...(noAnswers.length > 0 ? { declined: noAnswers.length } : {}),
@@ -1736,6 +1993,19 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
 
   // Will's goals, for the console's Goals panel (./goals-routes): checked both ways, never spooled.
   if (await goalsRoutes(req, res, url, { runtime: ctx.runtime, errorRef })) return;
+
+  // The routing mode and the local model's status, for Settings and the status command (./inference-routes).
+  if (
+    await inferenceRoutes(req, res, url, {
+      mode: ctx.inference.mode,
+      status: () => ctx.inference.status({ configured: !!ctx.brains, ...(ctx.brains ? { brains: ctx.brains.describe() } : {}), ...pausedNow(ctx) }),
+      sentences: () => ctx.inference.sentences(),
+      audit: (c) =>
+        ctx.audit.record({ actor: `will:${c.by}`, context: 'console', kind: 'action', action: 'inference.mode', decision: 'act', outcome: 'ok', inputs: { from: c.from, to: c.to, reset: c.reset } }),
+      errorRef,
+    })
+  )
+    return;
 
   // Training corpus stats — the growing seed of Flint's own brain.
   if (req.method === 'GET' && url.startsWith('/training')) {

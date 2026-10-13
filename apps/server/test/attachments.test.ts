@@ -6,6 +6,7 @@ import {
   sniff,
   mediaNeeds,
   summarizeAttachments,
+  textChars,
   readJsonLimited,
   LIMITS,
   MAX_BODY_BYTES,
@@ -166,5 +167,20 @@ describe('readJsonLimited', () => {
 
   it('treats malformed JSON as an empty object', async () => {
     expect(await readJsonLimited(fakeReq('{nope'), 100)).toEqual({ tooLarge: false, body: {} });
+  });
+});
+
+describe('textChars', () => {
+  it('counts the text files a turn carries, and nothing else', () => {
+    expect(textChars([])).toBe(0);
+    expect(
+      textChars([
+        { kind: 'text', mediaType: 'text/plain', name: 'a.txt', text: 'x'.repeat(1200) },
+        { kind: 'text', mediaType: 'text/markdown', name: 'b.md', text: 'y'.repeat(300) },
+        { kind: 'image', mediaType: 'image/png', name: 'c.png', data: 'A'.repeat(9000) },
+        { kind: 'document', mediaType: 'application/pdf', name: 'd.pdf', data: 'B'.repeat(9000) },
+        { kind: 'text', mediaType: 'text/plain', name: 'shed.txt' },
+      ]),
+    ).toBe(1500);
   });
 });

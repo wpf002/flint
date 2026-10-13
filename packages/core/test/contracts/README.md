@@ -1,7 +1,8 @@
 # Contract suite
 
 These tests define what "all providers behave the same" means. In Phase 1 they
-run against Anthropic only; in Phase 2 the **same** suite runs against Ollama.
+run against Anthropic only; in Phase 2 the **same** suite runs against Ollama,
+and against `LocalOpenAiProvider` (any OpenAI-compatible local server).
 Any test that passes for one provider and fails for the other is either fixed in
 the adapter or documented as a capability gap.
 
@@ -27,6 +28,7 @@ CI never hits the live API.
 | `error-normalization` | provider errors map to the correct `AiError.kind` |
 | `idempotency` | a non-idempotent tool failure is not auto-retried |
 | `ollama-format` | responseFormat on Ollama `format`: the JSON is the text, a forced tool is its call, a reply cut off at `num_predict` is `max_tokens` |
+| `local` | the same guarantees for `LocalOpenAiProvider`, on SSE bodies recorded from Ollama's `/v1/chat/completions` ([`local-harness.ts`](./local-harness.ts)) |
 
 ## Refreshing cassettes (live run)
 

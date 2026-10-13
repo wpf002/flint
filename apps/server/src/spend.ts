@@ -48,6 +48,7 @@ import { SPEND_KINDS, type SpendKind as BackgroundKind } from '@flint/policy';
 import type { BrainTier, Tier } from './brains';
 import type { Brain } from './policy';
 import { errorSummary } from './error-log';
+import { isPrivateOff, outsideOffText } from './outside-ai';
 
 export type { PaidVendor } from '@flint/core';
 export type { BackgroundKind };
@@ -1161,8 +1162,18 @@ export function toolSucceeded(result: unknown): boolean {
  * use up Will's own Tavily / Perplexity caps; the replay's cost reports them to
  * parity instead. A refusal there is noted on the turn (`budgetBlocked`), so
  * parity doesn't judge an answer Flint had to give without search.
+ *
+ * `outsideOff` is the other reason a paid tool does not reach its vendor: Flint
+ * is in Local mode, or the turn is private (./outside-ai; a sentence for the
+ * model, read on every call, so it follows the mode Will last set and reaches
+ * the calls deep_research makes itself). It acts exactly like a spent budget:
+ * a tool with a keyless switch searches keyless, and any other refuses. It is
+ * not a budget refusal, so it is not noted as one.
  */
-export function meterPaidTools(tools: Tool[], deps: { guard: SpendGuard; specs: PaidToolSpec[] }): Tool[] {
+export function meterPaidTools(
+  tools: Tool[],
+  deps: { guard: SpendGuard; specs: PaidToolSpec[]; outsideOff?: () => string | undefined; onOutsideRefused?: (name: string, why: string) => void },
+): Tool[] {
   const byName = new Map(deps.specs.map((s) => [s.name, s] as const));
   const wired = new Set(tools.map((t) => t.definition.name));
   const keylessTools = new Set(
@@ -1183,6 +1194,14 @@ export function meterPaidTools(tools: Tool[], deps: { guard: SpendGuard; specs: 
       handler: async (call) => {
         const args = { ...((call.args as Record<string, unknown> | null) ?? {}) };
         if (keyless) delete args[keyless];
+        // Local mode (no outside AI, no paid service) or a private turn (nothing leaves this Mac): whatever its budget.
+        const off = deps.outsideOff?.();
+        if (off) {
+          // Keyless search is still a search: it runs for Local mode, never for a private turn (./outside-ai).
+          if (keyless && !isPrivateOff(off)) return tool.handler({ ...call, args: { ...args, [keyless]: true } });
+          deps.onOutsideRefused?.(spec.name, off);
+          return { isError: true, content: outsideOffText(off, { wired, keyless: keylessTools, fetchTool: KEYLESS_FETCH_TOOL }) };
+        }
         const blocked = deps.guard.blocked(spec.vendor);
         if (blocked) {
           // A spent budget turns into free (keyless) search where the tool can do it.

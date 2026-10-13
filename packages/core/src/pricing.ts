@@ -206,7 +206,7 @@ export function vendorOfProvider(providerName: string): TokenVendor | undefined 
 }
 
 /** Provider names a brain label can start with (apps/server brains.ts: `${provider.name}:${model}`). */
-const LABEL_PROVIDERS: ReadonlySet<string> = new Set(['anthropic', 'openai', 'perplexity', 'ollama']);
+const LABEL_PROVIDERS: ReadonlySet<string> = new Set(['anthropic', 'openai', 'perplexity', 'ollama', 'local']);
 
 /**
  * Split a brain label (`anthropic:claude-opus-5-5`, `openai:gpt-5`) into the

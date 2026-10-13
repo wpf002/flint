@@ -14,6 +14,7 @@ import { ollamaCapabilities } from './capabilities.js';
 import { OllamaFormatError, OllamaHttpError, toAiError } from './errors.js';
 import { responseFormatName } from '../response-format.js';
 import { mapMessages, mapDoneReason } from './mapping.js';
+import { raceAbort, readDeadline, startDeadline, type DeadlineMs } from '../deadline.js';
 
 export interface OllamaProviderOptions {
   /** Base URL of the Ollama server. Defaults to http://localhost:11434. */
@@ -41,6 +42,54 @@ export interface OllamaProviderOptions {
    *    every call. So only set `true` for a model that can think.
    */
   think?: boolean;
+  /**
+   * What the caller knows about a model, typically the server's own report
+   * (`/api/show`): it wins over the built-in table, field by field. Return
+   * undefined for a model it knows nothing about. A model it marks
+   * `toolCalling: 'unsupported'` is not offered tools (Ollama answers every
+   * such call with a 400). Unset, requests are exactly what they were.
+   */
+  capabilities?: (model: string) => Partial<ModelCapabilities> | undefined;
+  /*
+   * Deadlines of the adapter's own, for a model that stalls instead of failing
+   * (cold, or evaluating a long prompt). All off unless set, and a client that
+   * sets none makes exactly the calls it did. Each is a number of ms, or a
+   * function read on every call (DeadlineMs).
+   */
+  /**
+   * ms from sending a call to its first sign of output: text, a tool call, or
+   * a thinking model's reasoning. Past it the call ends with a `timeout` error
+   * whose providerCode is `first_token_timeout`, not retryable.
+   *
+   * It covers EVERY call, the ones that answer whole too: the tool-decision
+   * pass (tools offered, no tool result yet, which is the first pass of nearly
+   * every chat turn), a constrained reply, generate(). With this set, such a
+   * call is sent `stream: true`, timed on its first line, and folded back into
+   * the one object a non-streamed call returns (postWhole), so nothing changes
+   * for the caller. Without it they are the plain non-streamed calls they were:
+   * a model that stalled there held the turn for the whole-reply deadline.
+   */
+  firstTokenTimeoutMs?: DeadlineMs;
+  /** The same for a call that follows a tool result. Unset: firstTokenTimeoutMs. */
+  toolPassTimeoutMs?: DeadlineMs;
+  /**
+   * ms for a call that answers whole to finish: the tool-decision pass, a
+   * constrained reply, generate(). providerCode `request_timeout`.
+   */
+  requestTimeoutMs?: DeadlineMs;
+  /**
+   * ms a reply may go quiet once it has begun, between one piece and the next
+   * (providerCode `idle_timeout`): a model that sends a token and then nothing.
+   * It applies wherever a first-token deadline does.
+   */
+  idleTimeoutMs?: DeadlineMs;
+  /**
+   * Called when a request's first sign of output arrives, once per request
+   * this client reads as a stream (which, with a first-token deadline, is all
+   * of them). For a caller that measures time to first token: the events of a
+   * call that answers whole only come out when the whole reply is in.
+   */
+  onFirstOutput?: () => void;
 }
 
 const DEFAULT_BASE_URL = 'http://localhost:11434';
@@ -88,6 +137,9 @@ export class OllamaProvider implements ProviderAdapter {
   private readonly fetchImpl: typeof fetch;
   private readonly defaultOptions: Record<string, unknown>;
   private readonly think: boolean | undefined;
+  private readonly known: ((model: string) => Partial<ModelCapabilities> | undefined) | undefined;
+  private readonly deadlines: Pick<OllamaProviderOptions, 'firstTokenTimeoutMs' | 'toolPassTimeoutMs' | 'requestTimeoutMs' | 'idleTimeoutMs'>;
+  private readonly onFirstOutput: (() => void) | undefined;
 
   constructor(opts: OllamaProviderOptions = {}) {
     this.baseURL = (opts.baseURL ?? DEFAULT_BASE_URL).replace(/\/$/, '');
@@ -96,10 +148,169 @@ export class OllamaProvider implements ProviderAdapter {
     this.fetchImpl = opts.fetch ?? fetch;
     this.defaultOptions = opts.defaultOptions ?? {};
     this.think = opts.think;
+    this.known = opts.capabilities;
+    this.deadlines = {
+      ...(opts.firstTokenTimeoutMs !== undefined ? { firstTokenTimeoutMs: opts.firstTokenTimeoutMs } : {}),
+      ...(opts.toolPassTimeoutMs !== undefined ? { toolPassTimeoutMs: opts.toolPassTimeoutMs } : {}),
+      ...(opts.requestTimeoutMs !== undefined ? { requestTimeoutMs: opts.requestTimeoutMs } : {}),
+      ...(opts.idleTimeoutMs !== undefined ? { idleTimeoutMs: opts.idleTimeoutMs } : {}),
+    };
+    this.onFirstOutput = opts.onFirstOutput;
   }
 
+  /** The first-token deadline for a call: the tool-pass one after a tool result, when set. */
+  private firstMsFor(args: Pick<GenerateArgs, 'messages'>): number | undefined {
+    const afterTool = args.messages[args.messages.length - 1]?.role === 'tool_result';
+    return afterTool && this.deadlines.toolPassTimeoutMs !== undefined ? readDeadline(this.deadlines.toolPassTimeoutMs) : readDeadline(this.deadlines.firstTokenTimeoutMs);
+  }
+
+  /** The first sign of output of the request being read. A caller's callback that throws is its own trouble. */
+  private sawFirstOutput(): void {
+    try {
+      this.onFirstOutput?.();
+    } catch {
+      /* not the request's */
+    }
+  }
+
+  /**
+   * One POST to /api/chat that answers whole: the response, or a deadline's
+   * own error.
+   *
+   * With no deadline it is the plain non-streamed fetch it always was, with the
+   * caller's signal untouched. With a request deadline only, the same call,
+   * bounded.
+   *
+   * With a FIRST-TOKEN deadline (`firstMs`) it is sent `stream: true` and read
+   * as it arrives (postFolded): the first line is timed with that deadline,
+   * the gaps after it with the idle one, the whole with the request one, and
+   * the lines are folded into the one object a non-streamed call returns. So
+   * chatOnce and structured parse what they always parsed, and a model that is
+   * cold or stalled is found out in seconds instead of holding the call for
+   * the whole-reply deadline.
+   */
+  private async postWhole(body: Record<string, unknown>, signal: AbortSignal | undefined, firstMs?: number): Promise<Response> {
+    if (firstMs !== undefined) return this.postFolded(body, signal, firstMs);
+    const guard = startDeadline('request', readDeadline(this.deadlines.requestTimeoutMs), signal);
+    const send = (s: AbortSignal | undefined): Promise<Response> =>
+      this.fetchImpl(`${this.baseURL}/api/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        redirect: 'error', // Ollama is at a fixed address: a redirect is never followed
+        ...(s ? { signal: s } : {}),
+      });
+    if (!guard.active) return send(signal);
+    try {
+      // The whole reply is awaited under the deadline: the body too, not only the headers.
+      const resp = await raceAbort(send(guard.signal), guard.signal);
+      const text = await raceAbort(resp.text(), guard.signal);
+      // (A status that may carry no body gets none.)
+      return new Response([204, 205, 304].includes(resp.status) ? null : text, { status: resp.status, headers: resp.headers });
+    } catch (err) {
+      throw guard.fired() ?? err;
+    } finally {
+      guard.dispose();
+    }
+  }
+
+  /**
+   * postWhole, streamed and folded. What comes back is exactly a non-streamed
+   * reply: `message.content` is every piece of content joined, `tool_calls`
+   * every call in order, and the counts and `done_reason` are the last line's.
+   * An error object inside the stream is the failure it would have been
+   * (status 500, the same body); a stream that ends before `done` is a 502.
+   */
+  private async postFolded(body: Record<string, unknown>, signal: AbortSignal | undefined, firstMs: number): Promise<Response> {
+    const idleMs = readDeadline(this.deadlines.idleTimeoutMs);
+    // The whole reply is still bounded; the first-token and idle clocks run inside that bound.
+    const whole = startDeadline('request', readDeadline(this.deadlines.requestTimeoutMs), signal);
+    const guard = startDeadline('first_token', firstMs, whole.signal);
+    const json = { 'content-type': 'application/json' };
+    try {
+      const resp = await raceAbort(
+        this.fetchImpl(`${this.baseURL}/api/chat`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ...body, stream: true }),
+          redirect: 'error',
+          ...(guard.signal ? { signal: guard.signal } : {}),
+        }),
+        guard.signal,
+      );
+      if (!resp.ok) return new Response(await raceAbort(resp.text(), guard.signal), { status: resp.status, headers: resp.headers });
+      if (!resp.body) return new Response(JSON.stringify({ error: 'Ollama returned no response body' }), { status: 502, headers: json });
+
+      let content = '';
+      let thinking = '';
+      const toolCalls: NonNullable<NonNullable<OllamaChatChunk['message']>['tool_calls']> = [];
+      let last: OllamaChatChunk | undefined;
+      let started = false;
+      for await (const line of readNdjson(resp.body, guard.signal)) {
+        let chunk: OllamaChatChunk & { error?: unknown };
+        try {
+          chunk = JSON.parse(line) as OllamaChatChunk & { error?: unknown };
+        } catch {
+          continue; // a line that is not JSON says nothing; the reply is judged by the lines that are
+        }
+        if (chunk.error !== undefined && chunk.error !== null) return new Response(JSON.stringify({ error: chunk.error }), { status: 500, headers: json });
+        // Any sign the model is producing something ends the first-token deadline (reasoning counts), and
+        // from then on each line restarts the idle clock.
+        if (!started && (chunk.message?.content || chunk.message?.thinking || (chunk.message?.tool_calls?.length ?? 0) > 0 || chunk.done)) {
+          started = true;
+          this.sawFirstOutput();
+        }
+        if (started) guard.rearm('idle', idleMs);
+        content += chunk.message?.content ?? '';
+        thinking += chunk.message?.thinking ?? '';
+        for (const tc of chunk.message?.tool_calls ?? []) toolCalls.push(tc);
+        if (chunk.done) last = chunk;
+      }
+      if (!last) return new Response(JSON.stringify({ error: 'Ollama closed the reply before it was done' }), { status: 502, headers: json });
+      const folded: OllamaChatChunk = {
+        ...last,
+        message: { role: 'assistant', content, ...(thinking ? { thinking } : {}), ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}) },
+      };
+      return new Response(JSON.stringify(folded), { status: 200, headers: json });
+    } catch (err) {
+      throw guard.fired() ?? whole.fired() ?? err;
+    } finally {
+      guard.dispose();
+      whole.dispose();
+    }
+  }
+
+  /**
+   * The built-in table, then what the caller knows (`capabilities`), then the
+   * context this client actually asks Ollama for: `defaultOptions.num_ctx` is
+   * sent on every call, so that IS the window, whatever a table says. Budgeting
+   * against a table's guess sent a 16K model a 2K history (an unknown model's
+   * 4,096 default) and a 4K one far more than it could hold. One thing bounds
+   * it: the model's own maximum, when the caller's `capabilities` gives it as
+   * `maxContextTokens` (Ollama gives a model no more than that, whatever is asked).
+   */
   getCapabilities(model: string): ModelCapabilities {
-    return ollamaCapabilities(model);
+    const told = definedOnly(this.known?.(model));
+    const caps: ModelCapabilities = { ...ollamaCapabilities(model), ...told };
+    const numCtx = this.defaultOptions.num_ctx;
+    if (typeof numCtx === 'number' && Number.isInteger(numCtx) && numCtx > 0) {
+      // Ollama clamps num_ctx to the model's own maximum. When the caller knows that maximum (the
+      // server's own report, through `capabilities`), the window is the smaller of the two: budgeting
+      // against the number ASKED for sends a model more than it holds, and Ollama cuts the prompt's start.
+      const most = typeof told.maxContextTokens === 'number' && told.maxContextTokens > 0 ? told.maxContextTokens : undefined;
+      const window = most !== undefined ? Math.min(numCtx, most) : numCtx;
+      caps.maxContextTokens = window;
+      // The reply's share never crowds out the prompt: at most a quarter of the real window.
+      caps.maxOutputTokens = Math.max(1, Math.min(caps.maxOutputTokens, Math.floor(window / 4)));
+    }
+    return caps;
+  }
+
+  /** `args` without its tools, for a model the caller knows cannot call them; otherwise `args` itself. */
+  private offerable(args: GenerateArgs): GenerateArgs {
+    if (!args.tools || args.tools.length === 0 || this.known?.(args.model)?.toolCalling !== 'unsupported') return args;
+    const { tools: _tools, toolChoice: _choice, ...rest } = args;
+    return rest;
   }
 
   estimateTokens(messages: Message[], _model: string): number {
@@ -138,12 +349,7 @@ export class OllamaProvider implements ProviderAdapter {
       });
       b.options = { ...b.options, temperature: 0.9 + attempt * 0.15 };
     }
-    const resp = await this.fetchImpl(`${this.baseURL}/api/chat`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      ...(args.signal ? { signal: args.signal } : {}),
-    });
+    const resp = await this.postWhole(body, args.signal, this.firstMsFor(args));
     if (!resp.ok) throw new OllamaHttpError(resp.status, await safeText(resp));
     const chunk = (await resp.json()) as OllamaChatChunk;
     let toolCalls: ToolCall[] = (chunk.message?.tool_calls ?? []).map((c) => ({
@@ -179,9 +385,10 @@ export class OllamaProvider implements ProviderAdapter {
         throw new FlintError(toAiError(err));
       }
     }
-    const args = honourToolChoice(rawArgs);
+    const offered = this.offerable(rawArgs);
+    const args = honourToolChoice(offered);
     try {
-      const { text, toolCalls, usage, doneReason } = await this.fetchFull(args, rawArgs.tools ?? []);
+      const { text, toolCalls, usage, doneReason } = await this.fetchFull(args, offered.tools ?? []);
       if (toolCalls.length > 0) {
         return { message: encodeToolCallTurn(newId('msg'), text, toolCalls, 0), usage, reason: 'tool_call' };
       }
@@ -207,7 +414,8 @@ export class OllamaProvider implements ProviderAdapter {
       }
       return;
     }
-    const args = honourToolChoice(rawArgs);
+    const offered = this.offerable(rawArgs);
+    const args = honourToolChoice(offered);
     // The tool-DECISION pass (tools offered, no tool result in history yet) must
     // be reliable, so it's non-streamed with retry-on-empty. But once a tool has
     // run — or there were never any tools — the model is just writing prose, so
@@ -242,7 +450,7 @@ export class OllamaProvider implements ProviderAdapter {
     // The tools as the caller defined them, even when honourToolChoice didn't
     // offer them: a call the model writes as text on the answer-only call must
     // still be recognised as a call, not shown as the answer.
-    const toolDefs = rawArgs.tools ?? [];
+    const toolDefs = offered.tools ?? [];
     // Some smaller models (notably llama3.1) emit a tool call as TEXT — a bare
     // `{"name":...,"parameters":...}` JSON object — instead of a structured tool
     // call. If the streamed content starts with `{`, we don't stream it raw
@@ -250,19 +458,37 @@ export class OllamaProvider implements ProviderAdapter {
     // tool call at the end. Prose answers (the common case) stream live as before.
     let buf = '';
     let mode: 'undecided' | 'stream' | 'buffer' = 'undecided';
+    // The adapter's own deadlines: on the first sign of output, then between one piece of the
+    // reply and the next (both off unless set).
+    const idleMs = readDeadline(this.deadlines.idleTimeoutMs);
+    const guard = startDeadline('first_token', this.firstMsFor(args), args.signal, { always: idleMs !== undefined });
+    let started = false;
     try {
       const body = this.buildBody(args, true);
-      const resp = await this.fetchImpl(`${this.baseURL}/api/chat`, {
+      const send = this.fetchImpl(`${this.baseURL}/api/chat`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
-        ...(args.signal ? { signal: args.signal } : {}),
+        redirect: 'error',
+        ...(guard.signal ? { signal: guard.signal } : {}),
       });
+      const resp = await (guard.active ? raceAbort(send, guard.signal) : send);
       if (!resp.ok) throw new OllamaHttpError(resp.status, await safeText(resp));
       if (!resp.body) throw new OllamaHttpError(502, 'Ollama returned no response body');
 
-      for await (const line of readNdjson(resp.body)) {
-        const chunk = JSON.parse(line) as OllamaChatChunk;
+      for await (const line of readNdjson(resp.body, guard.active ? guard.signal : undefined)) {
+        const chunk = JSON.parse(line) as OllamaChatChunk & { error?: unknown };
+        // An error sent inside the stream, once the 200 is out: the call failed. It used to be
+        // read as a line with nothing in it, and the reply ended `complete` with what had arrived.
+        if (chunk.error !== undefined && chunk.error !== null) throw new OllamaHttpError(500, typeof chunk.error === 'string' ? chunk.error : JSON.stringify(chunk.error));
+        // Any sign the model is producing something ends the first-token deadline: reasoning
+        // counts (the model is working), though only `content` is ever the answer. From then
+        // on each line restarts the idle clock.
+        if (!started && (chunk.message?.content || chunk.message?.thinking || (chunk.message?.tool_calls?.length ?? 0) > 0 || chunk.done)) {
+          started = true;
+          this.sawFirstOutput();
+        }
+        if (started) guard.rearm('idle', idleMs);
         // A properly-structured tool call on the answer pass (model chains a
         // lookup) — surface it so the loop runs it.
         for (const tc of chunk.message?.tool_calls ?? []) {
@@ -334,7 +560,9 @@ export class OllamaProvider implements ProviderAdapter {
       }
       yield { type: 'done', reason: sawTool ? 'tool_call' : mapDoneReason(doneReason), usage };
     } catch (err) {
-      yield { type: 'error', error: toAiError(err) };
+      yield { type: 'error', error: toAiError(guard.fired() ?? err) };
+    } finally {
+      guard.dispose();
     }
   }
 
@@ -357,15 +585,16 @@ export class OllamaProvider implements ProviderAdapter {
     let usage: TokenUsage = { input: 0, output: 0 };
     for (let attempt = 0; attempt < 3; attempt++) {
       const body = { ...this.buildBody(rest as GenerateArgs, false), format: s.schema };
-      const resp = await this.fetchImpl(`${this.baseURL}/api/chat`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-        ...(args.signal ? { signal: args.signal } : {}),
-      });
+      const resp = await this.postWhole(body, args.signal, this.firstMsFor(args));
       if (!resp.ok) throw new OllamaHttpError(resp.status, await safeText(resp));
       const chunk = (await resp.json()) as OllamaChatChunk;
-      usage = { input: usage.input + (chunk.prompt_eval_count ?? 0), output: usage.output + (chunk.eval_count ?? 0) };
+      // Summed over the tries (what was processed); from the second try on, the last try's own prompt count
+      // rides along, for a caller that checks the window: three tries of a 1,500-token prompt is not 4,500 in it.
+      usage = {
+        input: usage.input + (chunk.prompt_eval_count ?? 0),
+        output: usage.output + (chunk.eval_count ?? 0),
+        ...(attempt > 0 ? { lastInput: chunk.prompt_eval_count ?? 0 } : {}),
+      };
       lastText = withoutTurnEnd(chunk.message?.content ?? '');
       let value: unknown;
       try {
@@ -452,13 +681,14 @@ function structuredOf(args: GenerateArgs): Structured | undefined {
 }
 
 /** Read a web ReadableStream of bytes as newline-delimited JSON lines. */
-async function* readNdjson(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+async function* readNdjson(body: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      // With a deadline, a read gives up when it fires even if the transport ignores the signal.
+      const { done, value } = await (signal ? raceAbort(reader.read(), signal) : reader.read());
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       let nl: number;
@@ -471,6 +701,8 @@ async function* readNdjson(body: ReadableStream<Uint8Array>): AsyncGenerator<str
     const tail = buffer.trim();
     if (tail) yield tail;
   } finally {
+    // A stream abandoned at its deadline is closed, not left open behind the turn.
+    if (signal?.aborted) void reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 }
@@ -599,6 +831,13 @@ function extractTextToolCall(
     }
   }
   return null;
+}
+
+/** An object without its undefined values, so spreading it never erases a field. */
+function definedOnly<T extends object>(o: T | undefined): Partial<T> {
+  const out: Partial<T> = {};
+  for (const [k, v] of Object.entries(o ?? {})) if (v !== undefined) (out as Record<string, unknown>)[k] = v;
+  return out;
 }
 
 async function safeText(resp: Response): Promise<string> {

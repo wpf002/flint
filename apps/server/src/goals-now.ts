@@ -48,6 +48,16 @@
  *    brain gets the block, the history, the facts and the tools, and his goal
  *    text is sent to whichever provider answers.
  *
+ * The same mechanism keeps a second kind of turn here: one Will kept private
+ * (Local Only, the words, or any turn of Local mode: ./private-turns). It has
+ * its own mark, and a stored turn can carry both. Everything above holds for
+ * it (the history a brain is handed, the mark a later local turn carries, the
+ * tools, the facts learned, the extractor, speech), with one difference:
+ * FLINT_GOALS_TO_FRONTIER lifts nothing of it. Will chose to send his goals
+ * out, not what he asked to keep private. So each rule here is asked per mark:
+ * a brain reads a stored turn or a fact only if it may read every mark on it,
+ * and a turn carries every mark of what its brain was given.
+ *
  * What is in it: active goals only, one line each. A title is Will's own words,
  * and only for a goal he signed that carries no outside text; any other goal is
  * `goal#ab12cd`. The rest is counts, days and the open forecast in the ledger's
@@ -82,6 +92,7 @@ import type { Runtime } from './audit-sink';
 import { TIERS, type BrainSet } from './brains';
 import type { PersistentStore } from './persistent-store';
 import { LOCAL_WIRES, brainIsLocal, brainOf, type AnsweringBrain } from './policy';
+import { PRIVATE_TURN, wasPrivate } from './private-turns';
 import { carriesTaint } from './world-now';
 
 export const GOALS_NOW_MAX_TOKENS = GOALS_BLOCK_MAX_TOKENS;
@@ -155,17 +166,40 @@ export function carriedGoals(turn: { context?: unknown }): boolean {
 
 /**
  * Every mark that keeps a stored turn on this Mac, as the test that reads it.
- * There is one today: the turn was answered with Will's goals in its context.
- * A second kind of turn that stays here (one Will asked to keep private) is
- * added to this list and nowhere else: the history a brain is handed, what a
+ * There are two: the turn was answered with Will's goals in its context, or
+ * Will kept it private (./private-turns: Local Only, the words, any turn of
+ * Local mode). A turn can carry both. The history a brain is handed, what a
  * later local turn carries, the extractor's rule and the speech rule all go
- * through `keptHere`.
+ * through this list (`keptHere`, or one mark's own test where the two differ:
+ * FLINT_GOALS_TO_FRONTIER lifts the first mark and never the second).
  */
-export const STAY_MARKS: ReadonlyArray<(turn: { context?: unknown }) => boolean> = [carriedGoals];
+export const STAY_MARKS: ReadonlyArray<(turn: { context?: unknown }) => boolean> = [carriedGoals, wasPrivate];
+
+/** What a stored turn that stays here carries in its call context: one mark, or both. */
+export type StayMark = Readonly<{ goals?: true; private?: true }>;
+
+/** A turn that was answered with Will's goals AND is one he kept private: it keeps both marks. */
+const BOTH_MARKS: StayMark = Object.freeze({ goals: true, private: true });
+
+/** The call context for a turn with these marks; undefined for a turn with none. */
+export function stayMark(marks: { goals: boolean; private: boolean }): StayMark | undefined {
+  if (marks.goals && marks.private) return BOTH_MARKS;
+  return marks.goals ? GOALS_TURN : marks.private ? PRIVATE_TURN : undefined;
+}
 
 /** Is this stored turn marked to stay on this Mac, by any mark? */
 export function keptHere(turn: { context?: unknown }): boolean {
   return STAY_MARKS.some((marked) => marked(turn));
+}
+
+/**
+ * Is this stored turn kept here by a mark that NO setting lifts? Every mark on
+ * the list but the goals one: FLINT_GOALS_TO_FRONTIER sends out the turns
+ * answered with Will's goals and nothing else, so a turn he kept private (and
+ * any kind of turn added to the list later) stays whatever it says.
+ */
+export function keptStrictly(turn: { context?: unknown }): boolean {
+  return STAY_MARKS.some((marked) => marked !== carriedGoals && marked(turn));
 }
 
 /** What stands in an outside brain's history where such turns were. It says nothing of what they held. */
@@ -182,39 +216,54 @@ export function staysHere(brain: AnsweringBrain | undefined, toFrontier: boolean
 }
 
 /**
+ * May this brain be given what Will kept PRIVATE: the turns he kept on this
+ * Mac (./private-turns) and the facts learned from them? Only a brain on this
+ * Mac (./policy brainIsLocal). No setting lifts it: FLINT_GOALS_TO_FRONTIER is
+ * about his goals.
+ */
+export function keepsPrivate(brain: AnsweringBrain | undefined): boolean {
+  return !!brain && brainIsLocal(brain);
+}
+
+/**
  * The conversation store as one brain may read it. A brain that may read what
  * stays here reads all of it. Any other brain reads it without the turns that
  * are marked to stay here (keptHere): the question and the answer are both
  * left out (the answer may repeat a goal, and the question may be about one),
  * and HISTORY_GAP stands where they were.
- * FLINT_GOALS_TO_FRONTIER=on lifts this, as it lifts the block's own rule: Will
- * chose to send goal text out.
+ * FLINT_GOALS_TO_FRONTIER=on lifts this for the turns answered with Will's
+ * goals, as it lifts the block's own rule: Will chose to send goal text out.
+ * It lifts nothing for a turn he kept private: no brain off this Mac is ever
+ * handed one.
  *
- * Which of the two a brain reads is decided at each read, not once when the
- * brain is built: whether it runs on this Mac is its Ollama's own word
- * (./policy brainIsLocal), and that is not known at boot and can change.
+ * Which view a brain reads is decided at each read, not once when the brain is
+ * built: whether it runs on this Mac is its Ollama's own word (./policy
+ * brainIsLocal), and that is not known at boot and can change.
  *
- * And the read is tied to the turn it is for. A brain on this Mac is handed
- * the whole store only for a turn that was begun, through this very view, with
- * a mark that keeps it here: so a turn that is stored unmarked can never have
- * read a marked one, whatever was decided when its ask was built (a marked
- * turn that finished in between, a brain that became local in between). A
- * read with no turn begun for it, and reads of two turns begun at once in one
- * conversation (which cannot be told apart), get the view without the marked
- * turns.
+ * And the read is tied to the turn it is for. A brain on this Mac is handed a
+ * marked turn only for a turn that was begun, through this very view, with
+ * that same mark: so a turn that is stored unmarked can never have read a
+ * marked one, and a turn stored with the goals mark alone can never have read
+ * a private one (which FLINT_GOALS_TO_FRONTIER would then send out), whatever
+ * was decided when its ask was built (a marked turn that finished in between,
+ * a brain that became local in between). A read with no turn begun for it, and
+ * reads of two turns begun at once in one conversation (which cannot be told
+ * apart), get the view a brain off this Mac gets.
  */
 export function historyFor(store: PersistentStore, brain: AnsweringBrain | undefined, toFrontier: boolean): MemoryStore {
+  /** As a brain off this Mac reads it: without every turn that stays here. */
   const outside = store.viewWithout(keptHere, HISTORY_GAP);
-  // Will chose to send goal text out: every brain that can be named reads everything, as before.
-  if (toFrontier) return { ...outside, getMessages: (conversationId) => (staysHere(brain, true) ? store : outside).getMessages(conversationId) };
+  /** Without the turns no setting lifts (the ones Will kept private): what a goals turn reads, and any named brain once he sends his goals out. */
+  const open = store.viewWithout(keptStrictly, HISTORY_GAP);
   /** The turns begun through this view whose history has not been read yet, by conversation, oldest first. */
-  const begun = new Map<string, Array<{ turnId: string; kept: boolean; apart: boolean }>>();
+  const begun = new Map<string, Array<{ turnId: string; goals: boolean; private: boolean; apart: boolean }>>();
   return {
     ...outside,
     beginTurn: async (input) => {
       const turn = await store.beginTurn(input);
       const waiting = begun.get(input.conversationId) ?? [];
-      waiting.push({ turnId: input.turnId, kept: keptHere({ context: input.context }), apart: true });
+      const marked = { context: input.context };
+      waiting.push({ turnId: input.turnId, goals: carriedGoals(marked), private: keptStrictly(marked), apart: true });
       begun.set(input.conversationId, waiting);
       return turn;
     },
@@ -226,8 +275,13 @@ export function historyFor(store: PersistentStore, brain: AnsweringBrain | undef
       const mine = waiting.shift();
       if (waiting.length) begun.set(conversationId, waiting);
       else begun.delete(conversationId);
-      const whole = mine !== undefined && mine.kept && mine.apart && staysHere(brain, false);
-      return (whole ? store : outside).getMessages(conversationId);
+      const tied = mine !== undefined && mine.apart ? mine : undefined;
+      // A turn Will kept private, on a brain on this Mac: all of it. Nothing that turn says is ever read off this Mac.
+      if (tied?.private && keepsPrivate(brain)) return store.getMessages(conversationId);
+      // The turns answered with Will's goals, and never the private ones: for a goals turn on a brain that may
+      // read them, and for any named brain once Will set FLINT_GOALS_TO_FRONTIER=on (as before: every read).
+      if (toFrontier ? staysHere(brain, true) : tied?.goals === true && staysHere(brain, false)) return open.getMessages(conversationId);
+      return outside.getMessages(conversationId);
     },
   };
 }
@@ -266,14 +320,17 @@ export interface LocalBrain<P> {
 }
 
 /**
- * Every persona /chat can ask, with the brain it speaks for: the local one,
- * each tier's, the last resort's. This is what brainIsLocal (./policy) is asked
+ * Every persona /chat can ask, with the brain it speaks for: the local one
+ * (and the standby local model, when there is one), each tier's, the last
+ * resort's. This is what brainIsLocal (./policy) is asked
  * about, per ask; anything else that must know whether an ask stays on this Mac
  * can look its persona up here too. A persona that is not in it is unknown,
  * and unknown is never local.
  */
-export function chatBrains<P>(local: LocalBrain<P>, tiers: BrainSet<P> | undefined): Map<P, ChatBrain> {
+export function chatBrains<P>(local: LocalBrain<P>, tiers: BrainSet<P> | undefined, others: ReadonlyArray<LocalBrain<P>> = []): Map<P, ChatBrain> {
   const brains = new Map<P, ChatBrain>([[local.persona, chatBrain(local.provider, local.model)]]);
+  // The other local models that can answer a turn (the standby, while the main one loads): named like the first.
+  for (const b of others) if (!brains.has(b.persona)) brains.set(b.persona, chatBrain(b.provider, b.model));
   for (const b of tiers ? [...TIERS.map((t) => tiers.get(t)), ...(tiers.lastResort ? [tiers.lastResort] : [])] : []) {
     if (!brains.has(b.persona)) brains.set(b.persona, chatBrain(b.provider, b.model));
   }
@@ -304,12 +361,34 @@ export interface Ask {
    */
   here?: string;
   /**
-   * A turn that stays on this Mac is in the history this conversation's next
-   * message carries (the store's `windowHas(conversationId, keptHere)`). A
-   * brain that may read it has then read it, so its ask carries what stays
-   * here whether or not it is also given the goals or a fact.
+   * The same context without the facts learned from a turn Will kept PRIVATE
+   * (./knowledge `fromPrivate`), when some were recalled: the facts learned
+   * from his goals are still in it. It is what a brain off this Mac is given
+   * once he set FLINT_GOALS_TO_FRONTIER=on, which lifts nothing private. Left
+   * out: `here` (a caller that does not tell the two kinds of fact apart has
+   * no private ones).
+   */
+  lifted?: string;
+  /**
+   * A turn answered with Will's goals is in the history this conversation's
+   * next message carries (the store's `windowHas(conversationId,
+   * carriedGoals)`). A brain that may read it has then read it, so its ask
+   * carries what stays here whether or not it is also given the goals or a
+   * fact.
    */
   carried?: boolean;
+  /**
+   * A turn Will kept private is in that history (`windowHas(conversationId,
+   * keptStrictly)`). A brain on this Mac has then read it, so its own turn is
+   * kept private too.
+   */
+  carriedPrivate?: boolean;
+  /**
+   * The turn itself is one that stays on this Mac by its route (./private-turns
+   * turnStaysHere: Will kept it private, or Flint is in Local mode). It is
+   * marked whichever brain is asked, and whatever that brain is given.
+   */
+  kept?: boolean;
   /** The tools the turn would offer. */
   tools?: readonly Tool[];
   /**
@@ -326,8 +405,8 @@ export interface Asked {
   tools: readonly Tool[];
   /** The goals block's size in this ask's prompt (0: it went without). */
   tokens: number;
-  /** For the call's options: marks the turn as answered with what stays here. Empty when it was given none of it. */
-  mark: { context?: typeof GOALS_TURN };
+  /** For the call's options: marks the turn as one that stays here, with each mark that applies. Empty when none does. */
+  mark: { context?: StayMark };
 }
 
 const toolChars = (tools: readonly Tool[]): number => (tools.length ? JSON.stringify(tools.map((t) => t.definition)).length : 0);
@@ -339,6 +418,10 @@ interface TurnRules<P> {
   localTurn: () => boolean;
   /** The tools for an ask that carries what stays here (./goals-tools); the same tools when nothing needs holding back. */
   tools: (offered: readonly Tool[]) => readonly Tool[];
+  /** May this persona's brain read what Will kept private, asked as a local model's turn? No setting lifts either half. */
+  privately: (persona: P) => boolean;
+  /** The tools for an ask whose turn is kept private: what it saves is marked private (and `goals`: with the goals mark too). */
+  toolsPrivate: (offered: readonly Tool[], goals: boolean) => readonly Tool[];
 }
 
 /**
@@ -363,19 +446,37 @@ export class TurnGoals<P> {
    * here, and the mark that keeps the turn out of an outside brain's history
    * and what is learned from it out of an outside brain's recall. Every other
    * ask is the one any brain may be given.
+   *
+   * What Will kept private is handed out by the same steps, to a brain on this
+   * Mac only, and FLINT_GOALS_TO_FRONTIER changes none of them. The turn is
+   * marked private when its route keeps it here (`kept`: then whichever brain
+   * is asked), when its brain was given a fact learned from a private turn, or
+   * when its history holds a private turn that brain may read. A turn that is
+   * both keeps both marks.
    */
   ask(persona: P, a: Ask): Asked {
     const offered = a.tools ?? [];
-    const without: Asked = { context: a.context, tools: offered, tokens: 0, mark: {} };
     const brain = this.#rules.brainOf(persona);
-    if (!brain || !this.#rules.mayRead(persona) || !this.#rules.localTurn()) return without;
-    const base = a.here ?? a.context;
-    const tools = this.#rules.tools(offered);
-    const text = this.#answer ? render(this.#answer, promptRoom(brain, (a.promptChars ?? 0) + base.length + toolChars(tools))) : '';
-    // Neither a fact that stays here, nor the goals, nor a turn that stays here in its history: an ordinary
-    // ask, with every tool and no mark.
-    if (!text && base === a.context && a.carried !== true) return without;
-    return { context: text ? (base ? `${base}\n\n${text}` : text) : base, tools, tokens: text ? estimateTokens(text) : 0, mark: { context: GOALS_TURN } };
+    // Will's goals, the turns answered with them and the facts learned from them: a brain that may read them.
+    const goalsOk = !!brain && this.#rules.mayRead(persona) && this.#rules.localTurn();
+    // What he kept private: a brain on this Mac, asked as a local model's turn.
+    const privateOk = !!brain && this.#rules.privately(persona);
+    const whole = a.here ?? a.context;
+    const lifted = a.lifted ?? whole;
+    const base = privateOk ? whole : goalsOk ? lifted : a.context;
+    // Private: by its route, by a private fact it was given, or by a private turn in the history it reads.
+    const priv = a.kept === true || (privateOk && (whole !== lifted || a.carriedPrivate === true));
+    // (The two builds of a tool are the same size in the prompt: which mark `remember` saves with is settled below.)
+    const sized = priv ? this.#rules.toolsPrivate(offered, false) : this.#rules.tools(offered);
+    const text = goalsOk && this.#answer ? render(this.#answer, promptRoom(brain, (a.promptChars ?? 0) + base.length + toolChars(sized))) : '';
+    // The goals mark: the block, a fact learned from a goals turn, or a goals turn in its history.
+    const goals = goalsOk && (!!text || lifted !== a.context || a.carried === true);
+    // Neither a fact that stays here, nor the goals, nor a turn that stays here in its history, nor a route that
+    // keeps it here: an ordinary ask, with every tool and no mark.
+    const context = stayMark({ goals, private: priv });
+    if (!context) return { context: a.context, tools: offered, tokens: 0, mark: {} };
+    const tools = priv ? this.#rules.toolsPrivate(offered, goals) : sized;
+    return { context: text ? (base ? `${base}\n\n${text}` : text) : base, tools, tokens: text ? estimateTokens(text) : 0, mark: { context } };
   }
 }
 
@@ -400,6 +501,12 @@ export interface GoalsNowOptions<P> {
   localTurn?: () => boolean;
   /** What an ask that carries the block is offered, from what the turn would offer (./goals-tools). Default: the same tools. */
   tools?: (offered: readonly Tool[]) => readonly Tool[];
+  /**
+   * What an ask whose turn is kept private is offered (`goals`: it carries
+   * Will's goals too). Never lifted by `toFrontier`. Default: `tools`, else the
+   * same tools.
+   */
+  toolsPrivate?: (offered: readonly Tool[], goals: boolean) => readonly Tool[];
   /**
    * Is there, right now, a brain that may read the goals? Asked each turn:
    * with none, the runtime is not asked for them. Default: yes.
@@ -429,6 +536,9 @@ export class GoalsNow<P> {
       // Will chose to send goal text out: it goes to any brain's ask, and nothing is held back from one.
       localTurn: opts.toFrontier === true || !opts.localTurn ? () => true : opts.localTurn,
       tools: opts.toFrontier === true || !opts.tools ? (offered) => offered : opts.tools,
+      // Nothing private is lifted: the brain is on this Mac and the ask is a local model's turn, whatever Will set for his goals.
+      privately: (p) => keepsPrivate(opts.brainOf(p)) && (opts.localTurn?.() ?? true),
+      toolsPrivate: opts.toolsPrivate ?? (opts.tools ? (offered) => opts.tools!(offered) : (offered) => offered),
     };
   }
 
@@ -493,6 +603,10 @@ export interface GoalsForChat<P> {
   toFrontier: boolean;
   /** What an ask that carries what stays here is offered (./goals-tools withoutOutsideAi). */
   tools?: (offered: readonly Tool[]) => readonly Tool[];
+  /** What an ask whose turn is kept private is offered (`goals`: it carries Will's goals too). */
+  toolsPrivate?: (offered: readonly Tool[], goals: boolean) => readonly Tool[];
+  /** The other local models that can answer a turn: the standby, when there is one. */
+  others?: ReadonlyArray<LocalBrain<P>>;
   /** Is the ask being made running as a local model's turn (./turn-taint isLocalTurn)? */
   localTurn: () => boolean;
   fetchImpl?: typeof fetch;
@@ -510,12 +624,12 @@ export interface GoalsForChat<P> {
  * no brain may read it, the runtime is never asked.
  */
 export function goalsForChat<P>(o: GoalsForChat<P>): GoalsNow<P> {
-  const brains = chatBrains(o.local, o.tiers);
+  const brains = chatBrains(o.local, o.tiers, o.others);
   return new GoalsNow<P>({
     on: o.on, runtime: o.runtime, brainOf: (p) => brains.get(p), toFrontier: o.toFrontier, localTurn: o.localTurn,
     // Asked each turn: which brains run on this Mac is their Ollama's word, and it is not known at boot.
     readers: () => [...brains.values()].some((b) => staysHere(b, o.toFrontier)),
-    ...(o.tools ? { tools: o.tools } : {}), ...(o.fetchImpl ? { fetchImpl: o.fetchImpl } : {}),
+    ...(o.tools ? { tools: o.tools } : {}), ...(o.toolsPrivate ? { toolsPrivate: o.toolsPrivate } : {}), ...(o.fetchImpl ? { fetchImpl: o.fetchImpl } : {}),
   });
 }
 
@@ -526,9 +640,9 @@ export function goalsForChat<P>(o: GoalsForChat<P>): GoalsNow<P> {
  * address and never a goal's words. It says what is true when it is asked, so
  * it is asked once each brain's Ollama has said what runs on it.
  */
-export function describeGoals<P>(o: Pick<GoalsForChat<P>, 'on' | 'local' | 'tiers' | 'toFrontier'>): string | undefined {
+export function describeGoals<P>(o: Pick<GoalsForChat<P>, 'on' | 'local' | 'tiers' | 'toFrontier' | 'others'>): string | undefined {
   if (!o.on) return undefined;
-  const brains = [...chatBrains(o.local, o.tiers).values()];
+  const brains = [...chatBrains(o.local, o.tiers, o.others).values()];
   // A local wire that is not local (an Ollama cloud model, a server on another machine, a model its Ollama does not run) is said so: its label alone would not.
   const label = (b: ChatBrain) => `${b.provider}:${b.model}${LOCAL_WIRES.has(b.provider) && !brainIsLocal(b) ? ' (not on this Mac)' : ''}`;
   const labels = (list: ChatBrain[], say: (b: ChatBrain) => string = label) => [...new Set(list.map(say))];

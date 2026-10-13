@@ -8,8 +8,14 @@
  * pulled, else DEFAULT_OLLAMA_MODEL. Never a model off this machine's Ollama.
  */
 
-/** Used only when Ollama can't be asked or lists nothing usable: small enough for any recent Mac. */
-export const DEFAULT_OLLAMA_MODEL = 'qwen2.5:7b';
+import { hardwareTier } from '../../hardware-tiers.js';
+
+/**
+ * Used only when Ollama can't be asked or lists nothing usable: small enough for
+ * any recent Mac. It is the 8 GB hardware tier's model: the tier table
+ * (../../hardware-tiers) is the one place a local model tag is named.
+ */
+export const DEFAULT_OLLAMA_MODEL: string = hardwareTier('8gb').model;
 
 /**
  * Is this one of Ollama's cloud models (`gpt-oss:120b-cloud`, `glm-4.6:cloud`)?
@@ -68,6 +74,12 @@ export interface PickOllamaModelOptions {
   fetch?: typeof fetch;
   /** How long each of the two list calls may take (default 2 s). */
   timeoutMs?: number;
+  /**
+   * Models never to pick, by name: a caller's own small helper model (a standby
+   * it loads itself) is in Ollama's memory too, and must not be taken for the
+   * model the person runs.
+   */
+  skip?: (name: string) => boolean;
 }
 
 /**
@@ -82,7 +94,7 @@ export async function pickOllamaModel(opts: PickOllamaModelOptions = {}): Promis
   let answered = false;
   const list = async (path: string): Promise<ListedModel[]> => {
     try {
-      const res = await doFetch(`${base}${path}`, { signal: AbortSignal.timeout(opts.timeoutMs ?? 2000) });
+      const res = await doFetch(`${base}${path}`, { signal: AbortSignal.timeout(opts.timeoutMs ?? 2000), redirect: 'error' });
       if (!res.ok) return [];
       const models = ((await res.json()) as { models?: unknown } | null)?.models;
       answered = true;
@@ -91,12 +103,13 @@ export async function pickOllamaModel(opts: PickOllamaModelOptions = {}): Promis
       return [];
     }
   };
-  const loaded = (await list('/api/ps')).find(localChatModel);
+  const usable = (m: ListedModel): m is ListedModel & { name: string } => localChatModel(m) && !opts.skip?.(m.name);
+  const loaded = (await list('/api/ps')).find(usable);
   if (loaded) {
     const n = loaded.context_length;
     return { model: loaded.name, from: 'loaded', answered: true, ...(typeof n === 'number' && Number.isInteger(n) && n > 0 ? { numCtx: n } : {}) };
   }
-  const pulled = (await list('/api/tags')).find(localChatModel);
+  const pulled = (await list('/api/tags')).find(usable);
   if (pulled) return { model: pulled.name, from: 'pulled', answered: true };
   return { model: DEFAULT_OLLAMA_MODEL, from: 'default', answered };
 }

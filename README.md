@@ -222,6 +222,131 @@ The path from here to a model that is distinctively yours (prompting + retrieval
 first, LoRA fine-tune only if needed) is written up in
 [docs/PHASE3.md](docs/PHASE3.md).
 
+### Local OpenAI-compatible servers
+
+`LocalOpenAiProvider` talks to any local model server that speaks the OpenAI
+chat-completions API: Ollama's `/v1`, llama.cpp's `llama-server`, and others.
+One adapter; the base URL is the only thing that changes.
+
+```ts
+import { Flint, LocalOpenAiProvider, localCapabilities } from '@flint/core';
+
+const flint = new Flint({
+  provider: new LocalOpenAiProvider({
+    baseURL: 'http://127.0.0.1:11434/v1',   // Ollama; llama-server: http://127.0.0.1:8080/v1
+    // What each model can do. You know your model; there is no built-in table.
+    capabilities: () => localCapabilities({ contextTokens: 16384, tools: true }),
+    firstTokenTimeoutMs: 20_000,             // optional: never wait on a cold model
+  }),
+  defaultModel: 'your-model',
+});
+```
+
+- **Streaming and tool calls** work as with every provider. Tools are offered
+  only to a model whose capabilities say it can call them: `tools: false` gives
+  `toolCalling: 'unsupported'`, the flag a router reads, and that model is never
+  sent a tool. A model you have no facts for gets `tools: false`.
+- **Deadlines.** A cold local model stalls instead of failing. With
+  `firstTokenTimeoutMs` (and `toolPassTimeoutMs` for the call after a tool ran,
+  `requestTimeoutMs` for a non-streamed call) a stalled call ends with a
+  `timeout` error whose `providerCode` is `first_token_timeout`. It is not
+  retryable, so your code moves to another model instead of waiting again.
+- **This machine only, by default.** A `baseURL` that is not `127.0.0.1`,
+  `localhost` or `[::1]` is refused when the provider is built, unless you pass
+  `allowRemote: true`. Redirects are never followed.
+- **What it cannot do.** Chat completions has no field for the context size, so
+  the server's own setting applies (on Ollama: the model's `num_ctx`). The
+  native `OllamaProvider` can set it per call, and also recovers tool calls a
+  model wrote as text; prefer it on Ollama unless you need the OpenAI wire.
+
+The server's setup, routing modes and hardware tiers are in
+[apps/server/README.md](apps/server/README.md), "Local inference".
+
+## Local inference (the server)
+
+Flint's server (`apps/server`) treats a model on your own hardware as a first-class provider.
+The full reference is [apps/server/README.md](apps/server/README.md), "Local inference"; the short
+version:
+
+**Setup.** With Ollama running, nothing needs setting: the server uses Ollama's own API at
+`http://127.0.0.1:11434`, picks the model your hardware tier recommends when it is installed (or
+the one you name with `OLLAMA_MODEL`), and never downloads one. To use another OpenAI-compatible
+local server instead (llama.cpp's `llama-server`, Ollama's `/v1`):
+
+```
+FLINT_LOCAL_PROVIDER=openai
+FLINT_LOCAL_BASE_URL=http://127.0.0.1:8080/v1
+FLINT_LOCAL_MODEL=<the model's name on that server>
+```
+
+A local endpoint must be this machine (`127.0.0.1`, `localhost`, `[::1]`) unless
+`FLINT_LOCAL_ALLOW_REMOTE=1`, and then it must be https (plain http to another machine also needs
+`FLINT_LOCAL_ALLOW_INSECURE_REMOTE=1`, and a key is never sent over it). Every setting is checked
+by a schema; a bad one is reported by name and never stops the server. See what was detected and
+chosen with:
+
+```bash
+pnpm --filter server inference-status
+```
+
+It asks the running server when it can (its token: `FLINT_TOKEN`, else `~/.flint/token`), and
+says so plainly when its answer is built from this shell's settings instead.
+
+**Modes.** `FLINT_INFERENCE_MODE`, or Settings in the console (the choice is saved):
+
+| Mode | What answers |
+| --- | --- |
+| `cloud` (default) | The cloud tiers; a message you keep private is answered locally. (What changed for a setup that sets nothing new is listed in `apps/server/README.md`, "What is different in Cloud mode".) |
+| `local` | The local model, always. No outside AI and no paid service: no cloud model answers, and paid search tools are off. Flint may still search the web (the keyless search on your own SearXNG, the page fetch and your account tools stay). If no local model can answer, you get a clear error, never the cloud. An eval replay that would go to a cloud model is refused. |
+| `hybrid` | A rule table picks per message. The first rule that holds decides: a private message stays local (and is not answered if no local model can); a file the local model cannot read, or no local model available, goes to the cloud; no cloud model configured stays local; an explicit "deep" answer, a message that needs tools, a conversation too long for the local window, and hard reasoning or code go to the cloud, with the local model as the fallback; everything else is local, with the cloud as the fallback. The rules are data in `apps/server/src/hybrid-rules.ts`. |
+
+To switch: Settings, BRAIN, Mode in the console, or
+`pnpm --filter server inference-status -- --mode local|hybrid|cloud|reset`. The choice is saved.
+An environment mode Flint does not know, and a saved mode that cannot be read, both run as
+`local`: a typo or a damaged file must not send a private setup to the cloud.
+
+**Privacy.** A message you keep private (Local Only, or "keep this private") is decided before
+the rule table is read, and nothing of it leaves the machine: it is offered only tools that run
+on this Mac (no web search, no page fetch, no account lookup, no research), it is spoken with the
+device's own voice, and it is kept from a cloud model on every later turn: as history, as
+long-term memory (what Flint learns from it is recalled only for a model on this Mac), and as
+speech. With a local model server that is not this Mac (and that you have not allowed), or a
+local model that is really one of Ollama's cloud models under another name, it is not answered
+at all. That is a stronger promise than Local mode's, which is about who answers: Local mode uses
+no outside AI and no paid service, and may still search the web.
+
+A turn never waits on a cold local model: the server watches the model's state (loaded, cold,
+loading, unavailable), gives a turn hard deadlines to connect, to get a first token and between
+one piece of a reply and the next, and serves it from a small standby model while the main one
+loads (`FLINT_LOCAL_FALLBACK_MODEL`, or the tier's standby below). The main model is loaded in the
+background and answers from the next message on; a turn is never moved to another model once it
+has shown text or run a tool. In hybrid, the cloud answers only when no local model can, and never
+for a private message. A local prompt is sized to the model's window before it is sent, so the
+server never has to cut one.
+
+The server is listening before it has looked at the machine or heard from the model server: both
+happen behind the boot, and the status says "Flint is checking" until they land.
+
+**Hardware tiers.** The server detects the machine and recommends a model from one table,
+`packages/core/src/hardware-tiers.ts` (the only place a local model is named, the embedding model
+included). A machine is sorted by the memory a model can use: an NVIDIA GPU's VRAM, or three
+quarters of an Apple Silicon Mac's unified memory (a 64 GB Mac has 48 GB for a model). A tier's
+number is reached at 93% of it, since a card sold as 16 GB reports 15,360 MiB. The name in
+brackets is how the console shows the model; the tag is for the command line.
+
+| Tier | Machine | Model | Context | Standby model | Standby context | Download | Measured |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| CPU, Low Memory | no usable GPU, under 8 GB of RAM | `llama3.2:1b` (Llama 3.2 1B) | 4,096 | none | none | 1.3 GB | recommended, unmeasured |
+| CPU Only | no usable GPU, 8 GB of RAM or more | `llama3.2:3b` (Llama 3.2 3B) | 4,096 | `llama3.2:1b` (Llama 3.2 1B) | 4,096 | 2.0 GB + 1.3 GB | recommended, unmeasured |
+| 8 GB | 6 GB to under 16 GB of usable memory | `qwen2.5:7b` (Qwen 2.5 7B) | 4,096 | none | none | 4.7 GB | recommended, unmeasured |
+| 16 GB | 16 GB to under 24 GB of usable memory | `qwen2.5:14b` (Qwen 2.5 14B) | 4,096 | `llama3.2:3b` (Llama 3.2 3B) | 8,192 | 9.0 GB + 2.0 GB | recommended, unmeasured |
+| 24 GB | 24 GB to under 48 GB of usable memory | `qwen3:14b` (Qwen 3 14B) | 16,384 | `llama3.2:3b` (Llama 3.2 3B) | 8,192 | 9.3 GB + 2.0 GB | recommended, unmeasured |
+| 48 GB+ | 48 GB of usable memory or more | `muse-glimmer:30b` (Muse Glimmer 30B) | 16,384 | `llama3.2:3b` (Llama 3.2 3B) | 8,192 | 18.2 GB + 2.0 GB | yes |
+
+"Recommended, unmeasured" rows come from each model's published size and capabilities, not from
+Flint's own measurements. For a model that is not installed, the status command prints the exact
+`ollama pull` line; Flint never runs it.
+
 ## Versioning & release policy
 
 - Published as tagged semver to a private registry (GitHub Packages or

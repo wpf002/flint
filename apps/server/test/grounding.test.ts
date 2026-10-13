@@ -61,8 +61,9 @@ describe('context block (withMemory / recallContext)', () => {
         throw new Error('embedder down');
       },
     });
-    // `outside` (what a brain that is not on this Mac may have, test/goals-facts.test.ts) is the same nothing.
-    expect(r).toEqual({ block: base, facts: [], mode: 'error', outside: { block: base, facts: [] } });
+    // `outside` (what a brain that is not on this Mac may have, test/goals-facts.test.ts) is the same nothing,
+    // and so is `lifted` (the same without only the facts from a turn Will kept private).
+    expect(r).toEqual({ block: base, facts: [], mode: 'error', outside: { block: base, facts: [] }, lifted: { block: base, facts: [] } });
   });
 
   it('skip (eval recall: false) never reads memory, and the block is the no-memory block', async () => {
@@ -73,7 +74,7 @@ describe('context block (withMemory / recallContext)', () => {
         return ['Will is going to UFC 330 with Mike'];
       },
     };
-    expect(await recallContext(base, 'Hey Flint, how is it going?', knowledge, { skip: true })).toEqual({ block: base, facts: [], mode: 'skipped', outside: { block: base, facts: [] } });
+    expect(await recallContext(base, 'Hey Flint, how is it going?', knowledge, { skip: true })).toEqual({ block: base, facts: [], mode: 'skipped', outside: { block: base, facts: [] }, lifted: { block: base, facts: [] } });
     expect(asked).toBe(0);
     // Without it, recall runs as always.
     expect((await recallContext(base, 'Hey Flint, how is it going?', knowledge)).facts).toEqual(['Will is going to UFC 330 with Mike']);

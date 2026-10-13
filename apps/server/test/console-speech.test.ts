@@ -124,10 +124,105 @@ describe('the console’s voice: a reply that stays on this Mac', () => {
 
   it('the page wires them in: each reply has its own voice state, the meta event feeds it, and speech goes through it', () => {
     expect(html).toContain("var vctx={displayed:'',gen:_ttsGen,conv:convId,here:true,turn:null};");
-    expect(html).toContain("if(ev.type==='meta'){if(ev.brain)setBrainChip(body,ev.brain);voiceMeta(vctx,ev);}");
+    // (The tag under the reply also says when the standby local model answered: `ev.standby`.)
+    expect(html).toContain("if(ev.type==='meta'){if(ev.brain)setBrainChip(body,ev.brain,ev.standby);voiceMeta(vctx,ev);}");
     expect(html).toContain('var blobP=_speechBlob(clean,vctx);');
+    // Nothing else in the page sets the voice state: not Local Only, not the route the brain's own event carries.
+    expect(html).not.toContain('vctx.priv');
+    expect(html.match(/vctx\.here=[^=]/g)).toHaveLength(1); // voiceMeta's own assignment
+    // The browser's own voice is told whether the reply stays here.
+    expect(html).toContain('}else{reveal();_localSpeak(clean,vctx.here===true).then(res);}');
     // /speak is asked from one place.
     expect(html.match(/\/speak'/g)).toHaveLength(1);
     expect(html.match(/_neuralFetch\(/g)).toHaveLength(2); // its definition, and _speechBlob's call
+  });
+});
+
+// The final review's C3: "the browser's own voice" is not always this device's. A browser can list network voices
+// (Chrome's "Google US English"): speaking with one sends the sentence to its maker.
+describe('the browser voice for a reply that stays here is one this device makes itself', () => {
+  const VOICE_SOURCE = [
+    'var _flintVoice=null,_flintVoiceHere=null;',
+    line(/^function _maleVoice\(name\)\{.*$/m),
+    html.slice(html.indexOf('function pickVoice(here){'), html.indexOf('if(window.speechSynthesis)window.speechSynthesis.onvoiceschanged=')),
+    line(/^function _localSpeak\(clean,here\)\{.*$/m),
+  ].join('\n');
+  interface Voice {
+    name: string;
+    lang: string;
+    localService: boolean;
+  }
+  function browser(voices: Voice[]) {
+    const spoken: Array<{ text: string; voice: string | null }> = [];
+    const ctx = createContext({
+      Promise,
+      Array,
+      String,
+      window: {
+        speechSynthesis: {
+          getVoices: () => voices,
+          speak: (u: { text: string; voice: Voice | null; onend: () => void }) => {
+            spoken.push({ text: u.text, voice: u.voice ? u.voice.name : null });
+            u.onend();
+          },
+        },
+      },
+      SpeechSynthesisUtterance: function (this: { text: string; voice: null }, text: string) {
+        this.text = text;
+        this.voice = null;
+      },
+    });
+    runInContext(VOICE_SOURCE, ctx);
+    const pick = (here: boolean) => (runInContext(`pickVoice(${here})`, ctx) as Voice | null)?.name ?? null;
+    const say = (text: string, here: boolean) => runInContext(`_localSpeak(${JSON.stringify(text)},${here})`, ctx) as Promise<void>;
+    return { pick, say, spoken };
+  }
+  const NETWORK: Voice = { name: 'Google UK English Male', lang: 'en-GB', localService: false };
+  const DANIEL_NET: Voice = { name: 'Daniel (Enhanced, online)', lang: 'en-GB', localService: false };
+  const SAMANTHA: Voice = { name: 'Samantha', lang: 'en-US', localService: true };
+  const AARON: Voice = { name: 'Aaron', lang: 'en-US', localService: true };
+
+  it('a reply that stays here never gets a network voice, even the one the page would otherwise prefer', () => {
+    const b = browser([DANIEL_NET, NETWORK, SAMANTHA, AARON]);
+    expect(b.pick(false)).toBe('Aaron'); // a preferred name, as before
+    expect(b.pick(true)).toBe('Aaron');
+    const netFirst = browser([DANIEL_NET, NETWORK, SAMANTHA]);
+    expect(netFirst.pick(false)).toBe('Daniel (Enhanced, online)');
+    expect(netFirst.pick(true)).toBe('Samantha');
+  });
+
+  it('with no voice of the device’s own, a reply that stays here is shown and not spoken; any other reply is spoken as before', async () => {
+    const b = browser([NETWORK, DANIEL_NET]);
+    expect(b.pick(true)).toBeNull();
+    await b.say('A private sentence.', true);
+    expect(b.spoken).toEqual([]);
+    await b.say('An ordinary sentence.', false);
+    expect(b.spoken).toEqual([{ text: 'An ordinary sentence.', voice: 'Daniel (Enhanced, online)' }]);
+    // A browser that has not listed its voices yet: nothing of the device's own is known, so nothing is spoken.
+    const none = browser([]);
+    await none.say('A private sentence.', true);
+    expect(none.spoken).toEqual([]);
+    await none.say('An ordinary sentence.', false);
+    expect(none.spoken).toEqual([{ text: 'An ordinary sentence.', voice: null }]);
+  });
+
+  it('with one, it is spoken by it', async () => {
+    const b = browser([NETWORK, SAMANTHA]);
+    await b.say('A private sentence.', true);
+    expect(b.spoken).toEqual([{ text: 'A private sentence.', voice: 'Samantha' }]);
+  });
+
+  it('"male" and "man" are words of a voice’s name: "Female" and "Samantha" are neither', () => {
+    const ctx = createContext({ String });
+    runInContext(line(/^function _maleVoice\(name\)\{.*$/m), ctx);
+    const is = (name: string) => runInContext(`_maleVoice(${JSON.stringify(name)})`, ctx) as boolean;
+    for (const name of ['Google UK English Male', 'English (male)', 'male voice 2', 'Man', 'en-US-man-1']) expect(is(name), name).toBe(true);
+    for (const name of ['Google UK English Female', 'Microsoft Zira Female', 'Samantha', 'Amanda', 'Roman', 'Germany', 'female', '']) expect(is(name), name).toBe(false);
+    // The fallback rule that uses it: an English voice named as male before any other English voice.
+    const b = browser([{ name: 'Google UK English Female', lang: 'en-GB', localService: true }, { name: 'English Male Two', lang: 'en-US', localService: true }]);
+    expect(b.pick(true)).toBe('English Male Two');
+    expect(b.pick(false)).toBe('English Male Two');
+    const onlyFemale = browser([{ name: 'Google UK English Female', lang: 'en-GB', localService: true }]);
+    expect(onlyFemale.pick(true)).toBe('Google UK English Female'); // the last rule: any English voice
   });
 });

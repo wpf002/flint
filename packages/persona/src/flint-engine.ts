@@ -12,7 +12,7 @@
  */
 
 export interface FlintEngine {
-  /** The provider adapter's name: `ollama`, `anthropic`, `openai`, `perplexity`. */
+  /** The provider adapter's name: `ollama`, `local` (an OpenAI-compatible local server), `anthropic`, `openai`, `perplexity`. */
   provider: string;
   /** The model as the provider is asked for it (`muse-glimmer:30b`, `claude-opus-5-5`). */
   model: string;
@@ -40,6 +40,9 @@ function source(e: FlintEngine): string {
       return e.ollamaCloud
         ? `This reply comes from an open model (${model}) that Ollama runs on its own servers, not on Will's hardware. It is not Claude.`
         : `This reply comes from an open model (${model}) that Will runs himself with Ollama. It is not Claude, and no AI company's service is answering.`;
+    case 'local':
+      // LocalOpenAiProvider: Ollama's /v1, llama.cpp or another server Will runs. The server is not named: Flint may not know which it is.
+      return `This reply comes from an open model (${model}) that Will runs himself, on his own model server. It is not Claude, and no AI company's service is answering.`;
     case 'anthropic':
       return `This reply comes from Claude (${model}), Anthropic's model: a borrowed engine, reached over the network.`;
     case 'openai':

@@ -17,6 +17,14 @@ export const TokenUsageSchema = z.object({
    * hit is indistinguishable from a miss in the logs.
    */
   cacheRead: z.number().int().nonnegative().optional(),
+  /**
+   * The input tokens of the LAST request, when a call made more than one of
+   * its own (an adapter that asks again for a reply it could not use). `input`
+   * is then their sum, which is what was processed and what a meter wants;
+   * this is what the model's window actually held, which is what a caller that
+   * checks the window wants. Absent when the call made one request.
+   */
+  lastInput: z.number().int().nonnegative().optional(),
 });
 export type TokenUsage = z.infer<typeof TokenUsageSchema>;
 

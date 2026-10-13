@@ -1326,6 +1326,8 @@ WHERE_TO=(
   Health-Endpoints "Health checks of other sites: their addresses were typed by hand. Set them again if you still want them."
   Voice          "Voice: the speech program and its model are installed by hand. Install them again if you use voice."
   Backup-Key     "Backup key: the rebuilt Mac encrypts its backups to the key you rebuilt it with."
+  Local-Model-Server "Local model server: its address and its key were typed by hand and are not put back, so Flint asks Ollama on this Mac. Set them again only if you still use another model server, and change the key if it was a real one."
+  Routing-Mode   "Routing mode: the mode you chose in Settings is not put back, so Flint starts in the mode its settings name, which is Cloud when none does. Choose Local, Hybrid or Cloud again in Settings under Brain."
 )
 outside=()
 if (( have_snapshot )); then outside=(${(u)PRESENT}); else outside=(Tailscale Approval-Key Connectors Google Nexus); fi

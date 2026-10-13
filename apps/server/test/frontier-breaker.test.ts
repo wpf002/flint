@@ -792,7 +792,46 @@ describe('a provider-wide check and a model with a pause of its own', () => {
     expect(s.brains.cheapestOn('anthropic')?.model).toBe('haiku');
     expect(s.brains.cheapestOn('anthropic', undefined, ok)?.model).toBe('sonnet');
     expect(s.brains.cheapestOn('anthropic', 'haiku', ok)?.model).toBe('haiku'); // a model's own check asks that model
-    expect(s.brains.cheapestOn('anthropic', undefined, () => false)).toBeUndefined();
+    // With none usable it still names one: a provider-wide check with nobody to ask could never pass.
+    expect(s.brains.cheapestOn('anthropic', undefined, () => false)?.model).toBe('haiku');
+    expect(s.brains.cheapestOn('nobody', undefined, () => false)).toBeUndefined();
+  });
+
+  // The breaker's last review, F2: every model on the provider paused on its own (the key may use none of
+  // them), and then the provider paused too. The provider's check had nobody it might ask and failed for
+  // good; and paused() read the provider's pause first, so no model's own check was ever started either.
+  it('the provider paused AND every model on it paused: both kinds of check still start, and each can close its own pause', async () => {
+    const t = make();
+    const denied = (model: string) => makeAiError('validation', `anthropic: 403 ${model} is not available on this key (check the API key)`, { retryable: false, providerCode: '403' });
+    for (const model of ['haiku', 'opus']) t.breaker.failed('anthropic', denied(model), { requestId: `r-${model}`, model });
+    fail(t, credit, 1);
+    expect(t.breaker.paused('anthropic', 'opus')).toBe('credit');
+    expect(t.breaker.state('anthropic', 'opus').open?.reason).toBe('auth');
+    expect(t.probes).toEqual([]);
+    // Past every cool-down: one ask about a model starts the provider's check AND that model's own.
+    t.advance(HARD_COOLDOWN_MS);
+    expect(t.breaker.paused('anthropic', 'opus')).toBe('credit');
+    await settle();
+    expect(t.probes.sort()).toEqual(['anthropic', 'anthropic:opus']);
+    // Both were answered: the provider and that model are back; the model nobody asked about keeps its pause.
+    expect(t.breaker.paused('anthropic', 'opus')).toBeUndefined();
+    expect(t.breaker.paused('anthropic')).toBeUndefined();
+    expect(t.breaker.paused('anthropic', 'haiku')).toBe('auth');
+  });
+
+  it('the server\'s own check, with every model on the provider paused: it asks one anyway, and the provider comes back', async () => {
+    const s = server();
+    const denied = (model: string) => makeAiError('validation', `anthropic: 403 ${model} is not available on this key (check the API key)`, { retryable: false, providerCode: '403' });
+    for (const model of ['haiku', 'sonnet', 'opus']) s.breaker.failed('anthropic', denied(model), { requestId: `r-${model}`, model });
+    s.breaker.failed('anthropic', credit(), { requestId: 'r-credit' });
+    s.claude.state.requests.length = 0;
+    s.advance(HARD_COOLDOWN_MS);
+    s.breaker.paused('anthropic');
+    await settle();
+    // Somebody was asked (the cheapest brain on the provider, though it has a pause of its own)...
+    expect(s.claude.state.requests).toEqual(['haiku']);
+    // ...and its answer is the provider's: back in use.
+    expect(s.breaker.paused('anthropic')).toBeUndefined();
   });
 
   it('a provider-wide check that is told "not that model" has found the provider up: it closes, and is not re-paused as a rejected key', async () => {

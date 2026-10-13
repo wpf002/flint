@@ -32,6 +32,19 @@ export class TurnTaint {
    * shares its parent's set, so the searches it makes are the turn's too.
    */
   tools = new Set<string>();
+  /**
+   * How the prompt of the last LOCAL model this turn asked was sized to its
+   * window (./route-log PromptFit): what history and which tools had to be left
+   * out. Numbers only. Undefined when no local model was asked.
+   */
+  fit: { window: number; dropped: number; kept: number; toolsShed: number; full?: true } | undefined;
+  /**
+   * Will asked for this request's message to stay on this Mac (Local Only, or
+   * the words), known from the moment it is routed: before the router or recall
+   * has embedded a word of it (markPrivateRequest). A scope opened inside the
+   * request inherits it.
+   */
+  private = false;
   get tainted(): boolean {
     return this.sources.size > 0;
   }
@@ -46,6 +59,7 @@ export function withTurnTaint<T>(fn: () => T, seed: { sources?: readonly string[
   for (const a of seed.allow ?? []) t.allowances.add(a);
   t.eval = seed.eval === true;
   if (seed.tools) t.tools = seed.tools;
+  t.private = scope.getStore()?.private === true;
   return scope.run(t, fn);
 }
 
@@ -57,6 +71,26 @@ export function currentTurn(): TurnTaint | undefined {
 /** Note a tool the current turn called. Outside a turn, nothing. */
 export function noteTool(name: string): void {
   scope.getStore()?.tools.add(name);
+}
+
+/** Note how a local model's prompt was sized for the current turn. Outside a turn, nothing. */
+export function noteFit(fit: NonNullable<TurnTaint['fit']>): void {
+  const t = scope.getStore();
+  if (t) t.fit = fit;
+}
+
+/**
+ * The model's own count of the prompt it was just sent, for the current turn:
+ * at `fullAt` of its window or more, the turn's fit says the window was full.
+ */
+export function noteFitInput(promptTokens: number, fullAt = 0.97): void {
+  const fit = scope.getStore()?.fit;
+  if (fit && fit.window > 0 && promptTokens >= fit.window * fullAt) fit.full = true;
+}
+
+/** How the last local model this turn asked had its prompt sized, if one was asked. */
+export function turnFit(): TurnTaint['fit'] {
+  return scope.getStore()?.fit;
 }
 
 /** The tools the current turn called, in the order first called. */
@@ -77,7 +111,7 @@ export function historyOrigin(): number | undefined {
   return scope.getStore()?.historyOrigin;
 }
 
-const localScope = new AsyncLocalStorage<true>();
+const localScope = new AsyncLocalStorage<{ private: boolean; staysHere: boolean }>();
 
 /**
  * Run `fn` as (part of) a turn the LOCAL model is answering: Local-only, a
@@ -85,14 +119,48 @@ const localScope = new AsyncLocalStorage<true>();
  * model. Its own store, not the turn's, so it reaches a scope opened inside the
  * turn too (deep_research runs in one): nothing the local model's turn sets off
  * may quietly send the question to an outside AI (isLocalTurn).
+ *
+ * Two things a turn can have promised, which are not the same (./outside-ai):
+ *  - `private`: Will asked for THIS turn to stay on this Mac (Local Only, or
+ *    the words). Then nothing it sets off leaves this Mac at all: only tools
+ *    that run here answer (isPrivateTurn);
+ *  - `staysHere`: the turn was routed as one that stays here, which is a
+ *    private turn or ANY turn of Local mode. Then nothing it sets off reaches
+ *    an outside AI or a paid service, even if the mode is changed while it is
+ *    still running (isStaysHereTurn).
  */
-export function asLocalTurn<T>(fn: () => T): T {
-  return localScope.run(true, fn);
+export function asLocalTurn<T>(fn: () => T, opts: { private?: boolean; staysHere?: boolean } = {}): T {
+  return localScope.run({ private: opts.private === true, staysHere: opts.staysHere === true || opts.private === true }, fn);
 }
 
 /** Is this the local model's turn (asLocalTurn)? */
 export function isLocalTurn(): boolean {
-  return localScope.getStore() === true;
+  return localScope.getStore() !== undefined;
+}
+
+/** Is this a turn Will asked to keep on this Mac (explicitly private), being answered by a local model? */
+export function isPrivateTurn(): boolean {
+  return localScope.getStore()?.private === true;
+}
+
+/** Is this a turn that was routed to stay on this Mac: private, or any turn of Local mode? */
+export function isStaysHereTurn(): boolean {
+  return localScope.getStore()?.staysHere === true;
+}
+
+/**
+ * This request's message is private: from here on, nothing made on its behalf
+ * may send its text off this Mac, the helpers that embed it included
+ * (./inference helpersOff). Outside a request, nothing.
+ */
+export function markPrivateRequest(): void {
+  const t = scope.getStore();
+  if (t) t.private = true;
+}
+
+/** Is this request one whose message Will asked to keep on this Mac? */
+export function isPrivateRequest(): boolean {
+  return scope.getStore()?.private === true;
 }
 
 /** This turn is an eval replay. */

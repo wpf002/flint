@@ -428,7 +428,17 @@ interface Item {
    * was not.
    */
   goals?: boolean;
+  /**
+   * This turn, or the earlier one shown with it, is one Will kept private
+   * (./private-turns). What is learned from it stays on this Mac too
+   * (KnowledgeStore `fromPrivate`, which no setting sends out), and it shares
+   * a call only with turns that carry the same marks.
+   */
+  private?: boolean;
 }
+
+/** How closely what is learned from this turn is held, like a fact's own marks (./knowledge): 0, 1 for Will's goals, 2 for a private turn. */
+const heldAs = (it: { goals?: boolean; private?: boolean }): 0 | 1 | 2 => (it.private ? 2 : it.goals ? 1 : 0);
 
 /** Chars of a turn's own text, and of the previous turn's, that the model is shown. */
 const WILL_CHARS = 1500;
@@ -489,6 +499,16 @@ export interface ExtractorOptions {
    */
   gate?: () => string | undefined;
   /**
+   * Why a pass must not run at all right now, or undefined to go ahead. The
+   * server passes "where the extractor's own model runs is not known yet"
+   * (./goals-chat extractor). Until it is known, a turn that stays on this Mac
+   * cannot be told from one this brain may never read, and a turn that is
+   * skipped is a turn never mined: so the whole pass waits, and comes back
+   * soon (as soon as a first pass would run). Said in the log once, not at
+   * every check.
+   */
+  holdOff?: () => string | undefined;
+  /**
    * Is Will chatting right now (./memory-brain liveChat: a /chat turn in
    * flight, or one that ended moments ago)? The local model is his first: a
    * pass checks before every call, and waits `deferMs` while he is.
@@ -508,6 +528,14 @@ export interface ExtractorOptions {
    * carry the mark: a call about any other turn holds nothing that stays here.
    */
   carriedGoals?: (conversationId: string, turnId: string) => boolean;
+  /**
+   * Is this turn one Will kept private (./private-turns: Local Only, the
+   * words, any turn of Local mode)? A fact learned from it is stored with that
+   * mark and recalled only for a brain on this Mac. Like the goals turns, such
+   * turns are sent in calls of their own, and only those calls are shown the
+   * known facts that carry the mark.
+   */
+  keptPrivate?: (conversationId: string, turnId: string) => boolean;
   /**
    * Also ask for the goals Will set (FLINT_EXTRACT_CANDIDATES=1). Only with
    * the local brain (`kind` local) and somewhere to hand them (`onCandidate`):
@@ -530,6 +558,7 @@ export class MemoryExtractor {
   private running = false;
   private stopped = true;
   private readonly kind: 'local' | 'frontier';
+  private readonly firstPassMs: number;
   private readonly everyMs: number;
   private readonly backlogEveryMs: number;
   private readonly deferMs: number;
@@ -538,9 +567,17 @@ export class MemoryExtractor {
   private readonly batchChars: number;
   private readonly skipConversations: RegExp;
   private readonly gate: (() => string | undefined) | undefined;
+  private readonly holdOff: (() => string | undefined) | undefined;
+  /** What the pass is waiting for, while it is held off (so the log says it once). */
+  private heldFor: string | undefined;
+  /** How often a held-off pass checks again: as soon as a first pass would run, and never less often than a deferred one. */
+  private get heldEveryMs(): number {
+    return Math.min(this.deferMs, this.firstPassMs);
+  }
   private readonly chatActive: (() => boolean) | undefined;
   private readonly isTainted: (conversationId: string, turnId: string) => boolean;
   private readonly carriedGoals: (conversationId: string, turnId: string) => boolean;
+  private readonly keptPrivate: (conversationId: string, turnId: string) => boolean;
   private readonly candidates: boolean;
   private readonly mayPropose: () => boolean;
   private readonly commitments: boolean;
@@ -570,6 +607,8 @@ export class MemoryExtractor {
     };
     this.kind = opts.kind ?? 'local';
     const local = this.kind === 'local';
+    // How long after boot the first pass runs. A minute and a half by default: the server has settled by then.
+    this.firstPassMs = env('FLINT_EXTRACT_FIRST_PASS_MS', 90_000);
     this.everyMs = opts.everyMs ?? env('FLINT_EXTRACT_INTERVAL_MS', 6 * 60 * 60 * 1000);
     this.backlogEveryMs = opts.backlogEveryMs ?? env('FLINT_EXTRACT_BACKLOG_INTERVAL_MS', 15 * 60 * 1000);
     this.deferMs = opts.deferMs ?? 2 * 60 * 1000;
@@ -579,9 +618,11 @@ export class MemoryExtractor {
     this.skipConversations =
       opts.skipConversations ?? new RegExp(process.env.FLINT_EXTRACT_SKIP_CONVERSATIONS ?? '^(bulk|grow|seed)-');
     this.gate = opts.gate;
+    this.holdOff = opts.holdOff;
     this.chatActive = opts.chatActive;
     this.isTainted = opts.isTainted ?? (() => false);
     this.carriedGoals = opts.carriedGoals ?? (() => false);
+    this.keptPrivate = opts.keptPrivate ?? (() => false);
     // Goals and commitments are asked of the local model alone, and only with somewhere to hand them.
     const asked = opts.candidates;
     this.candidates = (asked === true || typeof asked === 'function') && local && opts.onCandidate !== undefined;
@@ -616,8 +657,8 @@ export class MemoryExtractor {
   start(): void {
     if (!this.stopped) return;
     this.stopped = false;
-    // First pass shortly after boot. Unref'd so it never holds the process open.
-    this.schedule(90_000);
+    // First pass shortly after boot (FLINT_EXTRACT_FIRST_PASS_MS). Unref'd so it never holds the process open.
+    this.schedule(this.firstPassMs);
   }
 
   stop(): void {
@@ -632,6 +673,9 @@ export class MemoryExtractor {
    * gives no reply, faster while a backlog remains.
    */
   get nextDelayMs(): number {
+    // Held off until the model server has said where the model runs: that is usually moments away (the server
+    // has just started), so the next check comes as soon as a first pass would.
+    if (this.heldFor !== undefined) return this.heldEveryMs;
     if (this.deferred) return this.deferMs;
     if (this.failStreak > 0) return Math.min(this.everyMs, this.backlogEveryMs * 2 ** (this.failStreak - 1));
     return this.backlog ? this.backlogEveryMs : this.everyMs;
@@ -682,6 +726,16 @@ export class MemoryExtractor {
 
     // The cheap checks first: none of them needs the history, and reading all
     // of it (every turn, cloned) while Will chats would be work for nothing.
+    const held = this.holdOff?.();
+    if (held) {
+      // Nothing is read and nothing is skipped: the turns wait, and the next check comes soon.
+      if (this.heldFor !== held) console.error(`[memory-extract] waiting: ${held}; checking again every ${this.heldEveryMs < 60_000 ? `${Math.round(this.heldEveryMs / 1000)} s` : minutes(this.heldEveryMs)}`);
+      this.heldFor = held;
+      this.deferred = true;
+      this.saveState(state);
+      return 0;
+    }
+    this.heldFor = undefined;
     const paused = this.gate?.();
     if (paused) {
       console.error(`[memory-extract] paused (${paused})`);
@@ -730,9 +784,11 @@ export class MemoryExtractor {
         const batch: Item[] = [];
         let chars = 0;
         let turns = 0;
-        // A call is all turns answered with Will's goals, or none: what is learned from the first kind
-        // stays on this Mac, and a call that mixed them could not say which fact came from where.
-        let goals: boolean | undefined;
+        // A call is all turns with the same marks (answered with Will's goals, kept private, both, neither): what
+        // is learned from a marked turn stays on this Mac under its marks, and a call that mixed them could not
+        // say which fact came from where.
+        let marks: string | undefined;
+        const marksOf = (it: Item) => `${it.goals ? 'g' : ''}${it.private ? 'p' : ''}`;
         // A batch that strikes have halved keeps that size until it goes through.
         const head = pending.slice(idx).find((it) => !it.skip);
         const struck = head && state.failures?.key === `${head.cid}@${head.at}` ? state.failures.cap : undefined;
@@ -742,12 +798,12 @@ export class MemoryExtractor {
           const it = pending[j]!;
           if (!it.skip) {
             if (sent + turns >= this.maxTurnsPerPass || turns >= cap) break;
-            if (goals !== undefined && goals !== !!it.goals) break;
+            if (marks !== undefined && marks !== marksOf(it)) break;
             const size = it.chunk.length + TURN_HEADER;
             if (chars > 0 && chars + size > room.batchChars) break;
             chars += size;
             turns++;
-            goals = !!it.goals;
+            marks = marksOf(it);
           }
           batch.push(it);
           j++;
@@ -952,8 +1008,10 @@ export class MemoryExtractor {
               chunk: `${before}WILL: ${clip(user, WILL_CHARS)}\nASSISTANT: ${clip(asst, ASSISTANT_CHARS)}`,
               will: [head(user, WILL_CHARS), ...(context ? [head(userText(context), CONTEXT_CHARS)] : [])],
               assistant: [head(asst, ASSISTANT_CHARS), ...(context ? [head(assistantText(context), CONTEXT_CHARS)] : [])],
-              // The earlier turn's words are in the call too: either one having carried Will's goals marks it.
+              // The earlier turn's words are in the call too: either one having carried Will's goals marks it,
+              // and either one being a turn he kept private marks it private.
               ...(this.carriedGoals(cid, t.id) || (context && this.carriedGoals(cid, context.id)) ? { goals: true } : {}),
+              ...(this.keptPrivate(cid, t.id) || (context && this.keptPrivate(cid, context.id)) ? { private: true } : {}),
             });
           }
         }
@@ -969,8 +1027,8 @@ export class MemoryExtractor {
 
   /** The call's prompt, and the ids of the known facts it shows (the only ones a fact may supersede). */
   private prompt(items: Item[], room: Room, asking?: Suggesting): { text: string; shown: Set<string> } {
-    // The known facts that stay on this Mac are shown only to a call whose turns do too.
-    const known = this.knownFacts(items, room.knownChars, items.some((i) => i.goals));
+    // The known facts that stay on this Mac are shown only to a call whose turns do too, and are held as closely.
+    const known = this.knownFacts(items, room.knownChars, Math.max(0, ...items.map(heldAs)) as 0 | 1 | 2);
     const knownBlock = known.length
       ? known.map((f) => `${f.id}: ${f.text}`).join('\n')
       : '(none yet)';
@@ -990,8 +1048,10 @@ export class MemoryExtractor {
   /** The known facts worth showing the model: all of them while they fit, else
    *  the ones sharing the most words with this batch, up to KNOWN_CAP and
    *  `maxChars`. */
-  private knownFacts(items: Item[], maxChars: number, goals = false): Array<{ id: string; text: string }> {
-    const all = this.knowledge.all().filter((f) => goals || f.fromGoals !== true);
+  private knownFacts(items: Item[], maxChars: number, held: 0 | 1 | 2 = 0): Array<{ id: string; text: string }> {
+    // A fact is shown to a call held at least as closely as the fact is: one from a private turn only to a call
+    // about private turns, one from Will's goals to those and to a call about goals turns.
+    const all = this.knowledge.all().filter((f) => heldAs({ goals: f.fromGoals === true, private: f.fromPrivate === true }) <= held);
     const size = (f: { id: string; text: string }) => f.id.length + f.text.length + 3;
     if (all.length <= KNOWN_CAP && all.reduce((n, f) => n + size(f), 0) <= maxChars) return all;
     const words = new Set(items.flatMap((i) => i.chunk.toLowerCase().split(/[^a-z0-9]+/)).filter((w) => w.length > 3));
@@ -1027,8 +1087,9 @@ export class MemoryExtractor {
         conversationId: src.cid,
         sourceAt,
         ...(c.category ? { category: c.category } : {}),
-        // Learned from a turn answered with Will's goals: it stays on this Mac.
+        // Learned from a turn answered with Will's goals, or from one he kept private: it stays on this Mac.
         ...(src.goals ? { fromGoals: true } : {}),
+        ...(src.private ? { fromPrivate: true } : {}),
       });
       if (res.status !== 'added') {
         stats.rejected[res.status] = (stats.rejected[res.status] ?? 0) + 1;

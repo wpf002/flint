@@ -14,11 +14,12 @@ import { join } from 'node:path';
 import { Flint, makeAiError, type GenerateArgs, type ProviderAdapter, type StreamEvent, type Tool } from '@flint/core';
 import { Persona } from '@flint/persona';
 import { BrainSet, NoFallback, runWithFallback, type BrainTier } from '../src/brains';
-import { GoalsChat, type StaysHereEvent } from '../src/goals-chat';
+import { GoalsChat, type KeptTools, type StaysHereEvent } from '../src/goals-chat';
 import { recallContext } from '../src/grounding';
 import type { KnowledgeStore } from '../src/knowledge';
 import { LOCALITY, type ListedModel } from '../src/ollama-locality';
 import { PersistentStore } from '../src/persistent-store';
+import type { StayRoute } from '../src/private-turns';
 import { asLocalTurn, isLocalTurn } from '../src/turn-taint';
 
 export const CANARY = 'CANARY-p3goals';
@@ -130,6 +131,8 @@ export interface MiniOptions {
   frontier: BrainSpec[];
   /** The local brain. Default: an Ollama model on this Mac. */
   local?: BrainSpec;
+  /** The standby local model (it answers while the main one loads), named for the gate beside the local brain. Default: none. */
+  standby?: BrainSpec;
   toFrontier?: boolean;
   /** What the runtime answers for /v1/goals/now. Default: two goals. */
   goals?: unknown;
@@ -137,8 +140,8 @@ export interface MiniOptions {
   runtimeDown?: boolean;
   /** The tools every turn offers (the router's selection). */
   tools?: Tool[];
-  /** What an ask that carries the goals is offered (./goals-tools). */
-  goalsTools?: (offered: readonly Tool[]) => readonly Tool[];
+  /** What an ask that carries what stays here is offered (./goals-tools), by the marks its turn carries. */
+  goalsTools?: KeptTools;
   /** FLINT_GOALS_NOW: is the goals block on? Default: on. */
   goalsOn?: boolean;
   /** Long-term memory, recalled into each turn's context as main() does. Default: none (the context is the RECALL mark alone). */
@@ -194,30 +197,47 @@ export function miniServer(o: MiniOptions) {
   for (const [url, rows] of Object.entries(o.listings ?? {})) listed(url, rows);
   const brains: BrainTier<Persona>[] = tiers.map((t) => ({ tier: 'standard', provider: t.provider, model: t.model, label: `${t.provider.name}:${t.model}`, persona: personaOn(t.provider, t.model) }));
   const localPersona = personaOn(local.provider, local.model);
+  const standby = o.standby ? made(o.standby) : undefined;
+  if (standby && o.standby!.name === 'ollama' && o.standby!.baseURL && !(o.listings && o.standby!.baseURL in o.listings)) listed(o.standby!.baseURL, [...(byHost.get(o.standby!.baseURL) ?? []), o.standby!.model]);
+  const standbyPersona = standby ? personaOn(standby.provider, standby.model) : undefined;
   const first = brains[0];
   const set = first ? new BrainSet<Persona>({ routine: first, standard: first, hard: first, code: first }, brains[1]) : undefined;
   const chain = set ? set.chain('standard') : [];
   // As main(): every brain /chat can ask is named for the gate.
-  goalsChat.name({ persona: localPersona, provider: local.provider, model: local.model }, set, o.goalsTools ?? ((offered) => offered));
+  goalsChat.name(
+    { persona: localPersona, provider: local.provider, model: local.model },
+    set,
+    o.goalsTools ?? ((offered) => offered),
+    standby && standbyPersona ? [{ persona: standbyPersona, provider: standby.provider, model: standby.model }] : [],
+  );
   const selected = o.tools ?? [];
 
-  /** One /chat turn: `brain` is the route's choice; a frontier turn that fails before any text falls back to the local model. */
-  async function chat(brain: 'frontier' | 'local', message = 'how are my goals going?', conversationId = 'c1') {
+  /**
+   * One /chat turn: `brain` is the route's choice; a frontier turn that fails before any text falls back to the
+   * local model (`standby`: the standby local model answers it). `route`: how the turn was routed, when it is one
+   * Will kept private or one taken in Local mode (./private-turns).
+   */
+  async function chat(brain: 'frontier' | 'local' | 'standby', message = 'how are my goals going?', conversationId = 'c1', route?: StayRoute) {
     const base = `[Context] ${RECALL}`;
-    // Recall, as contextFor: the whole block, and its twin without the facts that stay on this Mac.
-    const recalled = o.knowledge ? await recallContext(base, message, o.knowledge) : { block: base, outside: { block: base } };
+    // Recall, as contextFor: the whole block, its twin without the facts that stay on this Mac, and the one
+    // without only the facts from a turn Will kept private.
+    const recalled = o.knowledge ? await recallContext(base, message, o.knowledge) : { block: base, outside: { block: base }, lifted: { block: base } };
     const ctxBlock = recalled.block;
     const outsideCtx = recalled.outside.block;
-    // World now is the frontier's only; Will's goals are fetched for whichever brain ends up asked.
-    const [world, goals] = await Promise.all([brain === 'frontier' ? WORLD : '', goalsChat.forTurn(conversationId, message)]);
+    const liftedCtx = recalled.lifted.block;
+    // World now is the frontier's only; what stays here is decided for whichever brain ends up asked.
+    const [world, goals] = await Promise.all([brain === 'frontier' ? WORLD : '', goalsChat.forTurn(conversationId, message, route)]);
     const frontierCtx = world ? `${ctxBlock}\n\n${world}` : ctxBlock;
     let goalsTokens = 0;
     let answerText = '';
-    let answeredBy = brain;
+    let answeredBy: 'frontier' | 'local' | 'standby' = brain;
     /** The `meta` events the client was sent about the reply staying here, in order. */
     const metas: StaysHereEvent[] = [];
+    /** Each ask the turn made: the tools it was offered and the mark its turn was stored with. */
+    const asks: Array<{ tools: string[]; mark: unknown; offered: readonly Tool[] }> = [];
     const pump = async (persona: Persona, _recoverable = false, tried?: number, context = ctxBlock) => {
-      const asked = goals.ask(persona, { context, whole: ctxBlock, outside: outsideCtx, tools: selected });
+      const asked = goals.ask(persona, { context, whole: ctxBlock, outside: outsideCtx, lifted: liftedCtx, tools: selected });
+      asks.push({ tools: asked.tools.map((t) => t.definition.name), mark: asked.mark.context, offered: asked.tools });
       goalsTokens = asked.tokens;
       const events = persona.chat(
         { conversationId, message, context: asked.context, ...(asked.tools.length ? { tools: [...asked.tools] } : {}) },
@@ -246,10 +266,14 @@ export function miniServer(o: MiniOptions) {
         answeredBy = 'local';
         await asLocalTurn(() => pump(localPersona));
       }
+    } else if (brain === 'standby') {
+      if (!standbyPersona) throw new Error('this miniature server has no standby model');
+      await asLocalTurn(() => pump(standbyPersona));
     } else {
       await asLocalTurn(() => pump(localPersona));
     }
-    return { answer: answerText, answeredBy, goalsTokens, metas };
+    // As /chat: once the turn is answered, the mark its entry in the training corpus carries.
+    return { answer: answerText, answeredBy, goalsTokens, metas, asks, corpus: goals.corpus() };
   }
-  return { chat, tiers, local, logs, goalsChat, store, storePath, chain, set, localPersona, fetched: () => fetched };
+  return { chat, tiers, local, standby, logs, goalsChat, store, storePath, chain, set, localPersona, fetched: () => fetched };
 }

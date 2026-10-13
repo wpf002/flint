@@ -26,6 +26,14 @@ interface Fact {
    * mark existed.
    */
   fromGoals?: true;
+  /**
+   * Learned from a turn Will kept private (./private-turns: Local Only, the
+   * words, or any turn of Local mode). Such a fact stays on this Mac like a
+   * `fromGoals` one, and more strictly: it is recalled only for a brain on
+   * this Mac, whatever FLINT_GOALS_TO_FRONTIER says (that setting is about his
+   * goals). A fact can carry both marks.
+   */
+  fromPrivate?: true;
   /** Set when a newer fact replaced this one. Kept for audit, never recalled. */
   supersededBy?: string;
   supersededAt?: number;
@@ -37,6 +45,8 @@ export interface FactMeta {
   category?: string;
   /** The turn it was learned from was answered with Will's goals in its context: the fact stays on this Mac. */
   fromGoals?: boolean;
+  /** The turn it was learned from was one Will kept private: the fact stays on this Mac, and no setting sends it out. */
+  fromPrivate?: boolean;
 }
 
 /** A recall, and the part of it any brain may be given. */
@@ -45,16 +55,24 @@ export interface Recall {
   facts: string[];
   /**
    * The most relevant facts for a brain that is not on this Mac: chosen the
-   * same way from the facts that carry no `fromGoals` mark. The same list as
-   * `facts` when none of those were marked.
+   * same way from the facts that carry no mark (`fromGoals`, `fromPrivate`).
+   * The same list as `facts` when none of those were marked.
    */
   outside: string[];
+  /**
+   * The most relevant facts that are not from a turn Will kept private: the
+   * ones learned from his goals are still among them. It is what a brain off
+   * this Mac may be given once he set FLINT_GOALS_TO_FRONTIER=on, which lifts
+   * nothing private. The same list as `facts` when no fact is `fromPrivate`.
+   */
+  lifted: string[];
   mode: RecallMode;
 }
 
 export interface KnowledgeOptions {
   /**
-   * Is the embedder on this Mac? A fact that stays here (`fromGoals`) is sent
+   * Is the embedder on this Mac? A fact that stays here (`fromGoals`,
+   * `fromPrivate`) is sent
    * to the embedder only when it is: with OLLAMA_HOST on another machine such
    * a fact is stored without a vector, and recall matches it by its words.
    * Asked each time. Default: no (an embedder nobody vouched for is not here).
@@ -107,8 +125,21 @@ function jaccard(a: string[], b: string[]): number {
 /** How a recall found its facts. */
 export type RecallMode = 'semantic' | 'lexical' | 'timeout' | 'none';
 
-/** May a brain that is not on this Mac be given this fact? */
-const mayLeave = (f: { fromGoals?: true }) => f.fromGoals !== true;
+/** The marks that keep a fact on this Mac. */
+type Marks = { fromGoals?: true; fromPrivate?: true };
+
+/** May a brain that is not on this Mac be given this fact? One with no mark. */
+const mayLeave = (f: Marks) => f.fromGoals !== true && f.fromPrivate !== true;
+
+/** Is this fact free of the private mark? (One learned from Will's goals still is: FLINT_GOALS_TO_FRONTIER may send that one out.) */
+const notPrivate = (f: Marks) => f.fromPrivate !== true;
+
+/**
+ * How closely a fact, or a source of one, is held: 0 for anyone, 1 for a brain
+ * that may read Will's goals, 2 for a brain on this Mac only. A source knows
+ * of every fact held no more closely than itself.
+ */
+const held = (f: Marks): 0 | 1 | 2 => (f.fromPrivate === true ? 2 : f.fromGoals === true ? 1 : 0);
 
 /** Resolve `p`, or throw after `ms`. The embedder has no timeout of its own, and
  *  a wedged Ollama (e.g. mid training run) must not hang every chat turn. */
@@ -153,7 +184,7 @@ export class KnowledgeStore {
   }
 
   /** May this fact's text be sent to the embedder? Any fact that may leave this Mac; one that stays here only when the embedder is here too. */
-  private mayEmbed(f: { fromGoals?: true }): boolean {
+  private mayEmbed(f: Marks): boolean {
     return mayLeave(f) || this.opts.embedderHere?.() === true;
   }
 
@@ -187,19 +218,23 @@ export class KnowledgeStore {
     }
     const n = KnowledgeStore.norm(clean);
     if (this.rejected.has(n)) return { status: 'rejected' }; // user rejected this; stays rejected
-    // A fact that stays on this Mac does not exist for a source that is not held here (the standard
-    // `remember`, which any brain may call, and what is learned from an ordinary turn): "already known"
-    // would tell an outside model that such a fact is there.
-    const stays = meta.fromGoals === true;
-    const known = (f: Fact) => stays || mayLeave(f);
+    // A fact that stays on this Mac does not exist for a source that is not held as closely (the standard
+    // `remember`, which any brain may call, and what is learned from an ordinary turn; and, for a fact from
+    // a private turn, a source that only carries Will's goals): "already known" would tell an outside model
+    // that such a fact is there.
+    const marks: Marks = { ...(meta.fromGoals === true ? { fromGoals: true as const } : {}), ...(meta.fromPrivate === true ? { fromPrivate: true as const } : {}) };
+    const known = (f: Fact) => held(f) <= held(marks);
     // Superseded facts count too: an old transcript must not resurrect a fact a
     // newer one already replaced.
     const twin = this.facts.find((f) => KnowledgeStore.norm(f.text) === n);
     if (twin && known(twin)) return { status: 'duplicate' };
     if (twin) {
-      // The very same words, now from a source that is not held here: they are no longer something only
-      // this Mac holds. The fact loses its mark, and the answer is the one a new fact gets.
+      // The very same words, now from a source that is held less closely: they are no longer something
+      // only this Mac holds (or only a brain on this Mac may read). The fact is left with that source's
+      // marks, and the answer is the one a new fact gets.
       delete twin.fromGoals;
+      delete twin.fromPrivate;
+      Object.assign(twin, marks);
       this.save();
       return { status: 'added', id: twin.id };
     }
@@ -208,7 +243,7 @@ export class KnowledgeStore {
 
     let vector: number[] = [];
     // A fact that stays here goes to the embedder only when the embedder is on this Mac too.
-    if (this.mayEmbed(stays ? { fromGoals: true } : {})) {
+    if (this.mayEmbed(marks)) {
       try {
         vector = (await withTimeout(this.embedder.embed([clean]), this.embedTimeoutMs))[0] ?? [];
       } catch (err) {
@@ -219,7 +254,7 @@ export class KnowledgeStore {
     if (meta.conversationId) fact.conversationId = meta.conversationId;
     if (meta.sourceAt !== undefined) fact.sourceAt = meta.sourceAt;
     if (meta.category) fact.category = meta.category;
-    if (meta.fromGoals === true) fact.fromGoals = true;
+    Object.assign(fact, marks);
     this.facts.push(fact);
     this.save();
     return { status: 'added', id: fact.id };
@@ -253,13 +288,16 @@ export class KnowledgeStore {
    * `none` (no facts, or nothing to look for).
    *
    * `outside` is the same recall for a brain that is not on this Mac: the facts
-   * learned from a turn answered with Will's goals (`fromGoals`) are left out,
-   * and the next most relevant take their place. One embedding serves both.
+   * learned from a turn answered with Will's goals (`fromGoals`) or from one he
+   * kept private (`fromPrivate`) are left out, and the next most relevant take
+   * their place. `lifted` leaves out only the private ones. One embedding
+   * serves all three.
    */
   async recallWithMode(query: string, k = Number(process.env.FLINT_MEMORY_K ?? 5)): Promise<Recall> {
     const facts = this.active();
-    if (facts.length === 0 || !query.trim()) return { facts: [], outside: [], mode: 'none' };
+    if (facts.length === 0 || !query.trim()) return { facts: [], outside: [], lifted: [], mode: 'none' };
     const open = facts.filter(mayLeave);
+    const unkept = facts.filter(notPrivate);
 
     let qv: number[] = [];
     let mode: RecallMode = 'semantic';
@@ -274,7 +312,12 @@ export class KnowledgeStore {
     if (qv.length === 0) {
       const texts = (pool: Fact[]) => this.lexicalFacts(query, pool, facts, k).map((f) => f.text);
       const found = texts(facts);
-      return { facts: found, outside: open.length === facts.length ? found : texts(open), mode: mode === 'semantic' ? 'lexical' : mode };
+      return {
+        facts: found,
+        outside: open.length === facts.length ? found : texts(open),
+        lifted: unkept.length === facts.length ? found : texts(unkept),
+        mode: mode === 'semantic' ? 'lexical' : mode,
+      };
     }
 
     // Embedder is up: opportunistically heal facts stored while it was down (never one it may not be sent).
@@ -287,8 +330,8 @@ export class KnowledgeStore {
       .sort((a, b) => b.score - a.score)
       .map((x) => x.f);
     // Facts without a vector yet can't be scored semantically — match them lexically.
-    const top = (pool: Fact[]): string[] => {
-      const scored = pool.length === facts.length ? semantic : semantic.filter(mayLeave);
+    const top = (pool: Fact[], among: (f: Fact) => boolean = () => true): string[] => {
+      const scored = pool.length === facts.length ? semantic : semantic.filter(among);
       const unvectored = pool.filter((f) => f.vector.length === 0);
       const lex = unvectored.length ? this.lexicalFacts(query, unvectored, facts, k) : [];
       const seen = new Set<string>();
@@ -302,7 +345,12 @@ export class KnowledgeStore {
       return out;
     };
     const all = top(facts);
-    return { facts: all, outside: open.length === facts.length ? all : top(open), mode: 'semantic' };
+    return {
+      facts: all,
+      outside: open.length === facts.length ? all : top(open, mayLeave),
+      lifted: unkept.length === facts.length ? all : top(unkept, notPrivate),
+      mode: 'semantic',
+    };
   }
 
   /** Embed facts that have no vector (stored while the embedder was down). */
@@ -459,7 +507,7 @@ export class KnowledgeStore {
  * Kate", "we decided to ship Friday"). Read-only-classified by the gate regex so
  * it runs freely; it only writes to Flint's own memory, never the outside world.
  */
-export function rememberTool(store: KnowledgeStore, opts: { fromGoals?: boolean } = {}): Tool {
+export function rememberTool(store: KnowledgeStore, opts: { fromGoals?: boolean; fromPrivate?: boolean } = {}): Tool {
   return {
     definition: {
       name: 'remember',
@@ -477,8 +525,9 @@ export function rememberTool(store: KnowledgeStore, opts: { fromGoals?: boolean 
     handler: async (call) => {
       const fact = String((call.args as { fact?: unknown })?.fact ?? '').trim();
       if (!fact) return { ok: false, error: 'no fact provided' };
-      // `fromGoals`: the build an ask that carries Will's goals is offered (./goals-tools). What it saves stays on this Mac.
-      const added = await store.add(fact, 'user', { sourceAt: Date.now(), ...(opts.fromGoals ? { fromGoals: true } : {}) });
+      // `fromGoals`: the build an ask that carries Will's goals is offered (./goals-tools). `fromPrivate`: the one a
+      // turn Will kept private is offered. What either saves stays on this Mac.
+      const added = await store.add(fact, 'user', { sourceAt: Date.now(), ...(opts.fromGoals ? { fromGoals: true } : {}), ...(opts.fromPrivate ? { fromPrivate: true } : {}) });
       return { ok: true, remembered: added, note: added ? 'saved' : 'already known' };
     },
   };
