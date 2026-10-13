@@ -2373,8 +2373,6 @@ function apprCard(p){var open=APPR.open===p.id;var card=apprEl('div','card row'+
   var row=apprEl('div','cf prow');var res=apprEl('div','res');res.style.display='none';
   apprKeptInto(res,p.id);
   if(open){var dl=apprEl('dl','facts');apprFaceInto(dl,p);card.appendChild(dl);
-    /* The open card as it is drawn now: a list that is read again keeps this very card (apprRender). */
-    APPR.openEl={id:p.id,card:card,res:res};
     /* Show Details stays as Will left it when the list is drawn again: a card he is reading does not fold under him. */
     var det=apprEl('div','details');det.hidden=APPR.details!==p.id;if(p.reason)det.appendChild(apprEl('p',null,p.reason));
     /* What the card would do, in sentences and labelled values (apprDetails): never its args as they are stored, and
@@ -2402,7 +2400,8 @@ function apprCard(p){var open=APPR.open===p.id;var card=apprEl('div','card row'+
         if(APPR.redraw){APPR.redraw=false;if(res.textContent)apprSaid(p.id,res.textContent,'bad');setTimeout(loadApprovals,2500);}});};
     row.appendChild(show);row.appendChild(no);row.appendChild(ok);card.appendChild(row);card.appendChild(det);}
   else{row.hidden=true;card.appendChild(row);card.classList.add('click');card.onclick=function(){if(APPR.flight>0||APPR.busy)return;APPR.open=p.id;APPR.details=null;apprRender();};}
-  card.appendChild(res);card.setAttribute('data-id',p.id);
+  /* (Where its line goes, for a list that is read again and keeps this very card: apprRender.) */
+  card.appendChild(res);card.setAttribute('data-id',p.id);card.apprRes=res;
   return card;}
 /* Approved but not run. A tool's card (a cap was reached, its tool was not connected, the runtime did not answer):
    run it now. A nightly card is run by its job, never from here (the server cannot run it), so it says when. */
@@ -2430,9 +2429,10 @@ function apprRender(keep){var list=document.getElementById('apprlist');list.text
   /* With the runtime down, the help line says why the list is empty: "Nothing Waiting" would contradict it. */
   if(!APPR.pending.length){if(!APPR.down){var e=apprEl('div','empty');e.appendChild(apprEl('b',null,'Nothing Waiting'));list.appendChild(e);}foot.hidden=true;return;}
   if(!APPR.open||!APPR.pending.some(function(p){return p.id===APPR.open;}))APPR.open=APPR.pending[0].id;
-  var g2=apprEl('div','group');APPR.pending.forEach(function(p){
-    if(was&&p.id===was.id&&p.id===APPR.open){apprKeptInto(was.res,p.id);g2.appendChild(was.card);return;}
-    g2.appendChild(apprCard(p));});list.appendChild(g2);
+  var g2=apprEl('div','group');APPR.pending.forEach(function(p){var c;
+    if(was&&p.id===was.id&&p.id===APPR.open){apprKeptInto(was.res,p.id);c=was.card;}
+    else{c=apprCard(p);if(p.id===APPR.open)APPR.openEl={id:p.id,card:c,res:c.apprRes};}
+    g2.appendChild(c);});list.appendChild(g2);
   var all=APPR.pending.filter(function(p){return !apprAlone(p);}),alone=APPR.pending.length-all.length;
   foot.hidden=false;var btn=document.getElementById('apprall');var note=document.getElementById('apprnote');
   if(APPR.signed&&!APPR.keyed){note.textContent='This device needs an approval key.';btn.textContent='Open Settings';btn.onclick=function(){closeApprovals();openSettings();};btn.disabled=false;return;}
