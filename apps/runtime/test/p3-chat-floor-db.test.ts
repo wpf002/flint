@@ -240,6 +240,26 @@ describe.skipIf(NO_DB)('a goal from chat rests on a signed card, or on a rule Wi
       await age();
     });
 
+    it('the check before the row is written stands on its own: with the trigger that records the use set aside, a card that is not a goal’s, or past its time, still covers nothing', async () => {
+      const [plain, late, good] = [source(), source(), source()];
+      await card('goal.propose', proposeArgs(plain), { kind: 'tool_call' });
+      await card('goal.propose', proposeArgs(late), { life: '2 seconds' });
+      const real = await card('goal.propose', proposeArgs(good));
+      await new Promise((r) => setTimeout(r, 2_300));
+      // The owner sets the second trigger aside for a moment; the runtime's role then writes on its own connection.
+      const tried: Array<string | undefined> = [];
+      await owner('ALTER TABLE "Goal" DISABLE TRIGGER "Goal_chat_floor_bind"');
+      try {
+        for (const s of [plain, late, good]) tried.push(await inTx((q) => flintGoal(q, s), false).then(() => 'written', (e: { code?: string }) => e.code));
+      } finally {
+        await owner('ALTER TABLE "Goal" ENABLE TRIGGER "Goal_chat_floor_bind"');
+      }
+      // The real card is let through by the check alone (and nothing was kept: the transaction was rolled back).
+      expect(tried).toEqual(['42501', '42501', 'written']);
+      expect(await used(real.aid)).toEqual([]);
+      for (const s of [plain, late, good]) expect(await goalRow(gidOf(s))).toBeUndefined();
+    });
+
     it('a card for another goal does not cover it, nor does this goal’s card cover another source', async () => {
       const [mine, other] = [source(), source()];
       const c = await card('goal.propose', proposeArgs(other));
@@ -292,6 +312,24 @@ describe.skipIf(NO_DB)('a goal from chat rests on a signed card, or on a rule Wi
       // One approval, one goal, one transaction: the insert and the start are the same use.
       expect(await used(go.aid)).toEqual([{ goalId: gid, action: 'goal.activate' }]);
       await finish(go.pid);
+      await age();
+    });
+
+    it('the start’s approval is used by making the goal: made in one transaction and started in another, the card starts nothing', async () => {
+      const src = source();
+      const gid = gidOf(src);
+      await card('goal.propose', proposeArgs(src), { stage: 'pending' });
+      const go = await card('goal.activate', activateArgs(src));
+      // A runtime that makes the row and stops: the approval is on record as used, for this goal, in that transaction.
+      await flintGoal(app, src, { successCriteria: DEF.successCriteria });
+      expect(await used(go.aid)).toEqual([{ goalId: gid, action: 'goal.activate' }]);
+      // Starting it later is another transaction: refused, and the goal stays a suggestion until Will signs a start again.
+      expect(await failure(start(app, gid, go.aid))).toEqual(['42501', `goal ${gid}: approval ${go.aid} was already used`, null]);
+      expect(await goalRow(gid)).toMatchObject({ status: 'proposed', approvalId: null });
+      const again = await card('goal.activate', activateArgs(src));
+      await start(app, gid, again.aid);
+      expect(await goalRow(gid)).toMatchObject({ status: 'active', approvalId: again.aid });
+      await finish(again.pid);
       await age();
     });
 

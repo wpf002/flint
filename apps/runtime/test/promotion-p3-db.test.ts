@@ -449,13 +449,16 @@ describe.skipIf(NO_DB).each(['UTC', 'America/Chicago'])('the later table, for go
       // The other tables are not touched by it.
       expect(await refusal(promotionTable(db, { phase: 'p3', tz: TZ, now }))).toBe('409: the shadow week is not over: 0 of 7 days of goal reviews');
     });
-    // Switched off by hand, the guard is not there either: only one that is on counts.
-    await withClient(urls.owner, (c) => c.query('ALTER TABLE "Goal" DISABLE TRIGGER "Goal_chat_floor"'));
-    try {
-      expect(await chatFloorInDatabase(db)).toBe(false);
-      expect(await refusal(table())).toBe(refused);
-    } finally {
-      await withClient(urls.owner, (c) => c.query('ALTER TABLE "Goal" ENABLE TRIGGER "Goal_chat_floor"'));
+    // Switched off by hand, the guard is not there either: only one that is whole and on counts (the check before
+    // each insert, and the one after it that records the card's approval as used).
+    for (const trigger of ['Goal_chat_floor', 'Goal_chat_floor_bind']) {
+      await withClient(urls.owner, (c) => c.query(`ALTER TABLE "Goal" DISABLE TRIGGER "${trigger}"`));
+      try {
+        expect(await chatFloorInDatabase(db), trigger).toBe(false);
+        expect(await refusal(table()), trigger).toBe(refused);
+      } finally {
+        await withClient(urls.owner, (c) => c.query(`ALTER TABLE "Goal" ENABLE TRIGGER "${trigger}"`));
+      }
     }
     // Back in place: the refusal is gone, and the table is the weeks' to open (without those two cards, they have not begun).
     expect(await chatFloorInDatabase(db)).toBe(true);

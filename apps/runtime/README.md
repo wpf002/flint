@@ -862,7 +862,7 @@ approved. Any later deploy of P3 code applies the migration again. Claude runs
 `down.sql` only with your OK, after the dump.
 
 The guard under goals from chat is a database update of its own
-(`20261014000200_p3_chat_goal_floor`), newer than P5's: in any rollback it is
+(`20261015000100_p3_chat_goal_floor`), the newest: in any rollback it is
 undone first. Its `down.sql` takes away two triggers and their function, and
 loses nothing: no table, no row, and the record of which approvals were used
 stays. It needs no older runtime. The runtime sees the guard is gone, files a

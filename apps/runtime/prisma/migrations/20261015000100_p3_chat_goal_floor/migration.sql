@@ -14,7 +14,8 @@
 --   2. Make It a Goal: an executing goal.activate that Will approved for this
 --      goal, signed as one Flint suggested, with the row's title and
 --      description, while the suggestion's own card still waits and names this
---      goal and this source.
+--      goal and this source. That approval is used here, so the goal is made
+--      and started in one transaction or the card starts nothing.
 --   3. a rule he signed: a live, unscoped ActionPolicy row that lets
 --      goal.propose run alone (it exists only on a policy card he signed), no
 --      live row holding it back, and the intake's own audit entry for this
@@ -62,8 +63,8 @@ BEGIN
   IF current_user = 'flint_owner' THEN
     RETURN NEW;
   END IF;
-  -- What every goal from chat is, whoever adds it: Will's, personal, untainted, with nothing counted as done yet,
-  -- and named by its source (so a card or an entry for one goal is never one for another).
+  -- What every goal from chat is, whoever adds it: Will's, personal, untainted, and named by its source (so a card
+  -- or an entry for one goal is never one for another).
   IF NOT coalesce(
        NEW."origin" = 'flint' AND NEW."owner" = 'will' AND NOT NEW."tainted" AND NEW."sensitivity" = 'personal' AND NEW."nexusProjectId" IS NULL
        AND NEW."sourceRef" ~ '^chat:[0-9a-f]{64}$' AND NEW."id" = 'go' || substr(NEW."sourceRef", 6, 32), false) THEN

@@ -232,7 +232,7 @@ export async function freshDb(): Promise<TestUrls> {
 const counted = (n: number, what: string): string => `${n} ${what}${n === 1 ? '' : 's'}`;
 
 /** The migration that holds a goal from chat to a signed card or rule (P3 part 5's floor). */
-export const CHAT_GOAL_FLOOR = '20261014000200_p3_chat_goal_floor';
+export const CHAT_GOAL_FLOOR = '20261015000100_p3_chat_goal_floor';
 
 /**
  * A database without that floor for the length of `fn`: its own down.sql (the

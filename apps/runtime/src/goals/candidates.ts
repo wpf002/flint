@@ -111,14 +111,15 @@ const CLOCK_SKEW_MS = 5 * 60_000;
  * refused.
  */
 export async function chatFloorInDatabase(db: Db | Tx): Promise<boolean> {
+  // Both of its triggers, each switched on and running the guard's own function: the check before every insert,
+  // and the one after it that records the card's approval as used. (pg_trigger.tgtype: 1 for each row, 2 before,
+  // 4 on insert, 64 instead of. Before is 7 of those; after is 5.)
   const [r] = await db.$queryRaw<Array<{ floor: boolean }>>`
-    SELECT EXISTS (
-      SELECT 1 FROM pg_trigger t JOIN pg_proc f ON f.oid = t.tgfoid JOIN pg_namespace n ON n.oid = f.pronamespace
-      WHERE t.tgrelid = to_regclass('public."Goal"') AND t.tgname = 'Goal_chat_floor' AND NOT t.tgisinternal AND t.tgenabled IN ('O', 'A')
-        AND n.nspname = 'public' AND f.proname = 'goal_chat_floor'
-        -- For each row, before, on insert (pg_trigger.tgtype's bits 1, 2 and 4).
-        AND (t.tgtype & 7) = 7
-    ) AS floor`;
+    SELECT count(*) = 2 AS floor
+    FROM pg_trigger t JOIN pg_proc f ON f.oid = t.tgfoid JOIN pg_namespace n ON n.oid = f.pronamespace
+    WHERE t.tgrelid = to_regclass('public."Goal"') AND NOT t.tgisinternal AND t.tgenabled IN ('O', 'A')
+      AND n.nspname = 'public' AND f.proname = 'goal_chat_floor'
+      AND ((t.tgname = 'Goal_chat_floor' AND (t.tgtype & 71) = 7) OR (t.tgname = 'Goal_chat_floor_bind' AND (t.tgtype & 71) = 5))`;
   return r?.floor === true;
 }
 /** What the later promotion table says while it is not. */
