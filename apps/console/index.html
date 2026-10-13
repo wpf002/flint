@@ -416,7 +416,12 @@
   /* A title, a sentence or a value with no place to break wraps anywhere rather than run off the row. */
   #taskbody .lbl b,#taskbody .lbl span,#taskbody .plead,#taskbody .empty span{overflow-wrap:anywhere;}
   #taskbody .row .val{white-space:normal;overflow-wrap:anywhere;text-align:right;max-width:60%;}
-  #taskbody .plead+.gsh{margin-top:16px;}
+  #taskbody .plead+.gsh{margin-top:16px;} #taskbody .plead+.group{margin-top:12px;}
+  /* A task's result is what the panel is for: it reads as text, not as a caption. */
+  #taskresult .lbl span{color:var(--t1);font-size:13px;line-height:18px;}
+  /* A task's marks and what it is about, beside its title. */
+  .tmeta{display:flex;align-items:center;gap:8px;flex:none;max-width:60%;min-width:0;}
+  .tmeta .tag{margin-left:0;} #taskbody .tmeta .val{max-width:none;}
   /* The card shown in the panel: its details start at the panel's own edge. */
   .tdetails{margin-left:4px;margin-right:4px;}
   #setassets .row .st{flex:none;}
@@ -424,7 +429,11 @@
     #taskfoot .btn{flex:1;justify-content:center;} #taskfoot .note:not(:empty){flex-basis:100%;} #taskfoot .gconfirm{flex-basis:100%;}
     /* Every target in the panel is at least 44 points tall on a phone: its tabs too. */
     #taskseg button{height:44px;padding:0 14px;}
-    #taskbody .row.gwrap>.val{flex:1 1 100%;max-width:none;text-align:left;}
+    #taskfoot .note:empty{display:none;}
+    #taskresult .lbl span{font-size:15px;line-height:20px;}
+    /* A task's row on a phone: its title and the chevron, then its marks and what it is about on a line of their own. */
+    .row.tkrow>svg.i{order:2;} .row.tkrow .tmeta{order:3;flex:1 1 100%;max-width:none;flex-wrap:wrap;} .row.tkrow .tmeta:empty{display:none;}
+    .row.tkrow .tmeta .val{text-align:left;}
   }
 </style>
 </head>
@@ -3265,8 +3274,13 @@ function taskTab(tab,say,kind){taskNav('list');TASKS.tab=tab==='finished'?'finis
       if(!tabs){top.appendChild(taskSeg());taskFocus(document.getElementById('tasktab-'+TASKS.tab));}
       taskRender(list,d||{});},failed);},failed);}
 function taskTags(t){var x=[];if(t.outside)x.push(gTag('Outside Text'));if(t.costs)x.push(gTag('Costs Money',true));return x;}
-/* A task's row: its title, one sentence for where it stands (the runtime's), and what it is about. */
-function taskRow(t){return predRow(t.title,[t.line],t.about||'',function(){taskOpen(t.id);},taskTags(t));}
+/* A task's row: its title, one sentence for where it stands (the runtime's), then its marks and what it is about (on a
+   phone, on a line of their own under the title). It is a button to the keyboard too. */
+function taskRow(t){var open=function(){taskOpen(t.id);};var row=gEl('div','row two gwrap click tkrow');var l=gEl('span','lbl');l.appendChild(gEl('b',null,t.title));l.appendChild(gEl('span',null,t.line));row.appendChild(l);
+  var m=gEl('span','tmeta');taskTags(t).forEach(function(x){m.appendChild(x);});if(t.about)m.appendChild(gEl('span','val',t.about));row.appendChild(m);
+  row.tabIndex=0;row.setAttribute('role','button');row.appendChild(gIcon('chev'));row.onclick=open;
+  row.onkeydown=function(e){if(!e||(e.key!=='Enter'&&e.key!==' '))return;if(e.preventDefault)e.preventDefault();open();};
+  return row;}
 function taskRender(list,d){list.textContent='';var tasks=d.tasks||[],can=taskCanRun();
   document.getElementById('taskadd').hidden=!can||(TASKS.tab==='active'&&!tasks.length);
   if(!tasks.length){
@@ -3313,7 +3327,8 @@ function taskShow(t,say,kind){taskHead(t.title,true,false);var body=taskBody(),h
   var goal=taskFact('Goal',t.goalId?'':'No Goal');goal.hidden=!!t.goalId;d.appendChild(goal);
   if(t.goalId)gCall('/goals/'+encodeURIComponent(t.goalId)).then(function(x){if(!here()||!x||!x.goal||typeof x.goal.title!=='string'||!x.goal.title)return;goal.val.textContent=x.goal.title;goal.hidden=false;},function(){});
   d.appendChild(taskFact('Due',t.dueAt?gDay(t.dueAt):'No Due Date'));
-  if(t.chance)d.appendChild(taskFact('Chance It Passes',(GOAL_LIKELY[t.chance.likelihood]||'About Even')+' · '+t.chance.percent+'%'));
+  /* Its forecast, while there is still something to forecast: once it has ended, how it ended is said above. */
+  if(t.chance&&!taskEnded(t))d.appendChild(taskFact('Chance It Passes',(GOAL_LIKELY[t.chance.likelihood]||'About Even')+' · '+t.chance.percent+'%'));
   d.appendChild(taskFact('Cost',taskCost(t)));
   body.appendChild(d);
   taskActions(t);taskFocus(document.getElementById('taskback'));

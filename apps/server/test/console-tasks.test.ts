@@ -328,7 +328,7 @@ const headers = (root: El = body()) => root.with('gsh').map((e) => e.textContent
 const rows = (root: El = body()) =>
   root.with('row').map((r) => {
     const lbl = r.children.find((c) => c.className.split(' ').includes('lbl'));
-    const val = r.children.find((c) => c.className === 'val' || c.className.split(' ').includes('st'));
+    const val = r.all().find((c) => c.className === 'val' || c.className.split(' ').includes('st'));
     return [lbl?.children.find((c) => c.tagName === 'b')?.textContent ?? '', lbl?.children.filter((c) => c.tagName === 'span').map((c) => c.textContent) ?? [], val?.textContent ?? ''] as [string, string[], string];
   });
 const tags = (root: El = body()) => root.with('tag').map((e) => e.textContent);
@@ -643,6 +643,11 @@ describe('one task, open', () => {
     expect(body().with('gnote')).toEqual([]);
     expect(foot().hidden).toBe(true);
     plainScreen();
+    // Its forecast is shown while there is something to forecast: an ended task says how it ended, not how likely that was.
+    routes = answers();
+    await openTask(T_RED);
+    expect(VIEWS[T_RED]!.chance).toEqual({ likelihood: 'about_even', percent: 50 });
+    expect(rows().map((r) => r[0])).not.toContain('Chance It Passes');
     // A failed check is said as failed; a check Will overruled says who decided; a model's check says so.
     for (const [checkedBy, line] of [['you', 'You decided it yourself, against its checks.'], ['model', 'The local model judged these.']] as const) {
       routes = answers({ [`GET /tasks/${T_RED}`]: { status: 200, body: { task: redView({ checkedBy }) } } });
@@ -1419,6 +1424,8 @@ describe('what the panel holds', () => {
     const phone = /@media \(max-width:600px\)\{([\s\S]*)\}/.exec(css)![1]!;
     expect(phone).toContain('#taskfoot .btn{flex:1;justify-content:center;}');
     expect(phone).toContain('#taskseg button{height:44px;');
+    // A task's row on a phone: its marks and what it is about take a line of their own, under the title and beside nothing.
+    expect(phone).toContain('.row.tkrow .tmeta{order:3;flex:1 1 100%;');
     expect(css).not.toMatch(/outline:\s*(none|0)|:focus/);
     expect(html).toContain(':focus-visible{outline:none;box-shadow:0 0 0 2px var(--bg),0 0 0 4px var(--gold-hi);border-radius:6px;}');
     // The palette is the page's own: the panel names no colour of its own.
