@@ -138,6 +138,10 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
           sensitivity: p.sensitivity, destructive: p.destructive === true, consequential: p.consequential === true,
           // What kind of card it is, and the runtime template it came from (P3: a review's minor or material plan change).
           ...(p.kind ? { kind: p.kind } : {}), ...(p.templateId ? { templateId: p.templateId } : {}),
+          // A tool's card on a connected server: its action is the server's and the tool's names, which anyone who runs
+          // a server can choose. The console gives such a card none of the words it keeps for Flint's own cards (a
+          // goal, a rule, a task), whatever it is called.
+          ...(p.action.startsWith('mcp:') ? { mcp: true } : {}),
           // What the card says about itself (the promotion table's week, a source's name), and when it lapses.
           ...(p.reason ? { reason: p.reason } : {}), expiresAt: p.expiresAt,
           // P5: what a task's dispatch card says the task will cost (zero included), for the card's Cost fact.
