@@ -329,6 +329,38 @@ describe.skipIf(NO_DB)('the path money takes, on flint_test', () => {
       expect(await runTaskCard(db, u.proposalId, undefined, 'UTC', 'test', deps(stuck))).toMatchObject({ taskId: u.id });
       expect([...stuck.held]).toEqual([[u.proposalId, 250_000]]);
 
+      // A failure that comes after the card ran (the commit went through, then the connection dropped) gives
+      // nothing back: the task went out, and its reservation stays with it.
+      const through = <T extends object>(target: T, over: (key: string | symbol) => unknown): T => new Proxy(target, {
+        get: (t, key) => {
+          const mine = over(key);
+          if (mine !== undefined) return mine;
+          const v = Reflect.get(t, key) as unknown;
+          return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+        },
+      });
+      const transact = db.$transaction.bind(db) as (...a: unknown[]) => Promise<unknown>;
+      const dropsAfterCommit = through(db, (key) => (key === '$transaction' ? async (...a: unknown[]) => { await transact(...a); throw new Error('the connection dropped after the commit'); } : undefined));
+      const after = reserveBook();
+      const w = await newTask();
+      await fx.approve(w.proposalId);
+      expect(await refusal(runTaskCard(dropsAfterCommit, w.proposalId, undefined, 'UTC', 'test', deps(after)))).toMatchObject({ status: 409 });
+      expect(await db.proposal.findUniqueOrThrow({ where: { id: w.proposalId } })).toMatchObject({ status: 'executed' });
+      expect(await fx.task(w.id)).toMatchObject({ status: 'queued' });
+      expect(after.calls).toEqual([`take ${w.proposalId} 250000`]);
+      expect([...after.held]).toEqual([[w.proposalId, 250_000]]);
+      // And when it cannot be told whether the card ran (the card cannot be read either), nothing is given back:
+      // the same card's next run takes nothing more, so there is still one reservation for one dispatch.
+      const unreadable = through(db, (key) => (key === 'proposal' ? through(db.proposal, (k) => (k === 'findUnique' ? async () => { throw new Error('the connection is gone'); } : undefined)) : undefined));
+      const untold = reserveBook();
+      const x = await newTask();
+      await fx.approve(x.proposalId);
+      expect(await refusal(runTaskCard(unreadable, x.proposalId, undefined, 'UTC', 'test', deps(untold), fault))).toMatchObject({ status: 409 });
+      expect(untold.calls).toEqual([`take ${x.proposalId} 250000`]);
+      expect(await fx.task(x.id)).toMatchObject({ status: 'proposed' });
+      expect(await runTaskCard(db, x.proposalId, undefined, 'UTC', 'test', deps(untold))).toMatchObject({ taskId: x.id });
+      expect([...untold.held]).toEqual([[x.proposalId, 250_000]]);
+
       // A card refused before the money is asked for (its asset turned off) asks for none.
       const off = reserveBook();
       const v = await newTask();
