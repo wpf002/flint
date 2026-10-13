@@ -357,6 +357,29 @@ describe('asking first: a word’s age, and what silence means (the one rule the
     expect(other.said(HERE)).toBeUndefined();
   });
 
+  it('the clock is read before a server is looked up: a keeper that forgets everything when its clock goes back is obeyed at that very read', () => {
+    // The server and the runtime each keep a record on a clock that forgets what was believed when it shows an
+    // earlier time than it has shown. The forgetting happens as the clock is read, so the look-up must come after.
+    const t = { now: 10_000, latest: Number.NEGATIVE_INFINITY };
+    const places: ModelPlaces = new ModelPlaces({
+      now: () => {
+        if (t.now < t.latest) places.clear();
+        t.latest = t.now;
+        return t.now;
+      },
+    });
+    places.learn(HERE, ROWS);
+    expect([places.runsHere(HERE, 'm:1'), places.runsElsewhere(HERE, 'mine'), places.said(HERE)]).toEqual([true, true, 'ollama']);
+    t.now = 4_000;
+    expect(places.runsHere(HERE, 'm:1')).toBe(false);
+    places.learn(HERE, ROWS);
+    t.now = 3_000;
+    expect(places.runsElsewhere(HERE, 'mine')).toBe(false);
+    places.learn(HERE, ROWS);
+    t.now = 2_000;
+    expect(places.said(HERE)).toBeUndefined();
+  });
+
   it('clear forgets everything, the silences too', async () => {
     const { t, places } = rig(async () => undefined);
     await places.fresh(HERE);
