@@ -59,16 +59,24 @@
  * (`learn`, `notOllama`). That keeps what is known of it fresher than a
  * minute, and is how a server that wants a key on every request is known at
  * all.
+ *
+ * A word's age is counted on the Mac's clock, which can be set back. A clock
+ * that shows an earlier time than it has shown makes every age untellable (a
+ * listing from before the change would read as younger than it is, and be
+ * believed for as much longer as the clock went back), so everything believed
+ * is forgotten then, and each server is asked again before anything on it is
+ * taken as local.
+ *
+ * What a word means, what silence means and how old a word may be are
+ * @flint/policy's (models.ts `ModelPlaces`), which the runtime keeps one of too
+ * (apps/runtime/src/model/here.ts), so the two cannot read a listing or a
+ * silence differently. This file is the asking: which addresses are watched,
+ * how often, and the request itself.
  */
-import { sameModel } from './memory-brain';
+import { ModelPlaces, PLACE_ASK_EVERY_MS, PLACE_FRESH_MS, placeSaid, trimmedAddress, type ListedModel, type PlaceSaid } from '@flint/policy';
 
-/** One row of Ollama's /api/tags, as far as this goes. */
-export interface ListedModel {
-  name?: unknown;
-  model?: unknown;
-  remote_host?: unknown;
-  remote_model?: unknown;
-}
+// Re-exported so imports here hold.
+export { placeSaid, type ListedModel, type PlaceSaid };
 
 export interface OllamaLocalityOptions {
   fetchImpl?: typeof fetch;
@@ -82,65 +90,40 @@ export interface OllamaLocalityOptions {
 }
 
 /** How old a server's word may be before a caller that asks with `fresh` has it asked again. */
-export const FRESH_MS = 2_000;
-
-/** What one server last said, and when. */
-interface Heard {
-  at: number;
-  /** Every model it listed, with whether it runs on that server. Absent: it answered, and it is not an Ollama. */
-  models?: Array<{ name: string; here: boolean }>;
-  /**
-   * It has since been asked and gave no word (`silent`): all that is left of
-   * what it said is which models run ELSEWHERE. It is no longer taken as
-   * having said what it is.
-   */
-  quiet?: true;
-}
-
-/** One ask of one address, once it is over: when it began, when it ended, and whether the server gave its word. */
-interface Asked {
-  from: number;
-  at: number;
-  word: boolean;
-}
-
-const trimmed = (baseURL: string): string => baseURL.replace(/\/+$/, '');
-
-/** The server an address is at: its origin. An address that is no URL is its own key, and matches nothing else. */
-const serverOf = (baseURL: string): string => {
-  try {
-    return new URL(baseURL).origin.toLowerCase();
-  } catch {
-    return trimmed(baseURL);
-  }
-};
+export const FRESH_MS = PLACE_FRESH_MS;
 
 export class OllamaLocality {
-  readonly #heard = new Map<string, Heard>();
-  readonly #asking = new Map<string, Promise<Asked>>();
+  readonly #places: ModelPlaces;
   /** The addresses asked every minute: where each server's listing is. */
   readonly #watched = new Set<string>();
-  /** The last ask of each address that is over, answered or not: `fresh` does not ask a silent server at every call. */
-  readonly #asked = new Map<string, Asked>();
-  /**
-   * When each server was last found silent by someone who waited (`silent`), until it speaks again: by one of the
-   * asks made here, or by a look the health monitor took. `fresh` does not ask such a server again at once, so a
-   * turn that has just waited one look for it does not wait a second time for the same silence.
-   */
-  readonly #silentAt = new Map<string, number>();
   #timer: ReturnType<typeof setInterval> | undefined;
+  /** The latest time the clock has shown. */
+  #latest = Number.NEGATIVE_INFINITY;
 
-  constructor(private readonly opts: OllamaLocalityOptions = {}) {}
-
-  #now(): number {
-    return this.opts.now?.() ?? Date.now();
+  constructor(private readonly opts: OllamaLocalityOptions = {}) {
+    this.#places = new ModelPlaces({
+      ...(opts.maxAgeMs !== undefined ? { maxAgeMs: opts.maxAgeMs } : {}),
+      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+      now: () => this.#now(),
+      // One request for the listing. (A redirect is an error: a listing that came from another address is not this one's word.)
+      ask: async (at, signal) => {
+        const r = await (this.opts.fetchImpl ?? fetch)(`${at}/api/tags`, { signal, redirect: 'error' });
+        const said = await placeSaid(r.status, () => r.json());
+        if (!r.ok) await r.body?.cancel().catch(() => {});
+        return said;
+      },
+    });
   }
 
-  /** What the server at this address last said, when that is recent enough to believe. */
-  #fresh(baseURL: string | undefined): Heard | undefined {
-    if (!baseURL) return undefined;
-    const heard = this.#heard.get(serverOf(baseURL));
-    return heard && this.#now() - heard.at <= (this.opts.maxAgeMs ?? 5 * 60_000) ? heard : undefined;
+  /**
+   * The time, as every age here is counted. A clock that has gone back (the Mac's was set, or corrected) leaves
+   * no age to count: what was believed is forgotten, and the addresses that are watched stay watched.
+   */
+  #now(): number {
+    const t = (this.opts.now ?? Date.now)();
+    if (t < this.#latest) this.#places.clear();
+    this.#latest = t;
+    return t;
   }
 
   /**
@@ -149,8 +132,7 @@ export class OllamaLocality {
    * known and asks nothing.
    */
   runsHere(baseURL: string | undefined, model: string): boolean {
-    if (!model) return false;
-    return this.#fresh(baseURL)?.models?.find((m) => sameModel(m.name, model))?.here === true;
+    return this.#places.runsHere(baseURL, model);
   }
 
   /**
@@ -161,8 +143,7 @@ export class OllamaLocality {
    * then both false, and whoever asks decides what not knowing means.
    */
   runsElsewhere(baseURL: string | undefined, model: string): boolean {
-    if (!model) return false;
-    return this.#fresh(baseURL)?.models?.find((m) => sameModel(m.name, model))?.here === false;
+    return this.#places.runsElsewhere(baseURL, model);
   }
 
   /**
@@ -173,8 +154,7 @@ export class OllamaLocality {
    * knows (./policy brainIsLocal).
    */
   said(baseURL: string | undefined): 'ollama' | 'other' | undefined {
-    const heard = this.#fresh(baseURL);
-    return heard === undefined || heard.quiet ? undefined : heard.models ? 'ollama' : 'other';
+    return this.#places.said(baseURL);
   }
 
   /**
@@ -184,16 +164,16 @@ export class OllamaLocality {
    * (or the first failure); it never rejects.
    */
   watch(baseURL: string): Promise<void> {
-    const at = trimmed(baseURL);
+    const at = trimmedAddress(baseURL);
     const first = !this.#watched.has(at);
     this.#watched.add(at);
     if (!this.#timer) {
       this.#timer = setInterval(() => {
         for (const url of this.#watched) void this.refresh(url);
-      }, this.opts.everyMs ?? 60_000);
+      }, this.opts.everyMs ?? PLACE_ASK_EVERY_MS);
       this.#timer.unref?.();
     }
-    return first || !this.#heard.has(serverOf(at)) ? this.refresh(at) : Promise.resolve();
+    return first || !this.#places.heard(at) ? this.refresh(at) : Promise.resolve();
   }
 
   /**
@@ -202,42 +182,11 @@ export class OllamaLocality {
    * for a caller about to hand one of its models something that stays here.
    * Fresh enough already: nothing is asked. When this returns, either the
    * server's word is from an ask that BEGAN within `maxAgeMs` of this call
-   * (or since), or nothing it said before is believed to run here (`silent`):
-   * an ask that this caller waited for and that yielded no word does not
-   * leave the old listing standing.
-   *
-   * A word is as old as when its ask began, never as young as when its
-   * answer landed: a listing that took most of two seconds to arrive is not
-   * handed to the next caller for two more. Only SILENCE is left alone: a
-   * server that was asked within `maxAgeMs` and gave no word is not asked
-   * again yet (one that is down, or hangs, is not asked at every call), and
-   * it is as silent for this caller as it was for that ask. Never rejects; it
-   * waits as long as one ask may take (two, for a caller that found an ask
-   * under way that began before its own window).
+   * (or since), or nothing it said before is believed to run here (`silent`).
+   * Never rejects. (The rule itself: @flint/policy ModelPlaces.fresh.)
    */
   fresh(baseURL: string, maxAgeMs: number = FRESH_MS): Promise<void> {
-    const at = trimmed(baseURL);
-    const now = this.#now();
-    const since = now - maxAgeMs;
-    const heard = this.#heard.get(serverOf(at));
-    // (What is left of a server found silent is no older than the silence, so it is covered by the line after this one.)
-    if (heard && heard.at >= since) return Promise.resolve();
-    // Found silent a moment ago by someone who waited for it, and not a word since: it is already not believed, and
-    // it is not asked again yet.
-    const hushed = this.#silentAt.get(serverOf(at));
-    if (hushed !== undefined && hushed >= since) return Promise.resolve();
-    // No word: what was said before that ask began is dropped, and so is anything too old for this caller
-    // (an ask that hung can have begun before a word that is itself too old by now).
-    const settle = (a: Asked): void => {
-      if (!a.word) this.silent(at, Math.max(a.from, since), a.at);
-    };
-    const last = this.#asked.get(at);
-    if (last !== undefined && !last.word && last.at >= since) return Promise.resolve(settle(last));
-    const running = this.#asking.get(at);
-    if (!running) return this.#begin(at).then(settle);
-    // An ask already under way: its word is as old as its start. Begun before this caller's window, it is too old
-    // for this caller, who then asks once more.
-    return running.then((a) => (a.word && a.from < since ? this.#begin(at).then(settle) : settle(a)));
+    return this.#places.fresh(baseURL, maxAgeMs);
   }
 
   /**
@@ -246,75 +195,18 @@ export class OllamaLocality {
    * must know asks with `fresh`.
    */
   refresh(baseURL: string): Promise<void> {
-    return this.#begin(trimmed(baseURL)).then(() => undefined);
-  }
-
-  /** The ask of this address that is under way, or a new one. */
-  #begin(at: string): Promise<Asked> {
-    const running = this.#asking.get(at);
-    if (running) return running;
-    const asked = this.#ask(at).finally(() => this.#asking.delete(at));
-    this.#asking.set(at, asked);
-    return asked;
-  }
-
-  async #ask(at: string): Promise<Asked> {
-    const from = this.#now();
-    // One clock for the whole ask, however many times the server is tried inside it.
-    const signal = AbortSignal.timeout(this.opts.timeoutMs ?? 2_000);
-    let word = await this.#try(at, from, signal);
-    // One failed listing is not yet silence. A server that answered AT ONCE with something that is no word (an
-    // error, a dropped connection: it is restarting, or it was busy for a moment) is tried once more, so one bad
-    // answer does not cost a turn. A server that did not answer in time is not: whoever waits has waited as long
-    // as an ask may take.
-    if (!word && !signal.aborted) word = await this.#try(at, this.#now(), signal);
-    // (When the ask ENDED: a server that hangs is left alone for a moment after each ask, not asked again at once.)
-    const asked: Asked = { from, at: this.#now(), word };
-    this.#asked.set(at, asked);
-    return asked;
-  }
-
-  /** One request for the listing, begun at `from`: did the server give its word? Never throws. */
-  async #try(at: string, from: number, signal: AbortSignal): Promise<boolean> {
-    try {
-      // (A redirect is an error: a listing that came from another address is not this one's word.)
-      const r = await (this.opts.fetchImpl ?? fetch)(`${at}/api/tags`, { signal, redirect: 'error' });
-      const said = await placeSaid(r.status, () => r.json());
-      if (!r.ok) await r.body?.cancel().catch(() => {});
-      if (said === 'other') this.notOllama(at, from);
-      else if (said) this.learn(at, said.ollama, from);
-      // Its word is an answer that is now what is known of this server. A "no" that did not replace a listing still
-      // believed (two addresses on one origin) left that listing as old as it was: no word about it.
-      const heard = this.#heard.get(serverOf(at));
-      return said !== undefined && heard !== undefined && !heard.quiet && heard.at >= from;
-    } catch {
-      // Down or slow: nothing is learned.
-      return false;
-    }
+    return this.#places.refresh(baseURL);
   }
 
   /**
    * The server at this address was asked, by someone who waited for its
-   * answer, and gave no word (it is down, it hangs, its listing failed, the
-   * question was not let through). What it said BEFORE that ask began
-   * (`asOf`) is no longer believed as far as "runs here" goes: every model it
-   * listed as its own is forgotten, and so is "it is not an Ollama". The
-   * models it said run elsewhere are kept, for as long as they would have
-   * been: silence never turns that into a yes, and a turn refused for a cloud
-   * model goes on being told so. Anything it has said since `asOf` stands.
-   * And until it speaks again, or two seconds pass since the silence was
-   * found (`foundAt`: when the ask that met it ended), `fresh` does not ask
-   * it once more: whoever waited for this silence has waited for all of them.
+   * answer, and gave no word. What it said BEFORE that ask began (`asOf`) is
+   * no longer believed as far as "runs here" goes; what it said runs
+   * elsewhere is kept; and `fresh` does not ask it again for two seconds
+   * after the silence was found (`foundAt`). (@flint/policy ModelPlaces.silent.)
    */
-  silent(baseURL: string, asOf: number = this.#now(), foundAt: number = this.#now()): void {
-    const key = serverOf(baseURL);
-    const heard = this.#heard.get(key);
-    if (heard && heard.at > asOf) return;
-    this.#silentAt.set(key, foundAt);
-    if (!heard) return;
-    const elsewhere = heard.models?.filter((m) => !m.here) ?? [];
-    if (elsewhere.length === 0) this.#heard.delete(key);
-    else this.#heard.set(key, { at: heard.at, models: elsewhere, quiet: true });
+  silent(baseURL: string, asOf?: number, foundAt?: number): void {
+    this.#places.silent(baseURL, asOf, foundAt);
   }
 
   /**
@@ -323,36 +215,18 @@ export class OllamaLocality {
    * number, `true`, an object) runs elsewhere. A model listed twice is local
    * only if every row says so.
    */
-  learn(baseURL: string, rows: readonly ListedModel[], at: number = this.#now()): void {
-    const models: NonNullable<Heard['models']> = [];
-    for (const m of rows) {
-      const name = typeof m?.name === 'string' && m.name.trim() ? m.name : typeof m?.model === 'string' ? m.model : '';
-      if (!name.trim()) continue;
-      // Anything at all said of a remote host or model, of any type, means it runs elsewhere: only a row that says nothing is local.
-      const said = (v: unknown): boolean => v !== undefined && v !== null && v !== '';
-      const remote = said(m.remote_host) || said(m.remote_model);
-      const seen = models.find((x) => sameModel(x.name, name));
-      if (seen) seen.here = seen.here && !remote;
-      else models.push({ name, here: !remote });
-    }
-    this.#heard.set(serverOf(baseURL), { at, models });
-    this.#silentAt.delete(serverOf(baseURL));
+  learn(baseURL: string, rows: readonly ListedModel[], at?: number): void {
+    this.#places.learn(baseURL, rows, at);
   }
 
   /**
    * The server at this address answered the question an Ollama answers with a
    * listing, and its answer was none: it is some other server (llama.cpp, LM
    * Studio), as of `at`. One thing is not taken from it: while a listing from
-   * that very server is still believed, a "no" does not replace it. Two
-   * addresses on one origin can be asked (Ollama behind a path, and the origin
-   * itself), and the one that is not the Ollama's must not unsay the other.
+   * that very server is still believed, a "no" does not replace it.
    */
-  notOllama(baseURL: string, at: number = this.#now()): void {
-    const key = serverOf(baseURL);
-    const heard = this.#heard.get(key);
-    if (heard?.models && at - heard.at <= (this.opts.maxAgeMs ?? 5 * 60_000)) return;
-    this.#heard.set(key, { at });
-    this.#silentAt.delete(key);
+  notOllama(baseURL: string, at?: number): void {
+    this.#places.notOllama(baseURL, at);
   }
 
   /** Stop asking, and forget everything (tests, and a server shutting down). */
@@ -360,41 +234,8 @@ export class OllamaLocality {
     if (this.#timer) clearInterval(this.#timer);
     this.#timer = undefined;
     this.#watched.clear();
-    this.#heard.clear();
-    this.#asked.clear();
-    this.#silentAt.clear();
+    this.#places.clear();
   }
-}
-
-/** What a server said when it was asked for the listing an Ollama gives (`GET /api/tags`). */
-export type PlaceSaid = { ollama: ListedModel[] } | 'other';
-
-/**
- * Read a server's answer to `GET /api/tags`:
- *  - 2xx with a `models` array: it is an Ollama, and the rows say where each
- *    model runs (`"models": null` is an Ollama with none: nothing on it is
- *    known to run there);
- *  - an answer that is no such listing: it is some other server. A 404 (or
- *    405, 501: llama.cpp, vLLM), and a 2xx with anything else in it (LM Studio
- *    answers 200 to a path it does not know);
- *  - anything that says nothing either way: undefined. A 401 or 403 (the
- *    question was not let through), a 429, a 5xx (an Ollama whose listing
- *    failed is still an Ollama), and no answer at all.
- * `body` is read only for a 2xx; a body that is not JSON is "no listing".
- */
-export async function placeSaid(status: number, body: () => Promise<unknown>): Promise<PlaceSaid | undefined> {
-  if (status >= 200 && status < 300) {
-    let json: unknown;
-    try {
-      json = await body();
-    } catch {
-      json = undefined;
-    }
-    const models = (json as { models?: unknown } | null | undefined)?.models;
-    if (models === null) return { ollama: [] };
-    return Array.isArray(models) ? { ollama: models as ListedModel[] } : 'other';
-  }
-  return status === 404 || status === 405 || status === 501 ? 'other' : undefined;
 }
 
 /** The server's one record of what its model servers say runs on them. */

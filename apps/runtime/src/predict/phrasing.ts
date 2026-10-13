@@ -121,6 +121,10 @@ export const PANEL = {
   noBetter: 'Flint did no better than guessing the usual rate.',
   outsideClaim: 'Flint made this prediction in a chat.',
   steady: 'This number hasn’t changed lately.',
+  /** The local model's second opinion, when there is no estimate to say. */
+  noOpinion: 'The local model has no estimate for this forecast.',
+  opinionOff: 'The local model doesn’t estimate this number.',
+  noLocalModel: 'No local model is set on this Mac.',
   values: { noTrend: 'No Trend', early: 'Too Early', steady: 'Steady', waiting: 'Waiting', short: 'Not Enough History', noData: 'No Data', tonight: 'Tonight', failed: 'Failed', off: 'Off' },
 } as const;
 
@@ -188,6 +192,14 @@ export function chanceValue(p: number): string {
 export function chanceSays(p: number, step: StepName, threshold: number, unit: ForecastUnit): string {
   const x = chanceParts(p, undefined, 'UTC');
   return `It’s ${x.word}, around ${x.pct}%, that ${step === 'day' ? 'today' : 'this week'} runs above ${unitValue(threshold, unit)}.`;
+}
+
+/**
+ * The local model's second opinion on the same question, as one plain sentence: "The local model said about 60%."
+ * The percentage and nothing else of its reply: no reason, no word of its own.
+ */
+export function opinionSays(p: number): string {
+  return `The local model said about ${Math.round(p * 100)}%.`;
 }
 
 /** How a number's last ranges held: "22 of its last 27 ranges held." */
@@ -261,6 +273,23 @@ export function errorScoreSays(score: number, low?: number, high?: number): stri
 /** How far its stated chances sat from what happened, in points. */
 export function gapSays(points: number): string {
   return `Its stated chances sat ${points} ${points === 1 ? 'point' : 'points'} from what happened, on average.`;
+}
+
+/**
+ * How the local model's second opinions did against the other answer to the very same questions: the forecast's
+ * (one that beat a plain guess), or the usual rate's (where none did). "Closer": its stated chances sat nearer to
+ * what happened.
+ */
+export function opinionVersusSays(other: 'forecast' | 'usual', n: number, verdict: 'closer' | 'further' | 'same'): string {
+  const them = other === 'forecast' ? 'the forecast' : 'the usual rate';
+  const over = `Over ${n} ${n === 1 ? 'question' : 'questions'}, `;
+  if (verdict === 'same') return `${over}the local model and ${them} did about as well.`;
+  return verdict === 'closer' ? `${over}the local model was closer than ${them}.` : `${over}${them} was closer than the local model.`;
+}
+
+/** Too few questions both answered to compare them. */
+export function opinionTooFewSays(have: number, need: number): string {
+  return `The local model has ${have} of the ${need} results it needs to be compared.`;
 }
 
 /** What was left unsettled, a sentence a kind. */

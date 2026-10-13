@@ -14,6 +14,9 @@ import { composeDiff } from '../../src/goals/batch';
 import { planDiff, PlanReply } from '../../src/goals/planner';
 import { TemplateOp, resolveReply, stepTitle } from '../../src/goals/steps';
 import type { PlanStepState } from '@flint/policy';
+import { modelsHere } from '../ollama-kit';
+
+modelsHere([cassette.model]);
 
 describe('planDiff against the recorded Ollama reply', () => {
   it('sends what was recorded, and reads the reply as template operations', async () => {

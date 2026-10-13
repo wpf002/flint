@@ -192,11 +192,14 @@ const auditInputs = (p: { id: string; action: string; argsDigest: string }, extr
 /**
  * What a filer may ask of the transaction that files its card. `serial`: every filing that names the same key runs
  * one at a time (a transaction lock), so the filer's `filed` step sees every card filed before it and none filed
- * after. `filed`: runs once the new card's row and audit entry are written, in that transaction (not for a card that
- * was already waiting).
+ * after. `before`: runs first in that transaction, under the locks, before a card already waiting is looked for:
+ * what it reads there is what the card is filed on, and the reason it returns is the reason the card is filed
+ * with (a card's reason never changes afterwards). `filed`: runs once the new card's row and audit entry are
+ * written, in that transaction (not for a card that was already waiting).
  */
 export interface FilingSteps {
   serial?: string;
+  before?: (tx: Tx) => Promise<{ reason: string } | undefined>;
   filed?: (tx: Tx, id: string) => Promise<void>;
 }
 
@@ -292,6 +295,8 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
     // and never takes its place (the job claims only a card of its own origin, so a look-alike that stood in for
     // it would be approved and never run). Neither is the job's card ever handed back for a filing from elsewhere.
     const fromJob = input.origin.startsWith('runtime:');
+    // The filer's own look at how things stand, and the reason it files the card with.
+    const reason = (await steps.before?.(tx))?.reason ?? input.reason;
     // Nor does a card about a task, an asset or a review (P5) take the place of one filed from anywhere else, or
     // under another template: a card the executor would never run (one planted as chat's, or as the job's under a
     // template that is not its own) would hold the real filing back for as long as it waits.
@@ -316,7 +321,7 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
         INSERT INTO "Proposal" (id, kind, origin, action, "templateId", args, "argsDigest", "argsProvenance", tainted, sensitivity, destructive, consequential, reason, "estCostUsd", "expiresAt")
         VALUES (${id}, ${input.kind}, ${input.origin}, ${input.action}, ${input.templateId ?? null}, ${JSON.stringify(input.args)}::jsonb, ${argsDigest},
                 ${JSON.stringify(input.argsProvenance)}::jsonb, ${input.tainted}, ${input.sensitivity}, ${input.destructive}, ${input.consequential},
-                ${input.reason ? redact(input.reason) : null}, ${input.estCostUsd ?? null}::numeric, ${expiresAt})`;
+                ${reason ? redact(reason) : null}, ${input.estCostUsd ?? null}::numeric, ${expiresAt})`;
     } catch (err) {
       // The database's quote floor (P3) refusing a chat suggestion is the caller's input: a sentence, not a 500.
       if (isChatSuggestion(input.action) && dbRefused(err)) throw new Refused(400, 'A suggestion from chat needs your own words, quoted.');

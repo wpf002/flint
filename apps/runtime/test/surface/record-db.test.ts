@@ -28,6 +28,10 @@ import { Prisma } from '@prisma/client';
 import { sweep } from '../../src/ledger/sweep';
 import { DUE_COLUMNS, ruleOwner, type DuePrediction } from '../../src/predict/resolvers';
 import { backdatePrediction } from '../ledger/kit';
+import { modelsHere } from '../ollama-kit';
+
+// Ollama has listed the model as its own (every local call asks first): what makes a model "not here" is model/here.test.ts's.
+modelsHere(['muse-glimmer:30b']);
 
 const runAt = (now: Date): Omit<SourceRun, 'cursor'> => ({ now, signal: new AbortController().signal, fetch: async () => new Response(null, { status: 599 }) });
 const fakeSource = (name: SourceName, observations: () => SourceObservation[]): Source => ({ name, cadenceMs: 1, run: async () => ({ observations: observations(), metrics: [] }) });

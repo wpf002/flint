@@ -412,8 +412,11 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
     return [{ component: 'postgres', status: 'down' }];
   }
 
+  // A second opinion's job (forecast.reason) is never run again, so each one that fails, is killed or runs out of
+  // time is a dead letter at once, where every other queue's takes three failures. Counted here, one missed second
+  // opinion would read as a failing queue for a day. They are left out: a missed one is said on Forecasts.
   const bus = await db.$queryRaw<Array<{ dead: bigint; stuck: bigint }>>`
-    SELECT (SELECT count(*) FROM pgboss.job WHERE name = 'dead' AND created_on > ${ago(24 * 3_600_000)}) AS dead,
+    SELECT (SELECT count(*) FROM pgboss.job WHERE name = 'dead' AND created_on > ${ago(24 * 3_600_000)} AND source_name IS DISTINCT FROM 'forecast.reason') AS dead,
            (SELECT count(*) FROM pgboss.job WHERE state = 'active' AND started_on < ${ago(STUCK_ACTIVE_MS)}) AS stuck`;
   const dead = Number(bus[0]?.dead ?? 0);
   const stuck = Number(bus[0]?.stuck ?? 0);
@@ -631,6 +634,8 @@ export const FORECAST_HEALTH = {
  *    forecast fail, needs a look and says which.
  *  - A number without enough history yet, or waiting for yesterday's number,
  *    is not a fault: it is said, as ok.
+ *  - The local model's second opinion (predict/reason.ts) leaves a mark when it
+ *    gave up waiting for chat: said for an hour, after everything above.
  */
 async function forecasts(d: CheckDeps): Promise<ComponentCheck> {
   const { db, now } = d;
@@ -673,6 +678,10 @@ async function forecasts(d: CheckDeps): Promise<ComponentCheck> {
     if (quietSince(kept?.at) > FORECASTS_LATE_MS) return { component, status: 'degraded', detail: FORECAST_HEALTH.noNumbers };
     if (kept && n(kept.inputs, 'failed')) return { component, status: 'degraded', detail: FORECAST_HEALTH.numbersFailed(n(kept.inputs, 'failed')) };
   }
+  // The second opinion's own mark (the local model's estimate gave up waiting for chat), within the hour. The
+  // forecasts themselves ran: this says one of them went without it.
+  const deferred = await db.healthCheck.findFirst({ where: { component: 'forecasts.deferral', at: { gt: new Date(now.getTime() - 3_600_000) } }, select: { detail: true } });
+  if (deferred?.detail) return { component, status: 'degraded', detail: clip(deferred.detail) };
   const made = n(run.inputs, 'ran') + n(run.inputs, 'steady') + n(run.inputs, 'same');
   const late = n(run.inputs, 'late');
   if (made) return { component, status: 'ok', detail: FORECAST_HEALTH.ran(made, late) };
@@ -838,7 +847,7 @@ export async function recordChecks(db: Db, checks: ComponentCheck[], at: Date): 
 /**
  * The report the console shows (GET /v1/health/report): each component's latest check.
  * A dotted name is a mark of its own (the triage worker's 'triage.deferral', a goal
- * review's 'goals.deferral'), not a component: nothing writes it an ok row, so it is
+ * review's 'goals.deferral', a second opinion's 'forecasts.deferral'), not a component: nothing writes it an ok row, so it is
  * left out, as the digest leaves it out. The 'triage' and 'goals' rows already
  * reflect a deferral within the hour.
  */

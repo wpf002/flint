@@ -44,6 +44,7 @@ import { predictionsStarted, sweep } from './ledger/sweep.js';
 import { SNAPSHOT_ACTION, runSnapshot } from './ledger/calibration.js';
 import { runForecasts, runSeries } from './predict/run.js';
 import { askQuestions } from './predict/questions.js';
+import { ReasonJob, runReason, sendReasons } from './predict/reason.js';
 import { makeRun } from './sources/exec.js';
 import { clones } from './sources/registry.js';
 
@@ -175,7 +176,7 @@ export function housekeepingJobs(ctx: JobContext): JobSpec[] {
         if (lines?.skipped) ctx.log(`the files backup's record has lines that are not its own, which were skipped (${lines.skipped})`);
         // The Mac itself, read once for the checks and the watchdog both: free space, remote access, the local models.
         const wantsModels = ctx.config.ollama !== undefined || (ctx.config.standbyModel !== undefined && !noStandby(ctx.config.standbyModel));
-        const machine = await readMachine({ home: ctx.config.home, ...(wantsModels ? { ollama: { url: ctx.config.ollama?.url ?? ctx.config.ollamaUrl ?? 'http://127.0.0.1:11434' } } : {}) }, now);
+        const machine = await readMachine({ home: ctx.config.home, ...(wantsModels ? { ollama: { url: ctx.config.ollamaUrl ?? 'http://127.0.0.1:11434', ...(ctx.config.ollamaProxied ? { proxied: true } : {}) } } : {}) }, now);
         const checks = await checkComponents({ db: ctx.db, config: ctx.config, now, sources, machine });
         await recordChecks(ctx.db, checks, now);
         const raised = await raise(ctx.db, await watchdog(ctx.db, ctx.config, now, machine), now, enqueue, await promoted(ctx));
@@ -306,7 +307,11 @@ export const ASK_CRON = '20 7 * * *';
  *  - ledger.snapshot: the night's scores (ledger/calibration.ts).
  *  - forecast.run: today's forecast of each number that is on (predict/run.ts).
  *  - ledger.ask: the day's questions for Will, about predictions only he can settle (predict/questions.ts).
- * None has job data. Log lines carry counts, ids and series keys, never a value or a prediction's words.
+ *  - forecast.reason: the local model's second opinion on one run's question (predict/reason.ts). Not on a
+ *    schedule: the forecast job sends one for each run that has a question, and only for a number whose Second
+ *    Opinion switch Will signed. With no such number nothing is ever sent, and this worker stays idle.
+ * Only forecast.reason has job data: a run's id. Log lines carry counts, ids and series keys, never a value or a
+ * prediction's words.
  */
 export function predictJobs(ctx: JobContext): JobSpec[] {
   if (!ctx.config.predict) return [];
@@ -329,6 +334,23 @@ export function predictJobs(ctx: JobContext): JobSpec[] {
         if (!(await predictionsStarted(ctx.db))) return;
         const c = await runForecasts({ db: ctx.db, tz: ctx.config.tz, log: ctx.log });
         if (c.allowed) ctx.log(`forecast: ${c.ran} forecast(s) and ${c.steady} steady of ${c.on} on; ${c.waiting} waiting for history, ${c.late} waiting for the latest number, ${c.same} already made, ${c.capped} capped, ${c.refused} refused, ${c.failed} failed`);
+        // The forecasts are written. Now, and never before, the second opinions are asked for: a failure here costs no forecast.
+        try {
+          const sent = await sendReasons({ db: ctx.db, bus: ctx.bus });
+          if (sent) ctx.log(`forecast: ${sent} second opinion(s) asked for`);
+        } catch (err) {
+          ctx.log(`forecast: the second opinions were not asked for: ${failureClass(err)}`);
+        }
+      },
+    },
+    {
+      // One run's second opinion, one at a time, yielding to chat. Its data is a run's id and nothing else.
+      queue: 'forecast.reason',
+      handler: async (jobs) => {
+        for (const job of jobs) {
+          const data = ReasonJob.safeParse(job.data);
+          if (data.success) await runReason({ db: ctx.db, bus: ctx.bus, config: ctx.config, log: ctx.log }, data.data);
+        }
       },
     },
     {

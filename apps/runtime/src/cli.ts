@@ -58,6 +58,7 @@
  * action still at APPROVAL waits for Will's signed approval of a proposal it
  * files once a day; a promoted one claims its cap and runs.
  */
+// Network: None of its own: it hands the Google sign-in a fetch scoped to Google's token endpoint (policy/egress.ts).
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, writeFileSync } from 'node:fs';

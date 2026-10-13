@@ -150,6 +150,8 @@ describe.skipIf(NO_DB)('the goal jobs on pg-boss', () => {
         if (req.url === '/api/chat') prompts.push(body);
         res.setHeader('content-type', 'application/json');
         if (req.url === '/internal/load') return void res.end(JSON.stringify({ chatInFlight }));
+        // Ollama's own listing: the model runs on it (every local call asks first, model/here.ts).
+        if (req.url === '/api/tags') return void res.end(JSON.stringify({ models: [{ name: 'stub-model', model: 'stub-model' }] }));
         // The model: a valid reply that suggests nothing.
         res.end(JSON.stringify({ model: 'stub-model', message: { role: 'assistant', content: JSON.stringify({ reasonCode: 'on_track', ops: [] }) }, done: true, done_reason: 'stop', prompt_eval_count: 10, eval_count: 5 }));
       });

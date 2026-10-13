@@ -65,9 +65,16 @@ export const ForecastEnableArgs = z
   });
 export type ForecastEnableArgs = z.infer<typeof ForecastEnableArgs>;
 
-/** What a forecast card's reason says, for good: fixed sentences, never a number. */
+/**
+ * What a forecast card's reason says, for good: fixed sentences, never a number. A card's reason is also what KIND
+ * of card it is, and it cannot change once the card is filed:
+ *  - `enable`: it turns its numbers on (and the local model's second opinion, where it lists one).
+ *  - `opinion`: every number on it was already on when it was filed. It changes second opinions and nothing else:
+ *    signed after one of its numbers was turned off, it is refused, and never turns forecasts back on.
+ */
 export const FORECAST_REASONS = {
   enable: 'Approving turns on Flint’s forecasts of these numbers, on this Mac.',
+  opinion: 'Approving changes only the local model’s second opinion on these numbers, which Flint already forecasts.',
 } as const;
 
 /** How sensitive a set of series is, taken together: the most sensitive of them. */
@@ -131,7 +138,10 @@ export type ForecastRow = z.infer<typeof ForecastRow>;
  * is on, `on` otherwise. `waiting`: Turn On Predictions cards that wait for
  * Will's signature, each with how many numbers it names. `questions`: how many
  * wait for him; `announce`: whether the header may show a dot for them (only
- * once he has let Flint ask on its own).
+ * once he has let Flint ask on its own). `secondOpinion`: the Turn On sheet
+ * may offer the local model's own estimate (predictions run on this Mac and a
+ * local model is set). A runtime from before the second opinion does not say:
+ * absent is no, so the server reads an older runtime's page during a deploy.
  */
 export const PredictionsPage = z
   .object({
@@ -140,6 +150,7 @@ export const PredictionsPage = z
     waiting: z.array(z.object({ id: Ref, numbers: Count }).strict()).max(20),
     questions: Count,
     announce: z.boolean(),
+    secondOpinion: z.boolean().optional(),
   })
   .strict();
 export type PredictionsPage = z.infer<typeof PredictionsPage>;
@@ -155,12 +166,27 @@ export type PredictionsWaiting = z.infer<typeof PredictionsWaiting>;
 export const PanelFact = z.object({ label: PanelWords, value: PanelWords, says: PanelSentence }).strict();
 export type PanelFact = z.infer<typeof PanelFact>;
 
-/** One number, open: where it stands, each step of its forecast, its yes/no chance, and how its ranges have held. */
+/**
+ * The local model's second opinion on one number that is on. `on`: its switch.
+ * `says`: the one sentence there is to say (what the model said of today's
+ * question, that it has said nothing, that it is off, or why it cannot be
+ * turned on). `offer`: it is off and can be turned on from here now. The
+ * model's estimate is shown as this sentence and nowhere else.
+ */
+export const SecondOpinion = z.object({ on: z.boolean(), says: PanelSentence, offer: z.boolean() }).strict();
+export type SecondOpinion = z.infer<typeof SecondOpinion>;
+
+/** One number, open: where it stands, each step of its forecast, its yes/no chance, the local model's second opinion, and how its ranges have held. */
 export const SeriesView = z
   .object({
     number: ForecastRow,
     forecast: z.array(PanelFact).max(8),
     chance: PanelFact.nullable(),
+    /**
+     * Null while the number is off: there is nothing to give a second opinion on. Absent from a runtime that is
+     * older than the second opinion (read as null, so the server takes its answer during a deploy).
+     */
+    opinion: SecondOpinion.nullable().optional(),
     record: PanelSentence,
     /** A Turn On card that names it waits for Will. */
     waiting: z.boolean(),
@@ -215,10 +241,18 @@ export const AccuracyView = z
   .strict();
 export type AccuracyView = z.infer<typeof AccuracyView>;
 
-/** Turn On Predictions from the console: the numbers Will ticked. The card is `{series, reason: []}`, sorted, as he signs it. */
-export const TurnOnBody = z.object({ series: z.array(SeriesKey).min(1).max(40) }).strict();
+/**
+ * Turn On Predictions from the console: the numbers Will ticked, and whether the local model gives its second
+ * opinion on them (all of them, or none). The card is `{series, reason}`, sorted, as he signs it: `reason` is the
+ * same list when `opinion` is on, and empty otherwise.
+ */
+export const TurnOnBody = z.object({ series: z.array(SeriesKey).min(1).max(40), opinion: z.boolean().optional() }).strict();
 /** A card filed: its id, and whether it was one already waiting. */
-export const PredictFiled = z.object({ id: Ref, deduped: z.boolean() }).strict();
+/**
+ * The card that was filed. `onlyOpinion`: every number on it was already on when it was filed (as the filing read
+ * them), so approving it changes second opinions and nothing else. Said only when it is so.
+ */
+export const PredictFiled = z.object({ id: Ref, deduped: z.boolean(), onlyOpinion: z.literal(true).optional() }).strict();
 export const PredictDone = z.object({ ok: z.literal(true) }).strict();
 /** A body with nothing in it (Turn Off). */
 export const PredictEmptyBody = z.object({}).strict();
@@ -243,6 +277,8 @@ export const PREDICT_SAYS = {
   nothing: 'It changes nothing.',
   offHere: 'Predictions are switched off on this Mac.',
   alreadyOff: 'Forecasts for this number are already off.',
+  noModel: 'No local model is set on this Mac, so there is no second opinion to turn on.',
+  opinionOff: 'The second opinion for this number is already off.',
   answered: 'That question was already answered.',
   noQuestion: 'That question no longer exists.',
   unanswerable: 'Flint can’t show what this one was about, so it can only be skipped.',

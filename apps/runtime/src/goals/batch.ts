@@ -58,6 +58,7 @@
  * records `none:unavailable`. A job that died after filing its cards files
  * none twice: its next run finds them waiting.
  */
+// Network: None of its own: it passes a test's fetch through to the plan stage (goals/planner.ts).
 import { Prisma } from '@prisma/client';
 import {
   CHECK_PATHS,
@@ -91,6 +92,7 @@ import { labelFor, labelOf } from './items.js';
 import { GOALS_ACTOR } from './ontrack.js';
 import { activePlan } from './ops.js';
 import { planDiff, type PlanFacts } from './planner.js';
+import type { LocalModels } from '../model/here.js';
 import { PLAN_QUEUE, REVIEW_ACTION, reviewStanding, type PlanJob } from './review.js';
 import { STEP_TEMPLATES, STEP_TEMPLATES_REF, resolveReply, stepTitle, type DiffItem, type Held, type TemplateOp } from './steps.js';
 
@@ -466,10 +468,11 @@ export interface PlanStageDeps {
   db: Db;
   bus: Pick<Bus, 'boss'>;
   config: Pick<Config, 'tz' | 'server' | 'ollama'>;
-  /** For the tests: the load check, the model's fetch and its timeout. */
+  /** For the tests: the load check, the model's fetch and its timeout, and what is known of the models on this Mac. */
   load?: () => Promise<Load>;
   fetch?: typeof fetch;
   timeoutMs?: number;
+  models?: LocalModels;
   now?: () => Date;
   log?: (msg: string) => void;
   /** For the tests: how a card is filed, and a fault between filing the cards and writing the review. */
@@ -577,6 +580,7 @@ export async function runPlan(d: PlanStageDeps, job: PlanJob): Promise<PlanOutco
     resolve: (ops) => resolveReply(ops, { steps: snap.steps, items: snap.items, criteria: snap.criteria }, tz, now),
     ...(d.fetch ? { fetch: d.fetch } : {}),
     ...(d.timeoutMs ? { timeoutMs: d.timeoutMs } : {}),
+    ...(d.models ? { models: d.models } : {}),
   });
   // Stately on the goal: this job is running, so one more may wait.
   const again = (data: PlanJob, seconds: number) => d.bus.boss.send(PLAN_QUEUE, data, { singletonKey: job.goalId, startAfter: seconds });

@@ -33,6 +33,7 @@ import { GOAL_SAYS, GOAL_STATUS_SAYS, HEALTH_NAMES, JOB_WORDS, jobFailedNote, no
 import { ACTION, nextAfterFailure } from '../src/backup/nightly';
 import { digestBody, digestTitle, goalsSentence, questionsSentence } from '../src/digest';
 import { DEFERRAL_SAYS } from '../src/goals/batch';
+import { DEFERRAL_MARK as OPINION_MARK, DEFERRAL_SAYS as OPINION_WAITED, MISSED_SAYS as OPINION_MISSED } from '../src/predict/reason';
 import { REVIEWS_STOPPED } from '../src/goals/late';
 import { BACKUP_HEALTH, DATABASE_HEALTH, FORECAST_HEALTH, GOAL_HEALTH, LEDGER_HEALTH, NEXUS_HEALTH, TASK_HEALTH, UPKEEP_HEALTH } from '../src/health/checks';
 import { MODEL_HEALTH, REMOTE_HEALTH, diskCheck, remoteAccessCheck } from '../src/health/machine';
@@ -307,8 +308,13 @@ describe('the runtime’s notes to Will', () => {
       ...[[1, 1], [2, 1], [9, 3]].map(([n, late]) => FORECAST_HEALTH.ran(n!, late)),
       ...[1, 2, 12].flatMap((n) => [FORECAST_HEALTH.waiting(n), FORECAST_HEALTH.late(n), FORECAST_HEALTH.failed(n), FORECAST_HEALTH.refused(n), FORECAST_HEALTH.capped(n), FORECAST_HEALTH.numbersFailed(n)]),
       ...[2, 3, 30].map((n) => FORECAST_HEALTH.down(n)),
+      // The second opinion's own mark: the local model's estimate gave up waiting for chat, or could not be saved.
+      OPINION_WAITED, OPINION_MISSED,
     ];
-    expect(health).toHaveLength(31);
+    expect(health).toHaveLength(33);
+    expect(OPINION_WAITED).toBe('Chat was busy for 10 minutes, so a forecast went without the local model’s second opinion.');
+    expect(OPINION_MISSED).toBe('The local model’s second opinion couldn’t be saved, so a forecast went without it.');
+    expect(OPINION_MARK).toBe('forecasts.deferral');
     for (const line of health) said(line);
     expect(HEALTH_NAMES.forecasts).toBe('Forecasts');
     expect([FORECAST_HEALTH.ran(11), FORECAST_HEALTH.ran(1), FORECAST_HEALTH.failed(1), FORECAST_HEALTH.waiting(1), FORECAST_HEALTH.down(2)]).toEqual([
@@ -325,8 +331,12 @@ describe('the runtime’s notes to Will', () => {
     const checks = readFileSync(join(SRC, 'health', 'checks.ts'), 'utf8');
     const fn = checks.slice(checks.indexOf('async function forecasts('), checks.indexOf('/** The hourly check has not run in this long: degraded. */'));
     expect(fn.length).toBeGreaterThan(500);
-    expect(fn.match(/\bdetail: /g)).toHaveLength(13);
+    expect(fn.match(/\bdetail: /g)).toHaveLength(15);
     expect(fn.match(/detail: FORECAST_HEALTH\.\w+(\([^)]*\)+)?/g)).toHaveLength(13);
+    // ...or the second opinion's mark, read as it was written (one of the two sentences above), for an hour.
+    expect(fn.match(/select: \{ detail: true \}/g)).toHaveLength(1);
+    expect(fn).toContain("where: { component: 'forecasts.deferral', at: { gt: new Date(now.getTime() - 3_600_000) } }");
+    expect(fn.match(/detail: clip\(deferred\.detail\)/g)).toHaveLength(1);
     expect(digestBody({ relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 }, ['forecasts'])).toContain('Forecasts');
   });
 

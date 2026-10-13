@@ -160,8 +160,11 @@ describe("Node's env proxy is on: the token is never sent through it", () => {
     expect(await askServer(PROXY, 'tok', '/inference', undefined, f, [])).toEqual({ kind: 'proxied' });
     expect(await askServer({ HTTP_PROXY: PROXY.HTTP_PROXY }, 'tok', '/inference', undefined, f, ['--use-env-proxy'])).toEqual({ kind: 'proxied' });
     expect(asked).toBe(0);
-    // With this Mac named in NO_PROXY, or the switch off, it asks as before.
-    expect((await askServer({ ...PROXY, NO_PROXY: 'localhost,127.0.0.1,::1' }, 'tok', '/inference', undefined, f, [])).kind).toBe('answer');
+    // `::1` without its brackets names nothing to Node, which would still send the token to the proxy: nothing is sent.
+    expect(await askServer({ ...PROXY, NO_PROXY: 'localhost,127.0.0.1,::1' }, 'tok', '/inference', undefined, f, [])).toEqual({ kind: 'proxied' });
+    expect(asked).toBe(0);
+    // With this Mac named in NO_PROXY as Node needs it, or the switch off, it asks as before.
+    expect((await askServer({ ...PROXY, NO_PROXY: 'localhost,127.0.0.1,[::1]' }, 'tok', '/inference', undefined, f, [])).kind).toBe('answer');
     expect((await askServer({ HTTP_PROXY: PROXY.HTTP_PROXY }, 'tok', '/inference', undefined, f, [])).kind).toBe('answer');
     expect(asked).toBe(2);
   });
@@ -173,7 +176,8 @@ describe("Node's env proxy is on: the token is never sent through it", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain(OFFLINE.lines[0]);
     expect(r.stdout).toContain("This shows this shell's settings, not the running server's, and no cloud side: the running server was not asked.");
-    expect(r.stdout).toContain('Add ::1 to NO_PROXY, or run it without the proxy.');
+    // Node matches an IPv6 address in NO_PROXY only with its brackets, so the advice says so.
+    expect(r.stdout).toContain('Add [::1] to NO_PROXY, brackets included, or run it without the proxy.');
     expect(r.stdout + r.stderr).not.toContain('SECRET');
     expect(r.stdout + r.stderr).not.toContain('proxy.corp.example');
   });

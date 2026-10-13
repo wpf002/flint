@@ -10,14 +10,17 @@
  *   GET  /v1/predictions/series/:key                  one number, open (SeriesAnswer)
  *   GET  /v1/predictions/questions                    Will's questions (QuestionsPage)
  *   GET  /v1/predictions/accuracy                     how Flint has done (AccuracyView)
- *   POST /v1/predictions/turn-on {series}             the Turn On Predictions card, for the numbers he ticked
+ *   POST /v1/predictions/turn-on {series, opinion?}   the Turn On Predictions card, for the numbers he ticked (with the local model's second opinion, when he switched it on)
  *   POST /v1/predictions/series/:key/turn-off {}      unsigned, audited
+ *   POST /v1/predictions/series/:key/second-opinion-off {}  unsigned, audited: the local model stops estimating it, its forecasts stay on
  *   POST /v1/predictions/questions/:id/answer {answer}  his yes, no or skip: unsigned, audited, recorded as his
  *
  * With predictions switched off on this Mac (FLINT_PREDICT), turning on and
  * answering are refused with the sentence that says so, and the page, the
- * questions and the scores say it too. Turning a number off stays allowed: it
- * only narrows what Flint does. The reads still answer.
+ * questions and the scores say it too. Turning a number off stays allowed, and
+ * so does turning its second opinion off: each only narrows what Flint does.
+ * The reads still answer. A second opinion is asked for only where a local
+ * model is set: without one, the card is refused in a sentence, never filed.
  *
  * Input is checked with the shared contracts (@flint/policy); a refusal is one
  * of PREDICT_SAYS's sentences with its code, and a zod failure is logged by
@@ -30,7 +33,7 @@ import { AccuracyView, AnswerBody, PREDICT_SAYS, PredictDone, PredictEmptyBody, 
 import type { RuntimeScope } from '../config.js';
 import type { Db } from '../db.js';
 import { Refused } from '../governance/proposals.js';
-import { proposeForecasts, turnOffSeries } from '../predict/enable.js';
+import { proposeForecasts, turnOffOpinion, turnOffSeries } from '../predict/enable.js';
 import { answerQuestion, questionsPage, questionsWaiting } from '../predict/questions.js';
 import { accuracyView, predictionsPage, questionsAnnounced, seriesView } from '../predict/view.js';
 
@@ -40,6 +43,8 @@ export interface PredictionRouteDeps {
   tz: string;
   /** Predictions may run on this Mac (FLINT_PREDICT is on). Off: the views say so, and nothing can be turned on from here. */
   predict?: boolean;
+  /** A local model is set on this Mac. Without one there is no second opinion to turn on. */
+  model?: boolean;
 }
 
 /** An answer that broke its contract on the way out: the runtime's bug (a 500), never a leak. */
@@ -64,7 +69,7 @@ const None = z.object({}).strict();
 
 export function registerPredictionRoutes(app: FastifyInstance, d: PredictionRouteDeps): void {
   const { db, need, tz } = d;
-  const view = { tz, predict: d.predict ?? false };
+  const view = { tz, predict: d.predict ?? false, model: d.model ?? false };
   const pre = { preHandler: need('proposals') };
 
   /** A refusal as Will reads it, with its code (the server passes on only these); anything else to the app's handler. */
@@ -118,16 +123,26 @@ export function registerPredictionRoutes(app: FastifyInstance, d: PredictionRout
   // The card Will signs in the console, for the numbers he ticked. Not while predictions are switched off on this
   // Mac: a card signed then would turn numbers on that nothing forecasts.
   app.post('/v1/predictions/turn-on', pre, guarded(async (req) => {
-    const { series } = parse(TurnOnBody, req.body);
+    const { series, opinion } = parse(TurnOnBody, req.body);
     if (!view.predict) throw new Refused(409, PREDICT_SAYS.offHere);
-    const filed = await proposeForecasts(db, series, new Date(), 'console');
-    return out(PredictFiled, { id: filed.id, deduped: filed.deduped });
+    // The local model's second opinion is signed only where there is a local model to give it.
+    if (opinion === true && !view.model) throw new Refused(409, PREDICT_SAYS.noModel);
+    const filed = await proposeForecasts(db, series, new Date(), 'console', opinion === true);
+    // Whether every number on the card is already on (read as it was filed): the console words the card from this.
+    return out(PredictFiled, { id: filed.id, deduped: filed.deduped, ...(filed.onlyOpinion ? { onlyOpinion: true as const } : {}) });
   }));
 
   app.post('/v1/predictions/series/:key/turn-off', pre, guarded(async (req) => {
     const { key } = parse(Series, req.params);
     parse(PredictEmptyBody, req.body ?? {});
     await turnOffSeries(db, key);
+    return out(PredictDone, { ok: true });
+  }));
+
+  app.post('/v1/predictions/series/:key/second-opinion-off', pre, guarded(async (req) => {
+    const { key } = parse(Series, req.params);
+    parse(PredictEmptyBody, req.body ?? {});
+    await turnOffOpinion(db, key);
     return out(PredictDone, { ok: true });
   }));
 

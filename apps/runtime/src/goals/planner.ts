@@ -13,6 +13,13 @@
  *  - Checked three times: the reply ended on its own (not cut off); zod, strict,
  *    with a rule per operation; then resolve(), which holds every id against
  *    the plan, the goal's links and its checks. Any failure uses up an attempt.
+ *  - Only a model on this Mac (model/here.ts): a cloud model's name, an Ollama
+ *    that is not this machine, or a model Ollama's own listing does not say
+ *    runs here is "unavailable" before anything is asked, claimed or sent. A
+ *    goal's words never reach a model that runs somewhere else. The listing is
+ *    asked first, and again immediately before EVERY request (after the wait
+ *    for the slot, the load check and the claim; and before a second attempt),
+ *    so his words go only on a word of Ollama's at most two seconds old.
  *  - Before EVERY request, in order: the process's model slot (one local
  *    request at a time, shared with triage); at most 2 requests a review,
  *    counted across the runs of a review that yielded to chat; chat's load
@@ -26,11 +33,13 @@
  *    estimateTokens: done steps are dropped first, then items, then the latest
  *    open steps, and the drops are counted.
  */
+// Network: Ollama on this Mac only, a scoped POST to /api/chat, after model/here.ts says the model runs here.
 import { z } from 'zod';
 import { OllamaProvider } from '@flint/core/ollama';
 import { GOAL_BUDGETS, dataBlock, estimateTokens, type CheckState } from '@flint/policy';
 import { scopedFetch } from '../policy/egress.js';
 import { modelSlot } from '../model/slot.js';
+import { LOCAL_MODELS, type AskedOllama, type LocalModels } from '../model/here.js';
 import type { Load } from '../triage/load.js';
 import { STEP_TEMPLATES, STEP_TEMPLATE_IDS, SUGGESTED_STATUSES, type ReplyOp } from './steps.js';
 
@@ -196,7 +205,7 @@ export function planPrompt(f: PlanFacts, budget: number): { system: string; user
 export const promptBudget = (numCtx?: number): number => (numCtx ?? DEFAULT_NUM_CTX) - REPLY_TOKENS - PROMPT_MARGIN;
 
 export interface PlanDeps<T> {
-  ollama: { url: string; model: string; numCtx?: number };
+  ollama: AskedOllama & { numCtx?: number };
   /** Before each request: is a chat turn running? */
   load: () => Promise<Load>;
   /** One slot of goal.review.local's daily cap, or false when it is used up. Asked once per review. */
@@ -209,6 +218,8 @@ export interface PlanDeps<T> {
   resolve: (ops: readonly ReplyOp[]) => T | null;
   fetch?: typeof fetch;
   timeoutMs?: number;
+  /** What is known of the models on this Mac (tests): the process's own record when not given. */
+  models?: LocalModels;
 }
 
 export type Planned<T> =
@@ -219,6 +230,12 @@ class Stop extends Error {}
 
 export async function planDiff<T>(f: PlanFacts, d: PlanDeps<T>): Promise<Planned<T>> {
   const started = Date.now();
+  /** Is the model on this Mac, on Ollama's own word from the last two seconds (model/here.ts)? */
+  const here = (): Promise<boolean> => (d.models ?? LOCAL_MODELS).runsHere(d.ollama, d.fetch ?? fetch);
+  // A model that is not known to run on this Mac is never asked: nothing is claimed, nothing is sent.
+  if (!(await here())) {
+    return { ok: false, why: 'unavailable', modelMs: Date.now() - started, requests: Math.max(0, d.used ?? 0), claimed: d.claimed ?? false };
+  }
   const origin = new URL(d.ollama.url).origin;
   const post = scopedFetch([{ origin, pathPrefix: '/api/chat', methods: ['POST'] }], d.fetch ?? fetch, d.timeoutMs ?? 90_000);
   let requests = Math.max(0, d.used ?? 0);
@@ -226,7 +243,7 @@ export async function planDiff<T>(f: PlanFacts, d: PlanDeps<T>): Promise<Planned
   let made = 0;
   let replied = false;
   let claimed = d.claimed ?? false;
-  let stopped: 'capped' | 'deferred' | undefined;
+  let stopped: 'capped' | 'deferred' | 'unavailable' | undefined;
   // Every request the provider makes, its own retries included, comes through here.
   const gated = ((url: string | URL | Request, init?: RequestInit) =>
     modelSlot(async () => {
@@ -241,6 +258,12 @@ export async function planDiff<T>(f: PlanFacts, d: PlanDeps<T>): Promise<Planned
           throw new Stop('the day’s cap is used up');
         }
         claimed = true;
+      }
+      // Ollama is asked again at the last moment, before EVERY request: the slot may have been another caller's for
+      // seconds, and a second attempt comes after the first's whole reply. On a no, or no word, nothing is sent.
+      if (!(await here())) {
+        stopped = 'unavailable';
+        throw new Stop('the model is not on this Mac');
       }
       requests += 1;
       made += 1;

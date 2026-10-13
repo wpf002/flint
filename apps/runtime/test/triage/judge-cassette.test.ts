@@ -11,6 +11,9 @@ import { CASSETTE_EVENT } from '../fixtures/cassette-event';
 import { judge } from '../../src/triage/judge';
 import { decide } from '../../src/triage/triage';
 import { noCode } from './helpers';
+import { modelsHere } from '../ollama-kit';
+
+modelsHere([cassette.model]);
 
 describe('judge against the recorded Ollama reply', () => {
   it('sends what was recorded, and reads the reply as a judgement', async () => {

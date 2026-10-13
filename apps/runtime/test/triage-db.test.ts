@@ -20,6 +20,10 @@ import { runInternal } from '../src/governance/internal';
 import { markProcessed, recordEvent, triageEnqueue } from '../src/events/record';
 import { processEvent, MAX_DEFERRALS, type WorkerDeps } from '../src/triage/worker';
 import type { Source, SourceName, SourceObservation, SourceRun } from '../src/sources/types';
+import { fresh, hangs, listening, modelsHere, tags } from './ollama-kit';
+
+// Ollama has listed the model as its own (every local call asks first): what makes a model "not here" is model/here.test.ts's.
+modelsHere(['muse-glimmer:30b']);
 
 const runAt = (now: Date): Omit<SourceRun, 'cursor'> => ({ now, signal: new AbortController().signal, fetch: async () => new Response(null, { status: 599 }) });
 const fakeSource = (name: SourceName, observations: () => SourceObservation[]): Source => ({ name, cadenceMs: 1, run: async () => ({ observations: observations(), metrics: [] }) });
@@ -130,6 +134,44 @@ describe.skipIf(NO_DB)('triage on flint_test', () => {
     expect(await db.healthCheck.findFirst({ where: { component: 'triage.deferral', status: 'degraded' } })).toMatchObject({
       detail: 'Chat was busy for 10 minutes, so an event went to Other without the model’s review.',
     });
+  });
+
+  it('a model this Mac’s Ollama serves from elsewhere is never sent an item’s title: the listing is asked first, and the event is decided without the model', async () => {
+    const SECRET = 'CANARY-issue-title please look at this';
+    const known = [1, 2, 3, 4, 5].map((n) => issue(n));
+    const claims = async () => (await db.actionCounter.findFirst({ where: { action: 'triage.local_model' } }))?.count ?? 0;
+    const before = await claims();
+    /** One new issue, triaged against a stand-in Ollama whose chat always answers and whose listing says `listing`. */
+    const triaged = async (n: number, listing: () => Response | Promise<Response>) => {
+      await syncOnce(db, fakeSource('github', () => [...known, ...Array.from({ length: n - 20 }, (_, i) => issue(21 + i, `${SECRET} ${21 + i}`))]), runAt(new Date()), 'UTC', triageEnqueue(bus));
+      let asked = 0;
+      const o = listening(listing, (async () => (asked++, reply({ relevance: 0.95, reasonCode: 'needs_will', reasoning: 'r' }))) as unknown as typeof fetch);
+      expect(await drain(deps({ fetch: o.fetch, models: fresh(40) }))).toEqual(['decided']);
+      const ev = await db.sourceEvent.findFirstOrThrow({ where: { sourceRef: { startsWith: `issue:wpf002/flint#${n}@` } } });
+      return { o, asked, decision: await db.triageDecision.findUniqueOrThrow({ where: { sourceEventId: ev.id } }) };
+    };
+    const MODEL = 'muse-glimmer:30b';
+    // (The last number: how many times the listing is asked. One that fails at once is asked once more.)
+    const cases: Array<[number, string, () => Response | Promise<Response>, number]> = [
+      [21, 'its listing marks the model as run elsewhere', () => tags([{ name: MODEL, remote_host: 'https://ollama.com:443', remote_model: 'gpt-oss:120b' }]), 1],
+      [22, 'its listing hangs', hangs, 1],
+      [23, 'its listing fails while chat would have answered', () => new Response('{"error":"x"}', { status: 500 }), 2],
+      [24, 'its listing does not hold the model', () => tags([{ name: 'llama3.1:latest' }]), 1],
+    ];
+    for (const [n, what, listing, asks] of cases) {
+      const r = await triaged(n, listing);
+      // Decided without the model, quietly: never escalated on a guess. The model was not asked, so the title went nowhere.
+      expect(r.decision, what).toMatchObject({ action: 'log', lane: 'quiet', decidedBy: 'fallback:unavailable' });
+      expect(r.asked, what).toBe(0);
+      expect(r.o.seen.map((x) => `${x.method} ${new URL(x.url).pathname}`), what).toEqual(Array(asks).fill('GET /api/tags'));
+    }
+    // No slot of the hour's cap was taken for any of them.
+    expect(await claims()).toBe(before);
+    // Listed as run here, the same kind of event is judged by the model, which reads its title.
+    const here = await triaged(25, () => tags([{ name: MODEL }]));
+    expect(here.decision).toMatchObject({ action: 'escalate', lane: 'relevant', decidedBy: `model:ollama:${MODEL}` });
+    expect(here.asked).toBe(1);
+    expect(await claims()).toBe(before + 1);
   });
 
   it('per day: a handoff escalates once per sender; the next is logged quietly', async () => {

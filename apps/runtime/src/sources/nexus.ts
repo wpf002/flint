@@ -16,6 +16,7 @@
  *  - When Nexus ships `changes_since` (Decision 4) this switches to it; memory
  *    is not attached to entities in P1.
  */
+// Network: Nexus's own address only, through the scoped fetch the scheduler hands this source.
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { clip } from './text.js';

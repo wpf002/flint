@@ -7,6 +7,7 @@
  * body that is not the contract) means "wait", never "go". The one exception
  * is a refused connection: no server is running, so no chat turn is either.
  */
+// Network: The Flint server's own address only, a scoped POST to /internal/load.
 import { LoadResponse } from '@flint/policy';
 import type { Config } from '../config.js';
 import { scopedFetch } from '../policy/egress.js';

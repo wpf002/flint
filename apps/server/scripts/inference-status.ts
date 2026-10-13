@@ -130,7 +130,7 @@ export async function askServer(env: Env, token: string | undefined, path: strin
 }
 
 const TOKEN_HOW = 'Set FLINT_TOKEN, or put the token in the file ~/.flint/token.';
-const PROXY_HOW = "Node's env proxy is on (NODE_USE_ENV_PROXY) and NO_PROXY does not name this Mac, so this command's token would go to the proxy first. Add ::1 to NO_PROXY, or run it without the proxy.";
+const PROXY_HOW = "Node's env proxy is on (NODE_USE_ENV_PROXY) and NO_PROXY does not name this Mac, so this command's token would go to the proxy first. Add [::1] to NO_PROXY, brackets included, or run it without the proxy.";
 const refused = (status: number): boolean => status === 401 || status === 403;
 /** A mode's name as the server gave it, when it is one; never an arbitrary string from a response. */
 const modeName = (v: unknown): string => (typeof v === 'string' && (MODES as readonly string[]).includes(v) ? v : 'unknown');
