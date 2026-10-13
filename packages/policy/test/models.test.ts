@@ -336,6 +336,27 @@ describe('asking first: a word’s age, and what silence means (the one rule the
     expect(places.runsHere(HERE, 'm:1')).toBe(true);
   });
 
+  it('a word from an ask during which the clock went back is dated when it landed, never later', async () => {
+    const t = { now: 10_000_000, asks: 0 };
+    const places = new ModelPlaces({ now: () => t.now, ask: async () => { t.asks += 1; t.now -= 60_000; return { ollama: ROWS }; } });
+    await places.fresh(HERE);
+    const landed = t.now;
+    expect(places.runsHere(HERE, 'm:1')).toBe(true);
+    // Five minutes from when it landed. Dated by its ask's start (a minute "later"), it would be believed a minute longer.
+    t.now = landed + PLACE_MAX_AGE_MS;
+    expect(places.runsHere(HERE, 'm:1')).toBe(true);
+    t.now = landed + PLACE_MAX_AGE_MS + 1;
+    expect(places.runsHere(HERE, 'm:1')).toBe(false);
+    // The same for a server that says it is no Ollama.
+    const other = new ModelPlaces({ now: () => t.now, ask: async () => { t.now -= 60_000; return 'other' as const; } });
+    t.now = 10_000_000;
+    await other.fresh(HERE);
+    const at = t.now;
+    expect(other.said(HERE)).toBe('other');
+    t.now = at + PLACE_MAX_AGE_MS + 1;
+    expect(other.said(HERE)).toBeUndefined();
+  });
+
   it('clear forgets everything, the silences too', async () => {
     const { t, places } = rig(async () => undefined);
     await places.fresh(HERE);

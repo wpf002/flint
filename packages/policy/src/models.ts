@@ -256,8 +256,11 @@ export class ModelPlaces {
   /** What the server at this address last said, when that is recent enough to believe. */
   #fresh(baseURL: string | undefined): Heard | undefined {
     if (!baseURL) return undefined;
+    // The clock is read first: whoever keeps it may forget everything as it reads (a clock set back), and what is
+    // looked up after that is what is left.
+    const now = this.#now();
     const heard = this.#heard.get(serverOf(baseURL));
-    return heard && this.#now() - heard.at <= this.#maxAge() ? heard : undefined;
+    return heard && now - heard.at <= this.#maxAge() ? heard : undefined;
   }
 
   /**
@@ -378,12 +381,15 @@ export class ModelPlaces {
   async #try(at: string, from: number, signal: AbortSignal, ask: AskPlace | undefined): Promise<boolean> {
     try {
       const said = ask ? await ask(at, signal) : undefined;
-      if (said === 'other') this.notOllama(at, from);
-      else if (said) this.learn(at, said.ollama, from);
+      // The word is as old as its ask, and never dated after the time it landed: a clock set back while the ask
+      // was under way must not leave a word that reads as younger than it is.
+      const dated = Math.min(from, this.#now());
+      if (said === 'other') this.notOllama(at, dated);
+      else if (said) this.learn(at, said.ollama, dated);
       // Its word is an answer that is now what is known of this server. A "no" that did not replace a listing still
       // believed (two addresses on one origin) left that listing as old as it was: no word about it.
       const heard = this.#heard.get(serverOf(at));
-      return said !== undefined && heard !== undefined && !heard.quiet && heard.at >= from;
+      return said !== undefined && heard !== undefined && !heard.quiet && heard.at >= dated;
     } catch {
       // Down or slow: nothing is learned.
       return false;

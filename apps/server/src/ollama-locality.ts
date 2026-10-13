@@ -60,6 +60,13 @@
  * minute, and is how a server that wants a key on every request is known at
  * all.
  *
+ * A word's age is counted on the Mac's clock, which can be set back. A clock
+ * that shows an earlier time than it has shown makes every age untellable (a
+ * listing from before the change would read as younger than it is, and be
+ * believed for as much longer as the clock went back), so everything believed
+ * is forgotten then, and each server is asked again before anything on it is
+ * taken as local.
+ *
  * What a word means, what silence means and how old a word may be are
  * @flint/policy's (models.ts `ModelPlaces`), which the runtime keeps one of too
  * (apps/runtime/src/model/here.ts), so the two cannot read a listing or a
@@ -90,12 +97,14 @@ export class OllamaLocality {
   /** The addresses asked every minute: where each server's listing is. */
   readonly #watched = new Set<string>();
   #timer: ReturnType<typeof setInterval> | undefined;
+  /** The latest time the clock has shown. */
+  #latest = Number.NEGATIVE_INFINITY;
 
   constructor(private readonly opts: OllamaLocalityOptions = {}) {
     this.#places = new ModelPlaces({
       ...(opts.maxAgeMs !== undefined ? { maxAgeMs: opts.maxAgeMs } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-      ...(opts.now ? { now: opts.now } : {}),
+      now: () => this.#now(),
       // One request for the listing. (A redirect is an error: a listing that came from another address is not this one's word.)
       ask: async (at, signal) => {
         const r = await (this.opts.fetchImpl ?? fetch)(`${at}/api/tags`, { signal, redirect: 'error' });
@@ -104,6 +113,17 @@ export class OllamaLocality {
         return said;
       },
     });
+  }
+
+  /**
+   * The time, as every age here is counted. A clock that has gone back (the Mac's was set, or corrected) leaves
+   * no age to count: what was believed is forgotten, and the addresses that are watched stay watched.
+   */
+  #now(): number {
+    const t = (this.opts.now ?? Date.now)();
+    if (t < this.#latest) this.#places.clear();
+    this.#latest = t;
+    return t;
   }
 
   /**
