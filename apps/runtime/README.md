@@ -495,7 +495,10 @@ Flint):
   card's title and its description the card's quote; the card's approval is
   used once, for this goal;
 - **Make It a Goal:** your signed start of a suggestion whose own card still
-  waits, with the title and description you signed;
+  waits, with exactly what you signed there: its title, its description, its
+  checks, how often it is reviewed and its date. That approval is used by
+  making the goal, so it is made and started in one step or the card starts
+  nothing;
 - **a rule you signed:** the later table's row for goals (below), live and
   unscoped, with nothing holding it back, and the intake's audit entry for
   this goal already written. The entry carries the digest of what was added,
@@ -503,9 +506,18 @@ Flint):
   by the card's measure (12 to 300 characters).
 
 Anything else is refused, with an error that names the goal's id and nothing
-it holds. The guard is on new rows only: a goal proposed before it is listed,
-started and dismissed as before. It is not on the migration owner's role (a
-repair by hand), and a restore loads rows before any guard exists.
+it holds (and an id only when it is exactly one made from a source: words
+dressed as an id are not repeated). The guard is on new rows only: a goal
+proposed before it is listed, started and dismissed as before. It is not on
+the migration owner's role (a repair by hand), and a restore loads rows before
+any guard exists.
+
+It holds only for a write that reads the database as it is now (READ
+COMMITTED, which every writer in the runtime uses). A transaction at a higher
+isolation level keeps reading the database as it was when it began: it would
+not see the goals added since, a rule switched off since, or a card that has
+ended since. So the guard refuses any such write outright, on all three ways
+in.
 
 The runtime asks the database whether that guard is there each time it would
 add a goal without a card, and each time the later table is asked for. It is a
@@ -518,9 +530,21 @@ ago, its own limit), nothing is written and the suggestion is filed as a card.
 
 Under the rule a goal lands as a suggestion, 3 a day at most by the runtime's
 count (whatever cap a rule carries). The database counts as well, by its own
-clock: never more than twice the day's limit in any 24 hours, which is the
-most an honest count allows across a midnight. Past that it lets none in, so
-a counter that fails cannot fill Suggested.
+clock: never more than twice the day's limit of goals from chat in any 24
+hours, which is the most an honest count allows across a midnight. Past that
+it lets none in.
+
+What that is worth, exactly: with a rule you signed, a runtime can add at
+most that many goals from chat in 24 hours (6 under the table's own row),
+whatever it counts itself. Their words are the runtime's own record: it
+writes the audit entry and the row, so they are not proof that you said them.
+Your signature on each goal is what the two card paths carry, and only those.
+
+A row that holds the rule back is a brake you set, not a lock. The guard lets
+nothing in while a live row holds goals from chat at approval, but the runtime
+may switch a policy row off under the first phase's rules, and the way is then
+open again under the row that promotes it. (Who may switch a row off is a
+follow-up of its own.)
 
 **A commitment is always a card.** The database has no such guard under a
 commitment, so the intake files a card for each one whatever a rule says, and
@@ -755,8 +779,13 @@ they are. This is also the first step of rolling P3 back.
   checks that the entry is there and that the row matches its digest, but the
   runtime writes both. Against a runtime gone wrong, what holds is the rule
   you signed, the shape of the row (yours, personal, untainted, named by its
-  source, a quote's length) and the database's count. What it says you said is
-  the runtime's word, as on a card it is the server's.
+  source, a quote's length) and the database's count: at most twice the day's
+  limit of goals from chat in any 24 hours. What it says you said is the
+  runtime's word, as on a card it is the server's.
+- **A row that holds goals from chat back can be switched off by the
+  runtime**, as any policy row can (see P5's limits: a holding row is a brake
+  you set, not a lock). The promoting row then lets goals land again, within
+  the same count.
 - **A commitment's words last a week.** Your quote is kept beside the
   commitment for 7 days, then cleared with the rest of the kept text; the
   commitment and the day Flint read stay. Forgetting the commitment clears its
