@@ -11,6 +11,8 @@ import { textPdf } from '../src/synthetic-files';
  * changes. The reader is a stand-in: no program is run.
  */
 
+/** How long a wait for something to happen may take: an event is waited for, never a length of time, and a busy Mac is given room. */
+const WAIT = { timeout: 20_000, interval: 10 };
 const b64 = (lines: string[]): string => textPdf([lines]).toString('base64');
 const pdf = (name: string, lines: string[] = [name]): Attachment => ({ kind: 'document', mediaType: 'application/pdf', name, data: b64(lines), bytes: 400 });
 const PNG: Attachment = { kind: 'image', mediaType: 'image/png', name: 'shot.png', data: 'iVBORw0KGgo=', bytes: 8 };
@@ -162,7 +164,7 @@ describe('reads are kept', () => {
     const media = localMedia(r);
     const a = pdf('a.pdf', ['alpha']);
     const both = Promise.all([media.text(a), media.text({ ...a })]);
-    await expect.poll(() => r.reads.length).toBe(1);
+    await expect.poll(() => r.reads.length, WAIT).toBe(1);
     release(ok('Alpha.'));
     expect(await both).toEqual([ok('Alpha.'), ok('Alpha.')]);
     expect(r.reads).toEqual(['alpha']);

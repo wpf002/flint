@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,10 +15,6 @@ import { Sheet, crc32, png, textPdf } from '../src/synthetic-files';
  * must never do on Will's Mac: load, swap or unload a model, ask a model
  * server that is not this Mac, or install anything.
  */
-
-// Each run here draws six pictures and writes a sixty-page PDF: a few hundred milliseconds of plain work, and more
-// on a busy machine. Nothing here waits on a clock; the room is for that work.
-vi.setConfig({ testTimeout: 30_000 });
 
 const MAIN = 'main-model:30b';
 const SMALL = 'small-model:3b';

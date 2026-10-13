@@ -193,6 +193,20 @@ describe('a turn the standby would answer', () => {
     expect(names(inference.planLocal(route({ mode: 'hybrid', reason: 'default', cloudFallback: true }), { ...who, needs: { image: true } }))).toEqual(['cloud']);
   });
 
+  it('a turn that is a cloud model’s alone is planned exactly as it always was: the standby stays in a plan nobody will run', async () => {
+    const { inference } = await boot(models(false), { FLINT_INFERENCE_MODE: 'hybrid', FLINT_LOCAL_FALLBACK_MODEL: SMALL });
+    // What Hybrid makes of a picture turn with nothing turned on: the cloud's, with no falling back here.
+    const cloudOnly = route({ brain: 'frontier', localFallback: false, cloudFallback: false, reason: 'media', mode: 'hybrid' });
+    const withNeeds = inference.planLocal(cloudOnly, { ...who, needs: { image: true } });
+    const without = inference.planLocal(cloudOnly, who);
+    expect(withNeeds).toEqual(without);
+    expect(names(withNeeds)).toEqual(['standby']);
+    // (No sentence, so the plan sets off no extra look at the model server either: that follows a plan with nothing local in it.)
+    expect(withNeeds.refusal).toBeUndefined();
+    // The same turn once it MAY fall back here (the local model reads it): the standby that cannot see is left out.
+    expect(inference.planLocal({ ...cloudOnly, localFallback: true }, { ...who, needs: { image: true } }).steps).toEqual([]);
+  });
+
   it('with a picture the standby can see, it answers as for any turn', async () => {
     const { inference } = await boot(models(true), { FLINT_LOCAL_VISION: 'on', FLINT_INFERENCE_MODE: 'local', FLINT_LOCAL_FALLBACK_MODEL: SMALL });
     expect(names(inference.planLocal(route({}), { ...who, needs: { image: true } }))).toEqual(['standby']);

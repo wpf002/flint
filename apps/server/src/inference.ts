@@ -420,7 +420,9 @@ export class Inference {
       primary: who.primary,
       // A standby that is a cloud model under a plain name is not a local model: it is never asked, in any mode.
       // Neither is one that cannot read this turn's picture or PDF (`needs`): it would answer without having seen it.
-      standby: this.local.fallback && !this.standbyElsewhere() && this.standbyReads(who.needs) ? who.standby : undefined,
+      // (Asked only of a turn a local model may answer. A turn that is a cloud model's alone, as every turn with a
+      // file is until pictures or PDFs are turned on, is planned exactly as it always was.)
+      standby: this.local.fallback && !this.standbyElsewhere() && this.standbyReads(route.brain === 'local' || route.localFallback ? who.needs : undefined) ? who.standby : undefined,
       now: this.now(),
       ...(who.evalOwnModel ? { evalOwnModel: true } : {}),
       ...(this.allowedRemote() ? { allowedRemote: true } : {}),

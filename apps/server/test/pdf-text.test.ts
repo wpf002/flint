@@ -37,6 +37,8 @@ const TEXT_LINE = /^ {4}kMDItemTextContent = .*$/m;
 /** The recording with its text line replaced by `value` (as the Mac would print it), or taken out. */
 const recordedWith = (value: string | undefined): string => (value === undefined ? RECORDED.replace(/^ {4}kMDItemTextContent = .*\n/m, '') : RECORDED.replace(TEXT_LINE, () => `    kMDItemTextContent = ${value};`));
 
+/** How long a wait for something to happen may take: an event is waited for, never a length of time, and a busy Mac is given room. */
+const WAIT = { timeout: 20_000, interval: 10 };
 const dirs: string[] = [];
 const scratch = (): string => {
   const d = mkdtempSync(join(tmpdir(), 'flint-pdf-test-'));
@@ -301,11 +303,11 @@ describe('the reader', () => {
     const reads = [0, 1, 2, 3, 4].map(() => reader.read(PDF));
     // The fifth is one too many, and is told at once; the others are running or waiting.
     expect(await reads[4]).toEqual({ ok: false, why: 'busy' });
-    await expect.poll(() => started.length).toBe(2);
+    await expect.poll(() => started.length, WAIT).toBe(2);
     gates[0]!();
-    await expect.poll(() => started.length).toBe(3);
+    await expect.poll(() => started.length, WAIT).toBe(3);
     gates[1]!();
-    await expect.poll(() => started.length).toBe(4);
+    await expect.poll(() => started.length, WAIT).toBe(4);
     gates[2]!();
     gates[3]!();
     const done = await Promise.all(reads.slice(0, 4));
@@ -313,7 +315,7 @@ describe('the reader', () => {
     expect(most).toBe(2);
     // A place is free again afterwards.
     const again = reader.read(PDF);
-    await expect.poll(() => gates.length).toBe(5);
+    await expect.poll(() => gates.length, WAIT).toBe(5);
     gates[4]!();
     expect((await again).ok).toBe(true);
     expect(readdirSync(tmp)).toEqual([]);
@@ -365,7 +367,7 @@ describe('a folder a crash left behind', () => {
     const before = new Date(Date.now() - LEFTOVER_AFTER_MS - 1000);
     utimesSync(old, before, before);
     makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { tmp, run: async () => ({ stdout: '', truncated: false }) });
-    await expect.poll(() => existsSync(old)).toBe(false);
+    await expect.poll(() => existsSync(old), WAIT).toBe(false);
   });
 });
 
