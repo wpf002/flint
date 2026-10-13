@@ -68,8 +68,8 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
   let app: ReturnType<typeof buildApp>;
   let offHere: ReturnType<typeof buildApp>;
   const lines: string[] = [];
-  /** One clock for the forecasts' day, read once. */
-  const NOW = new Date();
+  /** One clock for the forecasts' day, read once (in beforeAll, once the day is safely under way). */
+  let NOW = new Date();
   const start = (daysAgo: number) => dayStart(daysAgo, NOW);
 
   const call = async (method: 'GET' | 'POST', url: string, body?: unknown, on = app) => {
@@ -113,13 +113,18 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
   };
 
   beforeAll(async () => {
+    // The routes read the real clock, and this file's forecasts are of NOW's day. It never starts in the last
+    // minute of a UTC day, so a midnight passing while it runs cannot move "today" under it.
+    const toMidnight = 86_400_000 - (Date.now() % 86_400_000);
+    if (toMidnight < 60_000) await new Promise((r) => setTimeout(r, toMidnight + 1000));
+    NOW = new Date();
     urls = await freshDb();
     k = await ledgerKit(urls);
     key = await enrollTestKey(urls);
     const logStream = { write: (l: string) => void lines.push(l) };
     app = buildApp({ db: k.db, config: { tokens, tz: TZ, predict: true }, logger: true, logStream });
     offHere = buildApp({ db: k.db, config: { tokens, tz: TZ, predict: false }, logger: true, logStream });
-  });
+  }, 120_000);
   afterAll(async () => {
     await app?.close();
     await offHere?.close();
