@@ -121,7 +121,12 @@ const Env = z.object({
    */
   FLINT_ASSETS: z.string().optional(),
   /** The local model triage and goal reviews ask (Ollama), on loopback only. */
-  OLLAMA_URL: z.string().regex(/^http:\/\/(\[::1\]|127\.0\.0\.1|localhost):\d+$/).optional(),
+  OLLAMA_URL: z
+    .string()
+    .regex(/^http:\/\/(\[::1\]|127\.0\.0\.1|localhost):\d{1,5}$/)
+    // A port is 1 to 65535: beyond that it is no address at all, and is said here, by the setting's name.
+    .refine((u) => { const port = Number(u.slice(u.lastIndexOf(':') + 1)); return port >= 1 && port <= 65_535; }, 'the port must be 1 to 65535')
+    .optional(),
   FLINT_TRIAGE_MODEL: z.string().regex(/^[A-Za-z0-9._:/-]{1,80}$/).optional(),
   /**
    * The standby model chat falls back to while the main one is not answering
@@ -281,7 +286,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 function ollamaAddress(given: string | undefined, env: Record<string, string | undefined>, execArgv: readonly string[], says: boolean): { url: string; proxied?: true } {
   const url = (given ?? 'http://127.0.0.1:11434').replace('//localhost:', '//127.0.0.1:');
   const proxied = viaProxy(new URL(url).host, readEnvProxy(env, execArgv));
-  if (proxied && says) console.error('runtime config: Node’s env proxy is on and would carry requests to Ollama, so the local model is not asked; name its host in NO_PROXY to keep them on this Mac');
+  if (proxied && says) console.error('runtime config: Node’s env proxy is on and would carry requests to Ollama, so the local model is not asked; name its host in NO_PROXY exactly, an IPv6 address with its brackets, to keep them on this Mac');
   return { url, ...(proxied ? { proxied: true as const } : {}) };
 }
 

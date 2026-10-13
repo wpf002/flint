@@ -118,6 +118,25 @@ describe('runtime config', () => {
     expect(() => loadConfig({ DATABASE_URL: DB, HOME, FLINT_TRIAGE_MODEL: 'a model; rm -rf' })).toThrow(/FLINT_TRIAGE_MODEL/);
   });
 
+  it('a port no machine has is refused in a sentence that names the setting, not left to fail as a URL later', () => {
+    const base = { DATABASE_URL: DB, HOME, FLINT_TRIAGE_MODEL: 'm' };
+    for (const bad of ['http://127.0.0.1:65536', 'http://127.0.0.1:99999', 'http://localhost:0', 'http://[::1]:70000', 'http://127.0.0.1:123456']) {
+      let said = '';
+      try {
+        loadConfig({ ...base, OLLAMA_URL: bad });
+      } catch (e) {
+        said = (e as Error).message;
+      }
+      expect(said, bad).toMatch(/OLLAMA_URL/);
+      expect(said, bad).not.toMatch(/Invalid URL/);
+    }
+    expect(() => loadConfig({ ...base, OLLAMA_URL: 'http://127.0.0.1:99999' })).toThrow(/OLLAMA_URL: the port must be 1 to 65535/);
+    expect(loadConfig({ ...base, OLLAMA_URL: 'http://127.0.0.1:65535' }).ollama?.url).toBe('http://127.0.0.1:65535');
+    expect(loadConfig({ ...base, OLLAMA_URL: 'http://127.0.0.1:1' }).ollama?.url).toBe('http://127.0.0.1:1');
+    // The same setting names the fallback's server: the same sentence without a triage model.
+    expect(() => loadConfig({ DATABASE_URL: DB, HOME, OLLAMA_URL: 'http://127.0.0.1:99999' })).toThrow(/OLLAMA_URL/);
+  });
+
   it('the local model’s address: localhost is pinned to 127.0.0.1, and Node’s env proxy marks it as not this Mac', () => {
     const base = { DATABASE_URL: DB, HOME, FLINT_TRIAGE_MODEL: 'm' };
     expect(loadConfig({ ...base, OLLAMA_URL: 'http://localhost:11434' }, []).ollama).toEqual({ url: 'http://127.0.0.1:11434', model: 'm' });
@@ -139,10 +158,28 @@ describe('runtime config', () => {
       // The message names no value: not the proxy, not the address.
       expect(said.join(' ')).not.toMatch(/proxy\.example|3128|11434/);
       // NO_PROXY naming the host exactly keeps it on this Mac; an entry Node would have to interpret does not.
-      expect(loadConfig({ ...base, ...PROXY, NO_PROXY: 'localhost,127.0.0.1,::1' }, []).ollama?.proxied).toBeUndefined();
-      expect(loadConfig({ ...base, ...PROXY, NO_PROXY: '::1', OLLAMA_URL: 'http://[::1]:11434' }, []).ollama?.proxied).toBeUndefined();
+      expect(loadConfig({ ...base, ...PROXY, NO_PROXY: 'localhost,127.0.0.1,[::1]' }, []).ollama?.proxied).toBeUndefined();
       expect(loadConfig({ ...base, ...PROXY, NO_PROXY: 'localhost' }, []).ollama?.proxied).toBe(true);
       expect(loadConfig({ ...base, ...PROXY, NO_PROXY: '127.0.0.0/8' }, []).ollama?.proxied).toBe(true);
+      // An IPv6 address needs its brackets: Node sends [::1] to the proxy when the list says ::1 (measured on Node 24).
+      const V6 = { ...base, ...PROXY, OLLAMA_URL: 'http://[::1]:11434' };
+      expect(loadConfig({ ...V6, NO_PROXY: '::1' }, []).ollama?.proxied).toBe(true);
+      expect(loadConfig({ ...V6, NO_PROXY: '[::1]' }, []).ollama?.proxied).toBeUndefined();
+      // (An entry with a port, or a suffix, is one Node would follow. The rule does not try to: it stays closed.)
+      expect(loadConfig({ ...V6, NO_PROXY: '[::1]:11434' }, []).ollama?.proxied).toBe(true);
+      expect(loadConfig({ ...base, ...PROXY, NO_PROXY: '127.0.0.1:11434' }, []).ollama?.proxied).toBe(true);
+      // Node reads the lower-case name first, an empty one included: NO_PROXY is then not read at all.
+      expect(loadConfig({ ...base, ...PROXY, no_proxy: 'elsewhere.example', NO_PROXY: '127.0.0.1' }, []).ollama?.proxied).toBe(true);
+      expect(loadConfig({ ...base, ...PROXY, no_proxy: '', NO_PROXY: '127.0.0.1' }, []).ollama?.proxied).toBe(true);
+      expect(loadConfig({ ...base, ...PROXY, no_proxy: '127.0.0.1', NO_PROXY: 'elsewhere.example' }, []).ollama?.proxied).toBeUndefined();
+      // A star means "nothing is proxied" only as the whole value. In a list Node ignores it.
+      expect(loadConfig({ ...base, ...PROXY, NO_PROXY: '*' }, []).ollama?.proxied).toBeUndefined();
+      expect(loadConfig({ ...base, ...PROXY, NO_PROXY: '*,elsewhere.example' }, []).ollama?.proxied).toBe(true);
+      expect(loadConfig({ ...base, ...PROXY, NO_PROXY: ' * ' }, []).ollama?.proxied).toBe(true);
+      expect(loadConfig({ ...base, ...PROXY, NO_PROXY: '*,127.0.0.1' }, []).ollama?.proxied).toBeUndefined();
+      // What it says to do names the brackets, and still no value.
+      expect(said.at(-1)).toMatch(/NO_PROXY exactly, an IPv6 address with its brackets/);
+      expect(said.join(' ')).not.toMatch(/proxy\.example|3128|11434|elsewhere/);
       // Without a local model there is nothing to mark.
       expect(loadConfig({ DATABASE_URL: DB, HOME, ...PROXY }, []).ollama).toBeUndefined();
     } finally {
