@@ -310,8 +310,16 @@ saved and survives restarts.
   of it is embedded, the model server is asked what runs on it now (`routeFirst` in
   `src/inference.ts`). So a name pointed at a cloud model while Flint runs (`ollama cp`) is caught
   by the very next such turn, not a minute later, and one pointed back is not refused on old news.
-  Everything else (a tier answering an ordinary turn, the helpers, memory extraction) reads what
-  the server last said, which is asked every minute and believed for five. In Cloud mode an ordinary turn reaches a remote `OLLAMA_HOST` as it always has,
+  **Whoever did not ask first asks before it hands anything over.** A tier on a local wire has
+  its server asked before the tier is asked. A local model that answers an ordinary turn in Cloud
+  mode (no cloud model set up, or one that failed) has the model server looked at first. And
+  every request of the helpers (the embedder, memory extraction, background calls) is decided
+  where it is sent, after Ollama has been asked. Each asks when the server's last word is more
+  than two seconds old (`fresh` in `src/ollama-locality.ts`; in the background every server is
+  still asked once a minute and believed for five). A request that carries text which stays here
+  whatever the mode (a fact that stays here on its way to the embedder, a call of memory
+  extraction about turns that do) goes only to a model Ollama has just listed as its own. What
+  is left is under "Known limits", below. In Cloud mode an ordinary turn reaches a remote `OLLAMA_HOST` as it always has,
   and **a private message does not**: with a model server that is not this Mac, and that Will has
   not allowed, it is refused where it is first routed (503: "The local model server is on another
   machine, and a private message never leaves this Mac."), before a word of it is embedded,
@@ -407,6 +415,27 @@ saved and survives restarts.
   settings say about addresses when it is built (`setPlaceRules`); nothing else decides it.
   History, recall, memory extraction, the embedder's rule for marked facts and the plan for a
   turn that stays here all ask it.
+
+**Known limits.**
+
+- *Two seconds.* Where something that stays here is handed to a model on a local wire, its
+  server's word is two seconds old at most. A name pointed at a cloud model inside those two
+  seconds, or while a request to it is already on its way, is seen by the next one.
+- *A server that stops listing.* A model server that still answers and no longer says what it
+  lists is believed for five minutes, and then nothing on it is local. Meanwhile it is asked
+  again at most every two seconds, so it is not asked at every call.
+- *A tier on a server that wants a key.* A tier's server is asked for its listing without a key
+  (only the main model server's looks carry `FLINT_LOCAL_API_KEY`). A tier on an
+  OpenAI-compatible server that wants one on every path, and is not also the main model server,
+  is never heard, so it is never a brain on this Mac.
+- *A program that passes requests on.* A program at a loopback address that forwards to a cloud
+  service answers like any server that is no Ollama, and Flint cannot tell it from one. Point the
+  local wire only at a server that runs its models on this Mac.
+- *`remember`, for a fact's exact words.* An outside model that already has the exact words of a
+  fact Will forgot is told "already known" where a fact Flint never held is "saved" (see "Goals
+  in chat"). No text is handed out.
+- *Goals from chat.* A turn Will asked to keep private is never asked for a goal, even when it
+  holds one; a turn taken in Local mode is. See "Goals and commitments from chat".
 
 **To switch modes** (no code, no restart):
 
@@ -1015,15 +1044,28 @@ yet: no panel lists it and no route forgets it. Leave it off until one does.
   reply is never read. With the setting off, the prompt and the request to Ollama are byte for
   byte what they were (a test pins both by their sha256), and turning it on does not re-read
   old chats.
-- **Never from a turn Will kept private.** A call about such turns (Local Only, a message that
-  asked to stay private, any turn of Local mode: `src/private-turns.ts`) asks for facts alone,
-  whatever the pass asks, and a suggestion in its reply is not read. A suggestion is his own
-  sentence on its way to being a goal, and his goals can be sent to every brain
-  (`FLINT_GOALS_TO_FRONTIER=on`); what he asked to keep on this Mac is not put on that road.
-  The facts from it are learned and marked as ever, and the pass line counts the turns that were
-  not asked (`suggestion-private-turn`). So nothing is suggested from chat taken in Local mode.
-  A turn answered with his goals is asked, as before, and its suggestion goes only to a runtime
-  on this Mac.
+- **Never from a turn Will asked to keep private. From a turn taken in Local mode, yes.** Two
+  notions, the same two the tools follow (`src/private-turns.ts`). A turn *stays here* when he
+  asked for it to be private or Flint was in Local mode: that is what history, memory and speech
+  go by. It is *explicitly private* only when he asked: the Local Only switch, or a message that
+  asked to stay private. Suggestions go by the second. A call about a turn he asked to keep
+  private asks for facts alone, whatever the pass asks, and a suggestion in its reply is not
+  read: a suggestion is his own sentence on its way to being a goal, and his goals can be sent
+  to every brain (`FLINT_GOALS_TO_FRONTIER=on`). A turn taken in Local mode is asked like any
+  other. Its suggestion is filed with the runtime on this Mac and needs his signature like any
+  other, and **a goal he approves is then a goal like any he typed**: it is in his goals, and
+  goes wherever his goals go.
+  - *How the two are told apart once stored.* The mark is still one (`{ private: true }`). A
+    turn that Local mode alone kept carries a note on it (`byMode`), written from the turn's
+    route. A mark with no note is read as his own word: that is every turn marked before the
+    note existed, and a turn outside Local mode that was marked because its model was handed a
+    private one. Everything else the mark does, it does for both.
+  - *In a pass that asks,* the turns he asked to keep private are sent in calls of their own,
+    and a turn that is shown one of them as its context is held with it. The facts are learned
+    and marked as ever, and the pass line counts the turns that were not asked
+    (`suggestion-private-turn`).
+  - A turn answered with his goals is asked, as before, and every suggestion goes only to a
+    runtime on this Mac.
 - **The quote check comes first, and no model takes part in it.** A suggestion is kept only
   if its quote, 12 characters or more, is in Will's own message of the turn it names, as whole
   words. Curly quotes and runs of whitespace are made alike on both sides; nothing else is.
@@ -1078,6 +1120,9 @@ Known limits:
   are dropped: the pass has moved on and does not read the turn again. So is one whose
   sentence runs past 300 characters.
 - *Only the first message of a turn is read,* up to 8,000 characters.
+- *A turn he asked to keep private is not asked,* even when it sets a goal, and neither is the
+  turn right after it in a call (it is shown the private one as its context). He can type the
+  goal in the Goals panel.
 
 | Var | Default | Purpose |
 | --- | --- | --- |
@@ -1723,9 +1768,15 @@ does not vouch for, that machine is sent nothing that stays here (the fence can 
 that stands for another machine to a stand-in on this one, `GUARD_REMAP`, so the test reads what
 it would have been sent). A tool held back on a private turn answers with the private rule's
 own sentence, and a Local-mode turn still running when the mode changes keeps its search
-keyless. Seven servers are started at once, each on its own scratch HOME. The process is fenced
+keyless. Goals from chat are run after a real restart: the first server says a goal on an
+ordinary turn, with Local Only on, in Local mode, and with both; the same HOME is then started
+again with the setting on, and the Local-mode turn and the ordinary one are asked and filed
+while the two he asked to keep private are mined for facts alone. And a tier's name is pointed at
+a cloud model on the tiers' own Ollama while the server runs: the next ordinary turn asks that
+server first, and the tier is handed nothing that stays here. Seven servers are started at once,
+each on its own scratch HOME, and one of them once more later. The process is fenced
 (`test/process/guard.mjs`): it can reach nothing but this machine, and none of the ports a live
-Flint, its runtime, Nexus, Ollama or Postgres use. It takes about three seconds.
+Flint, its runtime, Nexus, Ollama or Postgres use. It takes about five seconds.
 
 ## Run locally
 
