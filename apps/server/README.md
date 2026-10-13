@@ -235,8 +235,10 @@ size, is ignored and reported.
 - The address is not the whole of it for them either. The model a helper's request names is
   asked of that Ollama's own listing: a private message's words are embedded only by a model
   Ollama lists as its own (not by a cloud model under a plain name, and not by one Ollama has not
-  been heard on yet), the local and hybrid modes send nothing to a model known to run on Ollama's
-  servers, a fact that stays here is embedded only when the embedding model is one of Ollama's
+  been heard on yet), and so are the words of every turn of Local mode (the request is marked
+  where it is routed, before the tool router or recall has embedded a word of it). Anything else
+  made in the local and hybrid modes is sent unless the model is known to run on Ollama's
+  servers. A fact that stays here is embedded only when the embedding model is one of Ollama's
   own, and a background call (`/internal/complete`) is answered only by a model Ollama has said
   is its own, in every mode.
 - A model id that an OpenAI-compatible server reports is checked before it reaches a log or a
@@ -318,8 +320,9 @@ saved and survives restarts.
   message's request, one that carries text which stays here, a background call, and every
   request outside Cloud mode. (An ordinary Cloud-mode request is sent whatever the listing says,
   so it does not wait for one.) Each asks when the server's last word is more than two seconds
-  old (`fresh` in `src/ollama-locality.ts`; in the background every server is still asked once a
-  minute). A request that carries text which stays here whatever the mode (a fact that stays
+  old, counted from when that word was ASKED FOR, not from when it arrived: a listing that took
+  most of two seconds to come is not handed on for two more (`fresh` in
+  `src/ollama-locality.ts`; in the background every server is still asked once a minute). A request that carries text which stays here whatever the mode (a fact that stays
   here on its way to the embedder, a call of memory extraction about turns that do, and any call
   of it that asks for Will's goals) goes only to a model Ollama has just listed as its own.
   **A server that gives no word is not believed on what it said before.** When someone waits for
@@ -329,8 +332,12 @@ saved and survives restarts.
   runs on Ollama's servers is kept. That holds for the health monitor's look too, which is the
   one a turn that stays here waits for: the turn gets the sentence above, or "The local model
   isn't available, and ..." when the whole server is silent, inside the two seconds one look may
-  take, and waits once for one silence. The next answer is believed again. What is left is under
-  "Known limits", below. In Cloud mode an ordinary turn reaches a remote `OLLAMA_HOST` as it always has,
+  take, and waits once for one silence. That is a private turn in any mode and every turn of
+  Local mode: none of the turn's words are embedded or sent meanwhile. One bad answer is not yet
+  silence: a question that fails at once (an error, a dropped connection) is asked once more
+  inside the same look, so a server that was busy for a moment does not cost a turn; one that is
+  not answered in time is not asked again. The next answer is believed again. What is left is
+  under "Known limits", below. In Cloud mode an ordinary turn reaches a remote `OLLAMA_HOST` as it always has,
   and **a private message does not**: with a model server that is not this Mac, and that Will has
   not allowed, it is refused where it is first routed (503: "The local model server is on another
   machine, and a private message never leaves this Mac."), before a word of it is embedded,
@@ -430,17 +437,24 @@ saved and survives restarts.
 **Known limits.**
 
 - *Two seconds.* Where something that stays here is handed to a model on a local wire, its
-  server's word is two seconds old at most. A name pointed at a cloud model inside those two
-  seconds, or while a request to it is already on its way, is seen by the next one.
+  server's word was asked for two seconds ago at most. A name pointed at a cloud model inside
+  those two seconds, or while a request to it is already on its way, is seen by the next one.
 - *A server that stops listing.* It is no longer believed for five minutes (see above): the
   first caller that waits for its answer and gets none drops what it said, and it is then left
   alone for two seconds, so it is not asked at every call. Three things remain. The asks made
   in the background drop nothing by themselves, so what was last heard stands until someone who
   needs it asks (five minutes at most). A turn that arrives while a look is already out waits
   for that look, so a server that has just come back can cost the next turn one more sentence.
-  And in Local and Hybrid modes an ordinary request to a helper model is held only when the
-  model is KNOWN to run on Ollama's servers: one whose server has gone silent is still asked, as
-  one not heard on yet is at boot (a private message, and text that stays here, are not).
+  And what is not a turn of Will's (the tools' descriptions embedded while Flint boots, and an
+  ordinary turn's words in Hybrid mode, which may go to the cloud anyway) is held from a helper
+  model only when the model is KNOWN to run on Ollama's servers: one whose server has gone silent
+  is still asked. A private message, every turn of Local mode and text that stays here are held
+  to the strict rule.
+- *An ordinary Cloud-mode turn and a model server that answers nothing.* The tool router and
+  recall embed an ordinary turn's words at Ollama with no deadline of their own. With the whole
+  model server hung (it accepts the request and never answers), an ordinary Cloud-mode turn
+  waits on that request, as it did before the modes existed. A private turn and a turn of Local
+  mode get their sentence at two seconds.
 - *A tier on a server that wants a key.* A tier's server is asked for its listing without a key
   (only the main model server's looks carry `FLINT_LOCAL_API_KEY`). A tier on an
   OpenAI-compatible server that wants one on every path, and is not also the main model server,
@@ -1094,9 +1108,12 @@ yet: no panel lists it and no route forgets it. Leave it off until one does.
     own turns are (a fact does not say which kind of private turn it came from). A call that
     asks for facts alone is shown them as before.
   - *From a turn taken in Local mode, a card holds his words of that turn and nothing else.*
-    Every word of the short text must be in his own message of that turn (not half, as for an
-    ordinary turn), and a day is kept only when he named it there ("March 3", "3/3", a written
-    date): one the model worked out is left off, and the suggestion goes on without it.
+    Every word of the short text must be in his own message of that turn (not half of its
+    content words, as for an ordinary turn): every word, counted in any script, with no word
+    too common or too short to count, so a name that is also an everyday word ("May") or a word
+    in another alphabet cannot ride along from the rest of the call. A plural or an "-ing" form
+    of a word he used is his word. A day is kept only when he named it there ("March 3", "3/3",
+    a written date): one the model worked out is left off, and the suggestion goes on without it.
   - *The call itself is decided where it is sent.* Whether a pass asks is read when it begins;
     a call that asks is sent as text that stays here, so it goes only to a model its server,
     asked a moment before, lists as its own.
@@ -1115,8 +1132,8 @@ yet: no panel lists it and no route forgets it. Leave it off until one does.
 - **One sentence, one suggestion.** A quote that overlaps one already kept from the same turn
   is dropped, however it is worded, so three readings of one sentence cannot take the day's
   three goal cards.
-- **The short text is held to his message too:** at least half of its words (all of them from
-  a turn taken in Local mode), and every number in it, are in that same message. It starts with a capital letter, is 3 to 120
+- **The short text is held to his message too:** at least half of its content words (every
+  word, from a turn taken in Local mode), and every number in it, are in that same message. It starts with a capital letter, is 3 to 120
   characters as a goal's title is counted, and holds no control or format character (no
   direction override, no zero-width mark).
 - **A day is the model's reading, and is shown as that.** It is kept only if it is a real day,

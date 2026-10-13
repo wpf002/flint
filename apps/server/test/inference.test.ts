@@ -7,7 +7,7 @@ import { buildInference, helperModel, type Inference } from '../src/inference';
 import type { Hardware } from '../src/hardware';
 import type { ModeRoute } from '../src/mode-route';
 import { OUTSIDE_OFF_LOCAL_MODE, OUTSIDE_OFF_PRIVATE, OUTSIDE_OFF_PRIVATE_SERVER, PRIVATE_TURN_NOTE } from '../src/outside-ai';
-import { asKeptText, asLocalTurn, carriesKeptText, isPrivateRequest, withTurnTaint } from '../src/turn-taint';
+import { asKeptText, asLocalTurn, carriesKeptText, isPrivateRequest, isStaysHereRequest, withTurnTaint } from '../src/turn-taint';
 import { keepsPrivate, staysHere } from '../src/goals-now';
 import { embedderHere } from '../src/goals-chat';
 import { LOCALITY } from '../src/ollama-locality';
@@ -1054,6 +1054,89 @@ describe('the helpers that always talk to Ollama\'s own address', () => {
 
   // The privacy review's N9. The helpers judged "is it here" by the address and the model's name, never by what the
   // Ollama there lists: a cloud model under a plain name would embed a private message, or answer a background call.
+  // The re-review's N3. In Local mode the helpers held a turn's words only from a model KNOWN to run on Ollama's
+  // servers. With the listing silent nothing is known, so the words of a turn that was about to be refused still
+  // went to the embedding model (re-pointed at a cloud model or not), and with the whole server hung the turn
+  // waited on that request. A turn its route keeps here is now marked where it is routed, like a private one.
+  it('N3: a turn of Local mode is held to the strict rule by the helpers: its words go only to a model confirmed on this Mac; nothing else in that mode changes', async () => {
+    const HERE = 'http://127.0.0.1:11434';
+    const asked: string[] = [];
+    let says: Parameters<typeof listed>[1] | 'silent' = 'silent';
+    const i = await at({ FLINT_INFERENCE_MODE: 'local' }, async (baseURL) => {
+      asked.push(baseURL);
+      if (says === 'silent') LOCALITY.silent(baseURL);
+      else listed(baseURL, says);
+    });
+    const routed = (over: { localOnly?: boolean } = {}) => i.preRoute({ message: 'a synthetic question', localOnly: over.localOnly === true, deep: false, evalMode: false, hasFrontier: true, needs: {}, frontierCan: {} });
+    /** As a handler does it: one request, routed, then whatever is made on its behalf. */
+    const inTurn = <T>(fn: () => T | Promise<T>, over: { localOnly?: boolean } = {}): Promise<T> => withTurnTaint(async () => (routed(over), fn()));
+    const STAYS = 'the model asked for is not known to run on this Mac, and a turn that stays on this Mac is not sent to it';
+    const PRIVATE = 'the model asked for is not known to run on this Mac, and a private message is not sent to it';
+    const sent: Array<string | undefined> = [];
+    const f = i.helperFetch('helper', (async (_url: unknown, init?: RequestInit) => (sent.push(helperModel(init?.body)), new Response('{}'))) as unknown as typeof fetch);
+    const embed = (model = 'nomic-embed-text') => f(`${HERE}/api/embed`, { method: 'POST', body: JSON.stringify({ model, input: 'the words of the turn' }) });
+
+    // The route is Local mode's, and the request is marked from that moment.
+    await withTurnTaint(async () => {
+      expect(isStaysHereRequest()).toBe(false);
+      expect(routed()).toMatchObject({ brain: 'local', mode: 'local', private: false });
+      expect(isStaysHereRequest()).toBe(true);
+      expect(isPrivateRequest()).toBe(false); // it is not Will's own word, and nothing that goes by that changes
+    });
+    expect(isStaysHereRequest()).toBe(false); // the mark is the request's, and ends with it
+
+    // The server gives no word: nothing is known of the embedding model, and the turn's words are not sent to it.
+    expect(await inTurn(() => i.helpersOff('nomic-embed-text'))).toBe(STAYS);
+    await expect(inTurn(() => embed())).rejects.toThrow(`fetch refused: ${STAYS}`);
+    expect(sent).toEqual([]);
+    expect(asked.length).toBeGreaterThan(0); // it was asked first
+    // A private turn of Local mode is refused in its own words, as before.
+    expect(await inTurn(() => i.helpersOff('nomic-embed-text'), { localOnly: true })).toBe(PRIVATE);
+    // Outside a turn (the tools' descriptions, embedded while Flint boots): still asked of a model not heard on yet.
+    expect(i.helpersOff('nomic-embed-text')).toBeUndefined();
+    await embed();
+    expect(sent).toEqual(['nomic-embed-text']);
+
+    // Its listing answers: a model it lists as its own is sent the turn's words; a copy of a cloud model, and a
+    // model it does not hold, are not.
+    says = [MAIN, 'nomic-embed-text', { name: 'embed-alias', remote_host: 'https://ollama.com:443' }];
+    await inTurn(() => embed());
+    expect(sent).toEqual(['nomic-embed-text', 'nomic-embed-text']);
+    await expect(inTurn(() => embed('embed-alias'))).rejects.toThrow(`fetch refused: ${STAYS}`);
+    await expect(inTurn(() => embed('never-pulled'))).rejects.toThrow(`fetch refused: ${STAYS}`);
+    expect(await inTurn(() => i.helpersOff())).toBeUndefined(); // a request that names no model carries none of it
+    // The name is pointed at a cloud model while Flint runs: the very next request of a turn finds it.
+    says = [MAIN, { name: 'nomic-embed-text', remote_host: 'https://ollama.com:443' }];
+    await expect(inTurn(() => embed())).rejects.toThrow(`fetch refused: ${STAYS}`);
+    expect(sent).toHaveLength(2);
+
+    // A turn that began in Local mode keeps the rule if the mode changes while it runs.
+    says = 'silent';
+    await withTurnTaint(async () => {
+      routed();
+      i.mode.set('cloud', 'console');
+      await expect(embed()).rejects.toThrow(`fetch refused: ${STAYS}`);
+    });
+    // Cloud and Hybrid: an ordinary turn is not marked, and its requests are held as they always were.
+    for (const mode of ['cloud', 'hybrid'] as const) {
+      i.mode.set(mode, 'console');
+      await withTurnTaint(async () => {
+        routed();
+        expect(isStaysHereRequest(), mode).toBe(false);
+      });
+      says = [MAIN, 'nomic-embed-text'];
+      const before = sent.length;
+      await inTurn(() => embed());
+      await inTurn(() => embed('never-pulled')); // not known elsewhere: sent, as before
+      expect(sent.length, mode).toBe(before + 2);
+    }
+    // ...and a private turn in either is marked private, as it always was.
+    await withTurnTaint(async () => {
+      routed({ localOnly: true });
+      expect([isPrivateRequest(), isStaysHereRequest()]).toEqual([true, true]);
+    });
+  });
+
   it('N9: the helpers ask the same listing: a model Ollama says runs elsewhere is sent nothing that stays here, and never answers a background call', async () => {
     const HERE = 'http://127.0.0.1:11434';
     const i = await at({ FLINT_INFERENCE_MODE: 'cloud' });

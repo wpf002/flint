@@ -215,10 +215,10 @@ export interface BuildLocalDeps {
   /**
    * Told when a look at the model server came back WITHOUT that answer (it
    * did not answer, or its listing failed): the address the brain is asked
-   * at. What it said before does not stand through such a look
-   * (./ollama-locality silent). Left out: nobody is told.
+   * at, and when that look began. What it said before the look does not
+   * stand through it (./ollama-locality silent). Left out: nobody is told.
    */
-  silent?: (baseURL: string) => void;
+  silent?: (baseURL: string, since: number) => void;
   /**
    * Is this model known to run somewhere else than the server at this address
    * (./ollama-locality runsElsewhere)? Such a model is never warmed. Left out:
@@ -420,7 +420,7 @@ export async function startLocalBrains(deps: BuildLocalDeps): Promise<LocalHandl
   // under the address the brain itself is asked at. Told at every look the monitor takes.
   const placeOf = (baseURL: string) => (said: PlaceSaid): void => deps.place?.(baseURL, said);
   // ...and so is a look that came back without its answer: what it said before does not stand through it.
-  const silentAt = (baseURL: string) => (): void => deps.silent?.(baseURL);
+  const silentAt = (baseURL: string) => (since: number): void => deps.silent?.(baseURL, since);
   const nativeBackend =
     ollamaAt && nativeFetch
       ? ollamaBackend(`${ollamaAt.origin}${ollamaAt.path}`, nativeFetch, (rows) => placeOf(`${ollamaAt.origin}${ollamaAt.path}`)({ ollama: [...rows] as ListedModel[] }), silentAt(`${ollamaAt.origin}${ollamaAt.path}`))

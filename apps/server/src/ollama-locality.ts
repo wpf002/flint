@@ -201,32 +201,43 @@ export class OllamaLocality {
    * older than `maxAgeMs` (or it has said nothing), and wait for its answer:
    * for a caller about to hand one of its models something that stays here.
    * Fresh enough already: nothing is asked. When this returns, either the
-   * server has given its word within `maxAgeMs` of this call (or since), or
-   * nothing it said before is believed to run here (`silent`): an ask that
-   * this caller waited for and that yielded no word does not leave the old
-   * listing standing. Asked within `maxAgeMs` and silent: not asked again (a
-   * server that is down, or hangs, is not asked at every call), and it is as
-   * silent for this caller as it was for that ask. Never rejects; it waits as
-   * long as one ask may take.
+   * server's word is from an ask that BEGAN within `maxAgeMs` of this call
+   * (or since), or nothing it said before is believed to run here (`silent`):
+   * an ask that this caller waited for and that yielded no word does not
+   * leave the old listing standing.
+   *
+   * A word is as old as when its ask began, never as young as when its
+   * answer landed: a listing that took most of two seconds to arrive is not
+   * handed to the next caller for two more. Only SILENCE is left alone: a
+   * server that was asked within `maxAgeMs` and gave no word is not asked
+   * again yet (one that is down, or hangs, is not asked at every call), and
+   * it is as silent for this caller as it was for that ask. Never rejects; it
+   * waits as long as one ask may take (two, for a caller that found an ask
+   * under way that began before its own window).
    */
   fresh(baseURL: string, maxAgeMs: number = FRESH_MS): Promise<void> {
     const at = trimmed(baseURL);
     const now = this.#now();
+    const since = now - maxAgeMs;
     const heard = this.#heard.get(serverOf(at));
     // (What is left of a server found silent is no older than the silence, so it is covered by the line after this one.)
-    if (heard && now - heard.at <= maxAgeMs) return Promise.resolve();
+    if (heard && heard.at >= since) return Promise.resolve();
     // Found silent a moment ago by someone who waited for it, and not a word since: it is already not believed, and
     // it is not asked again yet.
     const hushed = this.#silentAt.get(serverOf(at));
-    if (hushed !== undefined && now - hushed <= maxAgeMs) return Promise.resolve();
+    if (hushed !== undefined && hushed >= since) return Promise.resolve();
+    // No word: what was said before that ask began is dropped, and so is anything too old for this caller
+    // (an ask that hung can have begun before a word that is itself too old by now).
+    const settle = (a: Asked): void => {
+      if (!a.word) this.silent(at, Math.max(a.from, since), a.at);
+    };
     const last = this.#asked.get(at);
-    const lately = last !== undefined && now - last.at <= maxAgeMs;
-    const asked = this.#asking.get(at) ?? (lately ? Promise.resolve(last) : this.#begin(at));
-    return asked.then((a) => {
-      // No word: what was said before that ask began is dropped, and so is anything too old for this caller
-      // (an ask that hung can have begun before a word that is itself too old by now).
-      if (!a.word) this.silent(at, Math.max(a.from, now - maxAgeMs), a.at);
-    });
+    if (last !== undefined && !last.word && last.at >= since) return Promise.resolve(settle(last));
+    const running = this.#asking.get(at);
+    if (!running) return this.#begin(at).then(settle);
+    // An ask already under way: its word is as old as its start. Begun before this caller's window, it is too old
+    // for this caller, who then asks once more.
+    return running.then((a) => (a.word && a.from < since ? this.#begin(at).then(settle) : settle(a)));
   }
 
   /**
@@ -249,10 +260,25 @@ export class OllamaLocality {
 
   async #ask(at: string): Promise<Asked> {
     const from = this.#now();
-    let word = false;
+    // One clock for the whole ask, however many times the server is tried inside it.
+    const signal = AbortSignal.timeout(this.opts.timeoutMs ?? 2_000);
+    let word = await this.#try(at, from, signal);
+    // One failed listing is not yet silence. A server that answered AT ONCE with something that is no word (an
+    // error, a dropped connection: it is restarting, or it was busy for a moment) is tried once more, so one bad
+    // answer does not cost a turn. A server that did not answer in time is not: whoever waits has waited as long
+    // as an ask may take.
+    if (!word && !signal.aborted) word = await this.#try(at, this.#now(), signal);
+    // (When the ask ENDED: a server that hangs is left alone for a moment after each ask, not asked again at once.)
+    const asked: Asked = { from, at: this.#now(), word };
+    this.#asked.set(at, asked);
+    return asked;
+  }
+
+  /** One request for the listing, begun at `from`: did the server give its word? Never throws. */
+  async #try(at: string, from: number, signal: AbortSignal): Promise<boolean> {
     try {
       // (A redirect is an error: a listing that came from another address is not this one's word.)
-      const r = await (this.opts.fetchImpl ?? fetch)(`${at}/api/tags`, { signal: AbortSignal.timeout(this.opts.timeoutMs ?? 2_000), redirect: 'error' });
+      const r = await (this.opts.fetchImpl ?? fetch)(`${at}/api/tags`, { signal, redirect: 'error' });
       const said = await placeSaid(r.status, () => r.json());
       if (!r.ok) await r.body?.cancel().catch(() => {});
       if (said === 'other') this.notOllama(at, from);
@@ -260,14 +286,11 @@ export class OllamaLocality {
       // Its word is an answer that is now what is known of this server. A "no" that did not replace a listing still
       // believed (two addresses on one origin) left that listing as old as it was: no word about it.
       const heard = this.#heard.get(serverOf(at));
-      word = said !== undefined && heard !== undefined && !heard.quiet && heard.at >= from;
+      return said !== undefined && heard !== undefined && !heard.quiet && heard.at >= from;
     } catch {
       // Down or slow: nothing is learned.
+      return false;
     }
-    // (When the ask ENDED: a server that hangs is left alone for a moment after each ask, not asked again at once.)
-    const asked: Asked = { from, at: this.#now(), word };
-    this.#asked.set(at, asked);
-    return asked;
   }
 
   /**

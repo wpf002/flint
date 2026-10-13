@@ -41,7 +41,7 @@ import { OUTSIDE_OFF_LOCAL_MODE, isPrivateOff, offered, offeredPrivate, outsideO
 import { brainIsLocal, brainOf, setPlaceRules, type MediaFlags } from './policy';
 import { turnStaysHere, type StayRoute } from './private-turns';
 import { paidToolSpecs, type BrainChooser, type BudgetView, type PaidToolSpec } from './spend';
-import { carriesKeptText, isEvalTurn, isPrivateRequest, isPrivateTurn, isStaysHereTurn, markPrivateRequest } from './turn-taint';
+import { carriesKeptText, isEvalTurn, isPrivateRequest, isPrivateTurn, isStaysHereRequest, isStaysHereTurn, markPrivateRequest, markStaysHereRequest } from './turn-taint';
 import type { TurnFacts } from './hybrid-rules';
 
 type Env = Record<string, string | undefined>;
@@ -251,10 +251,23 @@ export class Inference {
    *  - otherwise the request is marked private from this moment, so the
    *    helpers that would embed its words at an Ollama on another machine (the
    *    tool router, recall) are off for it (`helpersOff`).
+   *
+   * A turn that stays here by its ROUTE is marked the same way (every turn of
+   * Local mode; in Hybrid a turn stays here only when it is private, which is
+   * the case above). Its words are then held to the strict rule by every
+   * helper: embedded, or sent anywhere, only by a model that is confirmed to
+   * run on this Mac. "Not known to run elsewhere" used to be enough in Local
+   * mode, so with the listing silent the words of a turn that was about to be
+   * refused still went to the embedding model, and with the whole server hung
+   * the turn waited on that request instead of getting its sentence.
    */
   preRoute(i: Omit<PreRouteInput, 'mode' | 'localCan'>): PreRoute {
     const pre = preRoute({ ...i, mode: this.mode.current(), localCan: this.localCan() });
-    if ('error' in pre || !pre.private) return pre;
+    if ('error' in pre) return pre;
+    if (!pre.private) {
+      if (turnStaysHere(pre)) markStaysHereRequest();
+      return pre;
+    }
     const refusal = privateRefusal(pre, this.confined);
     if (refusal) return { error: refusal, status: 503 };
     markPrivateRequest();
@@ -484,16 +497,23 @@ export class Inference {
    *  - a private message is sent only to a model Ollama lists as its own: an
    *    embedding model that is such a copy, or one Ollama has not been heard
    *    on, embeds none of its words;
-   *  - in the local and hybrid modes nothing is sent to a model that is known
-   *    to be such a copy. (A model not heard on yet is still asked there: the
-   *    tools' descriptions are embedded while Flint boots, before any server
-   *    has answered, and they are nobody's private words.)
+   *  - a turn that stays here by its route (every turn of Local mode) is held
+   *    the same way: its words go only to a model Ollama lists as its own. A
+   *    server that gives no word is not one, so with the listing silent the
+   *    turn's words are embedded nowhere, and the turn gets its sentence
+   *    instead of waiting on a request to a server that does not answer;
+   *  - anything else made in the local and hybrid modes (the tools'
+   *    descriptions embedded while Flint boots, before any server has
+   *    answered: nobody's words) is sent unless the model is KNOWN to be such
+   *    a copy.
    */
   helpersOff(model?: string): string | undefined {
-    // Text that stays here whatever the mode: a private message's words (the request was marked where it was
-    // routed), and what a helper sends of a fact or a turn that stays here (./turn-taint asKeptText).
+    // Text that stays here whatever the mode: a private message's words and the words of a turn its route keeps
+    // here (the request was marked where it was routed), and what a helper sends of a fact or a turn that stays
+    // here (./turn-taint asKeptText).
     const kept = carriesKeptText();
-    const strict = isPrivateRequest() || kept;
+    const here = isStaysHereRequest();
+    const strict = here || kept;
     const mustStay = strict || this.mode.current() !== 'cloud';
     if (!ollamaIsLocal(this.cfg)) {
       if (isPrivateRequest()) return 'the Ollama server is on another machine, and a private message is not sent off this Mac';
@@ -502,6 +522,7 @@ export class Inference {
     }
     if (model === undefined) return undefined;
     if (isPrivateRequest() && !this.helperRunsHere(model)) return 'the model asked for is not known to run on this Mac, and a private message is not sent to it';
+    if (here && !this.helperRunsHere(model)) return 'the model asked for is not known to run on this Mac, and a turn that stays on this Mac is not sent to it';
     if (kept && !this.helperRunsHere(model)) return 'the model asked for is not known to run on this Mac, and what stays on this Mac is not sent to it';
     if (mustStay && this.helperElsewhere(model)) return "the model asked for runs on Ollama's servers, and in this mode nothing is sent off this Mac";
     return undefined;
@@ -534,12 +555,13 @@ export class Inference {
    */
   helperFetch(kind: 'helper' | 'background', base: typeof fetch = fetch): typeof fetch {
     return (async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-      // Asked first only where the answer decides something: a request for a private message, one that carries
-      // text that stays here, a background call (answered only by a model that runs here), and any request outside
-      // the cloud mode (where nothing may go to a model on Ollama's servers). An ordinary request in the cloud mode
-      // is sent whatever the listing says, so it does not wait for one: a model server whose listing hangs would
-      // otherwise hold every ordinary turn's embedding for as long as an ask may take.
-      if (kind === 'background' || isPrivateRequest() || carriesKeptText() || this.mode.current() !== 'cloud') await this.helpersHeard();
+      // Asked first only where the answer decides something: a request for a private message or for a turn its
+      // route keeps here, one that carries text that stays here, a background call (answered only by a model that
+      // runs here), and any request outside the cloud mode (where nothing may go to a model on Ollama's servers).
+      // An ordinary request in the cloud mode is sent whatever the listing says, so it does not wait for one: a
+      // model server whose listing hangs would otherwise hold every ordinary turn's embedding for as long as an
+      // ask may take.
+      if (kind === 'background' || isStaysHereRequest() || carriesKeptText() || this.mode.current() !== 'cloud') await this.helpersHeard();
       const model = helperModel(init?.body);
       const off = kind === 'background' ? this.backgroundOff(model) : this.helpersOff(model);
       if (off) throw new TypeError(`fetch refused: ${off}`);
@@ -791,7 +813,8 @@ export async function buildInference(deps: BuildInferenceDeps): Promise<Inferenc
     place: (baseURL, said) => (said === 'other' ? LOCALITY.notOllama(baseURL) : LOCALITY.learn(baseURL, said.ollama)),
     // ...and a look that came back without that answer leaves nothing it said before believed to run here: a turn
     // that stays here waited for this look, and is not decided on a listing the server no longer stands behind.
-    silent: (baseURL) => LOCALITY.silent(baseURL),
+    // (As of when the look began: a word the server gave another asker during the look is kept.)
+    silent: (baseURL, since) => LOCALITY.silent(baseURL, since),
     // ...and a model it says runs elsewhere is never loaded ahead of a turn.
     elsewhere: (baseURL, model) => LOCALITY.runsElsewhere(baseURL, model),
     log,

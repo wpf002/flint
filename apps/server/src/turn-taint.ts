@@ -45,6 +45,13 @@ export class TurnTaint {
    * request inherits it.
    */
   private = false;
+  /**
+   * This request's turn stays on this Mac by its ROUTE without Will having
+   * asked (a turn of Local mode), known from the moment it is routed
+   * (markStaysHereRequest). The helpers hold its words as closely as a
+   * private message's. A scope opened inside the request inherits it.
+   */
+  staysHere = false;
   get tainted(): boolean {
     return this.sources.size > 0;
   }
@@ -60,6 +67,7 @@ export function withTurnTaint<T>(fn: () => T, seed: { sources?: readonly string[
   t.eval = seed.eval === true;
   if (seed.tools) t.tools = seed.tools;
   t.private = scope.getStore()?.private === true;
+  t.staysHere = scope.getStore()?.staysHere === true;
   return scope.run(t, fn);
 }
 
@@ -161,6 +169,24 @@ export function markPrivateRequest(): void {
 /** Is this request one whose message Will asked to keep on this Mac? */
 export function isPrivateRequest(): boolean {
   return scope.getStore()?.private === true;
+}
+
+/**
+ * This request's turn stays on this Mac by its route (a turn of Local mode):
+ * from here on its words are held as a private message's are by everything
+ * made on its behalf, the helpers that embed them included (./inference
+ * helpersOff): they go only to a model that is confirmed to run on this Mac.
+ * Outside a request, nothing.
+ */
+export function markStaysHereRequest(): void {
+  const t = scope.getStore();
+  if (t) t.staysHere = true;
+}
+
+/** Is this request one whose words stay on this Mac: Will asked (isPrivateRequest), or its route keeps it here? */
+export function isStaysHereRequest(): boolean {
+  const t = scope.getStore();
+  return t?.private === true || t?.staysHere === true;
 }
 
 const keptScope = new AsyncLocalStorage<true>();

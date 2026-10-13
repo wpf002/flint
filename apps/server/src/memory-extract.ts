@@ -1221,8 +1221,11 @@ export class MemoryExtractor {
       // It starts with a capital, as a title does.
       const text = capital(normalizeSaid(s.text));
       // From a turn that carries the private mark, ALL of them: its call can hold words that are not his own message
-      // (the turn shown before it, what the model answered him), and none of those may reach a card.
-      if (!SuggestionText.safeParse(text).success || factCoverage([src.said], text) < (src.private ? 1 : FACT_COVERAGE) || !numbersGrounded([src.said], text, src.at)) {
+      // (the turn shown before it, what the model answered him), and none of those may reach a card. All of them
+      // is every word, not every content word: a name that is also a stop word ("May"), or a word in another
+      // script, is a word like any other (everyWordSaid).
+      const his = src.private ? factCoverage([src.said], text) >= 1 && everyWordSaid([src.said], text) : factCoverage([src.said], text) >= FACT_COVERAGE;
+      if (!SuggestionText.safeParse(text).success || !his || !numbersGrounded([src.said], text, src.at)) {
         drop('text');
         continue;
       }
@@ -1558,6 +1561,33 @@ export function factCoverage(will: string[], fact: string): number {
 
 /** A grounded fact's content words must be at least this much Will's (see factCoverage). */
 export const FACT_COVERAGE = 0.5;
+
+/**
+ * Every word of a text: runs of letters and digits in ANY script, lower-cased,
+ * with the stem ./knowledge contentTokens gives a word ("trips" is "trip").
+ * No stop list, and no word too short or too foreign to count: "with", "may"
+ * and a word in Cyrillic are words here, where contentTokens leaves each out.
+ */
+export function everyWord(s: string): string[] {
+  return normalizeQuoteText(s)
+    .replace(/'s(?![\p{L}\p{N}])/gu, '')
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((t) => t.length > 0)
+    .map((t) => (t.length > 4 && t.endsWith('ing') ? t.slice(0, -3) : t.length > 3 && t.endsWith('s') && !t.endsWith('ss') ? t.slice(0, -1) : t));
+}
+
+/**
+ * Is EVERY word of `text` one of Will's words in `will`? The rule for what a
+ * turn that stays here may put on a card: factCoverage counts content words
+ * only, so a stop word ("with May") or a word in another script could ride
+ * along from the rest of the call. Here nothing rides along. False for a text
+ * with no word in it.
+ */
+export function everyWordSaid(will: string[], text: string): boolean {
+  const said = new Set(everyWord(will.join(' ')));
+  const words = everyWord(text);
+  return words.length > 0 && words.every((w) => said.has(w));
+}
 
 const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 

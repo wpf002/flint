@@ -222,6 +222,60 @@ describe('ollamaBackend', () => {
     expect((await ollamaBackend(server.origin, fails).probe(['main-model:30b'], signal())).reachable).toBe(true);
   });
 
+  // The re-review's N4. One failed listing cost one refused turn: the turn that waited for that look got a sentence,
+  // and the next one was answered. A question that fails AT ONCE is asked once more inside the same look; one that
+  // was not answered in time is not, so a turn never waits for two deadlines.
+  it('probe: one bad answer is asked once more, and a good second answer is the look; two bad answers are silence; a hang is asked once', async () => {
+    server = await startMockLocalServer({ models: { 'main-model:30b': { loaded: true, contextLength: 16384 } } });
+    const real = guardedFetch({ origin: server.origin, paths: OLLAMA_PATHS });
+    for (const path of ['/api/tags', '/api/version'] as const) {
+      for (const how of ['500', 'throws', 'not json'] as const) {
+        let bad = 0;
+        let asked = 0;
+        const f = ((url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+          if (!String(url).endsWith(path)) return real(url, init);
+          asked++;
+          if (bad <= 0) return real(url, init);
+          bad--;
+          if (how === 'throws') return Promise.reject(new TypeError('fetch failed'));
+          return Promise.resolve(how === 'not json' ? new Response('<html>busy</html>', { status: 503 }) : new Response('{"error":"x"}', { status: 500 }));
+        }) as typeof fetch;
+        const heard: unknown[] = [];
+        const silent: number[] = [];
+        const b = ollamaBackend(server.origin, f, (rows) => heard.push(rows), (since) => void silent.push(since));
+        const label = `${path} ${how}`;
+        // Healthy: one request, as ever.
+        expect((await b.probe(['main-model:30b'], signal())).reachable, label).toBe(true);
+        expect([asked, heard.length, silent.length], label).toEqual([1, 1, 0]);
+        // One bad answer, then a good one: the look is a look, with its listing, and nobody is told of a silence.
+        bad = 1;
+        const once = await b.probe(['main-model:30b'], signal());
+        expect(once, label).toMatchObject({ reachable: true, models: { 'main-model:30b': { installed: true, loaded: true } } });
+        expect([asked, heard.length, silent.length], label).toEqual([3, 2, 0]);
+        // Two bad answers: silence, told with when the look began. Never a third request.
+        bad = 2;
+        const before = Date.now();
+        const twice = await b.probe(['main-model:30b'], signal());
+        expect(twice.reachable, label).toBe(path === '/api/tags');
+        expect([asked, heard.length, silent.length], label).toEqual([5, 2, 1]);
+        expect(silent[0], label).toBeGreaterThanOrEqual(before);
+        expect(silent[0], label).toBeLessThanOrEqual(Date.now());
+      }
+      // Not answered in time: asked once. The look has one deadline, and it has passed.
+      let asked = 0;
+      const hangs = ((url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        if (!String(url).endsWith(path)) return real(url, init);
+        asked++;
+        return new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted'))));
+      }) as typeof fetch;
+      let silent = 0;
+      const began = Date.now();
+      await ollamaBackend(server.origin, hangs, undefined, () => void silent++).probe(['main-model:30b'], AbortSignal.timeout(80));
+      expect([asked, silent], path).toEqual([1, 1]);
+      expect(Date.now() - began, path).toBeLessThan(1_000);
+    }
+  });
+
   it('probe: a server that is not there is unreachable, and nothing throws', async () => {
     server = await startMockLocalServer();
     const dead = backend(server);
@@ -386,6 +440,25 @@ describe('askPlace / withPlace: every look asks the server what it is', () => {
     const answered = withPlace(inner, (sig) => askPlace(f, server!.origin, sig), () => {}, () => void quiet++);
     await answered.probe(['only-model'], signal());
     expect(quiet).toBe(2);
+    // The re-review's N4: asked once more when the first try came back at once with nothing, and the second answer is
+    // the look's; told as silence (with when the look began) only when both said nothing; a hang is asked once.
+    let looks = 0;
+    const since: number[] = [];
+    const flaky = withPlace(inner, async () => (++looks === 1 ? undefined : 'other'), (said) => told.push(said), (at) => void since.push(at));
+    told.length = 0;
+    await flaky.probe(['only-model'], signal());
+    expect([looks, told, since]).toEqual([2, ['other'], []]);
+    looks = 0;
+    const began = Date.now();
+    await withPlace(inner, async () => (looks++, undefined), () => {}, (at) => void since.push(at)).probe(['only-model'], signal());
+    expect(looks).toBe(2);
+    expect(since).toHaveLength(1);
+    expect(since[0]).toBeGreaterThanOrEqual(began);
+    looks = 0;
+    const hung = withPlace(inner, (sig) => (looks++, new Promise<undefined>((resolve) => sig.addEventListener('abort', () => resolve(undefined)))), () => {}, (at) => void since.push(at));
+    await hung.probe(['only-model'], AbortSignal.timeout(60));
+    expect([looks, since.length]).toEqual([1, 2]);
+    told.length = 0;
     const broken = withPlace(inner, (sig) => askPlace(f, server!.origin, sig), () => {
       throw new Error('the keeper is broken');
     });

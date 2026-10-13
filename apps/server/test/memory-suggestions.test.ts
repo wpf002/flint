@@ -36,7 +36,7 @@ import { ChatCandidate, GoalTitle } from '@flint/policy';
 import { KnowledgeStore } from '../src/knowledge';
 import { localExtractBrain } from '../src/memory-brain';
 import {
-  EXTRACT_SYSTEM, EXTRACT_VERSION, FACTS_SCHEMA, GOAL_SUGGESTIONS_SCHEMA, MemoryBrainError, MemoryExtractor, SUGGESTIONS_SCHEMA, daySaid, SUGGEST_GOALS_PROMPT, SUGGEST_PROMPT, suggestionOf, suggestionsReply,
+  EXTRACT_SYSTEM, EXTRACT_VERSION, FACTS_SCHEMA, GOAL_SUGGESTIONS_SCHEMA, MemoryBrainError, MemoryExtractor, SUGGESTIONS_SCHEMA, daySaid, everyWord, everyWordSaid, SUGGEST_GOALS_PROMPT, SUGGEST_PROMPT, suggestionOf, suggestionsReply,
   type BrainReply, type ChatSuggestion, type ExtractBrain, type ExtractorOptions, type Suggesting, type SuggestionOutcome, type TurnSource,
 } from '../src/memory-extract';
 
@@ -609,6 +609,42 @@ describe('goals and commitments from chat, in the extractor', () => {
     // A turn answered with his goals carries the goals mark, not this one: it keeps the looser rule, as before.
     const goals = await pass({ c1: [turn('c1', said)] }, [lifted], { carriedGoals: () => true });
     expect(goals.got).toHaveLength(1);
+  });
+
+  // The re-review's N1. "Every word" was every CONTENT word: ASCII, longer than one character, not on the stop
+  // list. So a name that is also a stop word ("May"), a short word and a word in another script rode along from
+  // the rest of the call onto a card. From a turn that stays here every word is counted, in any script.
+  it('from a turn that carries the private mark, EVERY word is his: a stop word, a one-letter word and a word in another script count like any other', async () => {
+    const byMode = { keptPrivate: () => true, privateByRequest: () => false };
+    const one = async (said: string, quote: string, text: string, opts: ExtractorOptions = byMode) => {
+      const r = await pass({ c1: [turn('c1', `${CANARY} ${said}`)] }, [{ turn: 1, kind: 'goal', quote, text, dueOn: '' }], opts);
+      return { filed: r.got.map((g) => g.text), dropped: r.stats.rejected['suggestion-text'] ?? 0 };
+    };
+    // The reviewer's two cards. His reply named May and the illness; his message named neither.
+    const trip = ['After the surgery I want to plan a trip by June for sure.', 'I want to plan a trip by June'] as const;
+    expect(await one(...trip, 'plan a trip with May by June')).toEqual({ filed: [], dropped: 1 });
+    const papers = ['After the surgery I want to sort the paperwork by autumn.', 'I want to sort the paperwork by autumn'] as const;
+    expect(await one(...papers, 'sort the меланома paperwork by autumn')).toEqual({ filed: [], dropped: 1 });
+    // The same two in his own words are filed, as are a plural and an -ing form of a word he used.
+    expect((await one(...trip, 'plan a trip by June')).filed).toEqual(['Plan a trip by June']);
+    expect((await one(...papers, 'sort the paperwork by autumn')).filed).toEqual(['Sort the paperwork by autumn']);
+    expect((await one('I want to book two follow-up scans by June.', 'I want to book two follow-up scans by June', 'book the two follow-up scan')).filed).toEqual([]); // "the" is not his here
+    expect((await one('I want to book the two follow-up scans by June.', 'I want to book the two follow-up scans by June', 'book the two follow-up scan')).filed).toEqual(['Book the two follow-up scan']);
+    // One word is enough to drop it, wherever it sits and however small it is.
+    for (const text of ['plan a trip to X by June', 'plan a trip by June, with Jo', 'plan a trip by June 東京', 'plan a trip by June é', 'plan a trip in June']) {
+      expect(await one(...trip, text), text).toEqual({ filed: [], dropped: 1 });
+    }
+    // An ordinary turn keeps the looser rule (the card says it is the model's reading), exactly as before.
+    expect((await one(...trip, 'plan a trip with May by June', {})).filed).toEqual(['Plan a trip with May by June']);
+    expect((await one(...papers, 'sort the меланома paperwork by autumn', {})).filed).toEqual(['Sort the меланома paperwork by autumn']);
+    // What a word is.
+    expect(everyWord("Will's follow-up SCANS, running by June 9th: “меланома” 東京")).toEqual(['will', 'follow', 'up', 'scan', 'runn', 'by', 'june', '9th', 'меланома', '東京']);
+    expect(everyWordSaid(['I want to plan a trip by June'], 'Plan a trip by June!')).toBe(true);
+    expect(everyWordSaid(['I want to plan a trip by June'], 'plan trips')).toBe(true); // the same stem
+    expect(everyWordSaid(['I want to plan a trip by June'], 'plan a trip with May')).toBe(false);
+    expect(everyWordSaid(['I want to plan a trip by June'], '')).toBe(false);
+    expect(everyWordSaid(['I want to plan a trip by June'], '…!?')).toBe(false);
+    expect(everyWordSaid([], 'plan')).toBe(false);
   });
 
   it('a call that is asked for goals is shown no fact from a turn Will kept private, whatever its own turns are; a call that is not asked is shown them as before', async () => {

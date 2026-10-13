@@ -121,8 +121,15 @@ const QUIET_FACT = 'Will keeps the cash box in the FLINTSHRIKE loft.';
 const BOOT_SETTLE_MS = 400;
 /** A first extraction pass late enough that what the model server said at boot is too old to use without asking again. */
 const LATE_FIRST_PASS_MS = '3200';
+/** What the model server is asked for one ordinary turn of Local mode, when it is healthy (measured before the re-review's N3, and unchanged by it). */
+const LOCAL_TURN_REQUESTS = { listing: 1, version: 1, ps: 1, embeddings: 2, chat: 1 };
 const NOT_CONFIRMED = 'Flint cannot confirm right now that its local model runs on this Mac, and a private message never leaves this Mac.';
 const NOT_AVAILABLE = "The local model isn't available, and a private message never leaves this Mac.";
+/** ...and what a turn of Local mode is told, for the same three reasons. */
+const LOCAL_MODE_TAIL = 'and Local mode never uses the cloud.';
+const NOT_CONFIRMED_LOCAL = `Flint cannot confirm right now that its local model runs on this Mac, ${LOCAL_MODE_TAIL}`;
+const NOT_DOWNLOADED_LOCAL = `The local model isn't downloaded yet, ${LOCAL_MODE_TAIL}`;
+const NOT_AVAILABLE_LOCAL = `The local model isn't available, ${LOCAL_MODE_TAIL}`;
 
 let modes: { ollama: OllamaStub; cloud: CloudStub; mcp: ReturnType<typeof writeMcpConfig>; srv: Running };
 let repoint: { ollama: OllamaStub; cloud: CloudStub; runtime: RuntimeStub; srv: Running; flippedAt: number };
@@ -626,6 +633,32 @@ describe('the real server, as a process: Cloud mode, then Local mode', () => {
     expect(await srv.post('/speak', { text: 'Synthetic words.' })).toMatchObject({ status: 503, json: { fallback: 'browser' } });
     expect(cloud.requests).toHaveLength(before);
     expect(blocked(srv)).toEqual([]);
+  });
+
+  // The re-review's N3 holds a turn of Local mode to the strict rule (nothing of it goes to a model that is not
+  // confirmed on this Mac). On a healthy server that changes nothing: the turn is answered here, its words are
+  // embedded for the router and for recall as before, and the model server is asked exactly what it was asked.
+  it('a turn of Local mode on a healthy model server: answered on this Mac, with the same requests as ever', async () => {
+    expect(await mode()).toBe('local');
+    const counts = async (message: string) => {
+      const from = ollama.requests.length;
+      const r = await srv.post('/chat', { conversationId: `l-count-${from}`, message });
+      expect(r.events?.[0]).toMatchObject({ brain: 'local', route: { mode: 'local', reason: 'mode_local' } });
+      expect(r.text).toBe(`LOCAL(${MAIN}) reply.`);
+      const made = ollama.requests.slice(from);
+      const n = (method: string, path: string) => made.filter((q) => q.method === method && q.path === path).length;
+      return { made, listing: n('GET', '/api/tags'), version: n('GET', '/api/version'), ps: n('GET', '/api/ps'), embeddings: n('POST', '/api/embeddings') + n('POST', '/api/embed'), chat: n('POST', '/api/chat') };
+    };
+    const first = await counts('A HEALTHYWORDA synthetic question about the tide tables.');
+    const second = await counts('A HEALTHYWORDB synthetic question about the tide tables.');
+    for (const c of [first, second]) {
+      // One look (the turn asks the model server first), the turn's words embedded, one chat.
+      expect({ listing: c.listing, version: c.version, ps: c.ps, embeddings: c.embeddings, chat: c.chat }).toEqual(LOCAL_TURN_REQUESTS);
+    }
+    // Its words were embedded on this Mac, by the model that Ollama lists as its own, and went to the main model.
+    expect(first.made.some((q) => q.path === '/api/embeddings' && JSON.stringify(q.body).includes('HEALTHYWORDA'))).toBe(true);
+    expect(first.made.some((q) => q.path === '/api/chat' && JSON.stringify(q.body).includes('HEALTHYWORDA'))).toBe(true);
+    expect(cloud.saw('HEALTHYWORD')).toBe(false);
   });
 
   // M2 for Local mode, and survivor 2 (turns handed the tools without their meter: the search would have gone to
@@ -1313,8 +1346,13 @@ describe('the real server, as a process: a model server that stops saying what i
   const pointAway = (...names: string[]) => names.forEach((m) => (ollama.models[m]!.remoteHost = REMOTE_HOST));
   const pointBack = (...names: string[]) => names.forEach((m) => delete ollama.models[m]!.remoteHost);
   const privately = (word: string) => srv.post('/chat', { conversationId: `q-${word}`, message: `My ${word} account number is nobody else's business.`, localOnly: true });
-  /** The requests that carry something to a model, from request `from` on (chat, the embedding calls, a load): not what a look asks. */
-  const carried = (from: number) => ollama.requests.slice(from).filter((q) => q.method === 'POST' && q.path !== '/api/show').map((q) => q.path);
+  /**
+   * The requests that carry words to a model, from request `from` on (chat and the embedding calls): not what a
+   * look asks, and not a load, which names a model and carries no prompt (the monitor may make one behind a turn
+   * in Local mode).
+   */
+  const carries = (q: { method: string; path: string; body?: Record<string, unknown> | undefined }): boolean => q.method === 'POST' && q.path !== '/api/show' && !(q.path === '/api/generate' && q.body?.prompt === undefined);
+  const carried = (from: number) => ollama.requests.slice(from).filter(carries).map((q) => q.path);
 
   it('memory extraction: the turn he kept private is not sent to the memory model on the word of a listing that no longer answers', async () => {
     expect(await waitFor(() => /\[memory-extract\] v2 local pass: /.test(srv.log()), 15_000)).toBe(true);
@@ -1371,6 +1409,62 @@ describe('the real server, as a process: a model server that stops saying what i
     expect(cloud.saw('RUBYSANDERLING')).toBe(false);
   });
 
+  // The re-review's N4. One failed listing cost one refused turn: the turn that waited for that look got the
+  // sentence and the next was answered. A listing that fails AT ONCE is asked once more inside the same look.
+  it('one failed listing, then a good one: the turn is answered, and never knew; a listing that fails twice is the refusal above', async () => {
+    pointBack(MAIN);
+    ollama.looks = 'answers';
+    expect((await privately('MOSSGODWIT')).events?.[0]).toMatchObject({ brain: 'local', route: { private: true } });
+    ollama.looks = 'listing-fails-once';
+    const from = ollama.requests.length;
+    const r = await privately('FERNCURLEW');
+    expect(r.events?.[0]).toMatchObject({ brain: 'local', route: { mode: 'cloud', private: true } });
+    expect(r.text).toBe(`LOCAL(${MAIN}) reply.`);
+    // The look asked for the listing twice: the bad answer, and the good one it was decided on.
+    expect(ollama.requests.slice(from).filter((q) => q.path === '/api/tags').length).toBeGreaterThanOrEqual(2);
+    expect(ollama.looks).toBe('answers');
+    expect(cloud.saw('FERNCURLEW')).toBe(false);
+    // Two failures in one look: refused (the listing never answers in this mode), and asked twice, not three times.
+    pointAway(MAIN);
+    ollama.looks = 'listing-fails';
+    const again = ollama.requests.length;
+    expect(await privately('HEATHDUNNOCK')).toMatchObject({ status: 503, json: { error: NOT_CONFIRMED } });
+    const looks = ollama.requests.slice(again).filter((q) => q.path === '/api/tags').length;
+    expect(looks).toBeGreaterThanOrEqual(2);
+    expect(looks % 2).toBe(0); // (a look taken behind the refusal asks its own two)
+    expect(carried(again)).toEqual([]);
+    expect(ollama.saw('HEATHDUNNOCK')).toBe(false);
+  });
+
+  // The re-review's N3. In Local mode the helpers used to hold a turn's words only from a model KNOWN to run on
+  // Ollama's servers, so with the listing silent the words of a turn that was about to be refused still went to the
+  // embedding model (re-pointed or not). A turn of Local mode is now held to the strict rule, like a private one.
+  it('Local mode, a server that gives no word (its listing fails, is refused, or drops the connection): the turn gets a sentence, and its words are not embedded and not sent', async () => {
+    // What stands is a listing that says the main model and the embedding model run here.
+    pointBack(MAIN, MEMORY_MODEL, 'nomic-embed-text');
+    ollama.looks = 'answers';
+    expect((await privately('SEDGEPIPIT')).events?.[0]).toMatchObject({ brain: 'local', route: { private: true } });
+    expect((await srv.post('/inference/mode', { mode: 'local' })).json).toMatchObject({ mode: 'local' });
+    try {
+      // Every name is pointed at a cloud model, and from now on the server says nothing of what it lists.
+      pointAway(MAIN, MEMORY_MODEL, 'nomic-embed-text');
+      for (const [how, word] of [['listing-fails', 'LOCALWORDF'], ['listing-401', 'LOCALWORDU'], ['listing-403', 'LOCALWORDB'], ['listing-drops', 'LOCALWORDD']] as const) {
+        ollama.looks = how;
+        const from = ollama.requests.length;
+        const began = Date.now();
+        const r = await srv.post('/chat', { conversationId: `q-local-${how}`, message: `A ${word} note about the boat trailer hitch size.` });
+        expect(r, how).toMatchObject({ status: 503, json: { error: NOT_CONFIRMED_LOCAL } });
+        expect(Date.now() - began, how).toBeLessThan(1_500);
+        // Not to the main model, and not to the embedding model for the tool router or for recall.
+        expect(carried(from), how).toEqual([]);
+        expect(ollama.saw(word), how).toBe(false);
+        expect(cloud.saw(word), how).toBe(false);
+      }
+    } finally {
+      expect((await srv.post('/inference/mode', { mode: 'cloud' })).json).toMatchObject({ mode: 'cloud' });
+    }
+  });
+
   it('no look is answered at all (everything it is asked hangs, and chat still answers): a sentence, within the two seconds one look may take', async () => {
     pointBack(MAIN);
     ollama.looks = 'answers';
@@ -1388,9 +1482,50 @@ describe('the real server, as a process: a model server that stops saying what i
     expect(cloud.saw('OPALDIPPER')).toBe(false);
   });
 
+  // The rest of the seven ways a server can give no word, in Local mode. With the whole server hung, a turn of
+  // Local mode used to wait on a request to the embedding model that was never answered (no sentence inside nine
+  // seconds), where a Local Only turn got its sentence at two. Both get it at two now.
+  // (Two servers at once, one way each that takes the two seconds: this one, whose looks already hang, and the
+  // `repoint` Mac, whose listing first answers with something that is no listing and then answers nothing at all.)
+  it('Local mode, a listing that hangs, one that is no listing, and a server that answers nothing: a sentence within one look, and the words go nowhere', async () => {
+    const local = async (on: { srv: Running; ollama: OllamaStub; cloud: CloudStub }, how: OllamaStub['looks'], word: string) => {
+      on.ollama.looks = how;
+      const from = on.ollama.requests.length;
+      const began = Date.now();
+      const r = await on.srv.post('/chat', { conversationId: `q-local-${how}`, message: `A ${word} note about the boat trailer hitch size.` });
+      const carriedThere = on.ollama.requests.slice(from).filter(carries).map((q) => q.path);
+      return { status: r.status, error: (r.json as { error?: string } | undefined)?.error, ms: Date.now() - began, carried: carriedThere, saw: on.ollama.saw(word) || on.cloud.saw(word) };
+    };
+    for (const on of [quiet, repoint]) expect((await on.srv.post('/inference/mode', { mode: 'local' })).json).toMatchObject({ mode: 'local' });
+    try {
+      for (const m of [MAIN, 'nomic-embed-text']) repoint.ollama.models[m]!.remoteHost = REMOTE_HOST;
+      const [hangs, [noListing, nothing]] = await Promise.all([
+        local(quiet, 'listing-hangs', 'LOCALWORDH'),
+        (async () => [await local(repoint, 'listing-not-json', 'LOCALWORDJ'), await local(repoint, 'all-hang', 'LOCALWORDA')] as const)(),
+      ]);
+      // A listing that hangs. (This server's looks were already hanging: the turn's look is that one, or one more.)
+      expect(hangs.status).toBe(503);
+      expect([NOT_CONFIRMED_LOCAL, NOT_AVAILABLE_LOCAL]).toContain(hangs.error);
+      expect(hangs.ms).toBeLessThan(3_500);
+      expect([hangs.carried, hangs.saw]).toEqual([[], false]);
+      // A 200 that is no listing: an Ollama that lists nothing has no local model, and says so at once.
+      expect(noListing).toMatchObject({ status: 503, error: NOT_DOWNLOADED_LOCAL, carried: [], saw: false });
+      expect(noListing.ms).toBeLessThan(1_500);
+      // Nothing is answered, chat and the embedding calls included: the sentence at two seconds, and no request for
+      // the turn's words was even made (one would have been kept by the stand-in, answered or not).
+      expect(nothing).toMatchObject({ status: 503, error: NOT_AVAILABLE_LOCAL, carried: [], saw: false });
+      expect(nothing.ms).toBeGreaterThan(1_500);
+      expect(nothing.ms).toBeLessThan(3_500);
+    } finally {
+      for (const on of [quiet, repoint]) expect((await on.srv.post('/inference/mode', { mode: 'cloud' })).json).toMatchObject({ mode: 'cloud' });
+    }
+  });
+
   it('the log holds none of it, and the process reached nothing but this machine', () => {
-    for (const word of ['AGATEDUNLIN', 'FLINTSHRIKE', 'ZIRCONPLOVER', 'JADEPIPIT', 'OPALDIPPER', 'TEALWHIMBREL', 'RUBYSANDERLING']) expect(srv.log(), word).not.toContain(word);
+    for (const word of ['AGATEDUNLIN', 'FLINTSHRIKE', 'ZIRCONPLOVER', 'JADEPIPIT', 'OPALDIPPER', 'TEALWHIMBREL', 'RUBYSANDERLING', 'MOSSGODWIT', 'FERNCURLEW', 'HEATHDUNNOCK', 'SEDGEPIPIT', 'LOCALWORD']) expect(srv.log(), word).not.toContain(word);
+    expect(repoint.srv.log()).not.toContain('LOCALWORD');
     expect(blocked(srv)).toEqual([]);
+    expect(blocked(repoint.srv)).toEqual([]);
   });
 });
 
