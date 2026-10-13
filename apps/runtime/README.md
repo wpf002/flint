@@ -1956,6 +1956,11 @@ today. A task can't be run again, and the open task's view says so
 - one of its items is gone, is no longer active, or is the wrong kind;
 - its goal is no longer active.
 
+A new task is held to the same rules for its items and its goal, however it is
+sent: `POST /v1/tasks` about an item that is no longer active, or under a goal
+that is not, answers "One of its items is no longer active." or "Its goal is no
+longer active." The form sent twice at once is still one task and one card.
+
 A new task and its card are written together or not at all. A card that can't
 be filed leaves no task behind. When a rule of yours forbids the card, the
 answer is "A rule you set doesn’t allow this." When Flint's own rules do, it is
@@ -2274,10 +2279,6 @@ approved. Any later deploy of P5 code applies the migration again. Claude runs
   from a read of the task, on a row marked Looked Up. A later part should put
   the task's title in their signed details, so the card names its task in
   words you sign.
-- The rules for what can be run again are applied to Run Again. A new task
-  filed straight to `POST /v1/tasks` is checked that its items and its goal
-  exist, and not that they are still active. The console's form only offers
-  active ones. The route should apply the same rules.
 
 ## Your rules, and switching one off
 

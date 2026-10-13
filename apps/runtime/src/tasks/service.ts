@@ -39,7 +39,7 @@ import type { AdapterSet } from './adapters/types.js';
 import { WITHDRAW_ACTION, releaseTaskKeys, type Reserve } from './card.js';
 import { SAY, taskStatusWords } from './errors.js';
 import { ADAPTERS } from './run.js';
-import { offerProblem } from './offer.js';
+import { aboutProblem, offerProblem } from './offer.js';
 
 /** How long a task card waits for Will. */
 const CARD_TTL_MINUTES = 7 * 24 * 60;
@@ -106,6 +106,10 @@ export async function createTask(db: Db, body: NewTaskBody, deps: TaskServiceDep
   const dueAt = body.dueAt === null ? null : new Date(body.dueAt);
   if (dueAt && !(dueAt.getTime() > now.getTime() && dueAt.getTime() <= now.getTime() + DUE_MAX_MS)) throw new Refused(400, SAY.due);
   if (body.goalId !== null && !(await db.goal.findUnique({ where: { id: body.goalId }, select: { id: true } }))) throw new Refused(404, SAY.noGoal);
+  // And what the New Task form holds a task to (tasks/offer.ts): each item still active, the goal still active. The
+  // form lists nothing else, and a task sent by hand gets the sentence Run Again gives.
+  const ended = await aboutProblem(db, spec, body.goalId);
+  if (ended) throw new Refused(409, ended);
 
   const id = taskIdOf(body.draftKey);
   const estCostMicros = adapter.estimate(spec);

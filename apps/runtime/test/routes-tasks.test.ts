@@ -248,6 +248,10 @@ describe.skipIf(NO_DB)('the task routes on flint_test', () => {
     await say('POST', `/v1/tasks/${TASK}/accept`, {}, 400, TASK_SAYS.notOverride, 'notOverride');
     await say('POST', '/v1/tasks', { draftKey: draft(), template: 'watch_ci', params: { item: 'no-such-item' } }, 409, TASK_SAYS.itemGone, 'itemGone');
     await say('POST', '/v1/tasks', { draftKey: draft(), template: 'draft_note', params: { about: 'A note' } }, 409, TASK_SAYS.cantRun, 'cantRun');
+    // An item the form would no longer list (it is archived): a task sent by hand about it is refused as Run Again is.
+    const archived = await fx.entity('ci_run', { workflow: 'ci', status: 'completed' }, { name: 'Synthetic run, archived over HTTP' });
+    await db.entity.update({ where: { id: archived }, data: { status: 'archived' } });
+    await say('POST', '/v1/tasks', { draftKey: draft(), template: 'watch_ci', params: { item: archived } }, 409, TASK_SAYS.itemEnded, 'itemEnded');
     await say('POST', `/v1/assets/${CI_WATCHER.id}/on`, {}, 400, TASK_SAYS.nothing, 'nothing');
     await say('POST', '/v1/assets/as-unknown-v1/on', {}, 404, TASK_SAYS.noAsset, 'noAsset');
     // The card route itself: a spend card that says no cost, and a task or spend card whose details hold a number

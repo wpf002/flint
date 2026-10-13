@@ -16,7 +16,7 @@
  *    offered only what an asset that is on can run, items by label alone.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { AssetEnableArgs, AssetsPage, TASK_FORM_ITEMS_MAX, TASK_SAYS, TASK_STATUS_SAYS, TaskAnswer, TaskForm, TasksPage, noteProblems, titleCase } from '@flint/policy';
+import { AssetEnableArgs, AssetsPage, TASK_FORM_ITEMS_MAX, TASK_SAYS, TASK_STATUS_SAYS, TaskAnswer, TaskForm, TaskSpec, TasksPage, noteProblems, titleCase } from '@flint/policy';
 import { HEX, NO_DB, freshDb, id, type TestUrls } from '../db';
 import { createDb, type Db } from '../../src/db';
 import { Forbidden, Refused } from '../../src/governance/proposals';
@@ -26,7 +26,7 @@ import { WAITING, assetsPage } from '../../src/assets/view';
 import { checkTaskJob } from '../../src/tasks/check';
 import { runTaskJob } from '../../src/tasks/run';
 import { DUE_MAX_MS, TASK_TITLES, againProblem, cancelTask, createTask, overrideTask, runAgain } from '../../src/tasks/service';
-import { FORM_ITEM_KIND, offerProblem } from '../../src/tasks/offer';
+import { FORM_ITEM_KIND, aboutProblem, offerProblem } from '../../src/tasks/offer';
 import { taskForm, taskView, tasksPage } from '../../src/tasks/view';
 import { DAY, FakeBus, SHA, draft, taskFixture, type TaskFixture } from './fixture';
 
@@ -128,6 +128,28 @@ describe.skipIf(NO_DB)('the Tasks panel’s writes and views on flint_test', () 
     await no({ dueAt: new Date(Date.now() - 60_000).toISOString() }, 400, TASK_SAYS.due);
     await no({ dueAt: new Date(Date.now() + DUE_MAX_MS + DAY).toISOString() }, 400, TASK_SAYS.due);
     await no({ goalId: 'gonosuchgoal0001' }, 404, TASK_SAYS.noGoal);
+    // An item that is no longer active, or a goal that is not, is one the form would not list: a task sent by hand
+    // about one is refused with the sentence Run Again gives.
+    const archived = await fx.entity('ci_run', { workflow: 'ci', status: 'completed' }, { name: 'Synthetic run, archived' });
+    await db.entity.update({ where: { id: archived }, data: { status: 'archived' } });
+    expect((await taskForm(db, 'UTC')).templates[0]!.items.some((i) => i.entityId === archived)).toBe(false);
+    await no({ params: { item: archived } }, 409, TASK_SAYS.itemEnded);
+    const paused = `go${draft()}`;
+    const g = await fx.file('goal.activate', {
+      goalId: paused, title: 'Synthetic goal, paused', description: '', horizonAt: new Date(Date.now() + 30 * DAY).toISOString(), reviewCadence: 'P1W',
+      successCriteria: [{ id: 'c1', text: 'Synthetic check', check: { kind: 'manual' } }], links: [], plan: null,
+    }, { kind: 'goal', argsProvenance: { args: { source: 'will', tainted: false } }, sensitivity: 'personal' });
+    await fx.signRun(g.id);
+    await db.goal.updateMany({ where: { id: paused }, data: { status: 'paused' } });
+    expect((await taskForm(db, 'UTC')).goals.some((x) => x.id === paused)).toBe(false);
+    await no({ goalId: paused }, 409, TASK_SAYS.goalEnded);
+    // (The item made active again is taken: the refusal above was about where it stood. And the rule itself, read
+    // directly: the item alone is fine, the paused goal is why.)
+    await db.entity.update({ where: { id: archived }, data: { status: 'active' } });
+    const about = TaskSpec.parse({ template: 'watch_ci', params: { item: archived } });
+    expect(await aboutProblem(db, about, null)).toBeUndefined();
+    expect(await aboutProblem(db, about, paused)).toBe(TASK_SAYS.goalEnded);
+    await no({ params: { item: archived }, goalId: paused }, 409, TASK_SAYS.goalEnded);
     // No asset runs these templates yet; over 12 items is said as that.
     await no({ template: 'summarize_items', params: { items: [ci] } }, 409, TASK_SAYS.cantRun);
     await no({ template: 'summarize_items', params: { items: Array.from({ length: 13 }, (_, i) => `e${i}`) } }, 400, TASK_SAYS.tooMany);
@@ -142,6 +164,15 @@ describe.skipIf(NO_DB)('the Tasks panel’s writes and views on flint_test', () 
     expect(first).toMatchObject({ id: `tk${f.draftKey}`, deduped: false });
     expect(await createTask(db, f)).toEqual({ ...first, deduped: true });
     expect(await counts()).toEqual({ tasks: before.tasks + 1, cards: before.cards + 1 });
+    // The same form sent five times at once (a double tap, a retry that crossed its answer): still one task and one
+    // card. One of the five made them; the others found them.
+    const twice = form(await fx.ciRun('wpf002/at-once'));
+    const race = await Promise.all(Array.from({ length: 5 }, () => createTask(db, twice)));
+    expect(new Set(race.map((r) => r.id))).toEqual(new Set([`tk${twice.draftKey}`]));
+    expect(new Set(race.map((r) => r.proposalId)).size).toBe(1);
+    expect(race.filter((r) => !r.deduped)).toHaveLength(1);
+    expect(await counts()).toEqual({ tasks: before.tasks + 2, cards: before.cards + 2 });
+    expect(await db.auditEntry.count({ where: { correlationId: `task:tk${twice.draftKey}`, action: 'task.create' } })).toBe(1);
     expect(await fx.task(first.id)).toMatchObject({ title: 'Watch a CI Run', dueAt: new Date(String(f.dueAt)), goalId: null, stepKey: null, origin: 'will' });
     const made = await db.auditEntry.findFirstOrThrow({ where: { correlationId: `task:${first.id}`, action: 'task.create' } });
     expect(made.inputs).toEqual({ taskId: first.id, assetId: CI_WATCHER.id, template: 'watch_ci' });

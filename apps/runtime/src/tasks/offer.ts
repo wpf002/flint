@@ -1,7 +1,8 @@
 /**
  * What may be offered as a task to make (P5): the rules the New Task form
- * lists by, and the same rules Run Again is held to, so a task cannot be made
- * again from something the form would no longer offer.
+ * lists by. Run Again is held to the same rules, so a task cannot be made
+ * again from something the form would no longer offer; and a new task is held
+ * to what they say of its items and its goal, however it is sent.
  *
  * A kind of task is offered only while the asset that runs it is on, is what
  * the registry says it is, and has something behind it to run it; an item only
@@ -34,18 +35,30 @@ export async function runnerOf(db: Db | Tx, template: TaskTemplateId, deps: Offe
 }
 
 /**
+ * Why a task could not be about these items, under this goal, now: undefined
+ * when it could. Each item is there, still active, and (for a kind of task the
+ * form has a field for) of the kind that task is about; the goal is still
+ * active. The form lists by these, Run Again is held to them, and so is a new
+ * task however it is sent: one made by hand about an archived item or a paused
+ * goal is refused with the same sentence.
+ */
+export async function aboutProblem(db: Db | Tx, spec: TaskSpec, goalId: string | null): Promise<string | undefined> {
+  const kind = FORM_ITEM_KIND[spec.template];
+  const ids = specItems(spec);
+  const items = ids.length ? await db.entity.findMany({ where: { id: { in: ids } }, select: { kind: true, status: true } }) : [];
+  if (items.length !== ids.length) return SAY.itemGone;
+  if (items.some((e) => (kind !== undefined && e.kind !== kind) || e.status !== OFFERED_STATUS)) return SAY.itemEnded;
+  if (goalId !== null && (await db.goal.findUnique({ where: { id: goalId }, select: { status: true } }))?.status !== OFFERED_STATUS) return SAY.goalEnded;
+  return undefined;
+}
+
+/**
  * Why the form would not offer this task now, as a sentence, or undefined when
  * it would: its kind, its items and its goal, each as it stands.
  */
 export async function offerProblem(db: Db | Tx, spec: TaskSpec, goalId: string | null, deps: OfferDeps = {}): Promise<string | undefined> {
-  const kind = FORM_ITEM_KIND[spec.template];
-  if (!kind) return SAY.cantRun;
+  if (!FORM_ITEM_KIND[spec.template]) return SAY.cantRun;
   const runner = await runnerOf(db, spec.template, deps);
   if ('why' in runner) return runner.why;
-  const ids = specItems(spec);
-  const items = ids.length ? await db.entity.findMany({ where: { id: { in: ids } }, select: { kind: true, status: true } }) : [];
-  if (items.length !== ids.length) return SAY.itemGone;
-  if (items.some((e) => e.kind !== kind || e.status !== OFFERED_STATUS)) return SAY.itemEnded;
-  if (goalId !== null && (await db.goal.findUnique({ where: { id: goalId }, select: { status: true } }))?.status !== OFFERED_STATUS) return SAY.goalEnded;
-  return undefined;
+  return aboutProblem(db, spec, goalId);
 }
