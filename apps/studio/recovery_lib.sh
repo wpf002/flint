@@ -20,6 +20,9 @@ SETTINGS_MANIFEST="${FLINT_SETTINGS_MANIFEST:-$RECOVERY_DIR/settings.manifest}"
 AGENTS_MANIFEST="${FLINT_AGENTS_MANIFEST:-$RECOVERY_DIR/agents.manifest}"
 
 say() { print -r -- "$*"; }
+# A count with its word: "1 setting", "3 settings". Never "setting(s)".
+#   counted <n> <one> [<many>]
+counted() { if (( $1 == 1 )); then print -rn -- "1 $2"; else print -rn -- "$1 ${3:-${2}s}"; fi; }
 # refuse <sentence> [<more lines>...]: each argument is a line of its own (a command goes on its own line).
 refuse() { print -rl -- "$@" >&2; exit 1; }
 

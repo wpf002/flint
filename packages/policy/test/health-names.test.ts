@@ -50,7 +50,7 @@ describe('the rest of the machine (P7)', () => {
     expect(healthName('remote_access')).toBe('Remote Access');
     expect(healthName('files_backup')).toBe('Files Backup');
     expect(healthName('offsite_drill')).toBe('Offsite Restore Test');
-    expect(healthName('backup_model')).toBe('Backup Model');
+    expect(healthName('standby_model')).toBe('Standby Model');
   });
 
   it('Health is shown in four groups, each header in capitals, and no component is in two', () => {

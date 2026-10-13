@@ -15,7 +15,8 @@ DECLARE
 BEGIN
   SELECT count(*) INTO n FROM (SELECT 1 FROM "BackupRun" GROUP BY "kind", "location", "path" HAVING count(*) > 1) AS twice;
   IF n > 0 THEN
-    RAISE EXCEPTION 'p7_resilience: % backup file(s) are recorded more than once (same kind, location and path); nothing was changed', n
+    RAISE EXCEPTION 'p7_resilience: % recorded more than once, under the same kind, location and path; nothing was changed',
+      CASE WHEN n = 1 THEN '1 backup file is' ELSE n || ' backup files are' END
       USING HINT = 'Keep the newest record of each and remove the others, then deploy again.';
   END IF;
 END;

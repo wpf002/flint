@@ -43,7 +43,7 @@ import type { Db } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
 import { revokedIn } from '../sources/apple/calendar.js';
 import { uptime } from './instance.js';
-import { backupModelCheck, diskCheck, localModelCheck, remoteAccessCheck, type MachineReading } from './machine.js';
+import { standbyModelCheck, diskCheck, localModelCheck, remoteAccessCheck, type MachineReading } from './machine.js';
 import { CIRCUIT_FAILURES } from './circuits.js';
 import { REVIEWS_STOPPED, waitedMs } from '../goals/late.js';
 import { reviewStanding } from '../goals/review.js';
@@ -65,7 +65,7 @@ export const DEPLOY_WINDOW_MS = 10 * 60_000;
 
 export interface CheckDeps {
   db: Db;
-  config: Pick<Config, 'home' | 'triage' | 'tz'> & Partial<Pick<Config, 'planner' | 'ollama' | 'predict' | 'backupModel'>>;
+  config: Pick<Config, 'home' | 'triage' | 'tz'> & Partial<Pick<Config, 'planner' | 'ollama' | 'predict' | 'standbyModel'>>;
   now: Date;
   sources: ReadonlyArray<{ name: string; cadenceMs: number }>;
   /**
@@ -329,7 +329,8 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
     // "Ollama answers" is not "the model Flint asks is there": with the Mac's own reading, the local model says which.
     out.push(component === 'ollama' && d.machine ? localModelCheck(seen, d.config.ollama?.model, d.machine.models) : seen);
   }
-  if (d.machine) out.push(backupModelCheck(d.config.backupModel, d.machine.models));
+  const standby = d.machine ? standbyModelCheck(d.config.standbyModel, d.machine.models) : undefined;
+  if (standby) out.push(standby);
 
   const cursors = new Map((await db.sourceCursor.findMany()).map((c) => [c.source, c]));
   for (const s of d.sources) {

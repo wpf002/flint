@@ -1347,11 +1347,11 @@ outside=(${outside:#Routing-Mode})
 (( ${#outside} )) && say "These were never in a backup, because Flint does not back up a key or a sign-in. Each needs you once:"
 for o in $outside; do [[ -n ${WHERE_TO[$o]:-} ]] && say "  ${WHERE_TO[$o]}"; done
 (( ${#CONNECTORS} )) && say "The connectors that were set up on the old Mac: ${(j:, :)CONNECTORS}."
-(( ${#dropped_connectors} + dropped_unnamed )) && say "Flint left out $(( ${#dropped_connectors} + dropped_unnamed )) connector(s) it has no source for${dropped_connectors:+: ${(j:, :)dropped_connectors}}."
-(( ${#NOT_RESTORED} )) && say "Flint did not put back ${#${(u)NOT_RESTORED}} setting(s) it does not know or could not check: ${(j:, :)${(u)NOT_RESTORED}}."
+(( ${#dropped_connectors} + dropped_unnamed )) && say "Flint left out $(counted $(( ${#dropped_connectors} + dropped_unnamed )) connector) it has no source for${dropped_connectors:+: ${(j:, :)dropped_connectors}}."
+(( ${#NOT_RESTORED} )) && say "Flint did not put back $(counted ${#${(u)NOT_RESTORED}} setting) it does not know or could not check: ${(j:, :)${(u)NOT_RESTORED}}."
 # What else the backup held and a rebuild does not unpack (a rebuild takes your data, and nothing that is run or that holds a key).
 left_out=(${(o)left_out})
-(( ${#left_out} )) && say "The backup also held ${#left_out} other thing(s) that a rebuild does not put back: ${(j:, :)left_out[1,40]}${${left_out[41]:+, and more}:-}."
+(( ${#left_out} )) && say "The backup also held $(counted ${#left_out} "other thing") that a rebuild does not put back: ${(j:, :)left_out[1,40]}${${left_out[41]:+, and more}:-}."
 if (( ! REHEARSE && ! REMOTE_DONE )); then
   say "To finish remote access, run these three on $MAC, one at a time:"
   say "  tailscale --socket ~/.flint/tailscaled.sock up"

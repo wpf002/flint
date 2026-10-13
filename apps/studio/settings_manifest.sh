@@ -118,7 +118,7 @@ if [[ $mode == check ]]; then
     say "Every setting on this Mac is listed in the settings manifest."
     exit 0
   fi
-  say "The settings manifest does not list ${#unknown} setting(s) found on this Mac. A rebuild would not put them back."
+  say "The settings manifest does not list $(counted ${#unknown} setting) found on this Mac. A rebuild would not put $( (( ${#unknown} == 1 )) && print -n it || print -n them ) back."
   for u in $unknown; do say "  ${u/$'\t'/  }"; done
   exit 1
 fi

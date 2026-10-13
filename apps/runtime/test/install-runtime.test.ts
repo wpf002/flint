@@ -132,6 +132,21 @@ describe('install-runtime.sh', () => {
     expect(run('http://10.0.0.2:11434', 'a b', '16k; rm')).toBe('');
   });
 
+  it('passes the standby model on to the runtime only when the server’s settings name one, well-formed: from its LaunchAgent first, then secrets.env', () => {
+    const block = between('STANDBY_V="$(', 'echo "FLINT_LOCAL_FALLBACK_MODEL=$STANDBY_V"; fi');
+    const run = (inAgent: string, inSecrets: string) =>
+      zsh(`secret() { [ "$1" = FLINT_LOCAL_FALLBACK_MODEL ] && print -r -- '${inSecrets}'; }\n${block.replace(/STANDBY_V="\$\(plutil[^\n]*/, `STANDBY_V='${inAgent}'`)}`).stdout;
+    expect(run('qwen2.5:7b', '')).toBe('FLINT_LOCAL_FALLBACK_MODEL=qwen2.5:7b\n');
+    expect(run('', 'llama3.2')).toBe('FLINT_LOCAL_FALLBACK_MODEL=llama3.2\n');
+    expect(run('qwen2.5:7b', 'llama3.2')).toBe('FLINT_LOCAL_FALLBACK_MODEL=qwen2.5:7b\n');
+    // "off" is the server's own word for none: it is passed on, and Health then says the standby is off.
+    expect(run('', 'off')).toBe('FLINT_LOCAL_FALLBACK_MODEL=off\n');
+    // Named nowhere, or not a model's name: nothing is written.
+    expect(run('', '')).toBe('');
+    expect(run('', 'a model; rm -rf ~')).toBe('');
+    expect(run('$(id)', '')).toBe('');
+  });
+
   it('pruning keeps the newest three, the new release and any pinned one', () => {
     const prune = between('    ls -1dt "$RT"/releases/*(/N)', '    done\n');
     const rt = mkdtempSync(join(tmpdir(), 'rt-releases-'));
@@ -258,7 +273,7 @@ describe('install-runtime.sh', () => {
     expect(readFileSync(join(dir, 'calls'), 'utf8').replace(calls, '')).not.toMatch(/bootstrap|bootout/);
   });
 
-  it('the nightly script backs up every night, copies off the box only with a recipient, and drills on Sundays', () => {
+  it('the nightly script backs up every night, copies off the box only with a recipient, drills on Sundays, and removes old update backups last', () => {
     const dir = mkdtempSync(join(tmpdir(), 'rt-backup-nightly-'));
     mkdirSync(join(dir, 'bin'));
     mkdirSync(join(dir, 'home', '.flint'), { recursive: true });
@@ -269,9 +284,14 @@ describe('install-runtime.sh', () => {
       spawnSync('/bin/zsh', [script], { env: { PATH: `${dir}/bin:/usr/bin:/bin`, HOME: join(dir, 'home'), FLINT_REPO: dir, FLINT_DOW: String(dow) }, encoding: 'utf8' });
       return readFileSync(join(dir, 'pnpm-calls'), 'utf8').trim().split('\n').map((l) => l.replace('--silent --filter @flint/runtime ', ''));
     };
-    expect(night(3)).toEqual(['backup --auto']);
-    expect(night(7)).toEqual(['backup --auto', 'drill --auto']);
+    // Every night ends by removing old update backups: last, so it never delays a backup. (It asks for a card
+    // only on a night there is something to remove: prune-job-db.test.ts.)
+    expect(night(3)).toEqual(['backup --auto', 'prune --auto']);
+    expect(night(7)).toEqual(['backup --auto', 'drill --auto', 'prune --auto']);
     writeFileSync(join(dir, 'home', '.flint', 'backup-age-recipient'), 'age1example\n');
-    expect(night(7)).toEqual(['backup --auto', 'offsite --auto', 'drill --auto']);
+    expect(night(7)).toEqual(['backup --auto', 'offsite --auto', 'drill --auto', 'prune --auto']);
+    // A step that fails never stops the ones after it.
+    writeFileSync(join(dir, 'bin', 'pnpm'), `#!/bin/zsh\necho "$*" >> ${dir}/pnpm-calls\nexit 1\n`, { mode: 0o755 });
+    expect(night(7)).toEqual(['backup --auto', 'offsite --auto', 'drill --auto', 'prune --auto']);
   });
 });

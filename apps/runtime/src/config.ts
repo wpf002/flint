@@ -115,9 +115,12 @@ const Env = z.object({
   OLLAMA_URL: z.string().regex(/^http:\/\/(\[::1\]|127\.0\.0\.1|localhost):\d+$/).optional(),
   FLINT_TRIAGE_MODEL: z.string().regex(/^[A-Za-z0-9._:/-]{1,80}$/).optional(),
   /**
-   * The small local model chat falls back to when the main one is not answering
-   * (the server's own setting, by the same name). Named here too, Settings >
-   * Health says whether it is installed. The runtime never asks it anything.
+   * The standby model chat falls back to while the main one is not answering
+   * (the server's own setting, by the same name; install-runtime.sh copies it
+   * here when the server's settings name one). With a model's name, Settings >
+   * Health says whether it is installed; with "off" or "none" it says the
+   * standby is off; unset, the server chooses one for this Mac and Health has
+   * no line for it. The runtime never asks that model anything.
    */
   FLINT_LOCAL_FALLBACK_MODEL: z.string().regex(/^[A-Za-z0-9._:/-]{1,80}$/).optional(),
   /** The server's num_ctx: a different one makes Ollama reload the model chat is using. */
@@ -162,8 +165,8 @@ export interface Config {
   ollama?: { url: string; model: string; numCtx?: number };
   /** Where Ollama is asked which models it has (this Mac's own address), for Settings > Health. */
   ollamaUrl?: string;
-  /** The backup model, when one is named: Health says whether it is installed. */
-  backupModel?: string;
+  /** The standby model as the server's settings name it (a model, or "off"/"none"); absent when they name none. */
+  standbyModel?: string;
   gitSha: string;
 }
 
@@ -243,7 +246,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       ? { ollama: { url: e.OLLAMA_URL ?? 'http://127.0.0.1:11434', model: e.FLINT_TRIAGE_MODEL, ...(e.OLLAMA_NUM_CTX ? { numCtx: e.OLLAMA_NUM_CTX } : {}) } }
       : {}),
     ollamaUrl: e.OLLAMA_URL ?? 'http://127.0.0.1:11434',
-    ...(e.FLINT_LOCAL_FALLBACK_MODEL ? { backupModel: e.FLINT_LOCAL_FALLBACK_MODEL } : {}),
+    ...(e.FLINT_LOCAL_FALLBACK_MODEL ? { standbyModel: e.FLINT_LOCAL_FALLBACK_MODEL } : {}),
     gitSha: e.RUNTIME_GIT_SHA && /^[0-9a-f]{40}$/.test(e.RUNTIME_GIT_SHA) ? e.RUNTIME_GIT_SHA : 'dev',
   };
 }

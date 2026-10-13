@@ -206,6 +206,11 @@ if [ -f "$ENVF" ]; then cp -p "$ENVF" "$ENVF.prev"; else rm -f "$ENVF.prev"; fi
   # The same num_ctx as chat: a different one makes Ollama reload the model under it.
   OLLAMA_CTX_V="$(plutil -extract EnvironmentVariables.OLLAMA_NUM_CTX raw "$AGENTS/com.flint.server.plist" 2>/dev/null || true)"
   if print -r -- "$OLLAMA_CTX_V" | grep -qE '^[0-9]{3,6}$'; then echo "OLLAMA_NUM_CTX=$OLLAMA_CTX_V"; fi
+  # The standby model, when the server's own settings name one (its LaunchAgent, or secrets.env): Settings >
+  # Health then says whether it is installed. "off" is passed on as it is. The runtime never asks that model anything.
+  STANDBY_V="$(plutil -extract EnvironmentVariables.FLINT_LOCAL_FALLBACK_MODEL raw "$AGENTS/com.flint.server.plist" 2>/dev/null || true)"
+  [ -n "$STANDBY_V" ] || STANDBY_V="$(secret FLINT_LOCAL_FALLBACK_MODEL 2>/dev/null || true)"
+  if print -r -- "$STANDBY_V" | grep -qE '^[A-Za-z0-9._:/-]{1,80}$'; then echo "FLINT_LOCAL_FALLBACK_MODEL=$STANDBY_V"; fi
   echo "SERVER_INTERNAL_TOKEN=$(tr -d '\n' < "$INTERNAL_FILE")"
   # The spend caps are numbers, copied from the server's plist; no keys.
   # (|| true: under pipefail a missing plist or file must not stop the install.)

@@ -21,7 +21,7 @@ import { deliver } from './surface/deliver.js';
 import { expireEscalations } from './surface/expire.js';
 import { checkComponents, recordChecks } from './health/checks.js';
 import { raise, watchdog } from './health/watchdog.js';
-import { readMachine } from './health/machine.js';
+import { noStandby, readMachine } from './health/machine.js';
 import { ingestBackupEvents } from './backup/ingest.js';
 import { circuitAllows, circuitEvents } from './health/circuits.js';
 import { pushSpend } from './spend/push.js';
@@ -171,7 +171,7 @@ export function housekeepingJobs(ctx: JobContext): JobSpec[] {
         });
         if (lines?.skipped) ctx.log(`the files backup's record has lines that are not its own, which were skipped (${lines.skipped})`);
         // The Mac itself, read once for the checks and the watchdog both: free space, remote access, the local models.
-        const wantsModels = ctx.config.ollama !== undefined || ctx.config.backupModel !== undefined;
+        const wantsModels = ctx.config.ollama !== undefined || (ctx.config.standbyModel !== undefined && !noStandby(ctx.config.standbyModel));
         const machine = await readMachine({ home: ctx.config.home, ...(wantsModels ? { ollama: { url: ctx.config.ollama?.url ?? ctx.config.ollamaUrl ?? 'http://127.0.0.1:11434' } } : {}) }, now);
         const checks = await checkComponents({ db: ctx.db, config: ctx.config, now, sources, machine });
         await recordChecks(ctx.db, checks, now);

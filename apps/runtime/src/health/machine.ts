@@ -238,14 +238,14 @@ export async function localModels(url: string, base: typeof fetch = fetch): Prom
   return installed && loaded ? { installed, loaded } : undefined;
 }
 
-/** What Local Model and Backup Model say in Settings > Health. */
+/** What Local Model and Standby Model say in Settings > Health. */
 export const MODEL_HEALTH = {
   unread: 'Flint couldn’t check which models are installed.',
   missing: 'The local model isn’t installed.',
   loaded: 'The local model is loaded.',
   installed: 'The local model is installed, and loads when it’s needed.',
-  backupReady: 'The backup model is ready.',
-  backupMissing: 'The backup model isn’t installed.',
+  standbyReady: 'The standby model is ready.',
+  standbyMissing: 'The standby model isn’t installed.',
 } as const;
 
 /**
@@ -262,12 +262,21 @@ export function localModelCheck(endpoint: ComponentCheck, model: string | undefi
   return { component: endpoint.component, status: 'ok', detail: models.loaded.has(name) ? MODEL_HEALTH.loaded : MODEL_HEALTH.installed };
 }
 
-/** The backup model: off until one is named; then whether it is installed. */
-export function backupModelCheck(model: string | undefined, models: LocalModels | undefined): ComponentCheck {
-  const component = 'backup_model';
-  if (!model) return { component, status: 'disabled' };
+/** The server's own word for "no standby model". */
+export const noStandby = (model: string | undefined): boolean => model !== undefined && /^(off|none)$/i.test(model);
+
+/**
+ * The standby model (the one that answers while the main model loads), as
+ * far as the runtime is told. Named: whether it is installed. Named "off": off.
+ * Not named at all: no line, because the server then picks a standby for this
+ * Mac by itself and the runtime does not know which.
+ */
+export function standbyModelCheck(model: string | undefined, models: LocalModels | undefined): ComponentCheck | undefined {
+  const component = 'standby_model';
+  if (model === undefined) return undefined;
+  if (noStandby(model)) return { component, status: 'disabled' };
   if (!models) return { component, status: 'unknown', detail: MODEL_HEALTH.unread };
-  return models.installed.has(modelName(model)) ? { component, status: 'ok', detail: MODEL_HEALTH.backupReady } : { component, status: 'degraded', detail: MODEL_HEALTH.backupMissing };
+  return models.installed.has(modelName(model)) ? { component, status: 'ok', detail: MODEL_HEALTH.standbyReady } : { component, status: 'degraded', detail: MODEL_HEALTH.standbyMissing };
 }
 
 // ---------------------------------------------------------------------------

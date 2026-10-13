@@ -204,6 +204,7 @@ runtime.env  FLINT_RP_ORIGINS                     derive    install-runtime
 runtime.env  OLLAMA_URL                           derive    install-runtime
 runtime.env  OLLAMA_NUM_CTX                       derive    install-runtime
 runtime.env  FLINT_TRIAGE_MODEL                   derive    install-runtime
+runtime.env  FLINT_LOCAL_FALLBACK_MODEL           derive    install-runtime
 runtime.env  FLINT_BUDGET_ANTHROPIC_DAILY_USD     derive    install-runtime
 runtime.env  FLINT_BUDGET_ANTHROPIC_MONTHLY_USD   derive    install-runtime
 runtime.env  FLINT_BUDGET_OPENAI_DAILY_USD        derive    install-runtime

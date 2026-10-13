@@ -22,7 +22,7 @@ import { join } from 'node:path';
 import { HEALTH_NAMES, noteProblems } from '@flint/policy';
 import {
   DISK_FULL_BYTES, DISK_LOW_BYTES, EXPIRY_WARN_DAYS, MODEL_HEALTH, REMOTE_HEALTH, TAILSCALE_BINS,
-  backupModelCheck, daysUntil, diskCheck, freeBytes, gigabytes, localModelCheck, localModels, modelName, readMachine, remoteAccess, remoteAccessCheck, runFixed,
+  standbyModelCheck, daysUntil, diskCheck, freeBytes, gigabytes, localModelCheck, localModels, modelName, readMachine, remoteAccess, remoteAccessCheck, runFixed,
   type RemoteAccess, type Run,
 } from '../src/health/machine';
 
@@ -280,15 +280,19 @@ describe('the local models', () => {
     expect(modelName('registry.example:5000/x/y')).toBe('registry.example:5000/x/y:latest');
   });
 
-  it('Backup Model: off until one is named; then installed or not, and unknown when the list could not be read', () => {
+  it('Standby Model: no line until one is named; named "off" it is off; then installed or not, and unknown when the list could not be read', () => {
     const models = { installed: new Set(['llama3.2:latest']), loaded: new Set<string>() };
-    expect(backupModelCheck(undefined, models)).toEqual({ component: 'backup_model', status: 'disabled' });
-    expect(backupModelCheck('llama3.2', models)).toEqual({ component: 'backup_model', status: 'ok', detail: 'The backup model is ready.' });
-    expect(backupModelCheck('gemma3:4b', models)).toEqual({ component: 'backup_model', status: 'degraded', detail: 'The backup model isn’t installed.' });
-    expect(backupModelCheck('llama3.2', undefined)).toEqual({ component: 'backup_model', status: 'unknown', detail: 'Flint couldn’t check which models are installed.' });
+    // Not named: the server picks a standby for this Mac by itself, and the runtime has nothing to say about it.
+    expect(standbyModelCheck(undefined, models)).toBeUndefined();
+    for (const off of ['off', 'none', 'OFF', 'None']) expect(standbyModelCheck(off, models), off).toEqual({ component: 'standby_model', status: 'disabled' });
+    // A model that merely begins that way is a model.
+    expect(standbyModelCheck('offline-small:1b', models)).toMatchObject({ status: 'degraded' });
+    expect(standbyModelCheck('llama3.2', models)).toEqual({ component: 'standby_model', status: 'ok', detail: 'The standby model is ready.' });
+    expect(standbyModelCheck('gemma3:4b', models)).toEqual({ component: 'standby_model', status: 'degraded', detail: 'The standby model isn’t installed.' });
+    expect(standbyModelCheck('llama3.2', undefined)).toEqual({ component: 'standby_model', status: 'unknown', detail: 'Flint couldn’t check which models are installed.' });
     for (const line of Object.values(MODEL_HEALTH)) {
       plain('ollama', line);
-      plain('backup_model', line);
+      plain('standby_model', line);
     }
   });
 

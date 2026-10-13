@@ -47,9 +47,9 @@ describe.skipIf(NO_DB)('Health sees the whole machine (flint_test)', () => {
   let home: string;
   const owner = (sql: string, params: unknown[] = []) => withClient(urls.owner, (c) => c.query(sql, params));
   const flint = (name: string) => join(home, '.flint', name);
-  const checks = async (now: Date, machine?: MachineReading, named: { backupModel: boolean } = { backupModel: true }) => {
-    const { backupModel: _named, ...unnamed } = config;
-    return Object.fromEntries((await checkComponents({ db, config: named.backupModel ? config : unnamed, now, sources: [], ...(machine ? { machine } : {}) })).map((c) => [c.component, c]));
+  const checks = async (now: Date, machine?: MachineReading, named: { standbyModel: boolean } = { standbyModel: true }) => {
+    const { standbyModel: _named, ...unnamed } = config;
+    return Object.fromEntries((await checkComponents({ db, config: named.standbyModel ? config : unnamed, now, sources: [], ...(machine ? { machine } : {}) })).map((c) => [c.component, c]));
   };
   const healthy: MachineReading = { freeBytes: 212 * GB, remote: { state: 'ok' }, models: { installed: new Set(['qwen2.5:14b', 'llama3.2:latest']), loaded: new Set(['qwen2.5:14b']) } };
   /** A file's time set to `ms` before `now`. */
@@ -70,10 +70,10 @@ describe.skipIf(NO_DB)('Health sees the whole machine (flint_test)', () => {
     if (home) rmSync(home, { recursive: true, force: true });
   });
 
-  it('the settings: the backup model is named by the server’s own setting, and Ollama is asked on this Mac only', () => {
-    expect(config.backupModel).toBe('llama3.2');
+  it('the settings: the standby model is named by the server’s own setting, and Ollama is asked on this Mac only', () => {
+    expect(config.standbyModel).toBe('llama3.2');
     expect(config.ollamaUrl).toBe('http://127.0.0.1:11434');
-    expect(loadConfig({ DATABASE_URL: urls.app, HOME: home }).backupModel).toBeUndefined();
+    expect(loadConfig({ DATABASE_URL: urls.app, HOME: home }).standbyModel).toBeUndefined();
     expect(() => loadConfig({ DATABASE_URL: urls.app, HOME: home, FLINT_LOCAL_FALLBACK_MODEL: 'a model; rm -rf' })).toThrow();
     expect(() => loadConfig({ DATABASE_URL: urls.app, HOME: home, OLLAMA_URL: 'http://ollama.example.com:11434' })).toThrow();
   });
@@ -81,26 +81,30 @@ describe.skipIf(NO_DB)('Health sees the whole machine (flint_test)', () => {
   it('what is read from the Mac is shown only when there is a reading, each under its own name', async () => {
     const now = new Date();
     const without = await checks(now);
-    for (const component of ['disk', 'remote_access', 'backup_model']) expect(without[component], component).toBeUndefined();
+    for (const component of ['disk', 'remote_access', 'standby_model']) expect(without[component], component).toBeUndefined();
     const withIt = await checks(now, healthy);
     expect(withIt.disk).toEqual({ component: 'disk', status: 'ok', detail: 'This Mac has 212 GB free.' });
     expect(withIt.remote_access).toEqual({ component: 'remote_access', status: 'ok', detail: 'Your phone and MacBook can reach Flint.' });
-    expect(withIt.backup_model).toEqual({ component: 'backup_model', status: 'ok', detail: 'The backup model is ready.' });
+    expect(withIt.standby_model).toEqual({ component: 'standby_model', status: 'ok', detail: 'The standby model is ready.' });
     // Each bad reading, as its own component says it.
     const bad = await checks(now, { freeBytes: 3 * GB, remote: { state: 'down', why: 'signed_out' }, models: { installed: new Set(['qwen2.5:14b']), loaded: new Set() } });
     expect(bad.disk).toMatchObject({ status: 'down', detail: 'This Mac is nearly full, with 3 GB free.' });
     expect(bad.remote_access).toMatchObject({ status: 'down', detail: 'Remote access needs a new sign-in, so your phone and MacBook can’t reach Flint.' });
-    expect(bad.backup_model).toMatchObject({ status: 'degraded', detail: 'The backup model isn’t installed.' });
-    // Nothing could be read: unknown, never ok; remote access never set up, and no backup model named, are off.
+    expect(bad.standby_model).toMatchObject({ status: 'degraded', detail: 'The standby model isn’t installed.' });
+    // Nothing could be read: unknown, never ok; remote access never set up, and no standby model named, are off.
     const blind = await checks(now, { remote: { state: 'unknown' } });
     expect(blind.disk!.status).toBe('unknown');
     expect(blind.remote_access!.status).toBe('unknown');
-    expect(blind.backup_model!.status).toBe('unknown');
-    const off = await checks(now, { freeBytes: 50 * GB, remote: { state: 'off' } }, { backupModel: false });
+    expect(blind.standby_model!.status).toBe('unknown');
+    const off = await checks(now, { freeBytes: 50 * GB, remote: { state: 'off' } }, { standbyModel: false });
     expect(off.remote_access).toEqual({ component: 'remote_access', status: 'disabled' });
-    expect(off.backup_model).toEqual({ component: 'backup_model', status: 'disabled' });
+    // No standby named in the runtime's settings: no line at all (the server picks one for this Mac by itself).
+    expect(off.standby_model).toBeUndefined();
+    // Named "off": it is off, and that is what the line says.
+    const turnedOff = Object.fromEntries((await checkComponents({ db, config: { ...config, standbyModel: 'off' }, now, sources: [], machine: healthy })).map((c) => [c.component, c]));
+    expect(turnedOff.standby_model).toEqual({ component: 'standby_model', status: 'disabled' });
     // Each has a name on screen, and the morning digest uses it.
-    for (const component of ['disk', 'remote_access', 'backup_model', 'files_backup', 'offsite_drill']) expect(HEALTH_NAMES[component], component).toMatch(/^[A-Z][A-Za-z ]+$/);
+    for (const component of ['disk', 'remote_access', 'standby_model', 'files_backup', 'offsite_drill']) expect(HEALTH_NAMES[component], component).toMatch(/^[A-Z][A-Za-z ]+$/);
     expect(digestBody({ relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 }, ['disk', 'remote_access', 'files_backup'])).toContain('These need a look: Disk Space, Remote Access and Files Backup.');
   });
 
@@ -215,7 +219,7 @@ describe.skipIf(NO_DB)('Health sees the whole machine (flint_test)', () => {
     const by = Object.fromEntries(report.components.map((c) => [c.component, c]));
     expect(by.disk).toMatchObject({ status: 'degraded', detail: 'This Mac is low on space, with 14 GB free.' });
     expect(by.remote_access).toMatchObject({ status: 'ok' });
-    for (const component of ['disk', 'remote_access', 'backup_model', 'files_backup', 'offsite_drill']) {
+    for (const component of ['disk', 'remote_access', 'standby_model', 'files_backup', 'offsite_drill']) {
       expect(by[component], component).toBeDefined();
       expect(healthName(component)).toBe(HEALTH_NAMES[component]);
     }

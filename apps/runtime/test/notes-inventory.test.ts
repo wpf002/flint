@@ -317,7 +317,7 @@ describe('the runtime’s notes to Will', () => {
       ...[undefined, 0, 0.4 * GB, 4 * GB, 14 * GB, 212 * GB, 4000 * GB].map((free): [string, string | undefined] => ['disk', diskCheck(free).detail]),
       ['remote_access', REMOTE_HEALTH.ok], ['remote_access', REMOTE_HEALTH.unknown], ...Object.values(REMOTE_HEALTH.down).map((l): [string, string] => ['remote_access', l]),
       ...[0, 1, 2, 14].map((d): [string, string] => ['remote_access', REMOTE_HEALTH.expiring(d)]),
-      ...Object.values(MODEL_HEALTH).flatMap((l): Array<[string, string]> => [['ollama', l], ['backup_model', l]]),
+      ...Object.values(MODEL_HEALTH).flatMap((l): Array<[string, string]> => [['ollama', l], ['standby_model', l]]),
       ...[1, 2, 40].map((n): [string, string] => ['postgres', DATABASE_HEALTH.largeObjects(n)]),
       ['backup', BACKUP_HEALTH.failed], ['files_backup', BACKUP_HEALTH.filesNone], ['files_backup', BACKUP_HEALTH.filesFailed], ['offsite_backup', BACKUP_HEALTH.filesOffsiteNone], ['offsite_backup', BACKUP_HEALTH.filesOffsiteFailed],
       ...[0, 1, 30].flatMap((h): Array<[string, string]> => [['files_backup', BACKUP_HEALTH.filesAge(h)], ['offsite_backup', BACKUP_HEALTH.filesOffsiteAge(h)]]),
@@ -339,7 +339,7 @@ describe('the runtime’s notes to Will', () => {
     // (The other four are free space's own: a whole number of gigabytes in one of three fixed sentences, or that it could not be read.)
     expect(machine.match(/detail: (`This Mac [^`]*\$\{gigabytes\(free\)\} free\.`|'Flint couldn’t read how much space is free\.')/g)).toHaveLength(4);
     // The names are the ones Settings > Health and the digest show.
-    expect([HEALTH_NAMES.disk, HEALTH_NAMES.remote_access, HEALTH_NAMES.backup_model, HEALTH_NAMES.files_backup, HEALTH_NAMES.offsite_drill]).toEqual(['Disk Space', 'Remote Access', 'Backup Model', 'Files Backup', 'Offsite Restore Test']);
+    expect([HEALTH_NAMES.disk, HEALTH_NAMES.remote_access, HEALTH_NAMES.standby_model, HEALTH_NAMES.files_backup, HEALTH_NAMES.offsite_drill]).toEqual(['Disk Space', 'Remote Access', 'Standby Model', 'Files Backup', 'Offsite Restore Test']);
     expect(digestBody({ relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 }, ['disk', 'offsite_drill'])).toContain('Disk Space and Offsite Restore Test');
     // Removing old backups by hand: sentences, counts and sizes.
     for (const o of [

@@ -194,7 +194,7 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
         await c.query(row('p7-b', 'pg_dump_flint', '/b/one.dump'));
         await c.query(row('p7-n', 'nexus_railway_dump', '/b/nexus.dump'));
         const refused = await pgError(c.query(sql('migration.sql')));
-        expect(refused.message).toBe('p7_resilience: 1 backup file(s) are recorded more than once (same kind, location and path); nothing was changed');
+        expect(refused.message).toBe('p7_resilience: 1 backup file is recorded more than once, under the same kind, location and path; nothing was changed');
         // Nothing was changed: the earlier list of kinds is still the one in force, and there is no index.
         expect((await c.query(`SELECT "kind" FROM "BackupRun" WHERE "id" = 'p7-n'`)).rows).toEqual([{ kind: 'nexus_railway_dump' }]);
         expect((await c.query(`SELECT to_regclass('public."BackupRun_kind_location_path_key"') AS t`)).rows[0].t).toBeNull();
