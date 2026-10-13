@@ -211,6 +211,15 @@ export class CannotTranscribe extends Error {
 }
 
 /**
+ * What whisper.cpp lacks on this Mac right now, if anything: its program
+ * first, then its model. One question with one answer, for the recording that
+ * is about to be transcribed and for the status that says whether one can be.
+ */
+export function whisperMissing(at: { bin: string; model: string }, exists: (path: string) => boolean = isFile): 'program' | 'model' | undefined {
+  return !exists(at.bin) ? 'program' : !exists(at.model) ? 'model' : undefined;
+}
+
+/**
  * Speech-to-text with whisper.cpp, on this Mac (the same pipeline the CLI
  * voice mode uses).
  *
@@ -228,8 +237,8 @@ export function whisperCppStt(opts: { bin: string; model: string; run?: Run; exi
     local: true,
     model: fileNameOf(opts.model),
     async transcribe(audio) {
-      if (!exists(opts.bin)) throw new CannotTranscribe('program');
-      if (!exists(opts.model)) throw new CannotTranscribe('model');
+      const lacks = whisperMissing(opts, exists);
+      if (lacks) throw new CannotTranscribe(lacks);
       const dir = mkdtempSync(join(tmpdir(), 'flint-stt-'));
       try {
         const inFile = join(dir, 'in');
@@ -510,6 +519,15 @@ export function planVoice(cfg: Pick<InferenceConfig, 'voice' | 'problems'>, env:
     tts = { name: 'off', local: true, why: invalid('FLINT_TTS_PROVIDER') ? 'invalid' : 'set' };
   }
   return { stt, tts };
+}
+
+/**
+ * What the transcription a plan names lacks on this Mac right now, for a
+ * status. A speech server lacks nothing here: whether it is up is its own
+ * answer to give, when it is asked.
+ */
+export function transcriptionMissing(stt: VoicePlan['stt'], exists: (path: string) => boolean = isFile): 'program' | 'model' | undefined {
+  return stt.name === 'local' ? undefined : whisperMissing(stt, exists);
 }
 
 /** The paths a speech server is asked on: nothing else at its address is ever reached. */

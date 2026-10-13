@@ -430,11 +430,23 @@ describe('the real server, as a process: the same stale name in the environment,
     expect((await transcribe(none.srv, Buffer.alloc(0))).status).toBe(400);
   });
 
+  it('Settings says the same thing the route does: the Transcription row, and the line of the status', async () => {
+    const st = (await none.srv.get('/inference')).json as { voice: { transcription: Record<string, unknown>; speech: Record<string, unknown> }; lines: string[] };
+    expect(st.voice.transcription).toEqual({ provider: 'whisper-cpp', name: 'Whisper Base English', here: true, sentence: "Flint can't turn speech into text until its transcription model is on this Mac." });
+    expect(st.lines).toContain("Transcription is set to whisper-cpp (ggml-base.en.bin). Flint can't turn speech into text until its transcription model is on this Mac.");
+    expect(st.lines.join('\n')).not.toContain('Transcription uses whisper-cpp');
+    expect(st.voice.speech).toMatchObject({ name: 'OpenAI' });
+  });
+
   it('the model put where it belongs while Flint runs is used by the very next recording: nothing has to be restarted', async () => {
     const usual = join(none.srv.home, '.flint', 'models', 'ggml-base.en.bin');
     mkdirSync(join(none.srv.home, '.flint', 'models'), { recursive: true });
     writeFileSync(usual, 'a stand-in for the usual model file\n');
     try {
+      // The row follows at once: it is asked when the status is built, as the route asks before each recording.
+      const st = (await none.srv.get('/inference')).json as { voice: { transcription: Record<string, unknown> }; lines: string[] };
+      expect(st.voice.transcription).toMatchObject({ sentence: 'Your voice is turned into text on this Mac.' });
+      expect(st.lines).toContain('Transcription uses whisper-cpp (ggml-base.en.bin), on this Mac.');
       const r = await transcribe(none.srv, silence());
       if (ON_A_MAC) {
         expect(r).toEqual({ status: 200, json: { text: 'This is never printed.' } });

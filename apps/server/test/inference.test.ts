@@ -803,6 +803,28 @@ describe('which brain is on this Mac, as the facade answers it', () => {
     expect(told.inference.cfg.problems.map((p) => [p.key, p.kind])).toEqual([['WHISPER_MODEL', 'missing']]);
   });
 
+  // The Transcription row follows what is on this Mac when the status is built: the same look the provider takes
+  // before each recording (./voice whisperMissing), so the row and /transcribe never say different things.
+  it('the status says when whisper.cpp or its model is not on this Mac, and stops saying it the moment it is', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'flint-inference-'));
+    dirs.push(dir);
+    const there = new Set<string>();
+    const inference = await buildInference({ env: { OLLAMA_HOST: 'http://127.0.0.1:9', WHISPER_BIN: '/x/whisper-cli', WHISPER_MODEL: '/x/ggml-small.en.bin' }, modeFile: join(dir, 'm.json'), fetch: offline, detect, pick: { capMs: 200 }, observeOnly: true, fileExists: (p) => p.startsWith('/x/') && (there.size === 0 || there.has(p)) });
+    built.push(inference);
+    // Both were there at start, so both settings were taken.
+    expect(inference.cfg.problems).toEqual([]);
+    const row = async () => (await inference.status()).voice!.transcription;
+    expect((await row()).sentence).toBe('Your voice is turned into text on this Mac.');
+    there.add('/x/whisper-cli'); // from here on, only what is in the set is there: the model is gone
+    expect(await row()).toEqual({ provider: 'whisper-cpp', name: 'Whisper Small English', here: true, sentence: "Flint can't turn speech into text until its transcription model is on this Mac." });
+    expect((await inference.status()).lines).toContain("Transcription is set to whisper-cpp (ggml-small.en.bin). Flint can't turn speech into text until its transcription model is on this Mac.");
+    there.delete('/x/whisper-cli');
+    there.add('/x/ggml-small.en.bin'); // the model is back, and the program is gone
+    expect((await row()).sentence).toBe("Flint can't turn speech into text until its transcription program is on this Mac.");
+    there.add('/x/whisper-cli');
+    expect((await row()).sentence).toBe('Your voice is turned into text on this Mac.');
+  });
+
   it('a stand-in brain (nothing settled) is not local: it has no server it may be asked on', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'flint-inference-'));
     dirs.push(dir);

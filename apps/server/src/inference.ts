@@ -42,7 +42,7 @@ import { brainIsLocal, brainOf, setPlaceRules, type MediaFlags } from './policy'
 import { turnStaysHere, type StayRoute } from './private-turns';
 import { paidToolSpecs, type BrainChooser, type BudgetView, type PaidToolSpec } from './spend';
 import { carriesKeptText, isEvalTurn, isPrivateRequest, isPrivateTurn, isStaysHereRequest, isStaysHereTurn, markPrivateRequest, markStaysHereRequest } from './turn-taint';
-import { isFile, planVoice, type VoicePlan } from './voice';
+import { isFile, planVoice, transcriptionMissing, type VoicePlan } from './voice';
 import type { TurnFacts } from './hybrid-rules';
 
 type Env = Record<string, string | undefined>;
@@ -116,13 +116,16 @@ export class Inference {
   /** Have the server at this address asked what runs on it, when its word is more than two seconds old (./ollama-locality fresh). */
   private readonly listing: (baseURL: string) => Promise<void>;
   private readonly refusalLoggedAt = new Map<CloudCallKind, number>();
+  /** Is there a file at this path? Asked when a status is built, of the transcription program and its model (./voice transcriptionMissing). */
+  private readonly fileExists: (path: string) => boolean;
 
   constructor(parts: {
     cfg: InferenceConfig; voice: VoicePlan; handle: LocalHandle; mode: ModeStore; machine: () => Machine | undefined; ready: Promise<void>; paid: readonly PaidToolSpec[];
-    log?: (msg: string) => void; now?: () => number; listing?: (baseURL: string) => Promise<void>;
+    log?: (msg: string) => void; now?: () => number; listing?: (baseURL: string) => Promise<void>; fileExists?: (path: string) => boolean;
   }) {
     this.cfg = parts.cfg;
     this.voicePlan = parts.voice;
+    this.fileExists = parts.fileExists ?? isFile;
     this.handle = parts.handle;
     this.mode = parts.mode;
     this.machine = parts.machine;
@@ -695,6 +698,8 @@ export class Inference {
     const snapshot = await this.local.monitor.check();
     const machine = this.machine();
     const embedModel = this.embedModel;
+    // Whether a recording could be transcribed right now: the same look the provider takes before each one.
+    const lacks = transcriptionMissing(this.voicePlan.stt, this.fileExists);
     return inferenceStatus({
       embedding: { model: embedModel, installed: await this.embedInstalled(embedModel, snapshot.reachable) },
       mode: this.mode.current(),
@@ -705,6 +710,7 @@ export class Inference {
       ...(this.standbyElsewhere() ? { standbyElsewhere: true } : {}),
       snapshot,
       voice: this.voicePlan,
+      ...(lacks ? { transcriptionMissing: lacks } : {}),
       ...(cloud ? { cloud } : {}),
     });
   }
@@ -868,5 +874,5 @@ export async function buildInference(deps: BuildInferenceDeps): Promise<Inferenc
     // A brain adopted behind the boot (the tier's model, the server's late answer) is looked at and warmed the same way.
     handle.onChange(() => void ready.then(follow));
   }
-  return new Inference({ cfg, voice: planVoice(cfg, deps.env), handle, mode, machine: () => machine, ready, paid: paidToolSpecs(deps.env), log, ...(deps.listing ? { listing: deps.listing } : {}) });
+  return new Inference({ cfg, voice: planVoice(cfg, deps.env), handle, mode, machine: () => machine, ready, paid: paidToolSpecs(deps.env), log, ...(deps.listing ? { listing: deps.listing } : {}), ...(deps.fileExists ? { fileExists: deps.fileExists } : {}) });
 }

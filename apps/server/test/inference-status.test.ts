@@ -709,6 +709,31 @@ describe('voice: what speaks and what hears, for the console and for the command
     expect(st.lines.join('\n')).not.toContain('secret-folder');
   });
 
+  // The Transcription row said "Your voice is turned into text on this Mac." on a Mac with no whisper.cpp, or
+  // with no model for it. It follows what is there now: the same look the provider takes before each recording.
+  it('whisper.cpp or its model is not on this Mac: the row and the line say nothing can be transcribed until it is', () => {
+    const stt = plan(KEY).stt;
+    expect(transcriptionRow(stt)).toEqual({ provider: 'whisper-cpp', name: 'Whisper Base English', here: true, sentence: 'Your voice is turned into text on this Mac.' });
+    expect(transcriptionRow(stt, 'model')).toEqual({ provider: 'whisper-cpp', name: 'Whisper Base English', here: true, sentence: "Flint can't turn speech into text until its transcription model is on this Mac." });
+    expect(transcriptionRow(stt, 'program')).toEqual({ provider: 'whisper-cpp', name: 'Whisper Base English', here: true, sentence: "Flint can't turn speech into text until its transcription program is on this Mac." });
+    expect(voiceLines(plan(KEY), 'cloud', 'model')[0]).toBe("Transcription is set to whisper-cpp (ggml-base.en.bin). Flint can't turn speech into text until its transcription model is on this Mac.");
+    expect(voiceLines(plan(KEY), 'cloud', 'program')[0]).toBe("Transcription is set to whisper-cpp (ggml-base.en.bin). Flint can't turn speech into text until its transcription program is on this Mac.");
+    // In a whole status: the row, the line, and nothing else changes (speech is another program's business).
+    for (const mode of MODES) {
+      const there = status({ mode, env: KEY });
+      const gone = inferenceStatus({ ...input({ mode, env: KEY }), transcriptionMissing: 'model' });
+      expect(gone.voice!.transcription.sentence).toBe("Flint can't turn speech into text until its transcription model is on this Mac.");
+      expect(gone.voice!.speech).toEqual(there.voice!.speech);
+      expect(gone.lines.filter((l) => !there.lines.includes(l))).toEqual(["Transcription is set to whisper-cpp (ggml-base.en.bin). Flint can't turn speech into text until its transcription model is on this Mac."]);
+      expect(gone.notices).toEqual(there.notices);
+    }
+    // A sentence a screen can show: a capital, a full stop, no path, no file name.
+    for (const what of ['model', 'program'] as const) expect(transcriptionRow(stt, what).sentence).toMatch(/^Flint can't [A-Za-z ']+\.$/);
+    // A speech server that hears is asked nothing of whisper.cpp: its row is its own, whatever is said to be missing.
+    const server = plan({ FLINT_STT_PROVIDER: 'local', FLINT_LOCAL_STT_BASE_URL: 'http://127.0.0.1:8081/v1' }).stt;
+    expect(transcriptionRow(server, 'model').sentence).toBe('Your voice is turned into text by the speech server on this Mac.');
+  });
+
   it('a refused voice setting is a notice in plain words, and the row says what Flint did instead', () => {
     const typo = status({ env: { ...KEY, FLINT_TTS_PROVIDER: 'sya' } });
     expect(typo.voice!.speech).toEqual({ provider: 'off', name: 'Off', here: true, sentence: 'Each device speaks with its own voice.' });

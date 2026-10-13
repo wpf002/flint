@@ -986,7 +986,9 @@ the value comes from, the settings file or the environment. When neither the one
 nor the usual one is on this Mac, `/transcribe` answers 503 with a sentence saying so
 (`Flint can’t turn speech into text: its transcription model isn’t on this Mac.`), and not the
 500 of a program that could not start. The program and the model are looked for at each
-recording, so a model put in place while Flint runs is used by the next one.
+recording, so a model put in place while Flint runs is used by the next one. The Transcription
+row in Settings follows the same look, taken when the status is built: `Flint can't turn speech
+into text until its transcription model is on this Mac.`
 
 - **A refused setting never lands on a less private choice than the one that was meant.** A
   speech provider Flint does not know is NO speech here (`off`), never OpenAI: the default is an
@@ -998,7 +1000,12 @@ recording, so a model put in place while Flint runs is used by the next one.
   is his (`FLINT_LOCAL_ALLOW_REMOTE`, over https unless he also called its network private): the
   switch vouches for that server and for no other machine, the same rule `OLLAMA_HOST` has. Any
   other machine, and an address Node's env proxy would carry the request to, is refused, and
-  the refusal names no switch, because none allows it. The server is reached through the
+  the refusal names no switch, because none allows it. Whether an address is proxied is one
+  rule, `@flint/policy`'s (the same one the model server is held to), and it reads the no-proxy
+  list as Node does: an IPv6 address needs its brackets (`[::1]`), `*` means every host only as
+  the whole value, and when both `no_proxy` and `NO_PROXY` are set it is the lower-case one
+  that counts. `test/process/voice-proxy.test.ts` starts a real Node for each spelling and sees
+  where a request goes. The server is reached through the
   guarded fetch: its origin and its two paths only, and never a redirect. Its key is
   `FLINT_LOCAL_VOICE_API_KEY`, never part of the address, never sent over plain http to another
   machine, never sent to OpenAI, and OpenAI's key is never sent to it. Its answers are read to
@@ -1072,6 +1079,10 @@ What it never does:
 - **It plays nothing.** `say` is only ever run with a file to write to, and no player is run.
 - **It installs nothing.** For a model or an engine that is not here it prints the exact command
   and what it takes on disk, for Will to run.
+- **It asks the proxy rule before it starts its own server.** The transcription server it
+  starts is at `127.0.0.1`. When Node's env proxy would carry a request for that address, the
+  server is not started and no clip is posted to it, which matters most with `--clips`: those
+  are recordings of a person.
 - **It sends nothing off this Mac, and spends nothing**, unless OpenAI's speech is named with
   `--tts say,openai` AND a cap is given with `--budget-usd`. Then the estimate is printed before
   anything is sent (the ten sentences are under one cent on `tts-1`), and without a cap that

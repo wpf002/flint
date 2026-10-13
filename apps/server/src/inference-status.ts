@@ -179,6 +179,8 @@ export interface StatusInput {
   embedding?: { model: string; installed: boolean | undefined };
   /** What hears and what speaks, as config decided it (./voice planVoice). */
   voice?: VoicePlan;
+  /** What whisper.cpp lacks on this Mac right now, when it is what hears (./voice transcriptionMissing). Absent: nothing, or it was not looked at. */
+  transcriptionMissing?: 'program' | 'model';
   cloud?: InferenceStatus['cloud'];
   /**
    * The standby model is known to run on Ollama's servers, whatever it is
@@ -506,8 +508,14 @@ export function speechRow(t: VoicePlan['tts'], mode: InferenceMode): VoiceRow {
   }
 }
 
-/** What turns Will's voice into text. */
-export function transcriptionRow(s: VoicePlan['stt']): VoiceRow {
+/** What a row and a line say when whisper.cpp or its model is not on this Mac: nothing can be transcribed until it is. */
+const CANNOT_TRANSCRIBE: Record<'program' | 'model', string> = {
+  program: "Flint can't turn speech into text until its transcription program is on this Mac.",
+  model: "Flint can't turn speech into text until its transcription model is on this Mac.",
+};
+
+/** What turns Will's voice into text. `missing`: what whisper.cpp lacks on this Mac right now, when it is what hears. */
+export function transcriptionRow(s: VoicePlan['stt'], missing?: 'program' | 'model'): VoiceRow {
   if (s.name === 'local') {
     return {
       provider: s.name,
@@ -516,14 +524,19 @@ export function transcriptionRow(s: VoicePlan['stt']): VoiceRow {
       sentence: s.server.loopback ? 'Your voice is turned into text by the speech server on this Mac.' : 'Your voice is turned into text by the speech server on the model server you allowed.',
     };
   }
-  return { provider: s.name, name: whisperName(s.model), here: true, sentence: 'Your voice is turned into text on this Mac.' };
+  return { provider: s.name, name: whisperName(s.model), here: true, sentence: missing ? CANNOT_TRANSCRIBE[missing] : 'Your voice is turned into text on this Mac.' };
 }
 
 /** The same two facts for the command line: providers by name, models and voices as they are set. Never a path, an address or a key. */
-export function voiceLines(v: VoicePlan, mode: InferenceMode): string[] {
+export function voiceLines(v: VoicePlan, mode: InferenceMode, missing?: 'program' | 'model'): string[] {
   const s = v.stt;
   const t = v.tts;
-  const hears = s.name === 'local' ? `Transcription uses the local speech server ${whereOf(s.server)} (${s.model}).` : `Transcription uses whisper-cpp (${fileNameOf(s.model)}), on this Mac.`;
+  const hears =
+    s.name === 'local'
+      ? `Transcription uses the local speech server ${whereOf(s.server)} (${s.model}).`
+      : missing
+        ? `Transcription is set to whisper-cpp (${fileNameOf(s.model)}). ${CANNOT_TRANSCRIBE[missing]}`
+        : `Transcription uses whisper-cpp (${fileNameOf(s.model)}), on this Mac.`;
   let speaks: string;
   if (t.name === 'openai') {
     speaks = !t.hasKey
@@ -744,7 +757,7 @@ export function inferenceStatus(i: StatusInput): InferenceStatus {
     lines.push(`The embedding model is ${embedding.model}.${embedding.state === 'installed' ? ' It is downloaded.' : embedding.state === 'not_installed' ? ' It is not downloaded yet.' : ''}`);
     if (embedding.pull) lines.push(pullLine(embedding.pull, embedding.downloadGb));
   }
-  if (i.voice) lines.push(...voiceLines(i.voice, i.mode));
+  if (i.voice) lines.push(...voiceLines(i.voice, i.mode, i.transcriptionMissing));
   if (i.cloud) lines.push(i.cloud.configured ? (i.cloud.paused ? 'A cloud model is configured, and it is paused right now.' : 'A cloud model is configured.') : 'No cloud model is configured.');
   lines.push(...warnings);
   for (const p of local.cfg.problems) lines.push(`A setting was refused: ${p.key} is ${p.reason}.`);
@@ -793,7 +806,7 @@ export function inferenceStatus(i: StatusInput): InferenceStatus {
       pull,
       warnings,
     },
-    ...(i.voice ? { voice: { speech: speechRow(i.voice.tts, i.mode), transcription: transcriptionRow(i.voice.stt) } } : {}),
+    ...(i.voice ? { voice: { speech: speechRow(i.voice.tts, i.mode), transcription: transcriptionRow(i.voice.stt, i.transcriptionMissing) } } : {}),
     ...(i.cloud ? { cloud: i.cloud } : {}),
     problems: local.cfg.problems,
     notices: shown,

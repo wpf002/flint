@@ -16,7 +16,7 @@ import { createContext, runInContext } from 'node:vm';
 import { EMBEDDING_MODEL, HARDWARE_TIERS, hardwareTier, hardwareTierFor } from '@flint/core';
 import type { Hardware } from '../src/hardware';
 import { readInferenceConfig, type InferenceMode } from '../src/inference-config';
-import { inferenceStatus, type InferenceStatus } from '../src/inference-status';
+import { inferenceStatus, transcriptionRow, type InferenceStatus } from '../src/inference-status';
 import { planVoice } from '../src/voice';
 import type { LocalBrains, NotConfined } from '../src/local-brains';
 import type { ModelHealth } from '../src/local-monitor';
@@ -582,6 +582,21 @@ describe('what it shows', () => {
         for (const line of [p.ids.spsub!.textContent, p.ids.trsub!.textContent]) expect(line, JSON.stringify(env)).toMatch(/^[A-Z][^\n]*\.$/);
         for (const name of [p.ids.spval!.textContent, p.ids.trval!.textContent]) for (const w of name.split(' ')) expect(w[0], name).toBe(w[0]!.toUpperCase());
       }
+    }
+  });
+
+  it('whisper.cpp or its model is not on this Mac: the Transcription row says nothing can be transcribed until it is', () => {
+    const p = page();
+    const st = status();
+    for (const [what, sentence] of [
+      ['model', 'Flint can’t turn speech into text until its transcription model is on this Mac.'],
+      ['program', 'Flint can’t turn speech into text until its transcription program is on this Mac.'],
+    ] as const) {
+      const row = transcriptionRow(planVoice(readInferenceConfig({}), {}, { platform: 'darwin', home: '/home/will' }).stt, what);
+      p.render({ ...st, voice: { ...st.voice!, transcription: row } });
+      expect([p.ids.trrow!.hidden, p.ids.trval!.textContent, p.ids.trsub!.textContent]).toEqual([false, 'Whisper Base English', sentence]);
+      // The Speech row is untouched by it.
+      expect(p.ids.spval!.textContent).toBe('OpenAI');
     }
   });
 
