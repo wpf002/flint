@@ -465,7 +465,7 @@ describe('the console Approvals panel', () => {
 
   it('removing old backups is a card of its own: it says how much would go, that it cannot be undone, and it asks on its own', async () => {
     const prune = (over: Record<string, unknown> = {}) => card({
-      id: 'prune', fullName: 'backup.prune', origin: 'runtime:prune', destructive: true, args: { day: '2026-10-06', copies: 4, megabytes: 812 },
+      id: 'prune', fullName: 'backup.prune', origin: 'runtime:prune', destructive: true, args: { day: '2026-10-06', copies: 4, megabytes: 812, digest: '3f'.repeat(32) },
       reason: 'It waits for your approval each night there are old backups to remove, until you let it run on its own.', ...over,
     });
     answer = () => ({ status: 200, body: { signed: true, proposals: [prune(), card({ id: 'b', fullName: 'backup.local', origin: 'runtime:backup', args: { day: '2026-10-06' } })] } });
@@ -482,13 +482,20 @@ describe('the console Approvals panel', () => {
     const d = run(`apprDetails(${JSON.stringify(prune())})`) as { says: string[]; facts: string[][]; refs: string[][] };
     expect(d.says).toEqual([
       'It deletes 4 old update backups, which frees 812 MB.',
+      'It deletes only the ones counted for this card, even if more grow old before it runs.',
       'An update backup is the copy of the database Flint takes before an update changes it.',
       'The one taken before the version that is running is always kept.',
       'It runs tonight at 2:15 AM if you approve it.',
     ]);
     expect(JSON.stringify(d.facts)).not.toMatch(/Copies|Megabytes/);
+    // Which ones is signed too: the digest of their list is under REFERENCES, exactly, and in no sentence.
+    expect(d.refs).toEqual([['Digest', '3f'.repeat(32)]]);
+    expect(d.says.join(' ')).not.toContain('3f3f');
     for (const line of d.says) expect(noteProblems('Remove Old Backups', line), line).toEqual([]);
-    expect((run(`apprDetails(${JSON.stringify(prune({ args: { day: '2026-10-06', copies: 1, megabytes: 3 } }))})`) as { says: string[] }).says[0]).toBe('It deletes 1 old update backup, which frees 3 MB.');
+    // A card from before the digest (or with one that is not a digest) promises nothing about which.
+    const older = run(`apprDetails(${JSON.stringify(prune({ args: { day: '2026-10-06', copies: 1, megabytes: 3 } }))})`) as { says: string[] };
+    expect(older.says.slice(0, 2)).toEqual(['It deletes 1 old update backup, which frees 3 MB.', 'An update backup is the copy of the database Flint takes before an update changes it.']);
+    expect((run(`apprDetails(${JSON.stringify(prune({ args: { day: '2026-10-06', copies: 1, megabytes: 3, digest: 'all of them' } }))})`) as { says: string[] }).says.join(' ')).not.toMatch(/only the ones/);
     // A card with no count (an older Flint's) says the rest, and nothing it does not know; odd values are listed as they are, never put in a sentence.
     const bare = run(`apprDetails(${JSON.stringify(prune({ args: { day: '2026-10-06' } }))})`) as { says: string[] };
     expect(bare.says[0]).toBe('An update backup is the copy of the database Flint takes before an update changes it.');

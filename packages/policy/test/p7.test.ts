@@ -5,7 +5,7 @@
  * policy row says. The scratch restore drill keeps its own, promotable entry.
  */
 import { describe, it, expect } from 'vitest';
-import { resolveTier, forbiddenReason, CODE_TABLE, AUTONOMOUS_ACTIONS, CONSOLE_ONLY, type PolicyRow, type TierContext } from '../src/tiers';
+import { resolveTier, forbiddenReason, CODE_TABLE, AUTONOMOUS_ACTIONS, CONSOLE_ONLY, NEVER_FROM_CHAT, type PolicyRow, type TierContext } from '../src/tiers';
 import { BACKUP_EVENT_REASONS, BackupEvent } from '../src/wire';
 import { jobFailedNote } from '../src/action-words';
 import { noteProblems } from '../src/notes';
@@ -63,7 +63,21 @@ describe('P7: removing old backups', () => {
     expect(CODE_TABLE['backup.prune']).toMatchObject({ tier: 'approval', promotable: true, write: true, byName: true, cap: { limit: 1, period: 'day' } });
     expect(AUTONOMOUS_ACTIONS.has('backup.prune')).toBe(true);
     expect(resolveTier('backup.prune', auto)).toMatchObject({ tier: 'approval', rule: 'code', cap: { limit: 1, period: 'day' } });
-    expect(resolveTier('backup.prune', chat).tier).toBe('approval');
+    // By hand it is Will at the keyboard: his own approval, unless a rule of his forbids it.
+    expect(resolveTier('backup.prune', { context: 'console', tainted: false }).tier).toBe('approval');
+    expect(resolveTier('backup.prune', { context: 'console', tainted: false, policies: [row('backup.prune', 'forbidden')], now: NOW }).tier).toBe('forbidden');
+  });
+
+  it('is never asked for from chat: forbidden there, whatever a rule says, so no look-alike card can be filed', () => {
+    expect(NEVER_FROM_CHAT.has('backup.prune')).toBe(true);
+    expect(resolveTier('backup.prune', chat)).toMatchObject({ tier: 'forbidden', rule: 'forbidden', reason: 'backup.prune is never asked for from chat' });
+    expect(resolveTier('backup.prune', { ...chat, tainted: true }).tier).toBe('forbidden');
+    expect(resolveTier('backup.prune', { ...chat, policies: [row('backup.prune', 'alone')], now: NOW }).tier).toBe('forbidden');
+    // Its neighbours are as they were: a backup asked for in chat waits for approval.
+    for (const a of ['backup.local', 'backup.offsite', 'restore.drill', 'maintenance.retention']) expect(NEVER_FROM_CHAT.has(a), a).toBe(false);
+    expect(resolveTier('backup.local', chat).tier).toBe('approval');
+    // A tool some server calls by the same name is that server's tool, under the rules for tools.
+    expect(resolveTier('backup.prune', { ...chat, mcp: { server: 'other', tool: 'backup.prune' } }).rule).not.toBe('forbidden');
   });
 
   it('a row signed for the backups as a group does not promote it: only one that names it does', () => {

@@ -1923,17 +1923,33 @@ pnpm --filter @flint/runtime prune-backups
 ```
 
 It lists what would go, by count and size, and removes nothing. Add `--remove`
-to remove them. It keeps the newest 10, anything under 30 days old, and always
-the copy taken before the version that is running. When it cannot tell which
-version is running, it removes nothing.
+to remove them (nothing else means "remove": any other word after the command
+is refused). It keeps the newest 10, anything under 30 days old, and always the
+copy taken before the version that is running. When it cannot tell which
+version is running, it removes nothing. A rule of yours that forbids
+`backup.prune` forbids `--remove` too.
 
 The nightly job runs it last, as the action `backup.prune`, which ships at
 APPROVAL. On a night there is something to remove it files one card, Remove Old
 Backups. The card says how many copies would go and how much room that frees,
-and that it can't be undone, so it asks on its own and Approve All skips it. A
-run on that card removes no more copies than the card said. A promotion signed
-for the backups as a group does not cover it. To let it run on its own, sign a
-rule that names it.
+and that it can't be undone, so it asks on its own and Approve All skips it.
+
+The card signs those copies and no others. It carries their count, their
+megabytes and a digest of their names, sizes and times; the list itself is kept
+in `~/.flint/prune-plans`, and is believed only when it gives that digest. A
+run on the card removes the copies on its list that are still the same files
+and that the rule still lets go: never one that was not on it, and never more
+room than the card said. If the folder changed so that none of them may go, or
+the list cannot be believed, it removes nothing, and the next night's run files
+a new card.
+
+A promotion signed for the backups as a group does not cover it. To let it run
+on its own, sign a rule that names it. Nothing said in chat can ask for it.
+
+Every run looks again just before it removes each copy: the folder must be the
+folder it listed, and the copy the file it saw, with the same size and time, or
+it is left. The audit trail says a run is starting before anything goes, and
+what it did after; if the first cannot be written, nothing is removed.
 
 The encrypted copies offsite and the nightly dumps are kept to their own limits
 by their own jobs, as before.

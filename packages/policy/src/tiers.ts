@@ -131,7 +131,8 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   'backup.offsite': approval({ cap: { limit: 1, period: 'day' }, egress: true, note: 'age-encrypted, to iCloud' }),
   // Removing old backups (P7): only the copies of the database a deploy takes before a migration, past the
   // newest 10 and 30 days, and never the one of the release that is running. It deletes files, so it waits
-  // for a card each time there is something to remove, until Will promotes it.
+  // for a card each time there is something to remove, until Will promotes it. Only its own nightly job files
+  // that card, and by hand it is Will's own command: never from chat (NEVER_FROM_CHAT below).
   'backup.prune': approval({ cap: { limit: 1, period: 'day' }, byName: true, note: 'deletes update backups past the newest 10 and 30 days; never the running release\'s' }),
   // Replacing the production database with a backup (P7). Never promoted, never
   // autonomous, and never from chat (CONSOLE_ONLY below): Will runs the command
@@ -506,6 +507,14 @@ export const RUNTIME_CHAT_TOOLS: ReadonlySet<string> = new Set([
  */
 export const CONSOLE_ONLY: ReadonlySet<string> = new Set(['restore.production']);
 
+/**
+ * Actions a chat turn can never ask for, whatever is said in it and whatever a
+ * rule says: FORBIDDEN in chat, not merely waiting for approval. Removing old
+ * backups deletes files; its card comes from its own nightly job, which counts
+ * what would go, and from nowhere else.
+ */
+export const NEVER_FROM_CHAT: ReadonlySet<string> = new Set(['backup.prune']);
+
 /** Decide the tier of one action. Pure: same inputs, same answer. */
 export function resolveTier(action: string, ctx: TierContext): TierDecision {
   const key = actionKey(action, ctx.mcp);
@@ -518,6 +527,11 @@ export function resolveTier(action: string, ctx: TierContext): TierDecision {
   // 1b. For Will at the keyboard only.
   if (!ctx.mcp && CONSOLE_ONLY.has(action) && ctx.context !== 'console') {
     return { tier: 'forbidden', rule: 'forbidden', reason: `${action} is run by Will at the keyboard, and from nowhere else`, key };
+  }
+
+  // 1c. Never from chat.
+  if (!ctx.mcp && NEVER_FROM_CHAT.has(action) && ctx.context === 'chat') {
+    return { tier: 'forbidden', rule: 'forbidden', reason: `${action} is never asked for from chat`, key };
   }
 
   // 2a. Autonomous: the closed list, and never an MCP tool. Any context that is

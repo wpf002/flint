@@ -26,8 +26,8 @@ export interface CardJob {
   action: string;
   job: string;
   templateId: string;
-  /** What the card says beside its day: numbers the run itself worked out (how much a cleanup would remove). */
-  args?: Readonly<Record<string, number>>;
+  /** What the card says beside its day: values the run itself worked out (how much a cleanup would remove, and a digest of which copies), never anyone's words. */
+  args?: Readonly<Record<string, number | string>>;
   /** What it does cannot be undone (it deletes): the card says so, and asks on its own. */
   destructive?: boolean;
   /** Why it is asking, when the usual sentence does not fit. */

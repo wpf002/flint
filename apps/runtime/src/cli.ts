@@ -69,7 +69,7 @@ import { SOURCES } from '@flint/policy';
 import { createDb } from './db.js';
 import { appendAudit } from './governance/audit.js';
 import { ACTION, attempt, gate, tellFailure, tellStopped, type Command } from './backup/nightly.js';
-import { PRUNE_ACTION, pruneJob, pruneLines } from './backup/prune-job.js';
+import { PRUNE_ACTION, pruneJob, pruneLines, pruneMode } from './backup/prune-job.js';
 import { fileFailure } from './backup/record.js';
 import { completeProposal } from './governance/proposals.js';
 import { dumpDatabase, dumpPathAt, newestDump, pruneDumps, restoreDrill } from './backup/backup.js';
@@ -131,9 +131,7 @@ async function loginToGoogle(): Promise<void> {
  * prints is a line for the job's log.
  */
 async function pruneOldBackups(argv: readonly string[]): Promise<void> {
-  const unknown = argv.filter((a) => a !== '--auto' && a !== '--remove');
-  if (unknown.length || (argv.includes('--auto') && argv.includes('--remove'))) throw new Error('usage: cli.ts prune [--remove] | prune --auto');
-  const mode = argv.includes('--auto') ? 'auto' : argv.includes('--remove') ? 'remove' : 'list';
+  const mode = pruneMode(argv);
   const config = loadRuntimeConfig();
   const db = createDb(config.databaseUrl);
   try {
@@ -144,7 +142,8 @@ async function pruneOldBackups(argv: readonly string[]): Promise<void> {
     } else {
       for (const line of pruneLines(o)) console.log(line);
     }
-    if (o.did === 'failed') process.exitCode = 1;
+    // It could not do all it was asked to, or a rule of Will's would not let it: the command says so by failing.
+    if (o.did === 'failed' || o.did === 'forbidden') process.exitCode = 1;
   } finally {
     await db.$disconnect();
   }

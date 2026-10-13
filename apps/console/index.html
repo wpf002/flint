@@ -1805,9 +1805,11 @@ function apprDetails(p){p=p||{};var a=p.args&&typeof p.args==='object'&&!Array.i
       else says.push('Flint adds a person, listed below.');});
     var cal=apprGet(APPR_CALENDARS,a.source||'google_calendar');if(cal){if(typeof a.source==='string')took('source');says.push('They come from '+cal+'.');}}
   else if(f==='backup.prune'){
-    /* How much would go tonight, as the runtime counted it when it filed the card: a run on this card removes no more copies than that. */
+    /* How much would go tonight, as the runtime counted it when it filed the card. The card also signs which copies
+       (a digest of their names, sizes and times, listed under REFERENCES): a run on it deletes those and no others. */
     if(typeof a.copies==='number'&&a.copies>=0&&a.copies%1===0&&typeof a.megabytes==='number'&&a.megabytes>=0&&a.megabytes%1===0){took('copies','megabytes');
-      says.push('It deletes '+apprCount(a.copies,'old update backup')+', which frees '+a.megabytes+' MB.');}
+      says.push('It deletes '+apprCount(a.copies,'old update backup')+', which frees '+a.megabytes+' MB.');
+      if(typeof a.digest==='string'&&/^[0-9a-f]{64}$/.test(a.digest))says.push('It deletes only the ones counted for this card, even if more grow old before it runs.');}
     says.push('An update backup is the copy of the database Flint takes before an update changes it.');
     says.push('The one taken before the version that is running is always kept.');
     says.push('It runs '+apprWhen(f)+' if you approve it.');}
