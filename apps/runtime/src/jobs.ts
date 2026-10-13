@@ -169,7 +169,7 @@ export function housekeepingJobs(ctx: JobContext): JobSpec[] {
           ctx.log(`the files backup's record could not be read (${err instanceof Error ? err.name : 'error'})`);
           return undefined;
         });
-        if (lines?.skipped) ctx.log(`the files backup's record has ${lines.skipped} line(s) that are not its own, which were skipped`);
+        if (lines?.skipped) ctx.log(`the files backup's record has lines that are not its own, which were skipped (${lines.skipped})`);
         // The Mac itself, read once for the checks and the watchdog both: free space, remote access, the local models.
         const wantsModels = ctx.config.ollama !== undefined || ctx.config.backupModel !== undefined;
         const machine = await readMachine({ home: ctx.config.home, ...(wantsModels ? { ollama: { url: ctx.config.ollama?.url ?? ctx.config.ollamaUrl ?? 'http://127.0.0.1:11434' } } : {}) }, now);

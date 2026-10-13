@@ -247,9 +247,9 @@ export const TEMPLATES = {
   // ---- the Mac itself, and the copies off it (P7; the watchdog raises them) ----
   disk_low: t({
     fields: z.object({ gb: z.number().int().min(0).max(4) }).strict(),
-    title: () => 'This Mac Is Running Out of Space',
+    title: () => 'This Mac Is Nearly Full',
     body: (f) => `${f.gb < 1 ? 'Less than 1 GB is' : `Only ${f.gb} GB is`} free. Backups and the database stop when the disk fills.`,
-    fieldFreeTitle: 'This Mac Is Running Out of Space',
+    fieldFreeTitle: 'This Mac Is Nearly Full',
     fieldFreeBody: 'Very little space is free. Backups and the database stop when the disk fills.',
   }),
   offsite_stale: t({
