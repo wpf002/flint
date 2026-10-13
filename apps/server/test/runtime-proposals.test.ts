@@ -175,10 +175,12 @@ describe('the cards the console lists (P3)', () => {
         ['neg', null], ['part', null], ['text', null], ['over', null], ['fine', null], ['none', null], ['gone', null],
         ['accept', null], ['cancel', null], ['asset', null], ['tool', null],
       ]);
-      // A tool's card on a connected server is marked as one, and no other card is: the console keeps its own cards' words for its own cards.
-      expect(r.proposals.map((p) => [p.id, p.mcp ?? null]).filter((x) => x[1] !== null)).toEqual([['tool', true]]);
+      // Every card says whether it is a tool's on a connected server, yes or no: the console keeps its own cards' words
+      // for a card the server says is not one, and for no other.
+      for (const p of r.proposals) expect(typeof p.mcp, String(p.id)).toBe('boolean');
+      expect(r.proposals.filter((p) => p.mcp === true).map((p) => p.id)).toEqual(['tool']);
       // The card is otherwise as it was: its args whole (what he signs is what the console shows), and nothing of the row's own estimate.
-      expect(r.proposals[0]).toMatchObject({ fullName: 'task.dispatch.ci_runner', kind: 'task', args: { taskId: 'tkabcdefgh12345678', estCostMicros: 0 }, reason: 'Approving runs this task.' });
+      expect(r.proposals[0]).toMatchObject({ fullName: 'task.dispatch.ci_runner', kind: 'task', mcp: false, args: { taskId: 'tkabcdefgh12345678', estCostMicros: 0 }, reason: 'Approving runs this task.' });
       expect(JSON.stringify(r.proposals)).not.toContain('estCostUsd');
     } finally {
       server.close();

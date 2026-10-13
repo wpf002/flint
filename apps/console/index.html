@@ -1591,9 +1591,11 @@ function apprGet(table,key){key=String(key===null||key===undefined?'':key);retur
  * Flint's own cards (a goal, a plan, a rule, a source, a nightly job, a forecast, an asset, a task) are filed by the
  * runtime under their own action names, each under one kind. A tool on a connected server can be called anything, by
  * whoever runs the server: "task.check_bar" on a server called "task" is a tool's card. So a card gets the words this
- * panel keeps for one of Flint's own ONLY when the server does not mark it as a tool's (`mcp`) AND its kind is the kind
- * the runtime files that action under. Anything else that carries one of these names is drawn as what it is, a tool's
- * card with its server named, and asks on its own: it never rides Approve All under a borrowed title. */
+ * panel keeps for one of Flint's own ONLY when the server says it is not a tool's (`mcp` is false: the server says yes
+ * or no for every card) AND its kind is the kind the runtime files that action under. Anything else that carries one
+ * of these names is drawn as what it is, a tool's card with its server named, and asks on its own: it never rides
+ * Approve All under a borrowed title. A card that says nothing of `mcp` (an older server's) is one of those: several of
+ * Flint's own are filed as tool calls too, so without the server's word their kind tells nothing apart. */
 var APPR_OWN={'goal.activate':'goal','goal.criteria_change':'goal','goal.horizon_change':'goal','goal.done':'goal','goal.abandon':'goal','goal.propose':'goal','plan.change':'plan',
   'world.commitment.from_chat':'tool_call','policy.change':'policy','triage.rule.create':'rule','world.source.enable':'tool_call','world.person.create':'tool_call','world.relation.write':'tool_call',
   'forecast.series.enable':'tool_call','asset.enable':'policy','task.check_bar':'task','task.cancel':'task','task.bar_override':'task'};
@@ -1603,7 +1605,7 @@ function apprOwnKinds(name){name=String(name===null||name===undefined?'':name);v
   if(apprGet(APPR_NIGHTLY,name))return ['tool_call'];
   if(name.indexOf('task.dispatch.')===0)return ['task','spend'];
   return null;}
-function apprOwn(p){var ks=p?apprOwnKinds(p.fullName):null;return !!ks&&p.mcp!==true&&typeof p.kind==='string'&&ks.indexOf(p.kind)>=0;}
+function apprOwn(p){var ks=p?apprOwnKinds(p.fullName):null;return !!ks&&p.mcp===false&&typeof p.kind==='string'&&ks.indexOf(p.kind)>=0;}
 /* The card as this panel reads it: itself; or, for a tool's card under one of Flint's own names, the same card under a
    name no table here knows, with its server and its tool apart (`tool`). Every function that takes a card reads it
    through this first. */
@@ -3208,7 +3210,7 @@ function predStartSays(){var l=typeof approveLabel==='function'?approveLabel():'
    says that instead, in the Approvals panel's words for it: its numbers' forecasts and the checks of what Flint
    predicted are running already. */
 function predCard(id,args,only){predNav('card');predHead('Turn On Predictions',true);var body=predBody(),foot=predFoot();
-  var p={id:id,fullName:typeof APPR_PREDICT==='string'?APPR_PREDICT:'forecast.series.enable',kind:'tool_call',args:args,origin:'console',consequential:true};
+  var p={id:id,fullName:typeof APPR_PREDICT==='string'?APPR_PREDICT:'forecast.series.enable',kind:'tool_call',mcp:false,args:args,origin:'console',consequential:true};
   if(only&&typeof APPR_PREDICT_OPINION==='string')p.reason=APPR_PREDICT_OPINION;
   var list=typeof apprPredictList==='function'?apprPredictList(p):{named:[],unknown:0,total:args.series.length};
   body.appendChild(gEl('p','plead',typeof apprSub==='function'?apprSub(p):''));

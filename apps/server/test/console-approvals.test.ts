@@ -98,7 +98,7 @@ const run = (code: string) => runInContext(code, ctx);
 /** The footer's note, read with plain spaces (its second sentence is held together with no-break ones). */
 const noteSays = () => ids.apprnote!.textContent.replace(/\u00a0/g, ' ');
 const card = (over: Record<string, unknown> = {}) => ({
-  id: 'pr1', fullName: 'world.source.enable', kind: 'tool_call', args: { source: 'deploy' }, tainted: false, status: 'pending', origin: 'cli', ts: Date.now() - 3600_000,
+  id: 'pr1', fullName: 'world.source.enable', kind: 'tool_call', mcp: false, args: { source: 'deploy' }, tainted: false, status: 'pending', origin: 'cli', ts: Date.now() - 3600_000,
   expiresAt: '2026-10-12T14:00:00.000Z', ...over,
 });
 /** An ordinary card, which may share one prompt with others in Approve All: a read chat asked for. (A card that turns a source on asks on its own.) */
@@ -171,9 +171,9 @@ describe('the console Approvals panel', () => {
       body: {
         signed: true,
         proposals: [
-          card({ id: 'pr0', fullName: 'policy.change', kind: 'policy', reason: 'The shadow week: 1.2 relevant a day.', args: { rows: [{ pattern: 'backup.local', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'restore.drill', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'backup.offsite', tier: 'alone', expiresAt: RULE_UNTIL }] } }),
+          card({ id: 'pr0', fullName: 'policy.change', kind: 'policy', mcp: false, reason: 'The shadow week: 1.2 relevant a day.', args: { rows: [{ pattern: 'backup.local', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'restore.drill', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'backup.offsite', tier: 'alone', expiresAt: RULE_UNTIL }] } }),
           card(),
-          card({ id: 'pr2', fullName: 'world.person.create', kind: 'tool_call', origin: 'runtime:google_calendar', tainted: true, args: { people: [{ name: '<img src=x onerror=alert(1)>Ada', email: 'ada@example.com' }] } }),
+          card({ id: 'pr2', fullName: 'world.person.create', kind: 'tool_call', mcp: false, origin: 'runtime:google_calendar', tainted: true, args: { people: [{ name: '<img src=x onerror=alert(1)>Ada', email: 'ada@example.com' }] } }),
         ],
       },
     });
@@ -214,7 +214,7 @@ describe('the console Approvals panel', () => {
   });
 
   it('Approve and Reject on the open card take the signed path chat cards use; outside text asks on its own', async () => {
-    answer = () => ({ status: 200, body: { signed: true, proposals: [plain(), card({ id: 'pr2', tainted: true, fullName: 'world.person.create', kind: 'tool_call', args: { people: [] } }), card({ id: 'pr3' })] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [plain(), card({ id: 'pr2', tainted: true, fullName: 'world.person.create', kind: 'tool_call', mcp: false, args: { people: [] } }), card({ id: 'pr3' })] } });
     await open();
     const first = ids.apprlist!.children[0]!.children[0]!;
     first.button('Approve with Password').onclick!();
@@ -347,7 +347,7 @@ describe('the console Approvals panel', () => {
       { name: 'Mom', email: 'mallory@evil.example', emailHash: 'b'.repeat(64) },
       { name: 'sam@corp.example', email: 'sam@corp.example', emailHash: 'c'.repeat(64) },
     ];
-    answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'pp', fullName: 'world.person.create', kind: 'tool_call', origin: 'runtime:google_calendar', tainted: true, args: { people } })] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'pp', fullName: 'world.person.create', kind: 'tool_call', mcp: false, origin: 'runtime:google_calendar', tainted: true, args: { people } })] } });
     await open();
     const shown = ids.apprlist!.children[0]!.children[0]!.shown();
     expect(shown).toContain('Add 3 People from Calendar');
@@ -362,7 +362,7 @@ describe('the console Approvals panel', () => {
   it('a person card says which calendar its people came from in its subtitle, the one Will signs, and still says when it expires', async () => {
     const people = [{ name: 'Ada Lovelace', email: 'ada@example.com', emailHash: 'a'.repeat(64) }];
     const shown = async (args: Record<string, unknown>) => {
-      answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'pc', fullName: 'world.person.create', kind: 'tool_call', origin: 'runtime:apple_calendar', tainted: true, args })] } });
+      answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'pc', fullName: 'world.person.create', kind: 'tool_call', mcp: false, origin: 'runtime:apple_calendar', tainted: true, args })] } });
       await open();
       const row = ids.apprlist!.children[0]!.children[0]!;
       const dl = row.all().find((e) => e.tagName === 'dl')!;
@@ -378,7 +378,7 @@ describe('the console Approvals panel', () => {
   it('the calendar’s cards: its enable card states the source’s real cadence; the promotion that lets Flint add people is in words and asks on its own', async () => {
     const src = readFileSync(join(__dirname, '..', '..', 'runtime', 'src', 'sources', 'google', 'calendar.ts'), 'utf8');
     const minutes = Number(/cadenceMs: (\d+) \* 60_000/.exec(src)![1]);
-    const promo = card({ id: 'pz', fullName: 'policy.change', kind: 'policy', args: { rows: [{ pattern: 'world.sync.google_calendar', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'world.person.create', tier: 'alone', dailyCap: 20, expiresAt: RULE_UNTIL }] } });
+    const promo = card({ id: 'pz', fullName: 'policy.change', kind: 'policy', mcp: false, args: { rows: [{ pattern: 'world.sync.google_calendar', tier: 'alone', expiresAt: RULE_UNTIL }, { pattern: 'world.person.create', tier: 'alone', dailyCap: 20, expiresAt: RULE_UNTIL }] } });
     answer = () => ({ status: 200, body: { signed: true, proposals: [promo, card({ id: 'gc', args: { source: 'google_calendar' } })] } });
     await open();
     const rows = ids.apprlist!.children[0]!.children;
@@ -396,7 +396,7 @@ describe('the console Approvals panel', () => {
   it('Apple Calendar’s cards (P2.6): turning it on says how it reads in a sentence; its promotion is in words and asks on its own, as every card that lets something run alone does', async () => {
     const src = readFileSync(join(__dirname, '..', '..', 'runtime', 'src', 'sources', 'apple', 'calendar.ts'), 'utf8');
     const minutes = Number(/cadenceMs: (\d+) \* 60_000/.exec(src)![1]);
-    const promo = card({ id: 'pa', fullName: 'policy.change', kind: 'policy', args: { rows: [{ pattern: 'world.sync.apple_calendar', tier: 'alone', expiresAt: RULE_UNTIL }] } });
+    const promo = card({ id: 'pa', fullName: 'policy.change', kind: 'policy', mcp: false, args: { rows: [{ pattern: 'world.sync.apple_calendar', tier: 'alone', expiresAt: RULE_UNTIL }] } });
     answer = () => ({ status: 200, body: { signed: true, proposals: [promo, card({ id: 'ac', args: { source: 'apple_calendar' } })] } });
     await open();
     const rows = ids.apprlist!.children[0]!.children;
@@ -488,10 +488,10 @@ describe('the console Approvals panel', () => {
 
   it('removing old backups is a card of its own: it says how much would go, that it cannot be undone, and it asks on its own', async () => {
     const prune = (over: Record<string, unknown> = {}) => card({
-      id: 'prune', fullName: 'backup.prune', kind: 'tool_call', origin: 'runtime:prune', destructive: true, args: { day: '2026-10-06', copies: 4, megabytes: 812, digest: '3f'.repeat(32) },
+      id: 'prune', fullName: 'backup.prune', kind: 'tool_call', mcp: false, origin: 'runtime:prune', destructive: true, args: { day: '2026-10-06', copies: 4, megabytes: 812, digest: '3f'.repeat(32) },
       reason: 'It waits for your approval each night there are old backups to remove, until you let it run on its own.', ...over,
     });
-    answer = () => ({ status: 200, body: { signed: true, proposals: [prune(), card({ id: 'b', fullName: 'backup.local', kind: 'tool_call', origin: 'runtime:backup', args: { day: '2026-10-06' } })] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [prune(), card({ id: 'b', fullName: 'backup.local', kind: 'tool_call', mcp: false, origin: 'runtime:backup', args: { day: '2026-10-06' } })] } });
     await open();
     const row = ids.apprlist!.children[0]!.children[0]!;
     const shown = row.shown();
@@ -533,10 +533,10 @@ describe('the console Approvals panel', () => {
     expect(done.shown()).toBe('Remove Old BackupsApproved. It runs tonight at 2:15 AM.');
     expect(() => done.button('Run Now')).toThrow();
     // A rule that lets it run on its own is named for what it is, never as one of the backups.
-    const rule = (rows: Array<Record<string, unknown>>) => run(`apprTitle(${JSON.stringify(card({ fullName: 'policy.change', kind: 'policy', consequential: true, args: { rows } }))})`);
+    const rule = (rows: Array<Record<string, unknown>>) => run(`apprTitle(${JSON.stringify(card({ fullName: 'policy.change', kind: 'policy', mcp: false, consequential: true, args: { rows } }))})`);
     const until = '2027-01-10T00:00:00.000Z';
     expect(rule([{ pattern: 'backup.prune', tier: 'alone', dailyCap: 1, expiresAt: until }])).toBe('Let Flint Remove Old Backups on Its Own');
-    expect(run(`apprSub(${JSON.stringify(card({ fullName: 'policy.change', kind: 'policy', consequential: true, args: { rows: [{ pattern: 'backup.prune', tier: 'alone', dailyCap: 1, expiresAt: until }] } }))})`))
+    expect(run(`apprSub(${JSON.stringify(card({ fullName: 'policy.change', kind: 'policy', mcp: false, consequential: true, args: { rows: [{ pattern: 'backup.prune', tier: 'alone', dailyCap: 1, expiresAt: until }] } }))})`))
       .toMatch(/^Until [A-Z][a-z]+ \d+(, \d{4})?, Flint deletes update backups past the newest 10 and the last 30 days\.$/);
     expect(rule([{ pattern: 'backup.local', tier: 'alone', expiresAt: until }, { pattern: 'backup.offsite', tier: 'alone', expiresAt: until }])).toBe('Run Backups on Their Own');
     expect(rule([{ pattern: 'backup.local', tier: 'alone', expiresAt: until }, { pattern: 'backup.prune', tier: 'alone', expiresAt: until }])).not.toBe('Run Backups on Their Own');
@@ -591,7 +591,7 @@ describe('the console Approvals panel', () => {
     // A rule that lets them run on their own is named for Nexus, and never as Flint's own backups; Flint's own
     // three keep their title, and a Nexus rule among them is not folded in.
     const until = '2027-03-28T00:00:00.000Z';
-    const rule = (patterns: string[]) => run(`apprTitle(${JSON.stringify(card({ fullName: 'policy.change', kind: 'policy', consequential: true, args: { rows: patterns.map((pattern) => ({ pattern, tier: 'alone', expiresAt: until })) } }))})`);
+    const rule = (patterns: string[]) => run(`apprTitle(${JSON.stringify(card({ fullName: 'policy.change', kind: 'policy', mcp: false, consequential: true, args: { rows: patterns.map((pattern) => ({ pattern, tier: 'alone', expiresAt: until })) } }))})`);
     expect(rule(['backup.nexus', 'backup.nexus.offsite', 'restore.drill.nexus'])).toBe('Run Nexus Backups on Their Own');
     expect(rule(['backup.local', 'backup.offsite', 'restore.drill'])).toBe('Run Backups on Their Own');
     // Flint's own rules are titled exactly as before Nexus had any: every row a backup or anything under `restore.`.
@@ -605,7 +605,7 @@ describe('the console Approvals panel', () => {
   });
 
   it('the restore test’s card never names a time already past: on the Sunday it was filed, it runs next Sunday', async () => {
-    const drill = (status: string) => card({ id: 'drill', fullName: 'restore.drill', kind: 'tool_call', origin: 'runtime:drill', status, args: {} });
+    const drill = (status: string) => card({ id: 'drill', fullName: 'restore.drill', kind: 'tool_call', mcp: false, origin: 'runtime:drill', status, args: {} });
     const lines = async (now: Date) => {
       ctx.apprNow = () => now;
       answer = () => ({ status: 200, body: { signed: true, proposals: [drill('pending')] } });
@@ -630,16 +630,16 @@ describe('the console Approvals panel', () => {
   it('every line under a card’s title is a sentence, whatever filed it', () => {
     const sub = (p: Record<string, unknown>) => run(`apprSub(${JSON.stringify(p)})`) as string;
     for (const source of ['launchd', 'health', 'git', 'spend', 'deploy', 'knowledge', 'nexus_inbox', 'nexus', 'github', 'railway', 'google_calendar', 'apple_calendar', 'unknown_source']) {
-      expect(sub({ fullName: 'world.source.enable', kind: 'tool_call', args: { source } })).toMatch(/^[A-Z].*\.$/);
+      expect(sub({ fullName: 'world.source.enable', kind: 'tool_call', mcp: false, args: { source } })).toMatch(/^[A-Z].*\.$/);
     }
-    expect(sub({ fullName: 'world.source.enable', kind: 'tool_call', args: { source: 'unknown_source' } })).toBe('Flint starts reading this source.');
-    expect(sub({ fullName: 'policy.change', kind: 'policy', args: { rows: [{}] } })).toBe('It changes what Flint may do on its own.');
+    expect(sub({ fullName: 'world.source.enable', kind: 'tool_call', mcp: false, args: { source: 'unknown_source' } })).toBe('Flint starts reading this source.');
+    expect(sub({ fullName: 'policy.change', kind: 'policy', mcp: false, args: { rows: [{}] } })).toBe('It changes what Flint may do on its own.');
     // A card that names no calendar is Google's, as every P2.5 card was.
-    expect(sub({ fullName: 'world.person.create', kind: 'tool_call', args: {} })).toBe('They’re from Google Calendar events you accepted or organized.');
-    expect(sub({ fullName: 'world.person.create', kind: 'tool_call', args: { source: 'apple_calendar' } })).toBe('They’re from Apple Calendar events you accepted or organized.');
-    expect(sub({ fullName: 'triage.rule.create', kind: 'rule', args: {} })).toBe('This adds a new rule.');
-    expect(sub({ fullName: 'triage.rule.create', kind: 'rule', args: { rule: { name: 'ci-red' } } })).toBe('This adds the rule “ci-red”.');
-    expect(sub({ fullName: 'world.relation.write', kind: 'tool_call', args: {} })).toBe('Flint’s memory suggests this link.');
+    expect(sub({ fullName: 'world.person.create', kind: 'tool_call', mcp: false, args: {} })).toBe('They’re from Google Calendar events you accepted or organized.');
+    expect(sub({ fullName: 'world.person.create', kind: 'tool_call', mcp: false, args: { source: 'apple_calendar' } })).toBe('They’re from Apple Calendar events you accepted or organized.');
+    expect(sub({ fullName: 'triage.rule.create', kind: 'rule', mcp: false, args: {} })).toBe('This adds a new rule.');
+    expect(sub({ fullName: 'triage.rule.create', kind: 'rule', mcp: false, args: { rule: { name: 'ci-red' } } })).toBe('This adds the rule “ci-red”.');
+    expect(sub({ fullName: 'world.relation.write', kind: 'tool_call', mcp: false, args: {} })).toBe('Flint’s memory suggests this link.');
     expect(sub({ fullName: 'mcp.x', origin: 'console' })).toBe('You filed this.');
     expect(sub({ fullName: 'mcp.x', origin: 'runtime:knowledge' })).toBe('Flint filed this.');
     expect(sub({ fullName: 'mcp.x', origin: 'chat:abc' })).toBe('A chat filed this.');
@@ -661,41 +661,41 @@ describe('the console Approvals panel', () => {
       const c = { origin: 'console', expiresAt: '2026-10-16T14:00:00.000Z', ...p };
       return [run(`apprTitle(${JSON.stringify(c)})`), run(`apprSub(${JSON.stringify(c)})`), JSON.parse(JSON.stringify(run(`apprFacts(${JSON.stringify(c)})`))), run(`apprIcon(${JSON.stringify(c)})`)];
     };
-    expect(say({ fullName: 'goal.activate', kind: 'goal', args: { title: 'Synthetic goal', successCriteria: crit, horizonAt: h }, reason: 'Approving starts this goal.' }))
+    expect(say({ fullName: 'goal.activate', kind: 'goal', mcp: false, args: { title: 'Synthetic goal', successCriteria: crit, horizonAt: h }, reason: 'Approving starts this goal.' }))
       .toEqual(['Add a Goal', 'It starts as soon as you approve.', [['Goal', 'Synthetic goal'], ['Checks', '3 Checks'], ['Finish By', run(`apprDate('${h}')`)]], 'target']);
-    expect(say({ fullName: 'goal.activate', kind: 'goal', args: { title: 'Synthetic goal', successCriteria: crit.slice(0, 1), horizonAt: null, origin: 'flint' } }).slice(0, 3))
+    expect(say({ fullName: 'goal.activate', kind: 'goal', mcp: false, args: { title: 'Synthetic goal', successCriteria: crit.slice(0, 1), horizonAt: null, origin: 'flint' } }).slice(0, 3))
       .toEqual(['Activate a Goal', 'It starts as soon as you approve.', [['Goal', 'Synthetic goal'], ['Checks', '1 Check'], ['Finish By', 'No Date']]]);
-    expect(say({ fullName: 'goal.activate', kind: 'goal', args: { title: 'Synthetic goal', successCriteria: crit }, reason: 'Approving resumes this goal.' }).slice(0, 2)).toEqual(['Resume a Goal', 'It resumes as soon as you approve.']);
-    expect(say({ fullName: 'goal.criteria_change', kind: 'goal', args: { title: 'Synthetic goal', successCriteria: crit } }).slice(0, 3)).toEqual(['Change a Goal', 'This changes what counts as done.', [['Goal', 'Synthetic goal'], ['Checks', '3 Checks']]]);
-    expect(say({ fullName: 'goal.horizon_change', kind: 'goal', args: { goalTitle: 'Synthetic goal', horizonAt: null, reviewCadence: 'P2W' } }).slice(0, 3))
+    expect(say({ fullName: 'goal.activate', kind: 'goal', mcp: false, args: { title: 'Synthetic goal', successCriteria: crit }, reason: 'Approving resumes this goal.' }).slice(0, 2)).toEqual(['Resume a Goal', 'It resumes as soon as you approve.']);
+    expect(say({ fullName: 'goal.criteria_change', kind: 'goal', mcp: false, args: { title: 'Synthetic goal', successCriteria: crit } }).slice(0, 3)).toEqual(['Change a Goal', 'This changes what counts as done.', [['Goal', 'Synthetic goal'], ['Checks', '3 Checks']]]);
+    expect(say({ fullName: 'goal.horizon_change', kind: 'goal', mcp: false, args: { goalTitle: 'Synthetic goal', horizonAt: null, reviewCadence: 'P2W' } }).slice(0, 3))
       .toEqual(['Change a Goal’s Timing', 'This changes its date or how often it’s reviewed.', [['Goal', 'Synthetic goal'], ['Finish By', 'No Date'], ['Review Every', '2 Weeks']]]);
-    expect(say({ fullName: 'goal.done', kind: 'goal', args: { goalTitle: 'Synthetic goal' } }).slice(0, 3)).toEqual(['Mark a Goal Done', 'Flint stops reviewing it.', [['Goal', 'Synthetic goal'], ['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-16T14:00:00.000Z')`)]]]);
-    expect(say({ fullName: 'goal.abandon', kind: 'goal', args: { goalTitle: 'Synthetic goal' } }).slice(0, 2)).toEqual(['Abandon a Goal', 'Flint stops reviewing it, and it can’t be restarted.']);
+    expect(say({ fullName: 'goal.done', kind: 'goal', mcp: false, args: { goalTitle: 'Synthetic goal' } }).slice(0, 3)).toEqual(['Mark a Goal Done', 'Flint stops reviewing it.', [['Goal', 'Synthetic goal'], ['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-16T14:00:00.000Z')`)]]]);
+    expect(say({ fullName: 'goal.abandon', kind: 'goal', mcp: false, args: { goalTitle: 'Synthetic goal' } }).slice(0, 2)).toEqual(['Abandon a Goal', 'Flint stops reviewing it, and it can’t be restarted.']);
     // A review's cards as the runtime files them: each change with the step as it is now (`from`). The dates move by two days.
     const was = new Date(Date.parse(h) - 2 * 86_400_000).toISOString();
     const ops = [
       { op: 'add', key: 's4' }, { op: 'set', key: 's1', from: { title: 'Synthetic step one', dueAt: was }, to: { dueAt: h } },
       { op: 'set', key: 's2', from: { title: 'Synthetic step two', dueAt: was }, to: { dueAt: h } }, { op: 'set', key: 's3', from: { title: 'Synthetic step three', status: 'todo' }, to: { status: 'blocked' } },
     ];
-    expect(say({ fullName: 'plan.change', kind: 'plan', origin: 'runtime:goals', templateId: 'plan.diff.minor', args: { goalTitle: 'Synthetic goal', ops: ops.slice(1) } }).slice(0, 3))
+    expect(say({ fullName: 'plan.change', kind: 'plan', mcp: false, origin: 'runtime:goals', templateId: 'plan.diff.minor', args: { goalTitle: 'Synthetic goal', ops: ops.slice(1) } }).slice(0, 3))
       .toEqual(['Update a Plan', 'Flint suggests 3 small changes.', [['Goal', 'Synthetic goal'], ['Changes', 'Move 2 Dates · Mark 1 Blocked'], ['Filed By', 'Flint']]]);
-    expect(say({ fullName: 'plan.change', kind: 'plan', origin: 'runtime:goals', templateId: 'plan.diff.material', args: { goalTitle: 'Synthetic goal', ops: ops.slice(0, 1) } }).slice(0, 2)).toEqual(['Change a Plan', 'Flint suggests a bigger change.']);
-    expect(say({ fullName: 'plan.change', kind: 'plan', args: { goalTitle: 'Synthetic goal', ops: ops.slice(0, 1) } }).slice(0, 3)).toEqual(['Change a Plan', 'You asked for this change.', [['Goal', 'Synthetic goal'], ['Changes', 'Add 1 Step'], ['Filed By', 'You']]]);
+    expect(say({ fullName: 'plan.change', kind: 'plan', mcp: false, origin: 'runtime:goals', templateId: 'plan.diff.material', args: { goalTitle: 'Synthetic goal', ops: ops.slice(0, 1) } }).slice(0, 2)).toEqual(['Change a Plan', 'Flint suggests a bigger change.']);
+    expect(say({ fullName: 'plan.change', kind: 'plan', mcp: false, args: { goalTitle: 'Synthetic goal', ops: ops.slice(0, 1) } }).slice(0, 3)).toEqual(['Change a Plan', 'You asked for this change.', [['Goal', 'Synthetic goal'], ['Changes', 'Add 1 Step'], ['Filed By', 'You']]]);
     // What chat suggested (part 5), as the candidates intake files it: the short text, Will's own words, and the day Flint read (never called his).
-    expect(say({ fullName: 'goal.propose', kind: 'goal', origin: 'chat:c1', templateId: 'chat.goal', args: { goalId: 'go4f4f4f4f4f4f4f4f', title: 'Synthetic goal', quote: 'I want to run a half marathon', dueOn: '2027-03-20', saidAt: h, sourceRef: `chat:${'4f'.repeat(32)}` } }).slice(0, 3))
+    expect(say({ fullName: 'goal.propose', kind: 'goal', mcp: false, origin: 'chat:c1', templateId: 'chat.goal', args: { goalId: 'go4f4f4f4f4f4f4f4f', title: 'Synthetic goal', quote: 'I want to run a half marathon', dueOn: '2027-03-20', saidAt: h, sourceRef: `chat:${'4f'.repeat(32)}` } }).slice(0, 3))
       .toEqual(['Suggest a Goal from Chat', 'You said this in a chat.', [['Goal', 'Synthetic goal'], ['You Said', 'I want to run a half marathon'], ['Day Flint Read', 'Mar 20, 2027']]]);
-    expect(say({ fullName: 'goal.propose', kind: 'goal', origin: 'chat:c1', args: { title: 'Synthetic goal', quote: 'I want to run a half marathon' } })[2]).toEqual([['Goal', 'Synthetic goal'], ['You Said', 'I want to run a half marathon']]);
-    expect(say({ fullName: 'world.commitment.from_chat', kind: 'tool_call', origin: 'chat:c1', templateId: 'chat.commitment', args: { text: 'Send it', quote: 'I will send it by Friday', saidAt: h, sourceRef: `chat:${'4f'.repeat(32)}` } }).slice(0, 3))
+    expect(say({ fullName: 'goal.propose', kind: 'goal', mcp: false, origin: 'chat:c1', args: { title: 'Synthetic goal', quote: 'I want to run a half marathon' } })[2]).toEqual([['Goal', 'Synthetic goal'], ['You Said', 'I want to run a half marathon']]);
+    expect(say({ fullName: 'world.commitment.from_chat', kind: 'tool_call', mcp: false, origin: 'chat:c1', templateId: 'chat.commitment', args: { text: 'Send it', quote: 'I will send it by Friday', saidAt: h, sourceRef: `chat:${'4f'.repeat(32)}` } }).slice(0, 3))
       .toEqual(['Add a Commitment from Chat', 'You said this in a chat.', [['Commitment', 'Send it'], ['You Said', 'I will send it by Friday']]]);
-    expect(say({ fullName: 'world.commitment.from_chat', kind: 'tool_call', origin: 'chat:c1', args: { text: 'Send it', quote: 'I will send it by Friday', dueOn: '2027-03-20' } })[2]).toEqual([['Commitment', 'Send it'], ['You Said', 'I will send it by Friday'], ['Day Flint Read', 'Mar 20, 2027']]);
+    expect(say({ fullName: 'world.commitment.from_chat', kind: 'tool_call', mcp: false, origin: 'chat:c1', args: { text: 'Send it', quote: 'I will send it by Friday', dueOn: '2027-03-20' } })[2]).toEqual([['Commitment', 'Send it'], ['You Said', 'I will send it by Friday'], ['Day Flint Read', 'Mar 20, 2027']]);
     // The titles are the ones Will's notes use for the same two actions.
-    expect(say({ fullName: 'goal.propose', kind: 'goal', args: {} })[0]).toBe(ACTION_WORDS['goal.propose']);
-    expect(say({ fullName: 'world.commitment.from_chat', kind: 'tool_call', args: {} })[0]).toBe(ACTION_WORDS['world.commitment.from_chat']);
+    expect(say({ fullName: 'goal.propose', kind: 'goal', mcp: false, args: {} })[0]).toBe(ACTION_WORDS['goal.propose']);
+    expect(say({ fullName: 'world.commitment.from_chat', kind: 'tool_call', mcp: false, args: {} })[0]).toBe(ACTION_WORDS['world.commitment.from_chat']);
     // A card whose args were cleared says what it still knows, and no empty facts.
-    expect(say({ fullName: 'goal.done', kind: 'goal', args: null })[2]).toEqual([['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-16T14:00:00.000Z')`)]]);
-    expect(say({ fullName: 'goal.activate', kind: 'goal', args: null }).slice(0, 3)).toEqual(['Add a Goal', 'It starts as soon as you approve.', []]);
+    expect(say({ fullName: 'goal.done', kind: 'goal', mcp: false, args: null })[2]).toEqual([['Filed By', 'You'], ['Expires', run(`apprDate('2026-10-16T14:00:00.000Z')`)]]);
+    expect(say({ fullName: 'goal.activate', kind: 'goal', mcp: false, args: null }).slice(0, 3)).toEqual(['Add a Goal', 'It starts as soon as you approve.', []]);
     // The policy card names P3's rows in words.
-    expect(say({ fullName: 'policy.change', kind: 'policy', args: { rows: [{ pattern: 'goal.review.local', tier: 'alone', dailyCap: 20 }, { pattern: 'goal.propose', tier: 'alone', dailyCap: 3 }, { pattern: 'world.commitment.from_chat', tier: 'alone', dailyCap: 10 }] } })[2])
+    expect(say({ fullName: 'policy.change', kind: 'policy', mcp: false, args: { rows: [{ pattern: 'goal.review.local', tier: 'alone', dailyCap: 20 }, { pattern: 'goal.propose', tier: 'alone', dailyCap: 3 }, { pattern: 'world.commitment.from_chat', tier: 'alone', dailyCap: 10 }] } })[2])
       .toContainEqual(['Limits', 'Goal Reviews 20 a Day · Goal Suggestions from Chat 3 a Day · Commitments from Chat 10 a Day']);
   });
 
@@ -715,20 +715,20 @@ describe('the console Approvals panel', () => {
     const goalCard = (id: string, fullName: string, over: Record<string, unknown> = {}) => card({ id, fullName, kind: kindOf(fullName), origin: 'console', sensitivity: 'personal', args: { goalId: 'gotest0001', goalTitle: 'Synthetic goal', title: 'Synthetic goal' }, ...over });
     const alone = ['goal.activate', 'goal.criteria_change', 'goal.horizon_change', 'goal.done', 'goal.abandon'];
     // Even without the server's mark, a goal card's name keeps it alone (an older server).
-    for (const a of alone) expect(run(`apprAlone(${JSON.stringify({ fullName: a, kind: 'goal' })})`), a).toBe(true);
-    expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change', kind: 'plan', templateId: 'plan.diff.material', consequential: true })})`)).toBe(true);
-    expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change', kind: 'plan' })})`)).toBe(true);
-    expect(run(`apprAlone(${JSON.stringify({ fullName: 'world.source.enable', kind: 'tool_call', consequential: true })})`)).toBe(true);
+    for (const a of alone) expect(run(`apprAlone(${JSON.stringify({ fullName: a, kind: 'goal', mcp: false })})`), a).toBe(true);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change', kind: 'plan', mcp: false, templateId: 'plan.diff.material', consequential: true })})`)).toBe(true);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change', kind: 'plan', mcp: false })})`)).toBe(true);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'world.source.enable', kind: 'tool_call', mcp: false, consequential: true })})`)).toBe(true);
     const small = [{ op: 'set', key: 's1', from: { title: 'Synthetic step one', status: 'todo' }, to: { status: 'blocked' } }];
-    expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change', kind: 'plan', templateId: 'plan.diff.minor', consequential: false, args: { ops: small } })})`)).toBe(false);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'plan.change', kind: 'plan', mcp: false, templateId: 'plan.diff.minor', consequential: false, args: { ops: small } })})`)).toBe(false);
     // What chat suggested asks on its own by the mark the intake files it with (the runtime's choice, which a later table may change), not by its name.
     for (const [a, kind] of [['goal.propose', 'goal'], ['world.commitment.from_chat', 'tool_call']]) {
-      expect(run(`apprAlone(${JSON.stringify({ fullName: a, kind, origin: 'chat:c1', consequential: true })})`), a).toBe(true);
-      expect(run(`apprAlone(${JSON.stringify({ fullName: a, kind, origin: 'chat:c1' })})`), a).toBe(false);
+      expect(run(`apprAlone(${JSON.stringify({ fullName: a, kind, mcp: false, origin: 'chat:c1', consequential: true })})`), a).toBe(true);
+      expect(run(`apprAlone(${JSON.stringify({ fullName: a, kind, mcp: false, origin: 'chat:c1' })})`), a).toBe(false);
     }
     // Review finding 2: which plan card is a small one is read from its operations, never from the template's name alone.
     const due = '2026-10-20T22:00:00.000Z';
-    const minor = (ops: unknown[], over: Record<string, unknown> = {}) => ({ fullName: 'plan.change', kind: 'plan', origin: 'runtime:goals', templateId: 'plan.diff.minor', consequential: false, args: { goalTitle: 'Synthetic goal', ops }, ...over });
+    const minor = (ops: unknown[], over: Record<string, unknown> = {}) => ({ fullName: 'plan.change', kind: 'plan', mcp: false, origin: 'runtime:goals', templateId: 'plan.diff.minor', consequential: false, args: { goalTitle: 'Synthetic goal', ops }, ...over });
     const says = (p: Record<string, unknown>) => [run(`apprAlone(${JSON.stringify(p)})`), run(`apprTitle(${JSON.stringify(p)})`), run(`apprSub(${JSON.stringify(p)})`)];
     // Small: a status among not started, in progress and blocked; a date moved by a week at most; a step put elsewhere.
     expect(says(minor([
@@ -751,7 +751,7 @@ describe('the console Approvals panel', () => {
     for (const [what, ops] of bigger) expect(says(minor(ops)), what).toEqual([true, 'Change a Plan', 'Flint suggests a bigger change.']);
     // The server's own mark wins too, and a card whose args were cleared is never taken for a small one.
     expect(says(minor(small, { consequential: true }))[0]).toBe(true);
-    expect(says({ fullName: 'plan.change', kind: 'plan', origin: 'runtime:goals', templateId: 'plan.diff.minor', consequential: false, args: null })[0]).toBe(true);
+    expect(says({ fullName: 'plan.change', kind: 'plan', mcp: false, origin: 'runtime:goals', templateId: 'plan.diff.minor', consequential: false, args: null })[0]).toBe(true);
     answer = () => ({
       status: 200,
       body: {
@@ -814,7 +814,7 @@ describe('the console Approvals panel', () => {
   it('Turn On Predictions (P4) is in words, names each number it turns on, and asks on its own with a fresh touch and a plain prompt', async () => {
     const three = ['daily.calendar.hours', 'daily.deploys.count', 'daily.spend.anthropic.usd'];
     const predict = (over: Record<string, unknown> = {}) => card({
-      id: 'tp', fullName: 'forecast.series.enable', kind: 'tool_call', origin: 'console', sensitivity: 'financial', consequential: true,
+      id: 'tp', fullName: 'forecast.series.enable', kind: 'tool_call', mcp: false, origin: 'console', sensitivity: 'financial', consequential: true,
       args: { series: three, reason: [] }, reason: 'Approving turns on Flint’s forecasts of these numbers, on this Mac.', ...over,
     });
     /** The card's facts, read with plain spaces ("and 8 more" is held together with no-break ones). */
@@ -857,8 +857,8 @@ describe('the console Approvals panel', () => {
       expect(`${run(`apprTitle(${JSON.stringify(p)})`)} ${run(`apprSub(${JSON.stringify(p)})`)} ${facts(p).flat().join(' ')}`).not.toMatch(/forecast\.series|daily\.|weekly\.|\.usd|\.count|acme|x\.y|[{}[\]"]/);
     }
     // It asks on its own whatever it lists: by the server's mark, and by its name alone for a server that sends none.
-    expect(run(`apprAlone(${JSON.stringify({ fullName: 'forecast.series.enable', kind: 'tool_call', consequential: true, sensitivity: 'ops' })})`)).toBe(true);
-    expect(run(`apprAlone(${JSON.stringify({ fullName: 'forecast.series.enable', kind: 'tool_call', sensitivity: 'ops' })})`)).toBe(true);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'forecast.series.enable', kind: 'tool_call', mcp: false, consequential: true, sensitivity: 'ops' })})`)).toBe(true);
+    expect(run(`apprAlone(${JSON.stringify({ fullName: 'forecast.series.enable', kind: 'tool_call', mcp: false, sensitivity: 'ops' })})`)).toBe(true);
     answer = () => ({ status: 200, body: { signed: true, proposals: [predict({ sensitivity: 'ops', args: { series: all, reason: ['daily.deploys.count', 'daily.spend.anthropic.usd'] } }), plain({ id: 'src' })] } });
     await open();
     expect(noteSays()).toBe('You have 2 approvals waiting. Approve All skips 1.');
@@ -952,7 +952,7 @@ describe('the console Approvals panel', () => {
   it('a card approved here is told to the Goals panel, so a New Goal draft whose card it was is spent; a failed one is not', async () => {
     const told: string[] = [];
     ctx.goalsApproved = (p: { id: string }) => void told.push(p.id);
-    answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'g1', fullName: 'goal.activate', kind: 'goal', consequential: true, args: { goalId: 'gotest0001', title: 'Synthetic goal' } })] } });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [card({ id: 'g1', fullName: 'goal.activate', kind: 'goal', mcp: false, consequential: true, args: { goalId: 'gotest0001', title: 'Synthetic goal' } })] } });
     await open();
     ids.apprlist!.children[0]!.children[0]!.button('Approve with Password').onclick!();
     await settle();
@@ -975,12 +975,12 @@ describe('the console Approvals panel', () => {
     });
     const enable = (over: Record<string, unknown> = {}) => ({ assetId: WATCHER, kind: 'ci_runner', externalRef: 'github:ci:v1', name: 'CI Watcher', capabilities: ['watch_ci'], dispatchAction: 'task.dispatch.ci_runner', spends: false, entityId: null, ...over });
     const P5 = {
-      enable: card({ id: 'p5a', fullName: 'asset.enable', kind: 'policy', origin: 'console', consequential: true, reason: 'Approving turns this asset on.', args: enable() }),
-      dispatch: card({ id: 'p5b', fullName: 'task.dispatch.ci_runner', kind: 'task', origin: 'console', reason: 'Approving runs this task.', cost: { micros: 0 }, args: watch() }),
-      accept: card({ id: 'p5c', fullName: 'task.check_bar', kind: 'task', origin: 'runtime:tasks', templateId: 'task.accept.v1', reason: 'Approving accepts this result.', args: { taskId: TASK, outputRef: 'out:0123456789abcdef', metBar: true, checks: 2, met: 2, by: 'flint:rule' } }),
-      cancel: card({ id: 'p5d', fullName: 'task.cancel', kind: 'task', origin: 'console', reason: 'Approving stops this task.', args: { taskId: TASK } }),
-      acceptAnyway: card({ id: 'p5e', fullName: 'task.bar_override', kind: 'task', origin: 'console', consequential: true, reason: 'Approving accepts this result against its checks.', args: { taskId: TASK, to: 'accepted' } }),
-      rejectAnyway: card({ id: 'p5f', fullName: 'task.bar_override', kind: 'task', origin: 'console', consequential: true, reason: 'Approving rejects this result against its checks.', args: { taskId: TASK, to: 'rejected' } }),
+      enable: card({ id: 'p5a', fullName: 'asset.enable', kind: 'policy', mcp: false, origin: 'console', consequential: true, reason: 'Approving turns this asset on.', args: enable() }),
+      dispatch: card({ id: 'p5b', fullName: 'task.dispatch.ci_runner', kind: 'task', mcp: false, origin: 'console', reason: 'Approving runs this task.', cost: { micros: 0 }, args: watch() }),
+      accept: card({ id: 'p5c', fullName: 'task.check_bar', kind: 'task', mcp: false, origin: 'runtime:tasks', templateId: 'task.accept.v1', reason: 'Approving accepts this result.', args: { taskId: TASK, outputRef: 'out:0123456789abcdef', metBar: true, checks: 2, met: 2, by: 'flint:rule' } }),
+      cancel: card({ id: 'p5d', fullName: 'task.cancel', kind: 'task', mcp: false, origin: 'console', reason: 'Approving stops this task.', args: { taskId: TASK } }),
+      acceptAnyway: card({ id: 'p5e', fullName: 'task.bar_override', kind: 'task', mcp: false, origin: 'console', consequential: true, reason: 'Approving accepts this result against its checks.', args: { taskId: TASK, to: 'accepted' } }),
+      rejectAnyway: card({ id: 'p5f', fullName: 'task.bar_override', kind: 'task', mcp: false, origin: 'console', consequential: true, reason: 'Approving rejects this result against its checks.', args: { taskId: TASK, to: 'rejected' } }),
     };
     const words = (p: Record<string, unknown>) => [run(`apprTitle(${JSON.stringify(p)})`), run(`apprSub(${JSON.stringify(p)})`), run(`JSON.stringify(apprFacts(${JSON.stringify(p)}))`)] as [string, string, string];
     const facts = (p: Record<string, unknown>) => JSON.parse(words(p)[2]) as Array<[string, string]>;
@@ -1018,13 +1018,13 @@ describe('the console Approvals panel', () => {
       expect(words({ ...P5.enable, args: enable({ kind: 'local_worker', name: 'Local Tasks', capabilities: ['summarize_items', 'new_thing'], spends: true }) })).toEqual([
         'Turn On an Asset', 'Flint can hand it work once it’s on.', JSON.stringify([['Asset', 'Local Tasks'], ['Can Do', 'Summarize Items · New Thing'], ['Cost', 'Costs Money']]),
       ]);
-      expect(words({ ...P5.dispatch, fullName: 'task.dispatch.local_worker', kind: 'task', cost: undefined, args: watch({ title: 'Summarize Items' }) })).toEqual(['Run a Task', 'Flint runs it once you approve it.', JSON.stringify([['Task', 'Summarize Items'], ['Due', 'No Due Date'], ['Cost', 'No Cost']])]);
+      expect(words({ ...P5.dispatch, fullName: 'task.dispatch.local_worker', kind: 'task', mcp: false, cost: undefined, args: watch({ title: 'Summarize Items' }) })).toEqual(['Run a Task', 'Flint runs it once you approve it.', JSON.stringify([['Task', 'Summarize Items'], ['Due', 'No Due Date'], ['Cost', 'No Cost']])]);
       expect(words({ ...P5.acceptAnyway, args: { taskId: TASK, to: 'archived' } }).slice(0, 2)).toEqual(['Overrule a Task’s Checks', 'It ends against Flint’s checks.']);
       // A result is called passed only when every check is met, by the card's own counts.
       for (const args of [{ checks: 3, met: 2 }, { checks: 0, met: 0 }, { checks: '2', met: '2' }, { checks: 2.5, met: 2.5 }, {}]) expect(words({ ...P5.accept, args: { taskId: TASK, ...args } })[1], JSON.stringify(args)).toBe('Flint checked its result.');
       // A name a table does not hold is not a word: "constructor" is no kind of asset.
       for (const kind of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) expect(words({ ...P5.enable, args: enable({ kind }) })[0], kind).toBe('Turn On an Asset');
-      expect(words({ ...P5.dispatch, fullName: 'task.dispatch.constructor', kind: 'task', args: watch() })[0]).toBe('Run a Task');
+      expect(words({ ...P5.dispatch, fullName: 'task.dispatch.constructor', kind: 'task', mcp: false, args: watch() })[0]).toBe('Run a Task');
       for (const p of Object.values(P5)) {
         const [title, sub, f] = words({ ...p, args: null, cost: undefined });
         expect(title).toMatch(/^[A-Z]/);
@@ -1110,7 +1110,7 @@ describe('the console Approvals panel', () => {
       expect(alone({ ...P5.dispatch, cost: undefined, args: watch({ estCostMicros: 250_000 }) })).toBe(true);
       expect(alone({ ...P5.dispatch, tainted: true })).toBe(true);
       // A card filed as a spend is money, whatever its estimate reads and whatever marks it came without.
-      expect(alone({ ...P5.dispatch, fullName: 'task.dispatch.local_worker', kind: 'spend' })).toBe(true);
+      expect(alone({ ...P5.dispatch, fullName: 'task.dispatch.local_worker', kind: 'spend', mcp: false })).toBe(true);
       expect(alone({ ...plain(), kind: 'spend' })).toBe(true);
       // Ending a task against its checks says so in the prompt: it never reads as the plain acceptance of a result that passed.
       expect([P5.enable, P5.dispatch, P5.accept, P5.cancel, P5.acceptAnyway, P5.rejectAnyway].map(reason)).toEqual([
@@ -1218,7 +1218,7 @@ describe('the console Approvals panel', () => {
       // A task id that is not one, or a name under a key the table does not own, is never looked up as a task.
       expect(run(`apprTaskName(${JSON.stringify({ ...P5.cancel, args: { taskId: 'constructor' } })})`)).toBe('');
       expect(run(`apprTaskName(${JSON.stringify({ ...P5.cancel, args: { taskId: '__proto__' } })})`)).toBe('');
-      for (const taskId of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'tk0000000000000000']) expect(run(`apprTaskKnown(${JSON.stringify({ fullName: 'task.cancel', kind: 'task', args: { taskId } })})`), taskId).toBeNull();
+      for (const taskId of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'tk0000000000000000']) expect(run(`apprTaskKnown(${JSON.stringify({ fullName: 'task.cancel', kind: 'task', mcp: false, args: { taskId } })})`), taskId).toBeNull();
       expect(run(`apprTaskKnown(${JSON.stringify(P5.cancel)}).about`)).toBe('somewhere else');
       // What was looked up with no title, or with something that is no text, names nothing.
       for (const known of [{ title: '', about: 'x' }, { title: 7, about: 'x' }, { about: 'x' }, {}]) {
@@ -1576,25 +1576,37 @@ describe('the console Approvals panel', () => {
       for (const [name, kinds] of names) {
         const args = name === 'policy.change' ? { rows: [] } : {};
         for (const kind of kinds) {
-          expect(run(`apprOwn(${JSON.stringify({ fullName: name, kind, args })})`), `${name} as ${kind}`).toBe(true);
-          expect(run(`apprTitle(${JSON.stringify({ fullName: name, kind, args })})`), `${name} as ${kind}`).not.toBe('Approve a Tool Call');
+          expect(run(`apprOwn(${JSON.stringify({ fullName: name, kind, mcp: false, args })})`), `${name} as ${kind}`).toBe(true);
+          expect(run(`apprTitle(${JSON.stringify({ fullName: name, kind, mcp: false, args })})`), `${name} as ${kind}`).not.toBe('Approve a Tool Call');
           // The server's mark alone is enough to take the words away.
           const marked = { fullName: name, kind, mcp: true, args };
           expect(words(marked).slice(0, 2), `${name} marked`).toEqual(['Approve a Tool Call', SUB]);
           expect(alone(marked), `${name} marked`).toBe(true);
           // Its icon is a tool's too: never the switch, the target, the checklist or the database of the card it is named like.
           expect(run(`apprIcon(${JSON.stringify(marked)})`), `${name} marked`).toBe('bolt');
+          // And so is the server saying nothing (an older server's list), or anything but a plain no: several of Flint's
+          // own cards are filed as tool calls, so without the server's word the kind tells nothing apart.
+          for (const mcp of [undefined, null, 'false', 0, '', 'no', {}]) {
+            const unsaid = { fullName: name, kind, mcp, args };
+            expect(run(`apprOwn(${JSON.stringify(unsaid)})`), `${name} mcp ${JSON.stringify(mcp)}`).toBe(false);
+            expect(words(unsaid).slice(0, 2), `${name} mcp ${JSON.stringify(mcp)}`).toEqual(['Approve a Tool Call', SUB]);
+            expect(alone(unsaid), `${name} mcp ${JSON.stringify(mcp)}`).toBe(true);
+          }
         }
-        // So is any other kind, a kind that is no kind, or none at all (a card from a server with no runtime).
+        // So is any other kind, a kind that is no kind, or none at all, whatever the server says of `mcp`.
         for (const kind of [...KINDS.filter((k) => !kinds.includes(k)), 'constructor', '__proto__', '', 7, null, undefined]) {
-          const p = { fullName: name, kind, args };
-          expect(run(`apprTitle(${JSON.stringify(p)})`), `${name} as ${String(kind)}`).toBe('Approve a Tool Call');
-          expect(alone(p), `${name} as ${String(kind)}`).toBe(true);
+          for (const p of [{ fullName: name, kind, mcp: false, args }, { fullName: name, kind, args }]) {
+            expect(run(`apprTitle(${JSON.stringify(p)})`), `${name} as ${String(kind)}`).toBe('Approve a Tool Call');
+            expect(alone(p), `${name} as ${String(kind)}`).toBe(true);
+          }
         }
       }
+      // The names whose own kind is a tool call are the ones only the server's word tells apart.
+      const asTools = names.filter(([, kinds]) => kinds.includes('tool_call')).map(([n]) => n);
+      expect(asTools).toEqual(expect.arrayContaining(['backup.local', 'backup.nexus', 'restore.drill.nexus', 'backup.prune', 'forecast.series.enable', 'world.source.enable', 'world.person.create', 'world.commitment.from_chat']));
       // A card's fixed reason is not a way in either: the predictions card that changes second opinions only is worded
       // from its reason, and a tool's card that carries the same name and the same reason gets none of those words.
-      const opinion = { fullName: 'forecast.series.enable', kind: 'tool_call', origin: 'console', consequential: true, reason: run('APPR_PREDICT_OPINION') as string, args: { series: ['daily.deploys.count'], reason: [] } };
+      const opinion = { fullName: 'forecast.series.enable', kind: 'tool_call', mcp: false, origin: 'console', consequential: true, reason: run('APPR_PREDICT_OPINION') as string, args: { series: ['daily.deploys.count'], reason: [] } };
       expect(run(`apprPredictOnlyOpinion(${JSON.stringify(opinion)})`)).toBe(true);
       expect(run(`apprReason(${JSON.stringify(opinion)})`)).toBe('change a second opinion');
       expect(run(`apprPredictOnlyOpinion(${JSON.stringify({ ...opinion, mcp: true })})`)).toBe(false);
@@ -1631,8 +1643,42 @@ describe('the console Approvals panel', () => {
       expect(decided).toEqual([['approve', 'm1', { reason: 'run a tool on a connected server', fresh: true, args: planted.task.args }]]);
     });
 
+    it('a list from a server that does not say whether a card is a tool’s: no card named like one of Flint’s own gets its words, and none rides Approve All', async () => {
+      // As an older server sent them: Flint's own nightly cards and switches, each under its own kind, with no `mcp`.
+      const unsaid = (id: string, fullName: string, over: Record<string, unknown> = {}) => {
+        const { mcp: _mcp, ...c } = card({ id, fullName, kind: 'tool_call', origin: 'runtime:backup', args: { day: '2026-10-13' }, ...over });
+        return c;
+      };
+      const list = [
+        unsaid('o1', 'backup.local'), unsaid('o2', 'backup.nexus'), unsaid('o3', 'restore.drill.nexus'), unsaid('o4', 'backup.prune', { args: { day: '2026-10-13', files: 3, bytes: 1024, listDigest: 'a'.repeat(64) } }),
+        unsaid('o5', 'forecast.series.enable', { origin: 'console', args: { series: ['daily.deploys.count'], reason: [] } }), unsaid('o6', 'world.source.enable', { origin: 'cli', args: { source: 'deploy' } }),
+        unsaid('o7', 'world.person.create', { origin: 'runtime:google_calendar', args: { people: [] } }), unsaid('o8', 'world.commitment.from_chat', { origin: 'chat:c1', args: { text: 'Synthetic', quote: 'Synthetic quoted words' } }),
+        plain({ id: 'x1' }),
+      ];
+      for (const c of list.slice(0, 8)) expect('mcp' in c, c.fullName as string).toBe(false);
+      answer = () => ({ status: 200, body: { signed: true, proposals: list } });
+      await open();
+      const shown = cardsDrawn();
+      for (const c of shown.slice(0, 8)) {
+        expect(c.shown(), c.getAttribute('data-id')!).toContain('Approve a Tool Call');
+        expect(c.shown(), c.getAttribute('data-id')!).toContain('Asks on Its Own');
+      }
+      expect(ids.apprlist!.textContent).not.toMatch(/Run Tonight|Nexus|Remove Old|Turn On Predictions|Turn On the Deploy Source|from Calendar|Add a Commitment/);
+      // Approve All takes the one card that is nobody's look-alike, and leaves the eight.
+      expect(noteSays()).toBe('You have 9 approvals waiting. Approve All skips 8.');
+      ids.apprall!.onclick!();
+      await settle();
+      expect(decided.map((d) => d[1])).toEqual(['x1']);
+      // The same list from a server that says each is not a tool's: every card is its own again.
+      answer = () => ({ status: 200, body: { signed: true, proposals: list.map((c) => ({ ...c, mcp: false })) } });
+      run('loadApprovals()');
+      await settle();
+      expect(ids.apprlist!.textContent).not.toContain('Approve a Tool Call');
+      expect(ids.apprlist!.textContent).toContain('Turn On the Deploy Source');
+    });
+
     it('a goal’s task step on a plan card says Flint would run it as a task', () => {
-      const says = JSON.parse(run(`JSON.stringify(apprDetails(${JSON.stringify(card({ fullName: 'plan.change', kind: 'plan', args: { goalId: 'go1', goalTitle: 'Finish Building Flint', ops: [{ op: 'add', key: 's4', step: { ordinal: 400, title: 'Watch the release run', kind: 'asset_task', tier: 'approval', dueAt: null, dependsOn: [] } }] } }))}).says)`) as string) as string[];
+      const says = JSON.parse(run(`JSON.stringify(apprDetails(${JSON.stringify(card({ fullName: 'plan.change', kind: 'plan', mcp: false, args: { goalId: 'go1', goalTitle: 'Finish Building Flint', ops: [{ op: 'add', key: 's4', step: { ordinal: 400, title: 'Watch the release run', kind: 'asset_task', tier: 'approval', dueAt: null, dependsOn: [] } }] } }))}).says)`) as string) as string[];
       expect(says).toContain('Add the step “Watch the release run”. Flint would run this step as a task.');
     });
   });

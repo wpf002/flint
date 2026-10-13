@@ -48,7 +48,7 @@ type OffRow = { id: string; pattern: string; tier: string };
  * purpose, so an assertion that it asks on its own cannot pass on the flag.
  */
 const card = (off: unknown, more: Record<string, unknown> = {}) => ({
-  id: 'proff1', fullName: 'policy.change', kind: 'policy', origin: 'cli', tainted: false, destructive: false, sensitivity: 'ops',
+  id: 'proff1', fullName: 'policy.change', kind: 'policy', mcp: false, origin: 'cli', tainted: false, destructive: false, sensitivity: 'ops',
   expiresAt: '2026-10-20T14:00:00.000Z', reason: 'Approving switches this rule off.', args: { off }, ...more,
 });
 const say = (c: object) => ({

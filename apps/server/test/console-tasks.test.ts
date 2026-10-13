@@ -183,7 +183,7 @@ const spec = TaskSpec.parse({ template: 'watch_ci', params: { item: ITEM } });
 const dispatchArgs = (taskId: string, over: Record<string, unknown> = {}) =>
   TaskDispatchArgs.parse({ taskId, assetId: WATCHER, assetKind: 'ci_runner', title: 'Watch a CI Run', spec, acceptance: ruleChecks(spec), goalId: null, stepKey: null, dueAt: null, sensitivity: 'ops', tainted: false, estCostMicros: 0, ...over });
 const card = (id: string, fullName: string, args: unknown, over: Record<string, unknown> = {}) => ({
-  id, fullName, args, tainted: false, provenance: {}, status: 'pending', origin: 'console', ts: Date.now() - 60_000, sensitivity: 'ops', destructive: false, consequential: false, kind: 'task',
+  id, fullName, args, tainted: false, provenance: {}, status: 'pending', origin: 'console', ts: Date.now() - 60_000, sensitivity: 'ops', destructive: false, consequential: false, kind: 'task', mcp: false,
   reason: 'Approving runs this task.', expiresAt: '2026-10-27T18:00:00.000Z', ...over,
 });
 const CARDS = {
@@ -422,7 +422,7 @@ describe('the header button', () => {
       expect(dot(), p.fullName).toBe(false);
     }
     // One that is approved and waiting to run, or a card of another kind, does not light it.
-    run(`tasksDot(${JSON.stringify([{ ...CARDS.dispatch, status: 'approved' }, { id: 'pr9', fullName: 'goal.activate', kind: 'goal', status: 'pending', args: {} }, { id: 'pr8', fullName: 'tasks.other', status: 'pending', args: {} }])})`);
+    run(`tasksDot(${JSON.stringify([{ ...CARDS.dispatch, status: 'approved' }, { id: 'pr9', fullName: 'goal.activate', kind: 'goal', mcp: false, status: 'pending', args: {} }, { id: 'pr8', fullName: 'tasks.other', status: 'pending', args: {} }])})`);
     expect(dot()).toBe(true);
     // Nor does a tool on a connected server that carries one of these names: by the server's mark, or by its kind.
     for (const p of Object.values(CARDS)) {
@@ -433,14 +433,14 @@ describe('the header button', () => {
     }
     // The Goals dot is held the same way: a goal's card lights it, a tool's card called goal.activate does not.
     const goalDot = () => ids.goalsdot!.hidden;
-    const goal = { id: 'prg1', fullName: 'goal.activate', kind: 'goal', status: 'pending', args: {} };
+    const goal = { id: 'prg1', fullName: 'goal.activate', kind: 'goal', mcp: false, status: 'pending', args: {} };
     run(`goalsDot(${JSON.stringify([goal])})`);
     expect(goalDot()).toBe(false);
     for (const planted of [{ ...goal, kind: 'tool_call', mcp: true }, { ...goal, mcp: true }, { ...goal, kind: 'tool_call' }, { ...goal, kind: undefined }, { ...goal, fullName: 'plan.change', kind: 'tool_call', mcp: true }]) {
       run(`goalsDot(${JSON.stringify([planted])})`);
       expect(goalDot(), JSON.stringify(planted)).toBe(true);
     }
-    run(`goalsDot(${JSON.stringify([{ ...goal, fullName: 'plan.change', kind: 'plan' }])})`);
+    run(`goalsDot(${JSON.stringify([{ ...goal, fullName: 'plan.change', kind: 'plan', mcp: false }])})`);
     expect(goalDot()).toBe(false);
   });
 
@@ -883,7 +883,7 @@ describe('a card, shown and signed here', () => {
       ['already approved', [{ ...CARDS.accept, status: 'approved' }]],
       ['rejected', [{ ...CARDS.accept, status: 'rejected' }]],
       ['another kind of card under that id', [{ ...CARDS.accept, fullName: 'mcp:shop.buy', args: { amount: 400 } }]],
-      ['a goal card under that id', [{ ...CARDS.accept, fullName: 'goal.abandon', kind: 'goal', args: { goalId: GOAL, goalTitle: 'Finish Building Flint' } }]],
+      ['a goal card under that id', [{ ...CARDS.accept, fullName: 'goal.abandon', kind: 'goal', mcp: false, args: { goalId: GOAL, goalTitle: 'Finish Building Flint' } }]],
       ['another card', [CARDS.cancel]],
       // A tool on a connected server called "task", with a tool called "check_bar": the same name, and not a task's card.
       ['a tool’s card under a task card’s name, by the server’s mark', [{ ...CARDS.accept, kind: 'tool_call', mcp: true, origin: 'chat:c1' }]],
@@ -1741,7 +1741,7 @@ describe('the Approvals panel names a card’s task', () => {
 
   it('reads each task its cards are about, by its id, every time it is asked; a card of another kind, a tool’s card under a task card’s name, or one with no task’s id is not asked about', async () => {
     const ps = [
-      CARDS.accept, CARDS.cancel, { ...CARDS.reject }, CARDS.enable, { id: 'pr9', fullName: 'goal.activate', kind: 'goal', status: 'pending', args: { taskId: T_DONE } },
+      CARDS.accept, CARDS.cancel, { ...CARDS.reject }, CARDS.enable, { id: 'pr9', fullName: 'goal.activate', kind: 'goal', mcp: false, status: 'pending', args: { taskId: T_DONE } },
       { ...CARDS.dispatch, id: 'prbad', args: { taskId: '../assets' } }, { ...CARDS.override, id: 'prtool', kind: 'tool_call', mcp: true }, { ...CARDS.override, id: 'prnokind', kind: undefined },
     ];
     await names(ps);

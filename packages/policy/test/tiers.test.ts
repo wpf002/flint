@@ -457,12 +457,12 @@ describe('P3: goals and plans', () => {
     const apprAlone = (p: Record<string, unknown>) => runInContext(`apprAlone(${JSON.stringify(p)})`, c) as boolean;
     // (Each card under the kind the runtime files it under: the console gives a name its words only for that kind.)
     const kindOf = (a: string) => (a === 'plan.change' ? 'plan' : 'goal');
-    for (const a of GOAL_SIGNED_ACTIONS) expect(apprAlone({ fullName: a, kind: kindOf(a) }), a).toBe(true);
+    for (const a of GOAL_SIGNED_ACTIONS) expect(apprAlone({ fullName: a, kind: kindOf(a), mcp: false }), a).toBe(true);
     const status = { op: 'set', key: 's1', from: { title: 'T', status: 'todo' }, to: { status: 'blocked' } };
-    expect(apprAlone({ fullName: 'plan.change', kind: 'plan', templateId: 'plan.diff.minor', consequential: false, args: { ops: [status] } })).toBe(false);
+    expect(apprAlone({ fullName: 'plan.change', kind: 'plan', mcp: false, templateId: 'plan.diff.minor', consequential: false, args: { ops: [status] } })).toBe(false);
     // The name alone is not enough: a bigger operation under it, or none to read, asks on its own.
-    expect(apprAlone({ fullName: 'plan.change', kind: 'plan', templateId: 'plan.diff.minor', consequential: false })).toBe(true);
-    expect(apprAlone({ fullName: 'plan.change', kind: 'plan', templateId: 'plan.diff.minor', consequential: false, args: { ops: [status, { op: 'add', key: 's9', step: { ordinal: 900, title: 'T', kind: 'will_task' } }] } })).toBe(true);
+    expect(apprAlone({ fullName: 'plan.change', kind: 'plan', mcp: false, templateId: 'plan.diff.minor', consequential: false })).toBe(true);
+    expect(apprAlone({ fullName: 'plan.change', kind: 'plan', mcp: false, templateId: 'plan.diff.minor', consequential: false, args: { ops: [status, { op: 'add', key: 's9', step: { ordinal: 900, title: 'T', kind: 'will_task' } }] } })).toBe(true);
     // The console's reading agrees with the shared rule on every operation a review may file as small or bigger.
     const step = { kind: 'will_task' as const, status: 'todo' as const, dueAt: '2026-10-14T22:00:00.000Z' };
     const horizon = '2026-12-01T05:59:00.000Z';
@@ -479,13 +479,13 @@ describe('P3: goals and plans', () => {
     ];
     for (const op of cases) {
       const shared = classifyPlanOp(PlanOp.parse(op), step, horizon) === 'minor';
-      expect(!apprAlone({ fullName: 'plan.change', kind: 'plan', templateId: 'plan.diff.minor', consequential: false, args: { ops: [op] } }), JSON.stringify(op)).toBe(shared);
+      expect(!apprAlone({ fullName: 'plan.change', kind: 'plan', mcp: false, templateId: 'plan.diff.minor', consequential: false, args: { ops: [op] } }), JSON.stringify(op)).toBe(shared);
     }
-    expect(apprAlone({ fullName: 'plan.change', kind: 'plan', templateId: 'plan.diff.material', consequential: true })).toBe(true);
-    expect(apprAlone({ fullName: 'world.source.enable', kind: 'tool_call', consequential: true })).toBe(true);
+    expect(apprAlone({ fullName: 'plan.change', kind: 'plan', mcp: false, templateId: 'plan.diff.material', consequential: true })).toBe(true);
+    expect(apprAlone({ fullName: 'world.source.enable', kind: 'tool_call', mcp: false, consequential: true })).toBe(true);
     // The predictions switch asks alone too, by its name, whatever mark its card carries.
-    for (const a of FORECAST_SIGNED_ACTIONS) expect(apprAlone({ fullName: a, kind: 'tool_call' }), a).toBe(true);
-    for (const [a, kind] of [['goal.propose', 'goal'], ['world.commitment.from_chat', 'tool_call']]) expect(apprAlone({ fullName: a, kind }), a).toBe(false);
+    for (const a of FORECAST_SIGNED_ACTIONS) expect(apprAlone({ fullName: a, kind: 'tool_call', mcp: false }), a).toBe(true);
+    for (const [a, kind] of [['goal.propose', 'goal'], ['world.commitment.from_chat', 'tool_call']]) expect(apprAlone({ fullName: a, kind, mcp: false }), a).toBe(false);
     // Under any of these names, a card that is a connected server's tool, or of another kind, is not Flint's own: it asks on its own.
     for (const a of [...GOAL_SIGNED_ACTIONS, ...FORECAST_SIGNED_ACTIONS, 'goal.propose', 'world.commitment.from_chat']) {
       expect(apprAlone({ fullName: a, kind: 'tool_call', mcp: true }), a).toBe(true);

@@ -51,7 +51,7 @@ const UNTIL = laterDay(4, 5);
  * so an assertion that it does cannot pass on the flag.
  */
 const card = (rows: Array<{ pattern: string; dailyCap?: number; tier?: string }>, templateId: string) => ({
-  id: 'prp3', fullName: 'policy.change', kind: 'policy', origin: 'cli', templateId, tainted: false, destructive: false, sensitivity: 'ops',
+  id: 'prp3', fullName: 'policy.change', kind: 'policy', mcp: false, origin: 'cli', templateId, tainted: false, destructive: false, sensitivity: 'ops',
   expiresAt: '2026-10-27T14:00:00.000Z', reason: `This lets Flint review your goals and send its plan suggestions as cards without asking until ${date}.`,
   args: { rows: rows.map((r) => ({ tier: 'alone', ...r, reason: 'P3 promotion table, after the shadow week', expiresAt: UNTIL })) },
 });
@@ -246,7 +246,7 @@ describe('Show Details on every rule card, old and new', () => {
     expect(says({ pattern: 'world.sync.*', tier: 'alone', expiresAt: UNTIL })).toBe(`Every action under “World Sync” may run on its own until ${date}.`);
     // A row with no date, and a card with no rows.
     expect(says({ pattern: 'goal.review.local', tier: 'alone', dailyCap: 20 })).toBe('Goal reviews may run on their own, up to 20 a day.');
-    expect(details({ fullName: 'policy.change', kind: 'policy', args: {} })).toEqual([]);
+    expect(details({ fullName: 'policy.change', kind: 'policy', mcp: false, args: {} })).toEqual([]);
   });
 
   it('a rule that tightens says so: one that asks each time, and one that stops an action', () => {
@@ -308,7 +308,7 @@ describe('a rule card says what its rows do: the title, the line under it and th
     // Each rule by name; only the one that runs has a limit.
     expect(mixed.facts[1]).toEqual(['Rules', 'Goal Reviews 20 a Day · Phone Pings']);
     for (const tier of [undefined, 'ALONE', 'auto', '', null, 7]) {
-      const c = say({ fullName: 'policy.change', kind: 'policy', origin: 'cli', args: { rows: [{ pattern: 'goal.review.local', tier, expiresAt: UNTIL }] } });
+      const c = say({ fullName: 'policy.change', kind: 'policy', mcp: false, origin: 'cli', args: { rows: [{ pattern: 'goal.review.local', tier, expiresAt: UNTIL }] } });
       expect(c.title, String(tier)).toBe('Change 1 Rule');
       expect(c.title, String(tier)).not.toMatch(LETS);
       // Nor does the line under it say what a promotion would: it is not known to be one.
@@ -316,8 +316,8 @@ describe('a rule card says what its rows do: the title, the line under it and th
       expect(c.facts[1]![0], String(tier)).toBe('Rules');
     }
     // No rows at all, or rows that are not a list.
-    expect(say({ fullName: 'policy.change', kind: 'policy', origin: 'cli', args: {} }).title).toBe('Change 0 Rules');
-    expect(say({ fullName: 'policy.change', kind: 'policy', origin: 'cli', args: { rows: 'goal.review.local' } }).title).toBe('Change 0 Rules');
+    expect(say({ fullName: 'policy.change', kind: 'policy', mcp: false, origin: 'cli', args: {} }).title).toBe('Change 0 Rules');
+    expect(say({ fullName: 'policy.change', kind: 'policy', mcp: false, origin: 'cli', args: { rows: 'goal.review.local' } }).title).toBe('Change 0 Rules');
   });
 
   it('every title, line and label of these cards is Will’s standard', () => {
@@ -370,8 +370,8 @@ describe('a card can name anything: every table is read by its own entries only'
       expect(c.prompt, name).toBe(`approve: ${c.title}`);
       expect(run(`apprIcon(${JSON.stringify({ fullName: name, args: {} })})`), name).toBe('bolt');
       expect(run(`apprWhen(${JSON.stringify(name)})`), name).toBe('');
-      expect(say({ fullName: 'world.source.enable', kind: 'tool_call', origin: 'cli', args: { source: name } }).sub, name).toBe('Flint starts reading this source.');
-      expect(say({ fullName: 'world.person.create', kind: 'tool_call', origin: 'runtime:x', args: { people: [], source: name } }).sub, name).toBe('They’re from events you accepted or organized.');
+      expect(say({ fullName: 'world.source.enable', kind: 'tool_call', mcp: false, origin: 'cli', args: { source: name } }).sub, name).toBe('Flint starts reading this source.');
+      expect(say({ fullName: 'world.person.create', kind: 'tool_call', mcp: false, origin: 'runtime:x', args: { people: [], source: name } }).sub, name).toBe('They’re from events you accepted or organized.');
       // A status the panel has no words for is not called "not started": the sentence says it changes, and the card lists to what.
       expect(run(`apprOpSays(${JSON.stringify({ op: 'set', from: { title: 'Ship it' }, to: { status: name } })})`), name).toBe('Change the status of “Ship it”.');
       expect(run(`apprGet(APPR_RULES,${JSON.stringify(name)})`), name).toBeUndefined();
@@ -560,11 +560,11 @@ describe('asks on its own: read from what the card would sign, whatever mark it 
     expect(alone(tightens)).toBe(false);
     expect(alone({ ...tightens, consequential: true })).toBe(true);
     // Rows that are not rows let nothing run.
-    expect(alone({ fullName: 'policy.change', kind: 'policy', args: { rows: [null, 7, 'alone'] } })).toBe(false);
+    expect(alone({ fullName: 'policy.change', kind: 'policy', mcp: false, args: { rows: [null, 7, 'alone'] } })).toBe(false);
     // A rule card that is not a list of rows at all is not one Flint files (a rule card says one thing: rows, or the
     // rules it switches off). Whatever it is, it is never signed in a batch: it asks on its own.
-    expect(alone({ fullName: 'policy.change', kind: 'policy', args: { rows: 'alone' } })).toBe(true);
-    expect(alone({ fullName: 'policy.change', kind: 'policy', args: {} })).toBe(true);
+    expect(alone({ fullName: 'policy.change', kind: 'policy', mcp: false, args: { rows: 'alone' } })).toBe(true);
+    expect(alone({ fullName: 'policy.change', kind: 'policy', mcp: false, args: {} })).toBe(true);
     // The rule is about rule cards: another card with such a row inside it is not one.
     expect(alone({ fullName: 'runtime.inbox_recent', args: { rows: [{ pattern: 'x', tier: 'alone' }] } })).toBe(false);
   });

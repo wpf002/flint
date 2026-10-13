@@ -626,7 +626,7 @@ describe('turning predictions on', () => {
     ]);
     expect(headers()).toEqual(['Numbers']);
     expect(rows()).toEqual([['Anthropic Spend', [], 'Spending'], ['Deploys', [], ''], ['Calendar Hours', [], 'Calendar']]);
-    expect(body().with('plead')[0]!.textContent).toBe(run(`apprSub({fullName:APPR_PREDICT,kind:'tool_call',args:{series:${JSON.stringify(sorted)},reason:[]}})`));
+    expect(body().with('plead')[0]!.textContent).toBe(run(`apprSub({fullName:APPR_PREDICT,kind:'tool_call',mcp:false,args:{series:${JSON.stringify(sorted)},reason:[]}})`));
     expect(body().with('plead')[1]!.textContent).toBe(run('APPR_PREDICT_ALSO'));
     // What it also does is said before the list of numbers: never below the fold of a long card.
     const order = body().visible().filter((e) => ['plead', 'gsh', 'group'].includes(e.className)).map((e) => e.className);
