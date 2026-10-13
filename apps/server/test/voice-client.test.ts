@@ -169,7 +169,7 @@ v.speak(${JSON.stringify(long)}, False, "turn_long")
       expect(own.sent, String(status)).toHaveLength(1);
       expect((own.ran as string[][]).map((x) => x[0]), String(status)).toEqual(['say']);
     }
-  });
+  }, 60_000);
 
   it('when the server refuses (409: the reply stays here), is busy (429) or fails, this Mac’s own voice speaks it', () => {
     for (const status of [409, 429, 503, 500]) {

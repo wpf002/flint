@@ -890,7 +890,7 @@ describe('the command', () => {
     } finally {
       await server?.stop();
     }
-  });
+  }, 60_000);
 
   it('nothing could be measured: exit 1, and the page says why', async () => {
     const r = rig({ platform: 'linux' });

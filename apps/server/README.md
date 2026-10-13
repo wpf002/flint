@@ -2027,7 +2027,19 @@ return `ok`.
 ```bash
 pnpm --filter server test           # the unit tests, and the process test with them
 pnpm --filter server test:process   # the process test alone
+FLINT_TEST_REAL_SAY=1 pnpm --filter server test:process   # ...with the three that run the Mac's own `say` (a Mac only)
 ```
+
+Three process tests start the real `/usr/bin/say`, twenty and forty-five at a time, and compare
+how long things take (`test/process/voice.test.ts`: a client that hangs up, the line of two
+running and forty waiting). They are **opt-in**, by `FLINT_TEST_REAL_SAY=1`: `pnpm --filter
+server test` is what the deploy gate runs on the live Mac, and a busy moment there must not
+fail a deploy. `install-server.sh` clears that name before the gate's tests, so the gate can
+never be opted in. With the name set, `say` is only ever run with `-o`, a file in the test's own
+folder: nothing is played. What those three show is covered in the default run without the real
+program: the line, the hang-up and the signal through an injected runner, and the hang-up on a
+real server through the `local` provider and a speech stand-in that never answers. Nothing in
+the default run compares one length of time with another.
 
 Voice is tested without a sound: `test/voice.test.ts` and `test/voice.integration.test.ts` (each
 provider, with the programs and the network replaced; a mocked OpenAI-compatible speech server on
@@ -2035,8 +2047,10 @@ loopback, and a second live one that a redirect points at and that stands in for
 key reaches which server is seen), `test/speech-route.test.ts` (which provider is given which
 reply, and the line the Mac's own voice is held to), `test/wer.test.ts` and
 `test/voice-bench.test.ts` (the benchmark, whole, on stand-ins: no program runs but a stand-in for
-the transcription server), and `test/process/voice.test.ts` (the real server started three ways:
-speech off, a speech server on this Mac, and the four older settings saved in its settings file).
+the transcription server), `test/process/voice.test.ts` (the real server started six ways: speech
+off, a speech server on this Mac, the four older settings saved in its settings file, a stale
+model line, nothing to transcribe with, and a transcription program that cannot be run), and
+`test/process/voice-proxy.test.ts` (a real Node for each spelling of the no-proxy list).
 
 **The process test** (`test/process/`) starts the real `src/index.ts` as a process of its own,
 on a scratch HOME and free ports, against loopback stand-ins: a model server on Ollama's own API,

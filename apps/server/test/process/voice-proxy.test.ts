@@ -16,7 +16,7 @@
  * Nothing leaves this machine: the "proxy" is a server here that records what
  * it is asked to carry and answers itself. No program is run, and no audio.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
@@ -24,6 +24,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NO_PROXY_SPELLINGS, REVIEW_SPELLINGS } from '../no-proxy-spellings';
 import { scratch } from './rig';
+
+// Eleven Nodes are started, on a machine that may be busy: the room this file has under `test:process`, wherever it runs.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SERVER = join(HERE, '..', '..');

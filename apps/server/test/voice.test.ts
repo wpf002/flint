@@ -852,12 +852,42 @@ describe("the Mac's own say is held to a line: two at a time, a few waiting, and
   });
 
   it('the real runner stops a program when its signal fires, and says so', async () => {
+    // A program that would run for ten minutes: it ends because it was stopped, and the test's own limit (a
+    // minute) is the only clock. Nothing here measures how fast it was.
     const gone = new AbortController();
-    const started = Date.now();
-    const ran = runFile('/bin/sleep', ['30'], { signal: gone.signal, killSignal: 'SIGKILL' }).catch((e: Error) => e);
+    const ran = runFile('/bin/sleep', ['600'], { signal: gone.signal, killSignal: 'SIGKILL' }).catch((e: Error) => e);
     setTimeout(() => gone.abort(), 50);
     expect(((await ran) as Error).name).toBe('AbortError');
-    expect(Date.now() - started).toBeLessThan(5000);
+  }, 60_000);
+});
+
+// Three process tests start the Mac's own `say` for real, many at a time, and compare how long things take
+// (test/process/voice.test.ts). They are opt-in by a name of their own, and the deploy gate, which runs
+// `pnpm --filter server test` on the live Mac, can never be opted in: a busy moment there must not fail a deploy.
+describe('the tests that run the real say are opt-in, and the deploy gate never runs them', () => {
+  const file = (path: string): string => readFileSync(join(__dirname, '..', path), 'utf8');
+
+  it('they run only when FLINT_TEST_REAL_SAY=1 says so, on a Mac; nothing else in the test folder runs /usr/bin/say', () => {
+    const tests = file('test/process/voice.test.ts');
+    expect(tests).toContain("const REAL_SAY = ON_A_MAC && process.env.FLINT_TEST_REAL_SAY === '1';");
+    expect(tests).toContain('describe.runIf(REAL_SAY)(');
+    expect(tests).toContain('if (!REAL_SAY) return undefined;');
+    // The one place a server is started with the Mac's own voice is behind that name.
+    expect(tests.match(/FLINT_TTS_PROVIDER: 'say'/g)).toHaveLength(1);
+    expect(tests.slice(tests.indexOf('const startSay = async () => {'), tests.indexOf("FLINT_TTS_PROVIDER: 'say'"))).toContain('if (!REAL_SAY) return undefined;');
+    // How to run them is said where they are.
+    expect(tests).toContain('FLINT_TEST_REAL_SAY=1 pnpm --filter server test:process');
+  });
+
+  it('install-server.sh clears the name before the gate runs the server tests, and nothing in the repo sets it', () => {
+    const gate = file('install-server.sh');
+    const cleared = gate.indexOf('\n  unset FLINT_TEST_REAL_SAY\n');
+    const run = gate.indexOf('pnpm --filter server test ||');
+    expect(cleared).toBeGreaterThan(-1);
+    expect(run).toBeGreaterThan(cleared);
+    expect(gate.match(/FLINT_TEST_REAL_SAY/g)!.length).toBeGreaterThanOrEqual(1);
+    expect(gate).not.toMatch(/FLINT_TEST_REAL_SAY=/);
+    for (const path of ['package.json', 'vitest.config.ts', 'vitest.process.config.ts', 'auto_deploy.sh']) expect(file(path), path).not.toContain('FLINT_TEST_REAL_SAY');
   });
 });
 

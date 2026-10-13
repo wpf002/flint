@@ -27,22 +27,38 @@
  *  - `none`:  the same stale name, in the environment this time, and no usual
  *             model either: nothing on this Mac can transcribe;
  *  - `noexec`: a WHISPER_BIN that is there and may not be run (chmod 644);
- *  - `say`:   FLINT_TTS_PROVIDER=say, on a Mac only (below).
+ *  - `say`:   FLINT_TTS_PROVIDER=say: NOT in the default run (see below).
  * (The default server, with no voice setting anywhere, is `modes` in
  * ./behaviour.test.ts: its `meta` event is held to exactly its three keys
  * there.)
  *
  * No program that makes a sound is run. The programs a server here starts
- * are a stand-in for whisper.cpp (a script that prints a line), on a Mac
- * `afconvert`, which turns one file into another, and, for the `say` server
- * alone, the Mac's own `say`. That one cannot be a stand-in: the server runs
- * it by its full path (/usr/bin/say), never by a name a PATH could answer.
- * It is always run with `-o`, a file to write, in a folder that is this
- * test's own (the server's TMPDIR): with `-o` it writes that file and plays
- * nothing. The test counts the `say` processes whose file is in that folder,
- * and no others.
+ * by default are a stand-in for whisper.cpp (a script that prints a line) and,
+ * on a Mac, `afconvert`, which turns one file into another.
+ *
+ * THE THREE TESTS THAT SPEAK WITH THE MAC'S OWN `say` ARE OPT-IN. They start
+ * the real /usr/bin/say twenty and forty-five at a time and compare how long
+ * things take, and this file is part of `pnpm --filter server test`, which
+ * the deploy gate runs on the live Mac: a busy moment there must not fail a
+ * deploy. They run only with FLINT_TEST_REAL_SAY=1, on a Mac:
+ *
+ *   FLINT_TEST_REAL_SAY=1 pnpm --filter server test:process
+ *
+ * (install-server.sh clears that name before the gate's tests, so the gate
+ * can never be opted in.) That `say` cannot be a stand-in: the server runs it
+ * by its full path, never by a name a PATH could answer. It is always run
+ * with `-o`, a file to write, in a folder that is this test's own (the
+ * server's TMPDIR): with `-o` it writes that file and plays nothing. The test
+ * counts the `say` processes whose file is in that folder, and no others.
+ *
+ * What those three show is held in the default run without the real program:
+ * the line, the hang-up and the signal through an injected runner
+ * (../voice.test.ts, ../speech-route.test.ts), and the hang-up on a real
+ * server through the `local` provider and a speech stand-in that never
+ * answers (below). Nothing in the default run compares one length of time
+ * with another: it waits for events.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -60,6 +76,11 @@ const SECRET = 'ZEBRAQUARTZ';
 const OPENAI_KEY = 'sk-process-test-not-a-key-OPENAISECRET';
 const VOICE_KEY = 'voice-key-PROCESSSECRET-0123456789';
 const ON_A_MAC = process.platform === 'darwin';
+/** The three tests that run the Mac's own `say` for real: only when asked for by name, and never by the deploy gate. */
+const REAL_SAY = ON_A_MAC && process.env.FLINT_TEST_REAL_SAY === '1';
+// The same room this file has under `test:process` (vitest.process.config.ts), when it runs with every other test:
+// seven servers are started as processes, on a machine that may be busy.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
 const meta = (r: Reply): Record<string, unknown> | undefined => r.events?.find((e) => e.type === 'meta' && typeof e.staysHere === 'boolean');
 const blocked = (srv: Running): Array<{ kind: string; hostname?: string }> => srv.guard().filter((e) => e.kind.endsWith('blocked'));
@@ -108,8 +129,28 @@ interface SpeechGot {
   body: string;
 }
 /** A speech server on this Mac, as any OpenAI-compatible one answers: audio for `/v1/audio/speech`, text for `/v1/audio/transcriptions`. */
-async function startSpeechStub(): Promise<{ origin: string; got: SpeechGot[]; close(): Promise<void> }> {
+/** A request the speech stand-in has in hand and has not answered (its reply begins with HOLD). */
+interface Held {
+  text: string;
+  /** Over when the connection the request came on is closed before any answer: the asker gave up. */
+  closed: Promise<void>;
+  /** Answer it now, as any other reply is answered. */
+  release(): void;
+}
+interface SpeechStub {
+  origin: string;
+  got: SpeechGot[];
+  /** The next request for a reply it never finishes, when it arrives. */
+  nextHeld(): Promise<Held>;
+  /** How many such requests are in hand right now: not answered, and their connections still open. */
+  open(): number;
+  close(): Promise<void>;
+}
+async function startSpeechStub(): Promise<SpeechStub> {
   const got: SpeechGot[] = [];
+  const waiting: Array<(h: Held) => void> = [];
+  const arrived: Held[] = [];
+  let open = 0;
   const server: Server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
@@ -118,8 +159,36 @@ async function startSpeechStub(): Promise<{ origin: string; got: SpeechGot[]; cl
       const type = String(req.headers['content-type'] ?? '').split(';')[0]!;
       got.push({ method: req.method ?? '', path: req.url ?? '', auth: req.headers.authorization, type, body: type === 'application/json' ? raw.toString('utf8') : raw.toString('latin1') });
       if (req.method === 'POST' && req.url === '/v1/audio/speech') {
-        res.writeHead(200, { 'content-type': 'audio/wav' });
-        return void res.end(Buffer.from(`RIFF-stand-in-audio:${(JSON.parse(raw.toString('utf8')) as { input: string }).input}`));
+        const input = (JSON.parse(raw.toString('utf8')) as { input: string }).input;
+        const answer = (): void => {
+          res.writeHead(200, { 'content-type': 'audio/wav' });
+          res.end(Buffer.from(`RIFF-stand-in-audio:${input}`));
+        };
+        if (!input.startsWith('HOLD')) return void answer();
+        // A reply this server does not finish: it keeps the request, and says when the asker's connection closes.
+        open++;
+        let done = false;
+        const settle = (): void => {
+          if (!done) open--;
+          done = true;
+        };
+        const held: Held = {
+          text: input,
+          closed: new Promise<void>((resolve) =>
+            res.on('close', () => {
+              if (!res.writableEnded) resolve();
+              settle();
+            }),
+          ),
+          release: () => {
+            settle();
+            answer();
+          },
+        };
+        const next = waiting.shift();
+        if (next) next(held);
+        else arrived.push(held);
+        return;
       }
       if (req.method === 'POST' && req.url === '/v1/audio/transcriptions') {
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -132,6 +201,11 @@ async function startSpeechStub(): Promise<{ origin: string; got: SpeechGot[]; cl
   return {
     origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
     got,
+    nextHeld: () => {
+      const here = arrived.shift();
+      return here ? Promise.resolve(here) : new Promise<Held>((resolve) => waiting.push(resolve));
+    },
+    open: () => open,
     close: () =>
       new Promise<void>((r) => {
         server.closeAllConnections?.();
@@ -147,12 +221,12 @@ interface Booted {
 }
 const runs = { off: scratch('voice-off'), local: scratch('voice-local'), saved: scratch('voice-saved'), stale: scratch('voice-stale'), none: scratch('voice-none'), noexec: scratch('voice-noexec'), say: scratch('voice-say') };
 let off: Booted;
-let local: Booted & { speech: Awaited<ReturnType<typeof startSpeechStub>> };
+let local: Booted & { speech: SpeechStub };
 let saved: Booted & { whisperRan: string; whisperBin: string };
 let stale: Booted & { whisperRan: string; whisperBin: string };
 let none: Booted & { whisperRan: string };
 let noexec: Booted & { whisperRan: string };
-/** The `say` server, on a Mac: `tmp` is its TMPDIR, the one folder its `say` writes in. (A short path: the server's own start listens on a socket under it.) */
+/** The `say` server, when it is asked for (FLINT_TEST_REAL_SAY=1, on a Mac): `tmp` is its TMPDIR, the one folder its `say` writes in. (A short path: the server's own start listens on a socket under it.) */
 let say: (Booted & { tmp: string }) | undefined;
 /**
  * The `say` processes that are writing in a folder, by their command lines (`<pid> /usr/bin/say -o <folder>/...`).
@@ -238,7 +312,7 @@ beforeAll(async () => {
     return { ...b, whisperRan };
   };
   const startSay = async () => {
-    if (!ON_A_MAC) return undefined;
+    if (!REAL_SAY) return undefined;
     const tmp = mkdtempSync(join(tmpdir(), 'vs-'));
     const b = await boot(runs.say.dir, { FLINT_TTS_PROVIDER: 'say', TMPDIR: tmp });
     return { ...b, tmp };
@@ -345,6 +419,51 @@ describe('the real server, as a process: a speech server on this Mac speaks and 
     expect(new Set(sent.map((g) => g.auth))).toEqual(new Set([`Bearer ${VOICE_KEY}`]));
     expect(JSON.stringify(local.speech.got)).not.toContain('OPENAISECRET');
     // OpenAI's stand-in is the fence: not one lookup, though its key is set.
+    expect(blocked(local.srv)).toEqual([]);
+  });
+
+  // The hang-up path on a real server, with no speech program: the reply is one the speech server never finishes.
+  // Every step waits for something that happened (the request arrived, the connection closed), never for a length
+  // of time; the one clock here is a limit a healthy run never meets.
+  it('a client that hangs up while the speech server is still making its reply: Flint closes its own request to that server, and is left asking for nothing', async () => {
+    const before = local.srv.log().length;
+    const ask = (text: string, signal?: AbortSignal): Promise<string> =>
+      fetch(`${local.srv.base}/speak`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${local.srv.token}` }, body: JSON.stringify({ text }), ...(signal ? { signal } : {}) }).then(
+        async (r) => `answered ${r.status} ${Buffer.from(await r.arrayBuffer()).toString('utf8')}`,
+        (e: Error) => `client: ${e.name}`,
+      );
+    const within = <T>(what: Promise<T>, said: string): Promise<T> => Promise.race([what, sleep(30_000).then(() => Promise.reject(new Error(said)))]);
+    expect(local.speech.open()).toBe(0);
+
+    // First, what happens when nobody hangs up: the request stays with the speech server until that server answers.
+    const patient = ask('HOLD a reply that is waited for');
+    const kept = await within(local.speech.nextHeld(), 'the speech server was never asked');
+    expect([kept.text, local.speech.open()]).toEqual(['HOLD a reply that is waited for', 1]);
+
+    // A second client asks, and hangs up once the speech server has its request in hand.
+    const gone = new AbortController();
+    const left = ask('HOLD a reply nobody waits for', gone.signal);
+    const dropped = await within(local.speech.nextHeld(), 'the speech server was never asked for the second reply');
+    expect([dropped.text, local.speech.open()]).toEqual(['HOLD a reply nobody waits for', 2]);
+    gone.abort();
+    expect(await left).toBe('client: AbortError');
+    // Flint gives up its own request to the speech server: the connection it came on closes, with no answer sent.
+    await within(dropped.closed, 'Flint was still asking the speech server after its client had hung up');
+    // ...and only that one: the reply somebody is still waiting for is still being asked for.
+    expect(local.speech.open()).toBe(1);
+    let patientClosed = false;
+    void kept.closed.then(() => (patientClosed = true));
+
+    // The server speaks the next reply as ever, and says nothing of a failure: nothing failed.
+    const next = await speak(local.srv, { text: 'Hello there.' });
+    expect([next.status, next.audio.toString('utf8')]).toEqual([200, 'RIFF-stand-in-audio:Hello there.']);
+    expect(local.srv.log().slice(before)).not.toMatch(/\[speak\]|tts failed|    at /);
+    expect(patientClosed).toBe(false);
+
+    // The one that was waited for is answered when the speech server gets to it.
+    kept.release();
+    expect(await patient).toBe('answered 200 RIFF-stand-in-audio:HOLD a reply that is waited for');
+    expect(local.speech.open()).toBe(0);
     expect(blocked(local.srv)).toEqual([]);
   });
 
@@ -550,7 +669,9 @@ describe('the real server, as a process: the same stale name in the environment,
 // The re-review's test gap: what happens to a `say` when its client hangs up was held by the text of index.ts
 // alone. Here the real server speaks with the Mac's own voice (into files, in this test's own folder: nothing is
 // played), and a client really hangs up.
-describe.runIf(ON_A_MAC)('the real server, as a process: the Mac’s own voice, a client that hangs up, and the line', () => {
+//
+// OPT-IN: FLINT_TEST_REAL_SAY=1 pnpm --filter server test:process   (never in the default run or the deploy gate)
+describe.runIf(REAL_SAY)('the real server, as a process: the Mac’s own voice, a client that hangs up, and the line (opt-in: FLINT_TEST_REAL_SAY=1)', () => {
   /** The `say` processes that are writing in this test's own folder. */
   const saying = (): string[] => sayingIn(say!.tmp);
   const folders = (): string[] => readdirSync(say!.tmp).filter((n) => n.startsWith('flint-say-'));
@@ -626,11 +747,11 @@ describe.runIf(ON_A_MAC)('the real server, as a process: the Mac’s own voice, 
 
   it('past the line a reply is handed back at once (429), and replies that hang up while they wait leave it: no say is started for them', async () => {
     const gone = new AbortController();
-    // Sixty long replies at once: two are being spoken, forty wait, and the other eighteen are refused at once.
-    const asked = Array.from({ length: 60 }, () => ask('word '.repeat(800), gone.signal).then((r) => r.status, (e: Error) => e.name));
+    // Forty-five long replies at once: two are being spoken, forty wait, and the other three are refused at once.
+    const asked = Array.from({ length: 45 }, () => ask('word '.repeat(800), gone.signal).then((r) => r.status, (e: Error) => e.name));
     try {
-      const quick = await Promise.race([Promise.all(asked.slice(42)), sleep(4_000).then(() => 'slow' as const)]);
-      expect(quick).toEqual(Array.from({ length: 18 }, () => 429));
+      const quick = await Promise.race([Promise.all(asked.slice(42)), sleep(10_000).then(() => 'slow' as const)]);
+      expect(quick).toEqual(Array.from({ length: 3 }, () => 429));
       expect(saying().length).toBeLessThanOrEqual(2);
     } finally {
       // Every one of the forty-two hangs up (whatever was seen above: none is left asking).
@@ -643,4 +764,11 @@ describe.runIf(ON_A_MAC)('the real server, as a process: the Mac’s own voice, 
     expect((await ask('Hello again.')).status).toBe(200);
     expect(blocked(say!.srv)).toEqual([]);
   }, 60_000);
+});
+
+describe.skipIf(REAL_SAY)('the three tests that speak with the Mac’s own say are not in this run', () => {
+  it('they run only when asked for by name (FLINT_TEST_REAL_SAY=1, on a Mac), and no say server was started', () => {
+    expect(say).toBeUndefined();
+    expect(REAL_SAY).toBe(false);
+  });
 });

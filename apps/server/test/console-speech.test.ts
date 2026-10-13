@@ -274,7 +274,9 @@ describe('one reply, one voice: a reply that has been spoken by the device for o
 
   it('thirty sentences at once, and thirty at five a second: the Mac’s voice speaks every one, with the line it has now', async () => {
     expect([SAY_AT_ONCE, SAY_WAITING]).toEqual([2, 40]);
-    // (A sentence takes this Mac about 0.7 s to speak; at five a second one arrives every 0.2 s. The same ratio, a fiftieth of the time.)
+    // (A sentence takes this Mac about 0.7 s to speak; at five a second one arrives every 0.2 s. The same ratio, a
+    // fiftieth of the time. The outcome does not hang on those times: the line holds forty-two, and a reply of
+    // thirty fits in it however slowly anything is spoken.)
     for (const everyMs of [0, 4]) {
       const r = reply(mac(14));
       const vctx = r.start();
@@ -290,22 +292,41 @@ describe('one reply, one voice: a reply that has been spoken by the device for o
     }
   });
 
-  it('a server that runs out of room mid-reply (the line as it was: eight waiting): one change of voice at most, and never back', async () => {
-    for (const everyMs of [0, 4]) {
-      const r = reply(mac(20, 2, 8));
-      const vctx = r.start();
-      for (const s of THIRTY) {
-        r.say(s, vctx);
-        if (everyMs > 0) await sleep(everyMs);
-      }
-      await r.done();
-      const heard = r.voices.join('');
-      // Every sentence was spoken, by one voice and then, from some sentence on, by the other: never M after d.
-      expect(heard, `one every ${everyMs} ms`).toHaveLength(30);
-      expect(heard, `one every ${everyMs} ms`).toMatch(/^M+d+$/);
-      expect(changes(r.voices), `one every ${everyMs} ms`).toBe(1);
-      expect(vctx.own, `one every ${everyMs} ms`).toBe(true);
+  it('a server that runs out of room mid-reply: one change of voice at most, and never back', async () => {
+    // A reply that arrives whole, at a server whose line is the one it had before (two running, eight waiting):
+    // every sentence is asked for at once, so which ten it takes is settled before any of them is spoken.
+    const whole = reply(mac(2, 2, 8));
+    const v1 = whole.start();
+    for (const s of THIRTY) whole.say(s, v1);
+    await whole.done();
+    expect(whole.voices.join('')).toBe('M'.repeat(10) + 'd'.repeat(20));
+    expect([changes(whole.voices), v1.own]).toEqual([1, true]);
+
+    // A reply that trickles in at five sentences a second, as the re-review heard it. Which sentences that server
+    // had room for is what it measured (MMMMMMMMMMMMMMMMddMMdddMdMdMdM: places came free as it spoke), written
+    // down here sentence by sentence, so that nothing in this test depends on how fast anything runs.
+    const HEARD = 'MMMMMMMMMMMMMMMMddMMdddMdMdMdM';
+    const trickle = reply(async (text, n) => (HEARD[n] === 'M' ? ok(text) : no(429)));
+    const v2 = trickle.start();
+    for (const s of THIRTY) {
+      trickle.say(s, v2);
+      // Each sentence is spoken before the next arrives: the reply is still streaming in.
+      await trickle.done();
     }
+    // The server would have spoken sentences 19, 20, 24, 26, 28 and 30. The reply stays with the device from 17 on.
+    expect(trickle.voices.join('')).toBe('M'.repeat(16) + 'd'.repeat(14));
+    expect([changes(trickle.voices), v2.own]).toEqual([1, true]);
+    // ...and from the sentence after the first refusal on it does not ask: 17 requests for 30 sentences.
+    expect(trickle.asked).toHaveLength(17);
+
+    // The same reply arriving whole (every sentence asked for before one is spoken): the audio that came back for
+    // the later sentences is there, and is not played.
+    const atOnce = reply(async (text, n) => (HEARD[n] === 'M' ? ok(text) : no(429)));
+    const v3 = atOnce.start();
+    for (const s of THIRTY) atOnce.say(s, v3);
+    await atOnce.done();
+    expect(atOnce.asked).toHaveLength(30);
+    expect(atOnce.voices.join('')).toBe('M'.repeat(16) + 'd'.repeat(14));
   });
 
   it('a sentence whose audio had already come back is not played once the reply has gone to the device’s voice', async () => {
