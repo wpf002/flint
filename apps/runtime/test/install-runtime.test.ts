@@ -286,12 +286,22 @@ describe('install-runtime.sh', () => {
     };
     // Every night ends by removing old update backups: last, so it never delays a backup. (It asks for a card
     // only on a night there is something to remove: prune-job-db.test.ts.)
-    expect(night(3)).toEqual(['backup --auto', 'prune --auto']);
-    expect(night(7)).toEqual(['backup --auto', 'drill --auto', 'prune --auto']);
+    expect(night(3)).toEqual(['backup --auto', 'prune-backups --auto']);
+    expect(night(7)).toEqual(['backup --auto', 'drill --auto', 'prune-backups --auto']);
     writeFileSync(join(dir, 'home', '.flint', 'backup-age-recipient'), 'age1example\n');
-    expect(night(7)).toEqual(['backup --auto', 'offsite --auto', 'drill --auto', 'prune --auto']);
+    expect(night(7)).toEqual(['backup --auto', 'offsite --auto', 'drill --auto', 'prune-backups --auto']);
+    // Every step is a script of the runtime's own, and none has the name of one of pnpm's own commands: `pnpm prune`
+    // removes packages, and pnpm runs its own command before a script of the same name.
+    const scripts = Object.keys((JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')) as { scripts: Record<string, string> }).scripts);
+    const pnpmOwn = ['add', 'audit', 'bin', 'config', 'dedupe', 'deploy', 'dlx', 'env', 'exec', 'fetch', 'import', 'init', 'install', 'licenses', 'link', 'list', 'outdated', 'pack', 'patch', 'prune',
+      'publish', 'rebuild', 'remove', 'root', 'run', 'server', 'setup', 'store', 'unlink', 'update', 'why'];
+    for (const step of night(7).map((l) => l.split(' ')[0]!)) {
+      expect(scripts, step).toContain(step);
+      expect(pnpmOwn, step).not.toContain(step);
+    }
+    expect(scripts.filter((name) => pnpmOwn.includes(name))).toEqual([]);
     // A step that fails never stops the ones after it.
     writeFileSync(join(dir, 'bin', 'pnpm'), `#!/bin/zsh\necho "$*" >> ${dir}/pnpm-calls\nexit 1\n`, { mode: 0o755 });
-    expect(night(7)).toEqual(['backup --auto', 'offsite --auto', 'drill --auto', 'prune --auto']);
+    expect(night(7)).toEqual(['backup --auto', 'offsite --auto', 'drill --auto', 'prune-backups --auto']);
   });
 });

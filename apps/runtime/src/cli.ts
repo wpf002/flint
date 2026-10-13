@@ -4,11 +4,14 @@
  *   pnpm --filter @flint/runtime backup   [--auto]   pg_dump, 14 kept, BackupRun row
  *   pnpm --filter @flint/runtime offsite  [--auto]   age-encrypted copy off the box (iCloud Drive, 7 kept)
  *   pnpm --filter @flint/runtime drill    [--auto]   restore the newest dump and compare
- *   pnpm --filter @flint/runtime prune    [--remove]  list the old copies taken before database updates
+ *   pnpm --filter @flint/runtime prune-backups [--remove]
+ *                                                    list the old copies taken before database updates
  *                                                    that may go (the newest 10 and the last 30 days are
  *                                                    kept, and always the running release's); removes
- *                                                    them only with --remove. `prune --auto` is the
- *                                                    nightly job's: it waits for a card until promoted
+ *                                                    them only with --remove. `prune-backups --auto` is
+ *                                                    the nightly job's: it waits for a card until promoted.
+ *                                                    (The script is not called `prune`: that is pnpm's own
+ *                                                    command, which removes packages.)
  *   pnpm --filter @flint/runtime p2-report            P2's exit criteria, measured now (JSON)
  *   pnpm --filter @flint/runtime p25-report [--source google_calendar|apple_calendar]
  *                                                    P2.5's exit criteria for a calendar, measured now (JSON)

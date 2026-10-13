@@ -1916,10 +1916,10 @@ the newest one is over 26 hours old.
 ### Removing old backups
 
 Before a deploy changes the database it takes a copy of it, in
-`~/FlintBackups/pre-migrate`. Nothing ever removed those. `prune` does:
+`~/FlintBackups/pre-migrate`. Nothing ever removed those. `prune-backups` does:
 
 ```
-pnpm --filter @flint/runtime prune
+pnpm --filter @flint/runtime prune-backups
 ```
 
 It lists what would go, by count and size, and removes nothing. Add `--remove`
@@ -1955,7 +1955,7 @@ versions, see entry 6 of [docs/RECOVERY.md](../../docs/RECOVERY.md).
 - A LaunchAgent file, `com.flint.backup-catchup`, comes with the code. A deploy
   does not load it (the steps are above). Loaded, it does nothing unless the
   catch-up is on.
-- The nightly job gains its last step, `prune --auto`. It files no card on a
+- The nightly job gains its last step, `prune-backups --auto`. It files no card on a
   night there is nothing to remove.
 
 ### Known limits
@@ -1968,7 +1968,7 @@ versions, see entry 6 of [docs/RECOVERY.md](../../docs/RECOVERY.md).
   your phone itself is signed in.
 - The files backup's record names the default folders. A folder set by hand
   for one run of the script is not known to the runtime.
-- A failed `prune` is in its log and the audit trail. It posts no note, and
+- A failed `prune-backups` is in its log and the audit trail. It posts no note, and
   tries again the next night.
 
 ### Rolling P7 back
