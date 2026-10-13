@@ -26,6 +26,12 @@ import { forecastSeries } from '../predict/series.js';
 
 export const DOMAINS = ['services', 'deploys', 'spend', 'repos', 'projects', 'calendar', 'goals', 'assets', 'selfmod', 'triage', 'recommendation'] as const;
 export const TYPES = ['event_occurs', 'deadline_met', 'threshold_cross', 'trend', 'relevance', 'task_meets_bar', 'effect_given_accept'] as const;
+/**
+ * The types chat may file under: every one but a task's own (P5), which only
+ * the tasks writer records. The connector's tool offers the same list
+ * (packages/mcp/connectors/runtime-server.ts; a test keeps the two in step).
+ */
+export const CHAT_TYPES = ['event_occurs', 'deadline_met', 'threshold_cross', 'trend', 'relevance', 'effect_given_accept'] as const satisfies ReadonlyArray<(typeof TYPES)[number]>;
 const HORIZON_MS = 180 * 86400_000;
 
 /**
@@ -116,7 +122,7 @@ export const ChatPrediction = z
     probability: z.number().min(0).max(1),
     method: z.literal('model_reasoning'),
     domain: z.enum(DOMAINS),
-    type: z.enum(TYPES),
+    type: z.enum(CHAT_TYPES),
     evidence: Evidence,
     resolutionCriteria: z.string().max(1000),
     resolver: z.literal('will'),
@@ -172,10 +178,12 @@ export function validatePrediction(p: EmitPrediction, now = new Date(), createdB
   if ((p.forecastRunId === undefined) !== (p.seriesKey === undefined)) why.push('a forecast names its run and its series together');
   // P5: a task's forecast is the tasks writer's, under its own template, domain and type, by base rate, settled
   // from the world under the rule that names its task. That writer records nothing else, and no other writer
-  // uses the template (a caller that names no writer among them).
-  const taskShaped = p.template?.id === 'task_meets_bar' && p.domain === 'assets' && p.type === 'task_meets_bar' && p.kind === 'binary' && p.method === 'base_rate'
+  // (a caller that names none among them) uses the template, or the domain and type together: the database
+  // knows a task's forecast by that pair, and scores one only for its task, so another writer's would never be.
+  const taskPair = p.domain === 'assets' && p.type === 'task_meets_bar';
+  const taskShaped = p.template?.id === 'task_meets_bar' && taskPair && p.kind === 'binary' && p.method === 'base_rate'
     && p.resolver === 'auto_world' && !p.tainted && TaskForecastSpec.safeParse(p.resolverSpec).success;
-  if (createdBy === TASKS_WRITER ? !taskShaped : p.template?.id === 'task_meets_bar') why.push('a task’s forecast is the tasks writer’s, under the task template with its task’s rule, and only it is');
+  if (createdBy === TASKS_WRITER ? !taskShaped : p.template?.id === 'task_meets_bar' || taskPair) why.push('a task’s forecast is the tasks writer’s, under the task template with its task’s rule, and only it is');
   // A forecast writer's row always names its run and series: neither has a way to record a series' numbers loose.
   if ((createdBy === FORECAST_WRITER || createdBy === REASON_WRITER) && p.forecastRunId === undefined) why.push(`${createdBy} records only a forecast's predictions, each with its run and series`);
   if (p.method === 'prophet') why.push('no prediction is recorded as prophet: Flint forecasts on this Mac');

@@ -4,7 +4,9 @@
  * claim template, and the one shape the HTTP route takes.
  */
 import { describe, it, expect } from 'vitest';
-import { CLAIM_TEMPLATES, ChatPrediction, EmitPrediction, EmitPredictionIn, FORECAST_WRITER, INTERNAL_TEMPLATES, METHODS, REASON_WRITER, renderClaim, validatePrediction } from '../../src/ledger/emit';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { CHAT_TYPES, CLAIM_TEMPLATES, ChatPrediction, DOMAINS, EmitPrediction, EmitPredictionIn, FORECAST_WRITER, INTERNAL_TEMPLATES, METHODS, REASON_WRITER, TYPES, renderClaim, validatePrediction } from '../../src/ledger/emit';
 
 const soon = () => new Date(Date.now() + 86_400_000).toISOString();
 const base = () => ({
@@ -126,6 +128,32 @@ describe('emit: a task\'s forecast (P5)', () => {
     expect(why(task(), 'runtime:goals')).toEqual(SAYS);
     // Any other writer's ordinary prediction is as it was.
     expect(why({}, 'runtime:triage')).toEqual([]);
+  });
+
+  it('its domain and type together are the tasks writer\'s too: no other writer records under the pair, in its own words or under any template', () => {
+    const others = ['runtime:goals', 'runtime:triage', FORECAST_WRITER, REASON_WRITER, 'runtime-mcp', 'client:server', 'will', undefined];
+    const pair = { domain: 'assets', type: 'task_meets_bar' };
+    for (const writer of others) {
+      expect(why(pair, writer), String(writer)).toEqual(expect.arrayContaining(SAYS));
+      expect(why({ ...pair, method: 'human', resolver: 'will' }, writer), String(writer)).toEqual(expect.arrayContaining(SAYS));
+      expect(why({ ...pair, claim: undefined, template: { id: 'threshold', params: { metric: 'cpu', op: '>', value: 1 } } }, writer), String(writer)).toEqual(expect.arrayContaining(SAYS));
+    }
+    expect(why(pair, 'runtime-mcp')).toEqual(SAYS);
+    // Either half alone is not a task's forecast: the assets domain, like the goals domain, takes an ordinary prediction.
+    expect(why({ domain: 'assets' }, 'runtime-mcp')).toEqual([]);
+    expect(why({ type: 'task_meets_bar' }, 'runtime:triage')).toEqual([]);
+  });
+
+  it('chat is not offered the type at all: the route\'s body and the connector\'s tool take every type but a task\'s', () => {
+    expect([...CHAT_TYPES]).toEqual(TYPES.filter((t) => t !== 'task_meets_bar'));
+    const chat = { claim: 'the watcher stays on', probability: 0.7, method: 'model_reasoning', resolver: 'will', domain: 'assets', type: 'event_occurs', resolutionCriteria: 'Will says whether it did.', resolveBy: soon(), evidence: [], tainted: false };
+    expect(ChatPrediction.safeParse(chat).success).toBe(true);
+    for (const domain of DOMAINS) expect(ChatPrediction.safeParse({ ...chat, domain, type: 'task_meets_bar' }).success, domain).toBe(false);
+    // The tool's own lists, as the connector's source says them: the route's domains, and chat's types.
+    const tool = readFileSync(join(__dirname, '..', '..', '..', '..', 'packages', 'mcp', 'connectors', 'runtime-server.ts'), 'utf8');
+    const list = (field: string): string[] => JSON.parse((new RegExp(`^\\s*${field}: z\\.enum\\((\\[[^\\]]*\\])\\),$`, 'm').exec(tool)?.[1] ?? '[]').replace(/'/g, '"')) as string[];
+    expect(list('type')).toEqual([...CHAT_TYPES]);
+    expect(list('domain')).toEqual([...DOMAINS]);
   });
 });
 

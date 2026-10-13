@@ -271,6 +271,22 @@ describe.skipIf(NO_DB)('runtime API', () => {
       expect((await call('POST', '/v1/ledger/predictions', { ...base, claim: 'a goal is done' })).statusCode).toBe(201);
     });
 
+    it('a task’s forecast is the task job’s alone: the route refuses its type and its template, and records nothing (P5)', async () => {
+      const count = async () => (await owner(`SELECT count(*)::int AS n FROM "Prediction"`)).rows[0].n as number;
+      const before = await count();
+      const base = { ...chatBody(), domain: 'assets', resolutionCriteria: 'the task ends accepted' };
+      for (const over of [
+        { type: 'task_meets_bar' },
+        { type: 'task_meets_bar', domain: 'services' },
+        { type: 'task_meets_bar', claim: undefined, template: { id: 'task_meets_bar', params: { task: 'task#abc123', by: '2026-12-01' } } },
+        { claim: undefined, template: { id: 'task_meets_bar', params: { task: 'task#abc123', by: '2026-12-01' } } },
+        { type: 'task_meets_bar', resolverSpec: { taskId: 'tkabcdefghij123456', rule: 'task_meets_bar' } },
+      ]) expect((await call('POST', '/v1/ledger/predictions', { ...base, ...over })).statusCode, JSON.stringify(over)).toBe(400);
+      expect(await count()).toBe(before);
+      // A plain prediction in the assets domain, about no task, is still chat's to record.
+      expect((await call('POST', '/v1/ledger/predictions', { ...base, type: 'event_occurs' })).statusCode).toBe(201);
+    });
+
     it('the ledger route takes only what chat sends (P4): no other method or resolver, no range, series or run, nothing chat does not send', async () => {
       const before = (await owner(`SELECT count(*)::int AS n FROM "Prediction"`)).rows[0].n as number;
       const post = (over: Record<string, unknown>) => call('POST', '/v1/ledger/predictions', { ...chatBody(), ...over });
