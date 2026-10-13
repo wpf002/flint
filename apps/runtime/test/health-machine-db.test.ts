@@ -51,7 +51,7 @@ describe.skipIf(NO_DB)('Health sees the whole machine (flint_test)', () => {
     const { standbyModel: _named, ...unnamed } = config;
     return Object.fromEntries((await checkComponents({ db, config: named.standbyModel ? config : unnamed, now, sources: [], ...(machine ? { machine } : {}) })).map((c) => [c.component, c]));
   };
-  const healthy: MachineReading = { freeBytes: 212 * GB, remote: { state: 'ok' }, models: { installed: new Set(['qwen2.5:14b', 'llama3.2:latest']), loaded: new Set(['qwen2.5:14b']) } };
+  const healthy: MachineReading = { freeBytes: 212 * GB, remote: { state: 'ok' }, models: { installed: new Set(['qwen2.5:14b', 'llama3.2:latest']), loaded: new Set(['qwen2.5:14b']), elsewhere: new Set() } };
   /** A file's time set to `ms` before `now`. */
   const aged = (file: string, now: Date, ms: number) => {
     writeFileSync(file, '');
@@ -87,7 +87,7 @@ describe.skipIf(NO_DB)('Health sees the whole machine (flint_test)', () => {
     expect(withIt.remote_access).toEqual({ component: 'remote_access', status: 'ok', detail: 'Your phone and MacBook can reach Flint.' });
     expect(withIt.standby_model).toEqual({ component: 'standby_model', status: 'ok', detail: 'The standby model is ready.' });
     // Each bad reading, as its own component says it.
-    const bad = await checks(now, { freeBytes: 3 * GB, remote: { state: 'down', why: 'signed_out' }, models: { installed: new Set(['qwen2.5:14b']), loaded: new Set() } });
+    const bad = await checks(now, { freeBytes: 3 * GB, remote: { state: 'down', why: 'signed_out' }, models: { installed: new Set(['qwen2.5:14b']), loaded: new Set(), elsewhere: new Set() } });
     expect(bad.disk).toMatchObject({ status: 'down', detail: 'This Mac is nearly full, with 3 GB free.' });
     expect(bad.remote_access).toMatchObject({ status: 'down', detail: 'Remote access needs a new sign-in, so your phone and MacBook can’t reach Flint.' });
     expect(bad.standby_model).toMatchObject({ status: 'degraded', detail: 'The standby model isn’t installed.' });
@@ -119,9 +119,13 @@ describe.skipIf(NO_DB)('Health sees the whole machine (flint_test)', () => {
     const source: Source = { name: 'health', cadenceMs: 5 * MIN, run: async () => ({ observations: [{ type: 'service.health', kind: 'service', key: 'service:endpoint:ollama', name: 'ollama', sensitivity: 'ops', externalId: 'ollama', state: { managedBy: 'other', health: 'ok' } }], metrics: [] }) };
     await syncOnce(db, source, runAt(now), 'UTC');
     expect((await checks(now, healthy)).ollama).toEqual({ component: 'ollama', status: 'ok', detail: 'The local model is loaded.' });
-    expect((await checks(now, { ...healthy, models: { installed: new Set(['qwen2.5:14b']), loaded: new Set() } })).ollama!.detail).toBe('The local model is installed, and loads when it’s needed.');
+    expect((await checks(now, { ...healthy, models: { installed: new Set(['qwen2.5:14b']), loaded: new Set(), elsewhere: new Set() } })).ollama!.detail).toBe('The local model is installed, and loads when it’s needed.');
     // Ollama answers, and the model Flint asks was never installed (or was removed): nothing local can answer.
-    expect((await checks(now, { ...healthy, models: { installed: new Set(['llama3.2:latest']), loaded: new Set() } })).ollama).toEqual({ component: 'ollama', status: 'down', detail: 'The local model isn’t installed.' });
+    expect((await checks(now, { ...healthy, models: { installed: new Set(['llama3.2:latest']), loaded: new Set(), elsewhere: new Set() } })).ollama).toEqual({ component: 'ollama', status: 'down', detail: 'The local model isn’t installed.' });
+    // Ollama lists both, and says each runs on someone else's servers: neither is on this Mac, whatever it is called.
+    const cloud = await checks(now, { ...healthy, models: { ...healthy.models!, elsewhere: new Set(['qwen2.5:14b', 'llama3.2:latest']) } });
+    expect(cloud.ollama).toEqual({ component: 'ollama', status: 'down', detail: 'The local model isn’t on this Mac.' });
+    expect(cloud.standby_model).toEqual({ component: 'standby_model', status: 'degraded', detail: 'The standby model isn’t on this Mac.' });
     expect((await checks(now, { freeBytes: healthy.freeBytes!, remote: healthy.remote })).ollama).toMatchObject({ status: 'unknown', detail: 'Flint couldn’t check which models are installed.' });
     // With no reading from the Mac at all (the other checks' own tests), it is what the health source saw.
     expect((await checks(now)).ollama).toEqual({ component: 'ollama', status: 'ok' });
@@ -235,7 +239,7 @@ describe.skipIf(NO_DB)('Health sees the whole machine (flint_test)', () => {
   it('Standby Model: when the setting that named one goes away, the next check says Off once, so an old "isn’t installed" does not stand', async () => {
     const now = new Date();
     const { standbyModel: _named, ...unnamed } = config;
-    const missing: MachineReading = { ...healthy, models: { installed: new Set(['qwen2.5:14b']), loaded: new Set() } };
+    const missing: MachineReading = { ...healthy, models: { installed: new Set(['qwen2.5:14b']), loaded: new Set(), elsewhere: new Set() } };
     const standbyOf = async (cfg: typeof unnamed, at: Date, machine?: MachineReading) => (await checkComponents({ db, config: cfg, now: at, sources: [], ...(machine ? { machine } : {}) })).filter((c) => c.component === 'standby_model');
     const latest = async () => (await healthReport(db, config, new Date())).components.find((c) => c.component === 'standby_model');
     try {

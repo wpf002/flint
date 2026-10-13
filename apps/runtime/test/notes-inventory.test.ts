@@ -332,10 +332,10 @@ describe('the runtime’s notes to Will', () => {
     // What each of the checks from a reading can say is one of the lines above: none is put together where it is returned.
     for (const r of [{ state: 'unknown' }, { state: 'ok' }, { state: 'ok', expiresAt: new Date(now.getTime() + 86_400_000) }, { state: 'down', why: 'offline' }] as const) said('remote_access', remoteAccessCheck(r, now).detail!);
     const machine = readFileSync(join(SRC, 'health', 'machine.ts'), 'utf8');
-    expect(machine.match(/\bdetail: /g)).toHaveLength(14);
+    expect(machine.match(/\bdetail: /g)).toHaveLength(16);
     // (One of them chooses between two of the fixed sentences: loaded, or installed.)
     expect(machine.match(/detail: models\.loaded\.has\(name\) \? MODEL_HEALTH\.loaded : MODEL_HEALTH\.installed/g)).toHaveLength(1);
-    expect(machine.match(/detail: (REMOTE_HEALTH|MODEL_HEALTH)\.[\w.[\]]+(\([\w.]*\))?/g)).toHaveLength(9);
+    expect(machine.match(/detail: (REMOTE_HEALTH|MODEL_HEALTH)\.[\w.[\]]+(\([\w.]*\))?/g)).toHaveLength(11);
     // (The other four are free space's own: a whole number of gigabytes in one of three fixed sentences, or that it could not be read.)
     expect(machine.match(/detail: (`This Mac [^`]*\$\{gigabytes\(free\)\} free\.`|'Flint couldn’t read how much space is free\.')/g)).toHaveLength(4);
     // The names are the ones Settings > Health and the digest show.

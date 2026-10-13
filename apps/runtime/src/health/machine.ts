@@ -200,6 +200,12 @@ const ModelList = z.object({ models: z.array(z.object({ name: z.string().min(1).
 export interface LocalModels {
   installed: ReadonlySet<string>;
   loaded: ReadonlySet<string>;
+  /**
+   * Listed, and Ollama itself says it runs somewhere else: its row names a
+   * remote host or a remote model. A name proves nothing either way (a cloud
+   * model can be copied to a plain name), so only the listing is believed.
+   */
+  elsewhere: ReadonlySet<string>;
 }
 
 /** A model's name as Ollama lists it: one with no tag is its `latest`. */
@@ -220,32 +226,43 @@ export async function localModels(url: string, base: typeof fetch = fetch): Prom
     return undefined;
   }
   const get = scopedFetch([{ origin, pathPrefix: '/api/tags', methods: ['GET'] }, { origin, pathPrefix: '/api/ps', methods: ['GET'] }], base, 3_000);
-  const names = async (path: '/api/tags' | '/api/ps'): Promise<Set<string> | undefined> => {
+  const rows = async (path: '/api/tags' | '/api/ps'): Promise<Array<{ name: string; remote: boolean }> | undefined> => {
     let res: Response | undefined;
     try {
       res = await get(`${origin}${path}`);
       if (!res.ok) return undefined;
       const said = ModelList.safeParse(await res.json());
-      return said.success ? new Set(said.data.models.map((m) => modelName(m.name))) : undefined;
+      if (!said.success) return undefined;
+      // Anything at all under either key is Ollama saying the model is not run here.
+      const names = (v: unknown): boolean => v !== undefined && v !== null && v !== '';
+      return said.data.models.map((m) => ({ name: modelName(m.name), remote: names(m.remote_host) || names(m.remote_model) }));
     } catch {
       return undefined;
     } finally {
       await res?.body?.cancel().catch(() => {});
     }
   };
-  const installed = await names('/api/tags');
-  const loaded = await names('/api/ps');
-  return installed && loaded ? { installed, loaded } : undefined;
+  const installed = await rows('/api/tags');
+  const loaded = await rows('/api/ps');
+  if (!installed || !loaded) return undefined;
+  return {
+    installed: new Set(installed.map((m) => m.name)),
+    loaded: new Set(loaded.map((m) => m.name)),
+    // Listed twice, once as run elsewhere: it is run elsewhere.
+    elsewhere: new Set(installed.filter((m) => m.remote).map((m) => m.name)),
+  };
 }
 
 /** What Local Model and Standby Model say in Settings > Health. */
 export const MODEL_HEALTH = {
   unread: 'Flint couldn’t check which models are installed.',
   missing: 'The local model isn’t installed.',
+  elsewhere: 'The local model isn’t on this Mac.',
   loaded: 'The local model is loaded.',
   installed: 'The local model is installed, and loads when it’s needed.',
   standbyReady: 'The standby model is ready.',
   standbyMissing: 'The standby model isn’t installed.',
+  standbyElsewhere: 'The standby model isn’t on this Mac.',
 } as const;
 
 /**
@@ -258,6 +275,8 @@ export function localModelCheck(endpoint: ComponentCheck, model: string | undefi
   if (endpoint.status !== 'ok' || !model) return endpoint;
   if (!models) return { component: endpoint.component, status: 'unknown', detail: MODEL_HEALTH.unread };
   const name = modelName(model);
+  // Listed, and run on someone else's servers: nothing on this Mac answers for it, so it is not a local model at all.
+  if (models.elsewhere.has(name)) return { component: endpoint.component, status: 'down', detail: MODEL_HEALTH.elsewhere };
   if (!models.installed.has(name)) return { component: endpoint.component, status: 'down', detail: MODEL_HEALTH.missing };
   return { component: endpoint.component, status: 'ok', detail: models.loaded.has(name) ? MODEL_HEALTH.loaded : MODEL_HEALTH.installed };
 }
@@ -267,7 +286,8 @@ export const noStandby = (model: string | undefined): boolean => model !== undef
 
 /**
  * The standby model (the one that answers while the main model loads), as
- * far as the runtime is told. Named: whether it is installed. Named "off": off.
+ * far as the runtime is told. Named: whether it is installed, and on this Mac.
+ * Named "off": off.
  * Not named at all: no line, because the server then picks a standby for this
  * Mac by itself and the runtime does not know which.
  */
@@ -276,7 +296,9 @@ export function standbyModelCheck(model: string | undefined, models: LocalModels
   if (model === undefined) return undefined;
   if (noStandby(model)) return { component, status: 'disabled' };
   if (!models) return { component, status: 'unknown', detail: MODEL_HEALTH.unread };
-  return models.installed.has(modelName(model)) ? { component, status: 'ok', detail: MODEL_HEALTH.standbyReady } : { component, status: 'degraded', detail: MODEL_HEALTH.standbyMissing };
+  const name = modelName(model);
+  if (models.elsewhere.has(name)) return { component, status: 'degraded', detail: MODEL_HEALTH.standbyElsewhere };
+  return models.installed.has(name) ? { component, status: 'ok', detail: MODEL_HEALTH.standbyReady } : { component, status: 'degraded', detail: MODEL_HEALTH.standbyMissing };
 }
 
 // ---------------------------------------------------------------------------

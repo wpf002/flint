@@ -232,6 +232,9 @@ describe('the local models', () => {
       const names = String(url).endsWith('/api/ps') ? loaded : installed;
       return new Response(JSON.stringify({ models: names.map((name) => ({ name, size: 1, digest: 'x'.repeat(64) })) }), { status: 200 });
     }) as unknown as typeof fetch;
+  /** Ollama's own listing, row for row as given, and nothing loaded. */
+  const listing = (rows: Array<Record<string, unknown>>) =>
+    (async (url: string) => new Response(JSON.stringify({ models: String(url).endsWith('/api/ps') ? [] : rows }), { status: 200 })) as unknown as typeof fetch;
 
   it('asks this Mac’s own address only, for its two lists and nothing else', async () => {
     const calls: Array<{ url: string; method: string; redirect: unknown }> = [];
@@ -242,6 +245,7 @@ describe('the local models', () => {
     ]);
     expect([...m!.installed].sort()).toEqual(['llama3.2:latest', 'qwen2.5:14b']);
     expect([...m!.loaded]).toEqual(['qwen2.5:14b']);
+    expect([...m!.elsewhere]).toEqual([]);
     // Any other address is never asked, whatever the setting says.
     for (const url of ['http://ollama.example.com:11434', 'https://127.0.0.1:11434', 'http://10.0.0.5:11434', 'http://127.0.0.1.example.com:11434', 'file:///etc/passwd', 'not a url']) {
       const none: Array<{ url: string; method: string; redirect: unknown }> = [];
@@ -261,9 +265,39 @@ describe('the local models', () => {
     expect(await localModels('http://127.0.0.1:11434', (async () => { throw new Error('ECONNREFUSED'); }) as unknown as typeof fetch)).toBeUndefined();
   });
 
+  it('a model Ollama lists as run somewhere else is known by the listing, never by its name', async () => {
+    const m = await localModels('http://127.0.0.1:11434', listing([
+      { name: 'qwen2.5:14b' },
+      // Named for the cloud, and listed with where it runs.
+      { name: 'gpt-oss:120b-cloud', remote_host: 'https://ollama.com:443', remote_model: 'gpt-oss:120b' },
+      // The same kind of model copied to a plain name: only the listing tells.
+      { name: 'mine', remote_host: 'https://ollama.com:443' },
+      { name: 'other', remote_model: 'gpt-oss:20b' },
+      // Named for the cloud and run here; and keys that say nothing.
+      { name: 'looks-cloud:7b-cloud' },
+      { name: 'plain:1b', remote_host: '', remote_model: null },
+      // Listed twice, once as run elsewhere: it is run elsewhere.
+      { name: 'twice:1b' }, { name: 'twice:1b', remote_host: 'https://ollama.com:443' },
+    ]));
+    expect([...m!.elsewhere].sort()).toEqual(['gpt-oss:120b-cloud', 'mine:latest', 'other:latest', 'twice:1b']);
+    expect(m!.installed.has('looks-cloud:7b-cloud') && m!.installed.has('plain:1b') && m!.installed.has('mine:latest')).toBe(true);
+    const up = { component: 'ollama', status: 'ok' } as const;
+    // The local model set to one of them: nothing on this Mac answers for it.
+    expect(localModelCheck(up, 'mine', m)).toEqual({ component: 'ollama', status: 'down', detail: 'The local model isn’t on this Mac.' });
+    expect(localModelCheck(up, 'gpt-oss:120b-cloud', m)).toEqual({ component: 'ollama', status: 'down', detail: 'The local model isn’t on this Mac.' });
+    expect(localModelCheck(up, 'twice:1b', m).detail).toBe('The local model isn’t on this Mac.');
+    expect(localModelCheck(up, 'looks-cloud:7b-cloud', m)).toMatchObject({ status: 'ok' });
+    expect(localModelCheck(up, 'plain:1b', m)).toMatchObject({ status: 'ok' });
+    // The standby set to one: the same words, and an issue, never "ready".
+    expect(standbyModelCheck('mine', m)).toEqual({ component: 'standby_model', status: 'degraded', detail: 'The standby model isn’t on this Mac.' });
+    expect(standbyModelCheck('other:latest', m)).toMatchObject({ status: 'degraded', detail: 'The standby model isn’t on this Mac.' });
+    expect(standbyModelCheck('qwen2.5:14b', m)).toEqual({ component: 'standby_model', status: 'ok', detail: 'The standby model is ready.' });
+    expect(standbyModelCheck('looks-cloud:7b-cloud', m)).toMatchObject({ status: 'ok' });
+  });
+
   it('Local Model: "Ollama answers" is not "the model Flint asks is there"', () => {
     const up = { component: 'ollama', status: 'ok' } as const;
-    const models = { installed: new Set(['qwen2.5:14b', 'llama3.2:latest']), loaded: new Set(['qwen2.5:14b']) };
+    const models = { installed: new Set(['qwen2.5:14b', 'llama3.2:latest']), loaded: new Set(['qwen2.5:14b']), elsewhere: new Set<string>() };
     expect(localModelCheck(up, 'qwen2.5:14b', models)).toEqual({ component: 'ollama', status: 'ok', detail: 'The local model is loaded.' });
     expect(localModelCheck(up, 'llama3.2', models)).toEqual({ component: 'ollama', status: 'ok', detail: 'The local model is installed, and loads when it’s needed.' });
     expect(localModelCheck(up, 'gemma3:4b', models)).toEqual({ component: 'ollama', status: 'down', detail: 'The local model isn’t installed.' });
@@ -281,7 +315,7 @@ describe('the local models', () => {
   });
 
   it('Standby Model: no line until one is named; named "off" it is off; then installed or not, and unknown when the list could not be read', () => {
-    const models = { installed: new Set(['llama3.2:latest']), loaded: new Set<string>() };
+    const models = { installed: new Set(['llama3.2:latest']), loaded: new Set<string>(), elsewhere: new Set<string>() };
     // Not named: the server picks a standby for this Mac by itself, and the runtime has nothing to say about it.
     expect(standbyModelCheck(undefined, models)).toBeUndefined();
     for (const off of ['off', 'none', 'OFF', 'None']) expect(standbyModelCheck(off, models), off).toEqual({ component: 'standby_model', status: 'disabled' });

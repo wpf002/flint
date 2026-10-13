@@ -1845,8 +1845,8 @@ ACCESS. What needs a look is still listed first.
 |---|---|---|
 | **Disk Space** | Free space on the volume your home folder is on. | Under 20 GB free is low. Under 5 GB is nearly full, and you get a note. |
 | **Remote Access** | Flint's own Tailscale service on this Mac, asked over its socket. | It is stopped, signed out, offline, or not pointed at Flint. Its sign-in running out is said 14 days ahead. |
-| **Local Model** | Ollama's own list of installed and loaded models, on this Mac's address only. | Ollama answers and the model Flint asks is not installed. |
-| **Standby Model** | The same list. | The server's settings name a standby model and it is not installed. There is no row when they name none. |
+| **Local Model** | Ollama's own list of installed and loaded models, on this Mac's address only. | Ollama answers and the model Flint asks is not installed, or the list says it runs somewhere else ("isn't on this Mac": a cloud model, whatever it is named). |
+| **Standby Model** | The same list. | The server's settings name a standby model and it is not installed, or the list says it runs somewhere else. There is no row when they name none. |
 | **Files Backup** | The record the nightly files backup writes for each archive. | The last run failed, or the last good archive is over 26 hours old. |
 | **Offsite Backup** | The same record, beside the database's own. | Either copy, the database's or the files', did not go offsite. |
 | **Offsite Restore Test** | The MacBook's own test of an offsite copy. | Off until the MacBook reports a first result. Then a failure, or over 8 days without one. |
