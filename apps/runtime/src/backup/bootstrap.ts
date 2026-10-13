@@ -9,7 +9,11 @@
  *    (read-only: pg_read_all_data) and flint_restore (may only create the
  *    scratch database a restore drill uses).
  *  - Two databases, both owned by flint_owner: `flint`, and `flint_test` for the
- *    deploy gate's tests.
+ *    deploy gate's tests. Nobody reaches either by default: "everyone" is taken
+ *    off the database and off its public schema the moment it is made, and the
+ *    runtime's, the approval and the backup roles are let in by name. (The
+ *    migrations say the same, 20261013000150_public_schema_floor; here it holds
+ *    from the first moment, before any migration has run.)
  *  - Every password is made here, fresh, and goes to exactly two places: the
  *    server as a SCRAM verifier (so the password itself is in no statement and
  *    no server log), and ~/.flint/secrets.env and backup.env (0600). Nothing
@@ -228,6 +232,9 @@ export async function bootstrapDb(o: BootstrapOptions): Promise<BootstrapResult>
     for (const db of DATABASES) {
       if (haveDbs.has(db)) continue;
       await admin.query(`CREATE DATABASE ${db} OWNER flint_owner`);
+      // Postgres lets everyone connect to a new database: nobody does to this one, but Flint's own roles, by name.
+      await admin.query(`REVOKE ALL ON DATABASE ${db} FROM PUBLIC`);
+      await admin.query(`GRANT CONNECT ON DATABASE ${db} TO flint_app, flint_approver, flint_backup`);
       databases.push(db);
     }
   } catch (err) {
@@ -250,6 +257,8 @@ export async function bootstrapDb(o: BootstrapOptions): Promise<BootstrapResult>
     await c.connect();
     try {
       await c.query('ALTER SCHEMA public OWNER TO flint_owner');
+      // And nobody uses its public schema by default either (the migrations name who may).
+      await c.query('REVOKE ALL ON SCHEMA public FROM PUBLIC');
     } finally {
       await c.end().catch(() => {});
     }

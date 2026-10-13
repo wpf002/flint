@@ -1,3 +1,5 @@
+import { properWords } from './health-names.js';
+
 /**
  * Plain words for an action Will approves, as his notes and cards show it: never
  * the action's internal name ("runtime.world_now"). The console's approval cards
@@ -53,6 +55,23 @@ export const JOB_WORDS: Readonly<Record<string, string>> = {
   'restore.drill': 'Restore Test',
   'maintenance.retention': 'Cleanup',
 };
+
+/**
+ * A rule's action in words, for a sentence that lists what Flint may do on its
+ * own or what is limited ("Backup, Offsite Backup and Restore Test"): never the
+ * action's internal name. A job or an action with words of its own takes them
+ * (JOB_WORDS, ACTION_WORDS: the names the console shows). Anything else is its
+ * name's own parts as words (`world.sync.github` is World Sync Github), and a
+ * rule for a whole family (`mcp:*`, `backup.*`) says so (Everything Under MCP).
+ */
+export function ruleWords(pattern: string): string {
+  const known = JOB_WORDS[pattern] ?? ACTION_WORDS[pattern] ?? ACTION_WORDS[`runtime.${pattern}`];
+  if (known) return known;
+  const family = /[.:]\*$/.test(pattern);
+  const words = properWords(pattern.replace(/[.:]\*$/, ''));
+  if (!words) return family ? 'Everything' : 'An Action';
+  return family ? `Everything Under ${words}` : words;
+}
 
 /** The nightly jobs that tell Will when they fail (apps/runtime/src/cli.ts). */
 export type NightlyJob = 'backup.local' | 'backup.offsite' | 'restore.drill';

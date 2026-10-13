@@ -162,9 +162,42 @@ describe.skipIf(NO_CLUSTER)('bootstrap-db (a throwaway cluster)', () => {
       await c.query('CREATE DATABASE flint_restore_test');
       await c.query('DROP DATABASE flint_restore_test');
     });
+    // Nobody reaches a new database, or its public schema, by default: everyone holds nothing on either, from the first
+    // moment (before any migration has run), and the three roles that work in it are let in by name.
+    for (const key of ['FLINT_DB_OWNER_URL', 'FLINT_DB_TEST_OWNER_URL']) {
+      const held = await connect(first[key]!, async (c) => (await c.query<{ r: string }>(
+        `SELECT 'database ' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END || '=' || a.privilege_type AS r
+         FROM pg_database d, LATERAL aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) a WHERE d.datname = current_database() AND a.grantee <> d.datdba
+         UNION ALL
+         SELECT 'schema ' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END || '=' || a.privilege_type
+         FROM pg_namespace n, LATERAL aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) a WHERE n.nspname = 'public' AND a.grantee <> n.nspowner
+         ORDER BY 1`)).rows.map((x) => x.r));
+      expect(held, key).toEqual(['database flint_app=CONNECT', 'database flint_approver=CONNECT', 'database flint_backup=CONNECT']);
+    }
+    // A role that is none of Flint's own cannot connect to it at all.
+    const asAdmin = async (sql: string): Promise<void> => {
+      const c = new pg.Client(cluster.admin);
+      await c.connect();
+      try {
+        await c.query(sql);
+      } finally {
+        await c.end();
+      }
+    };
+    await asAdmin(`CREATE ROLE someone_else LOGIN PASSWORD 'not-a-secret-of-anyones'`);
+    try {
+      const stranger = new URL(first.FLINT_DB_URL!);
+      stranger.username = 'someone_else';
+      stranger.password = 'not-a-secret-of-anyones';
+      expect(await code(connect(stranger.toString(), (c) => c.query('SELECT 1')))).toBe('42501');
+    } finally {
+      await asAdmin('DROP ROLE someone_else');
+    }
     // The owner can make tables in its database; the runtime's role cannot.
     await connect(first.FLINT_DB_OWNER_URL!, (c) => c.query('CREATE TABLE survives (id integer)'));
-    expect(await code(connect(first.FLINT_DB_URL!, (c) => c.query('CREATE TABLE app_may_not (id integer)')))).toBe('42501');
+    // (Before any migration has named it there, the runtime's role has no schema at all to make one in; named outright, it is refused.)
+    expect(await code(connect(first.FLINT_DB_URL!, (c) => c.query('CREATE TABLE app_may_not (id integer)')))).toBe('3F000');
+    expect(await code(connect(first.FLINT_DB_URL!, (c) => c.query('CREATE TABLE public.app_may_not (id integer)')))).toBe('42501');
   });
 
   it('no password is in any statement the server saw', () => {

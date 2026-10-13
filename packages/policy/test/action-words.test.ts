@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ACTION_DONE, ACTION_WORDS, JOB_WORDS, actionWords, jobFailedNote, type NightlyJob } from '../src/action-words';
+import { ACTION_DONE, ACTION_WORDS, JOB_WORDS, actionWords, jobFailedNote, ruleWords, type NightlyJob } from '../src/action-words';
 import { HEALTH_NAMES } from '../src/health-names';
 import { noteProblems } from '../src/notes';
 
@@ -92,3 +92,33 @@ describe('jobFailedNote', () => {
     }
   });
 });
+
+describe('ruleWords', () => {
+  it('says a rule’s action by the name the console shows for it, never by its internal one', () => {
+    expect(ruleWords('backup.local')).toBe('Backup');
+    expect(ruleWords('backup.offsite')).toBe('Offsite Backup');
+    expect(ruleWords('restore.drill')).toBe('Restore Test');
+    expect(ruleWords('maintenance.retention')).toBe('Cleanup');
+    // A chat tool's rule is written without its server's name; it reads the same either way.
+    expect(ruleWords('world_now')).toBe(ACTION_WORDS['runtime.world_now']);
+    expect(ruleWords('runtime.world_now')).toBe(ACTION_WORDS['runtime.world_now']);
+  });
+
+  it('an action with no words of its own is its name’s parts as words, and a rule for a whole family says so', () => {
+    expect(ruleWords('world.sync.github')).toBe('World Sync Github');
+    expect(ruleWords('mcp:shell.run')).toBe('MCP Shell Run');
+    expect(ruleWords('mcp:*')).toBe('Everything Under MCP');
+    expect(ruleWords('backup.*')).toBe('Everything Under Backup');
+    expect(ruleWords('*')).toBe('An Action');
+    expect(ruleWords('.*')).toBe('Everything');
+  });
+
+  it('whatever the pattern, what is said holds no internal name, path or mark', () => {
+    for (const pattern of ['backup.local', 'world.sync.google_calendar', 'mcp:hive.open_position', 'selfmod.*', 'a.b.c.d', 'x_y-z', '../etc/passwd', 'FLINT_TOKEN', 'ledger_record_prediction', '`rm`']) {
+      const said = ruleWords(pattern);
+      expect(said, pattern).toMatch(/^[A-Z][A-Za-z0-9’ ]*$/);
+      expect(noteProblems('A Title', `Flint may do this on its own: ${said}.`), pattern).toEqual([]);
+    }
+  });
+});
+

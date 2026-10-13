@@ -23,6 +23,9 @@
  *   pnpm --filter @flint/runtime restore-production --check
  *                                                    a trial run of the same restore: nothing in use is
  *                                                    changed, and it says how long a real one would take
+ *   pnpm --filter @flint/runtime restore-production --compare
+ *                                                    read the database in use and list every way it differs
+ *                                                    from what this checkout builds; nothing is restored
  *   pnpm --filter @flint/runtime restore-production --repair
  *                                                    put right what a restore that was stopped part-way left
  *   pnpm --filter @flint/runtime restore-empty --from-rebuild --dump <file> [--sha256 <fingerprint>]
@@ -207,7 +210,7 @@ async function main(): Promise<void> {
     return;
   }
   const cmd = process.argv[2] as Command;
-  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | p3-report | promotion-table [--phase p1|p2|p25|p26|p3|p3c] [--drop <pattern>] | backup|offsite|drill [--auto] | restore-production [--dump <file>] [--without-copy] [--without-fingerprint] [--check] | restore-production --repair | restore-empty --from-rebuild --dump <file>');
+  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | p3-report | promotion-table [--phase p1|p2|p25|p26|p3|p3c] [--drop <pattern>] | backup|offsite|drill [--auto] | restore-production [--dump <file>] [--without-copy] [--without-fingerprint] [--check] | restore-production --compare | restore-production --repair | restore-empty --from-rebuild --dump <file>');
   const auto = process.argv.includes('--auto');
   const b = loadBackupConfig();
   const db = createDb(b.config.databaseUrl);
