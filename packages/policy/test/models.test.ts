@@ -5,7 +5,8 @@
  * model runs elsewhere. The server and the runtime both build on these.
  */
 import { describe, it, expect } from 'vitest';
-import { ModelPlaces, PLACE_MAX_AGE_MS, canonicalModel, isCloudModel, listedHere, listedModels, onThisMachine, placeSaid, readEnvProxy, sameModel, serverOf, viaProxy } from '../src/models';
+import { ModelPlaces, PLACE_FRESH_MS, PLACE_MAX_AGE_MS, canonicalModel, isCloudModel, listedHere, listedModels, onThisMachine, placeSaid, readEnvProxy, sameModel, serverOf, viaProxy } from '../src/models';
+import type { AskPlace } from '../src/models';
 
 describe('a cloud model by its name', () => {
   it('a -cloud or :cloud name runs on Ollama’s servers, in any case', () => {
@@ -175,6 +176,153 @@ describe('the record of what model servers have said', () => {
     now += PLACE_MAX_AGE_MS + 1;
     p.notOllama(HERE);
     expect(p.said(HERE)).toBe('other');
+  });
+});
+
+describe('asking first: a word’s age, and what silence means (the one rule the server and the runtime share)', () => {
+  const HERE = 'http://127.0.0.1:11434';
+  const ROWS = [{ name: 'm:1' }, { name: 'mine:latest', remote_host: 'https://ollama.com:443' }];
+  /** A record on a clock the test moves, asked through `ask` (counted). */
+  const rig = (ask: AskPlace, timeoutMs = 2_000) => {
+    const t = { now: 0, asks: 0 };
+    const places = new ModelPlaces({ now: () => t.now, timeoutMs, ask: (at, signal) => (t.asks++, ask(at, signal)) });
+    return { t, places };
+  };
+
+  it('fresh asks a server that has said nothing, not one whose word is from the last two seconds, and again once it is older', async () => {
+    const { t, places } = rig(async () => ({ ollama: ROWS }));
+    await places.fresh(HERE);
+    expect(t.asks).toBe(1);
+    expect(places.runsHere(HERE, 'm:1')).toBe(true);
+    t.now = PLACE_FRESH_MS;
+    await places.fresh(`${HERE}/`);
+    expect(t.asks).toBe(1);
+    t.now += 1;
+    await places.fresh(HERE);
+    expect(t.asks).toBe(2);
+    // A caller may ask for a younger word, or accept an older one.
+    t.now += 500;
+    await places.fresh(HERE, 400);
+    expect(t.asks).toBe(3);
+    await places.fresh(HERE, 60_000);
+    expect(t.asks).toBe(3);
+    expect(PLACE_FRESH_MS).toBe(2_000);
+  });
+
+  it('a word is as old as when its ask BEGAN, never as young as when its answer landed', async () => {
+    const { t, places } = rig(async () => { t.now += 1_800; return { ollama: ROWS }; });
+    await places.fresh(HERE);
+    // It landed at 1.8 s. At 2.1 s it is 2.1 s old, not 0.3: asked again.
+    t.now = 2_100;
+    await places.fresh(HERE);
+    expect(t.asks).toBe(2);
+  });
+
+  it('an ask that a caller waited for and that gave no word drops what the server was believed to run here, and keeps what runs elsewhere', async () => {
+    let up = true;
+    const { t, places } = rig(async () => (up ? { ollama: ROWS } : undefined));
+    await places.fresh(HERE);
+    expect([places.runsHere(HERE, 'm:1'), places.runsElsewhere(HERE, 'mine'), places.said(HERE)]).toEqual([true, true, 'ollama']);
+    up = false;
+    t.now = PLACE_FRESH_MS + 1;
+    await places.fresh(HERE);
+    // Silence is not a yes: nothing runs here. It never turns "elsewhere" into anything else. And the server has not said what it is.
+    expect([places.runsHere(HERE, 'm:1'), places.runsElsewhere(HERE, 'mine'), places.said(HERE)]).toEqual([false, true, undefined]);
+    // The same for a server that had said it is no Ollama.
+    const other = rig(async () => (up ? 'other' : undefined));
+    up = true;
+    await other.places.fresh(HERE);
+    expect(other.places.said(HERE)).toBe('other');
+    up = false;
+    other.t.now = PLACE_FRESH_MS + 1;
+    await other.places.fresh(HERE);
+    expect(other.places.said(HERE)).toBeUndefined();
+  });
+
+  it('a throw is no word either, and nothing rejects', async () => {
+    const { places } = rig(async () => { throw new TypeError('fetch failed'); });
+    await expect(places.fresh(HERE)).resolves.toBeUndefined();
+    expect(places.runsHere(HERE, 'm:1')).toBe(false);
+    // With no way to ask at all, nothing is ever known.
+    const mute = new ModelPlaces();
+    await expect(mute.fresh(HERE)).resolves.toBeUndefined();
+    expect(mute.runsHere(HERE, 'm:1')).toBe(false);
+  });
+
+  it('one bad answer is not yet silence: a server that fails at once is tried once more inside the same ask; a timeout is not tried again', async () => {
+    let n = 0;
+    const flaky = rig(async () => (n++ === 0 ? undefined : { ollama: ROWS }));
+    await flaky.places.fresh(HERE);
+    expect(flaky.t.asks).toBe(2);
+    expect(flaky.places.runsHere(HERE, 'm:1')).toBe(true);
+    const down = rig(async () => undefined);
+    await down.places.fresh(HERE);
+    expect(down.t.asks).toBe(2);
+    expect(down.places.runsHere(HERE, 'm:1')).toBe(false);
+    // One that does not answer in time: whoever waited has waited as long as an ask may take.
+    const hung = rig((_at, signal) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('timed out')))), 30);
+    await hung.places.fresh(HERE);
+    expect(hung.t.asks).toBe(1);
+  });
+
+  it('a server found silent is not asked again for two seconds, and a word from it ends that', async () => {
+    let up = false;
+    const { t, places } = rig(async () => (up ? { ollama: ROWS } : undefined));
+    await places.fresh(HERE);
+    expect(t.asks).toBe(2);
+    t.now = 1_000;
+    await places.fresh(HERE);
+    expect(t.asks).toBe(2);
+    t.now = PLACE_FRESH_MS + 1;
+    up = true;
+    await places.fresh(HERE);
+    expect(t.asks).toBe(3);
+    expect(places.runsHere(HERE, 'm:1')).toBe(true);
+    // Told silent by someone else who waited (a health look): the same, without an ask of its own.
+    t.now += 500;
+    places.silent(HERE, t.now, t.now);
+    expect(places.runsHere(HERE, 'm:1')).toBe(false);
+    await places.fresh(HERE);
+    expect(t.asks).toBe(3);
+    // What it has said SINCE the look that found it silent stands.
+    places.learn(HERE, ROWS, t.now + 10);
+    places.silent(HERE, t.now, t.now);
+    t.now += 20;
+    expect(places.runsHere(HERE, 'm:1')).toBe(true);
+  });
+
+  it('an ask nobody waited for that fails changes nothing by itself: the next caller that asks first finds the silence', async () => {
+    let up = true;
+    const { t, places } = rig(async () => (up ? { ollama: ROWS } : undefined));
+    await places.refresh(HERE);
+    up = false;
+    t.now = 60_000;
+    await places.refresh(HERE);
+    expect(places.runsHere(HERE, 'm:1')).toBe(true);
+    await places.fresh(HERE);
+    expect(places.runsHere(HERE, 'm:1')).toBe(false);
+  });
+
+  it('a call may bring its own way of asking, and callers that ask together share one ask', async () => {
+    const { t, places } = rig(async () => undefined);
+    let mine = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const ask: AskPlace = async () => { mine += 1; await gate; return { ollama: ROWS }; };
+    const all = Promise.all([places.fresh(HERE, PLACE_FRESH_MS, ask), places.fresh(HERE, PLACE_FRESH_MS, ask), places.fresh(HERE, PLACE_FRESH_MS, ask)]);
+    release();
+    await all;
+    expect([mine, t.asks]).toEqual([1, 0]);
+    expect(places.runsHere(HERE, 'm:1')).toBe(true);
+  });
+
+  it('clear forgets everything, the silences too', async () => {
+    const { t, places } = rig(async () => undefined);
+    await places.fresh(HERE);
+    places.clear();
+    await places.fresh(HERE);
+    expect(t.asks).toBe(4);
+    expect(places.heard(HERE)).toBe(false);
   });
 });
 

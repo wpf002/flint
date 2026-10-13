@@ -276,6 +276,82 @@ describe('the local models', () => {
     expect(standbyModelCheck('llama3.2', m)).toMatchObject({ status: 'ok' });
   });
 
+  it('the setting and the listing may write a name in different case: it is one model either way round', async () => {
+    const up = { component: 'ollama', status: 'ok' } as const;
+    const at = 'http://127.0.0.1:11434';
+    // The setting in capitals, the listing in lower case; and the other way round. With and without the tag.
+    const lower = await localModels(at, lists(['qwen2.5:14b', 'llama3.2:latest'], ['qwen2.5:14b']), new ModelReader());
+    expect(localModelCheck(up, 'Qwen2.5:14B', lower)).toEqual({ component: 'ollama', status: 'ok', detail: 'The local model is loaded.' });
+    expect(localModelCheck(up, 'LLaMA3.2', lower)).toEqual({ component: 'ollama', status: 'ok', detail: 'The local model is installed, and loads when it’s needed.' });
+    expect(standbyModelCheck('LLAMA3.2:Latest', lower)).toEqual({ component: 'standby_model', status: 'ok', detail: 'The standby model is ready.' });
+    const upper = await localModels(at, lists(['QWEN2.5:14B', 'LLaMA3.2'], ['Qwen2.5:14b']), new ModelReader());
+    expect(localModelCheck(up, 'qwen2.5:14b', upper)).toEqual({ component: 'ollama', status: 'ok', detail: 'The local model is loaded.' });
+    expect(standbyModelCheck('llama3.2', upper)).toEqual({ component: 'standby_model', status: 'ok', detail: 'The standby model is ready.' });
+    // "Run elsewhere" is read the same way: a name's case hides nothing.
+    const remote = await localModels(at, listing([{ name: 'MINE:Latest', remote_host: 'https://ollama.com:443' }, { name: 'Qwen2.5:14B' }]), new ModelReader());
+    expect(localModelCheck(up, 'mine', remote)).toEqual({ component: 'ollama', status: 'down', detail: 'The local model isn’t on this Mac.' });
+    expect(standbyModelCheck('Mine', remote)).toEqual({ component: 'standby_model', status: 'degraded', detail: 'The standby model isn’t on this Mac.' });
+    // A model that is not there is not found by a near name.
+    expect(localModelCheck(up, 'qwen2.5:7b', lower)).toMatchObject({ status: 'down', detail: 'The local model isn’t installed.' });
+    // The reader a local call goes by reads the same lists the same way.
+    const reader = new ModelReader();
+    await localModels(at, lists(['QWEN2.5:14B'], []), reader);
+    expect(await reader.runsHere({ url: at, model: 'qwen2.5:14b' }, lists([], []))).toBe(true);
+  });
+
+  it('"models": null is an Ollama with an empty list (how it writes "none"), not a list that could not be read', async () => {
+    const up = { component: 'ollama', status: 'ok' } as const;
+    const at = 'http://127.0.0.1:11434';
+    const says = (tags: string, ps: string) => (async (url: string) => new Response(String(url).endsWith('/api/ps') ? ps : tags, { status: 200 })) as unknown as typeof fetch;
+    // Nothing loaded: the model is installed, and loads when it is needed.
+    const idle = await localModels(at, says('{"models":[{"name":"qwen2.5:14b"}]}', '{"models":null}'), new ModelReader());
+    expect(idle).toBeDefined();
+    expect([[...idle!.installed], [...idle!.loaded]]).toEqual([['qwen2.5:14b'], []]);
+    expect(localModelCheck(up, 'qwen2.5:14b', idle)).toEqual({ component: 'ollama', status: 'ok', detail: 'The local model is installed, and loads when it’s needed.' });
+    // Nothing installed: the model is not there, said as that.
+    const empty = await localModels(at, says('{"models":null}', '{"models":null}'), new ModelReader());
+    expect([[...empty!.installed], [...empty!.loaded], [...empty!.elsewhere]]).toEqual([[], [], []]);
+    expect(localModelCheck(up, 'qwen2.5:14b', empty)).toEqual({ component: 'ollama', status: 'down', detail: 'The local model isn’t installed.' });
+    expect(standbyModelCheck('llama3.2', empty)).toEqual({ component: 'standby_model', status: 'degraded', detail: 'The standby model isn’t installed.' });
+    // An answer with no `models` at all is no Ollama's: unread, never "not installed".
+    for (const other of ['{}', 'null', '{"model":[]}', '[]']) {
+      const m = await localModels(at, says(other, '{"models":[]}'), new ModelReader());
+      expect(m, other).toBeUndefined();
+      expect(localModelCheck(up, 'qwen2.5:14b', m), other).toEqual({ component: 'ollama', status: 'unknown', detail: 'Flint couldn’t check which models are installed.' });
+    }
+    // And a reader that took the empty list believes nothing runs here.
+    const reader = new ModelReader();
+    await localModels(at, says('{"models":null}', '{"models":null}'), reader);
+    expect(await reader.runsHere({ url: at, model: 'qwen2.5:14b' }, says('{"models":null}', '{"models":null}'))).toBe(false);
+  });
+
+  it('a listing that takes 2.5 seconds is given up at 2: Health says it couldn’t check, and what lands late is not believed', async () => {
+    const up = { component: 'ollama', status: 'ok' } as const;
+    const at = 'http://127.0.0.1:11434';
+    const reader = new ModelReader();
+    let landed = 0;
+    // A transport that does not stop when told to: the answer comes at 2.5 seconds whatever the reader does.
+    const slow = (async (url: string) => {
+      await new Promise((r) => setTimeout(r, 2_500));
+      landed += 1;
+      return new Response(JSON.stringify({ models: String(url).endsWith('/api/ps') ? [] : [{ name: 'qwen2.5:14b' }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const began = Date.now();
+    const m = await localModels(at, slow, reader);
+    const took = Date.now() - began;
+    expect(m).toBeUndefined();
+    // Given up before the answer came (the first list alone took the two seconds: the second is still asked, in its own time).
+    expect(landed).toBeLessThan(2);
+    expect(took).toBeGreaterThanOrEqual(1_900);
+    expect(localModelCheck(up, 'qwen2.5:14b', m)).toEqual({ component: 'ollama', status: 'unknown', detail: 'Flint couldn’t check which models are installed.' });
+    expect(standbyModelCheck('llama3.2', m)).toEqual({ component: 'standby_model', status: 'unknown', detail: 'Flint couldn’t check which models are installed.' });
+    // Once the late answers have landed, nothing of them is in the record: a local call does not go by them.
+    await new Promise((r) => setTimeout(r, 900));
+    let asked = 0;
+    const counted = (async () => (asked++, new Response('{"models":[]}', { status: 200 }))) as unknown as typeof fetch;
+    expect(await reader.runsHere({ url: at, model: 'qwen2.5:14b' }, counted)).toBe(false);
+  }, 15_000);
+
   it('a list that cannot be read is no list at all: never half of one', async () => {
     const failing = (bad: (url: string) => Response | Promise<Response>) => (async (url: string) => (String(url).endsWith('/api/ps') ? bad(String(url)) : new Response('{"models":[{"name":"a"}]}'))) as unknown as typeof fetch;
     expect(await localModels('http://127.0.0.1:11434', failing(() => new Response('busy', { status: 503 })))).toBeUndefined();
