@@ -79,9 +79,9 @@ export type Run = (bin: string, args: readonly string[]) => Promise<string>;
  * printed is returned when it ran to its end, whatever it exited with (the
  * caller's schema decides what a reply is worth).
  */
-export const runFixed: Run = (bin, args) =>
+export const runFixed = (bin: string, args: readonly string[], timeoutMs: number = TAILSCALE_TIMEOUT_MS): Promise<string> =>
   new Promise((resolve, reject) => {
-    execFile(bin, [...args], { timeout: TAILSCALE_TIMEOUT_MS, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024, env: { PATH: '/usr/bin:/bin' }, windowsHide: true }, (err, stdout) => {
+    execFile(bin, [...args], { timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024, env: { PATH: '/usr/bin:/bin' }, windowsHide: true }, (err, stdout) => {
       const out = String(stdout ?? '');
       const e = err as (Error & { killed?: boolean; code?: unknown }) | null;
       if (e && (e.killed || typeof e.code !== 'number' || !out.trim())) reject(e);
