@@ -5,7 +5,7 @@
  * what the real server put on the wire is what the test reads.
  */
 import { createServer, type IncomingMessage, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import net, { type AddressInfo } from 'node:net';
 import { createHash } from 'node:crypto';
 
 const readBody = (req: IncomingMessage): Promise<string> =>
@@ -60,6 +60,12 @@ export interface OllamaStub {
   toolFor: ((lastUserMessage: string, offered: string[]) => { name: string; args: Record<string, unknown> } | undefined) | undefined;
   /** What the "model" says for a request, when the test has something particular for it (the reply to a memory-extraction prompt). */
   replyFor: ((body: Record<string, unknown>, lastUserMessage: string) => string | undefined) | undefined;
+  /** How long a chat takes to answer, in ms (a reply still on its way while the test does something else). */
+  chatDelayMs: number;
+  /** The models it has, as its listing gives them: a test may change one while the server runs. */
+  models: Record<string, OllamaModel>;
+  /** Does anything this stub was sent, from request `from` on, contain `needle`? */
+  saw(needle: string, from?: number): boolean;
   close(): Promise<void>;
 }
 
@@ -97,6 +103,9 @@ export async function startOllamaStub(models: Record<string, OllamaModel>): Prom
     chats: () => requests.filter((r) => r.path === '/api/chat'),
     toolFor: undefined,
     replyFor: undefined,
+    chatDelayMs: 0,
+    models,
+    saw: (needle, from = 0) => requests.slice(from).some((r) => JSON.stringify(r.body ?? '').includes(needle)),
     close: () => close(server),
   };
   const server = createServer(async (req, res) => {
@@ -133,6 +142,7 @@ export async function startOllamaStub(models: Record<string, OllamaModel>): Prom
       const m = named(body?.model);
       if (!m) return json(404, { error: 'model not found' });
       m.loaded = true;
+      if (stub.chatDelayMs) await new Promise((r) => setTimeout(r, stub.chatDelayMs));
       const facts = chatFacts(body);
       // One tool call a turn at most: once a result is in the messages, the "model" answers.
       const call = facts.toolResults.length === 0 && facts.offered.length >= 0 ? stub.toolFor?.(facts.last, facts.offered) : undefined;
@@ -193,4 +203,40 @@ export async function startCloudStub(): Promise<CloudStub> {
   });
   const origin = `http://127.0.0.1:${await listen(server)}`;
   return { origin, requests, saw: (needle, from = 0) => requests.slice(from).some((r) => JSON.stringify(r.body ?? '').includes(needle)), close: () => close(server) };
+}
+
+/** A free loopback port, held by nothing: where a model server will "come up" later (./forward). */
+export async function reservePort(): Promise<number> {
+  const s = net.createServer();
+  const port = await new Promise<number>((resolve) => s.listen(0, '127.0.0.1', () => resolve((s.address() as AddressInfo).port)));
+  await new Promise<void>((r) => s.close(() => r()));
+  return port;
+}
+
+/**
+ * Carry a loopback port to another loopback port. A model server that was not
+ * up when Flint booted "comes up" the moment this starts: until then the port
+ * refuses connections, as a server that is not running does.
+ */
+export async function forward(port: number, toPort: number): Promise<{ close(): Promise<void> }> {
+  const socks = new Set<net.Socket>();
+  const s = net.createServer((a) => {
+    const b = net.connect(toPort, '127.0.0.1');
+    socks.add(a);
+    socks.add(b);
+    a.pipe(b);
+    b.pipe(a);
+    for (const [x, y] of [[a, b], [b, a]] as const) {
+      x.on('error', () => y.destroy());
+      x.on('close', () => y.destroy());
+    }
+  });
+  await new Promise<void>((resolve) => s.listen(port, '127.0.0.1', () => resolve()));
+  return {
+    close: () =>
+      new Promise((resolve) => {
+        for (const x of socks) x.destroy();
+        s.close(() => resolve());
+      }),
+  };
 }

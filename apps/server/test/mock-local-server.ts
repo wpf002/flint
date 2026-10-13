@@ -69,6 +69,8 @@ export interface MockLocalServer {
   loading: boolean;
   /** Answer every request with a redirect to this URL. */
   redirectTo: string | undefined;
+  /** What a model answers to one chat request, when the test decides it from the request itself; undefined: its scripted `replies`. */
+  replyFor: ((request: RecordedRequest) => MockReply | undefined) | undefined;
   close(): Promise<void>;
 }
 
@@ -78,7 +80,7 @@ export async function startMockLocalServer(init: { kind?: MockLocalServer['kind'
   const models = new Map<string, MockModel>(Object.entries(init.models ?? {}));
   const requests: RecordedRequest[] = [];
   const calls = new Map<string, number>();
-  const state = { kind: init.kind ?? 'ollama', loading: false, redirectTo: undefined as string | undefined };
+  const state = { kind: init.kind ?? 'ollama', loading: false, redirectTo: undefined as string | undefined, replyFor: undefined as MockLocalServer['replyFor'] };
   const open = new Set<ServerResponse>();
 
   const json = (res: ServerResponse, status: number, body: unknown): void => {
@@ -178,7 +180,7 @@ export async function startMockLocalServer(init: { kind?: MockLocalServer['kind'
         await loadFor(m, native ? (body?.options as { num_ctx?: number } | undefined)?.num_ctx : undefined);
         if (m.firstTokenMs) await sleep(m.firstTokenMs);
         if (res.destroyed) return;
-        const reply = nextReply(model!, m);
+        const reply = state.replyFor?.({ method, path, body, model: model! }) ?? nextReply(model!, m);
         if ('status' in reply) return json(res, reply.status, openAi ? { error: { message: reply.message, type: 'server_error' } } : { error: reply.message });
         const stream = body?.stream === true;
         if (openAi) return answerOpenAi(res, model!, reply, stream);
@@ -218,6 +220,12 @@ export async function startMockLocalServer(init: { kind?: MockLocalServer['kind'
     },
     set redirectTo(v) {
       state.redirectTo = v;
+    },
+    get replyFor() {
+      return state.replyFor;
+    },
+    set replyFor(f) {
+      state.replyFor = f;
     },
     close: () =>
       new Promise<void>((resolve) => {

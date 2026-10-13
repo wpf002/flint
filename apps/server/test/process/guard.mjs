@@ -7,6 +7,10 @@
 //  - a connection to one of the ports a LIVE Flint, its runtime, Nexus, Ollama or Postgres listens on is refused
 //    too, loopback or not: the test's stand-ins are on other ports, so nothing here has a reason to go there;
 //  - the server never binds one of those ports either: such a listen is moved to a free port.
+// One thing a test may ask for: an address in GUARD_REMAP (a comma list) STANDS FOR another machine. To the server
+// it is one (its settings name it, and its rules treat it as elsewhere); a connection to it is carried to
+// 127.0.0.1 on the same port, where the test's stand-in listens, and recorded (`connect-remapped`). So a test can
+// read what the server would have sent to a machine that is not this one. A live port is refused there too.
 // Nothing is printed: the record goes to GUARD_LOG, one JSON object a line.
 import net from 'node:net';
 import dns from 'node:dns';
@@ -25,6 +29,8 @@ const rec = (o) => {
   }
 };
 const isLoopback = (h) => /^127\./.test(h) || h === '::1' || h === '0:0:0:0:0:0:0:1' || /^::ffff:127\./i.test(h);
+/** Addresses that stand for other machines: carried to this one, on the same port. */
+const REMAP = new Set((process.env.GUARD_REMAP ?? '').split(',').filter(Boolean));
 const refuse = (socket, host, port) => {
   process.nextTick(() => socket.destroy(Object.assign(new Error(`connect ECONNREFUSED ${host}:${port}`), { code: 'ECONNREFUSED', errno: -61, syscall: 'connect', address: host, port })));
   return socket;
@@ -62,6 +68,18 @@ net.Socket.prototype.connect = function (...args) {
   if (opts.path) return connect.apply(this, args); // a pipe to a child of its own (an MCP server over stdio)
   const host = opts.host ?? 'localhost';
   const port = Number(opts.port);
+  if (REMAP.has(host) && !LIVE_PORTS.has(port)) {
+    rec({ kind: 'connect-remapped', host, port });
+    const carried = { ...opts, host: '127.0.0.1' };
+    delete carried.lookup;
+    if (Array.isArray(args[0])) args[0][0] = carried;
+    else if (typeof args[0] === 'object' && args[0] !== null) args[0] = carried;
+    else {
+      args[0] = port;
+      args[1] = '127.0.0.1';
+    }
+    return connect.apply(this, args);
+  }
   if (net.isIP(host) && !isLoopback(host)) {
     rec({ kind: 'connect-blocked', why: 'not-this-machine', host, port });
     return refuse(this, host, port);
