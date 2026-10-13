@@ -1702,18 +1702,39 @@ does once tasks are switched on and an asset is on:
   card. You approve the card, and the task goes out with a forecast that it
   will meet its bar. The asset hands in a result. Flint checks the result
   against the bar. A result that fails is rejected. A result that passes waits
-  for your accept card, unless you've promoted that check.
+  for your accept card.
+- **Accepting on its own.** Flint accepts a passing result without a card only
+  once you sign a rule that names that check exactly (`task.check_bar`). A rule
+  over all task actions doesn't cover it. Even then Flint accepts at most 20 a
+  day on its own, and a result past that comes to you on a card. The database's
+  own check is coarser: once such a rule exists it lets Flint accept for every
+  asset alike, with no limit. The by-name rule and the daily limit are held by
+  the code.
 - **Seven cards**, each carried out in one step with the database's own checks:
   turn an asset on, require reviews or stop requiring them, run a task on the
   local model, watch a CI run, accept a result, cancel a task that has gone
   out, and overrule a check.
 - **Your latest signature counts.** If you approve a card and then sign
-  something newer about the same task or asset before it runs, the earlier card
-  fails with "You signed something newer about this, so this card didn’t run."
-  When that happens to an accept card, Flint asks you again, unless you turned
-  one down.
-- **Turning an accept card down ends the task.** Its line then reads "You
-  didn’t accept its result."
+  something newer about the same task or asset, the earlier card fails with
+  "You signed something newer about this, so this card didn’t run." That holds
+  even when the newer signature lands while the earlier card is running.
+- **Only your own no ends a result that passed.** An accept card that fails,
+  for any reason, is offered to you again. Turning one down, or letting it
+  lapse, ends the task. Its line then reads "You didn’t accept its result."
+- **Ending a task sets its other cards aside.** When your cancellation or your
+  override runs, the task's other waiting cards are turned away with "You ended
+  this task another way, so this card wasn’t needed."
+- **Accept Anyway needs the result.** A task's raw output is deleted a week
+  after it ended. After that the result can't be accepted any more, and the
+  panel won't offer it.
+- **A task's time.** A task with a due time is watched until then, however far
+  off, and then ends with "It wasn’t finished by its due date." A task with no
+  due time ends after a day without moving, with "It ran out of time."
+- **The day's limits.** 50 watches and 20 local tasks can go out a day. A card
+  that is refused doesn't use one of them.
+- **A result that isn't one ends the task.** Whatever an asset hands back that
+  isn't a result, a wait or a known failure ends the task with "Its result
+  wasn’t usable." Nothing of it is kept.
 - **A forgotten item stops its cards.** A card about something you had Flint
   forget doesn't run. It ends with a sentence and no result.
 - **The forecast is scored a day after the task ended**, by the task tick,
@@ -1723,10 +1744,11 @@ does once tasks are switched on and an asset is on:
   its date has passed.
 - **Cleanup.** A task's spec, bar, summary and evidence are cleared 30 days
   after it ended, or 7 days for one that is personal, financial or read outside
-  text. Its raw output is deleted 7 days after it ended. Its title stays.
-- **Health** has a Tasks row. It's shown as off while tasks are switched off
-  or no asset that runs tasks is on. Otherwise it says when a task is stuck or
-  a rule stops Flint from checking results.
+  text. Its raw output is deleted 7 days after it ended. Its title stays, and
+  its line then says its checks are no longer kept.
+- **Health** has a Tasks row, under THIS MAC. It's shown as off while tasks
+  are switched off or no asset that runs tasks is on. Otherwise it says when a
+  task is stuck or a rule stops Flint from checking results.
 
 There is no panel yet. The routes the panel will use exist, behind the same
 token scope as approvals, so no model can read a task or start one:
@@ -1748,6 +1770,13 @@ on this Mac." and reads nothing.
 Two things filed over `POST /v1/proposals` now get a sentence back instead of
 an error: a spend card that says no cost, and a task or spend card whose
 details hold a number that isn't whole.
+
+Three more things hold whether or not Flint knows the card's name:
+
+- From chat, no card about a task, an asset or a review is filed.
+- No caller can claim such a card or report it done. The runtime carries out
+  its own seven, and nothing carries out the others yet.
+- The list of open predictions that chat reads leaves task forecasts out.
 
 **Switching tasks on.** Part 2 ships off. No task job is scheduled, nothing
 reads a task or an asset, the routes above say tasks are turned off, and Health
@@ -1771,8 +1800,8 @@ jobs are no longer scheduled, no task or asset card is filed or run, and the
 routes and Health say tasks are off. Nothing else is changed. An asset you
 turned on is still on when tasks come back. A card you already approved stays
 approved until then, or until it expires. A task that was out waits where it
-was: the first tick after tasks are back on sends it again, or ends it if a day
-has passed. The nightly cleanup above still runs, so what has ended is still
+was: the first tick after tasks are back on sends it again, or ends it if its
+time is up. The nightly cleanup above still runs, so what has ended is still
 cleared on time. Part 2 has no database update of its own.
 
 ### What changed on deploy
@@ -1871,6 +1900,24 @@ model, reviews and the panel must hold to them too.
 - **Promotion.** The database lets Flint accept on its own only while a live,
   unscoped policy row promotes `task.check_bar` (or `task.*`) and no live row
   holds it back. See the limit below: the runtime can switch such a row off.
+  That check is all or nothing: it knows no asset and no limit. The code is
+  stricter, and a later part must keep it so: only a row that names
+  `task.check_bar` exactly promotes it, and each acceptance Flint makes alone
+  takes one of 20 places a day in the transaction that accepts.
+- **Adapters.** The run reads what an adapter returns strictly: a result with
+  its summary, a wait, or one of the failure classes above, and a result that
+  is plain data. Anything else ends the task as `invalid`. Keep every file
+  under `tasks/adapters` to type-only imports: the test reads each one, in any
+  sub-directory, and its list of files is closed.
+- **Money.** A dispatch that spends asks `reserve.take(cardId, micros)` before
+  it writes anything. Make `take` idempotent by the card's id. `release(cardId)`
+  is called whenever the dispatch does not happen, and is not called when that
+  can't be told, so a reservation must be able to outlive a task that never
+  went out.
+- **The Hive.** A Hive dispatch card names one pool, as a plain name, at the
+  top of its args. Give its args a contract before anything carries one out.
+- **Caps.** A dispatch takes its place under the day's cap after its writes,
+  in the same transaction. Keep it last, so a refused card uses none.
 - **Outputs** are written while the task is `dispatched` or `running`, and are
   always tainted. An output's digest is the database's own count over the body
   as it stores it: `encode(sha256(convert_to(body::text, 'UTF8')), 'hex')`.
