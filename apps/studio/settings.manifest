@@ -96,9 +96,17 @@ secrets.env  FLINT_HISTORY_TURNS                  restore   number
 secrets.env  FLINT_HISTORY_MAX_AGE_HOURS          restore   number
 secrets.env  FLINT_LOCAL_STYLE_VARIANT            restore   word
 # Local inference (apps/server/src/inference-config.ts): the routing mode, the local model and how it is asked.
-# The mode named here is only the starting one: the mode chosen in Settings is kept in a file (inference.json, below).
-secrets.env  FLINT_INFERENCE_MODE                 restore   word
+# The mode is never taken from a backup, here or from the file Settings keeps it in (inference.json, below): a
+# backup that was changed could turn Local into Cloud, and a mode decides where your words go. A rebuild writes
+# Local for the new Mac, whatever the old one was in, and says so.
+secrets.env  FLINT_INFERENCE_MODE                 reenter   Routing-Mode
 secrets.env  FLINT_HARDWARE_TIER                  restore   word
+# Which wire the local model is asked over, and what kind of server answers it. Both are words, and neither can
+# point Flint at another machine (the address is below, and is never restored). They can stay restorable because
+# neither decides whether a model is taken for one on this Mac: whatever these say, the model server itself is
+# asked what it is and where each model runs, and nothing is local until it has answered
+# (apps/server/src/policy.ts brainIsLocal). A backup that sets both to openai changes how the server is asked,
+# and nothing else.
 secrets.env  FLINT_LOCAL_PROVIDER                 restore   word
 secrets.env  FLINT_LOCAL_SERVER                   restore   word
 secrets.env  FLINT_LOCAL_MODEL                    restore   model
@@ -270,6 +278,6 @@ file  nexus-responder.sh          reenter   Nexus
 file  legion                      retired   legion
 # Not a secret, and listed so a rebuild says what it does with it: the routing mode chosen in Settings
 # (Local, Hybrid or Cloud). It is in the offsite copy, and a rebuild never unpacks it: a file from a backup
-# does not decide where your words go. The rebuilt Flint starts in the mode its settings name
-# (FLINT_INFERENCE_MODE; Cloud when none does), and the rebuild tells you to choose again.
+# does not decide where your words go. The rebuilt Flint starts in Local mode (the rebuild writes that, and the
+# setting above is never restored either), and the rebuild says so in one sentence.
 file  inference.json              reenter   Routing-Mode

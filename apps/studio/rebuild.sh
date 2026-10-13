@@ -789,6 +789,10 @@ if /usr/bin/tar -xzOf "$BUNDLE/files.tar.gz" ./settings-snapshot.tsv > "$snapsho
   while IFS=$'\t' read -r kind where name value extra; do
     case $kind in
       set)
+        # A setting this Flint leaves to you, though the backup carries a value for it (one made before the
+        # setting became yours to re-enter, or one that was changed): the value is not taken, and what the
+        # rebuild does instead is said at the end, like anything else that needs you.
+        if [[ -z $extra ]] && manifest_lookup "$where" "$name" && [[ $REPLY == reenter ]]; then PRESENT+=("$REPLY2"); continue; fi
         if [[ -n $extra ]] || ! manifest_lookup "$where" "$name" || [[ $REPLY != restore ]] || ! flint_value_ok "$REPLY2" "$value"; then
           [[ $name =~ '^[A-Za-z_][A-Za-z0-9_]{0,79}$' ]] && NOT_RESTORED+=("$name")
           continue
@@ -1120,8 +1124,13 @@ timed files
   umask 077
   {
     print -r -- "# Written by apps/studio/rebuild.sh. Flint's own secrets here are new; none came from a backup."
-    for kv in $SET_SECRETS; do [[ $kv == FLINT_RUNTIME_URL=* ]] || print -r -- "$kv"; done
+    for kv in $SET_SECRETS; do [[ $kv == (FLINT_RUNTIME_URL|FLINT_INFERENCE_MODE)=* ]] || print -r -- "$kv"; done
     print -r -- "FLINT_RUNTIME_URL=http://[::1]:$RUNTIME_PORT"
+    # The routing mode is never taken from a backup: not the setting, and not the file Settings keeps it in
+    # (which is never unpacked). A backup that was changed could turn Local into Cloud, and the mode decides
+    # where your words go. So the rebuilt Flint starts in Local mode, where every answer comes from this Mac,
+    # whatever the old one was in. It is said at the end, and you choose another in Settings if you want one.
+    print -r -- "FLINT_INFERENCE_MODE=local"
     token="$("$TOOL_openssl" rand -hex 32)"
     [[ $token =~ '^[0-9a-f]{64}$' ]] || exit 1
     print -r -- "FLINT_TOKEN=$token"
@@ -1327,10 +1336,14 @@ WHERE_TO=(
   Voice          "Voice: the speech program and its model are installed by hand. Install them again if you use voice."
   Backup-Key     "Backup key: the rebuilt Mac encrypts its backups to the key you rebuilt it with."
   Local-Model-Server "Local model server: its address and its key were typed by hand and are not put back, so Flint asks Ollama on this Mac. Set them again only if you still use another model server, and change the key if it was a real one."
-  Routing-Mode   "Routing mode: the mode you chose in Settings is not put back, so Flint starts in the mode its settings name, which is Cloud when none does. Choose Local, Hybrid or Cloud again in Settings under Brain."
+  Routing-Mode   "Flint is in Local mode after a rebuild. Choose another mode in Settings if you want one."
 )
+# The mode, always, and on a line of its own: it was not left out of a backup, it is simply never taken from
+# one. Whatever mode the old Mac was in, this one is in Local mode until you choose.
+say "${WHERE_TO[Routing-Mode]}"
 outside=()
 if (( have_snapshot )); then outside=(${(u)PRESENT}); else outside=(Tailscale Approval-Key Connectors Google Nexus); fi
+outside=(${outside:#Routing-Mode})
 (( ${#outside} )) && say "These were never in a backup, because Flint does not back up a key or a sign-in. Each needs you once:"
 for o in $outside; do [[ -n ${WHERE_TO[$o]:-} ]] && say "  ${WHERE_TO[$o]}"; done
 (( ${#CONNECTORS} )) && say "The connectors that were set up on the old Mac: ${(j:, :)CONNECTORS}."

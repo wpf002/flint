@@ -29,6 +29,19 @@ done
 check "a server setting counts in the plist and in secrets.env alike" 'manifest_lookup secrets.env OLLAMA_MODEL && manifest_lookup server.plist FLINT_WORLD_NOW'
 check "a name that is not listed is not found" '! manifest_lookup secrets.env NOT_A_SETTING'
 check "the switch that turns the taint rule off is never restorable: a rebuilt Flint starts with it on" 'manifest_lookup secrets.env FLINT_TAINT_FLOOR && [[ $REPLY != restore ]]'
+# Local inference. The routing mode decides where your words go, so it is never taken from a backup: not the
+# setting, and not the file Settings keeps it in. Nor is where the local model server is, its key, or the two
+# switches that let "local" be another machine.
+check "the routing mode is never restored, as a setting or as the file Settings keeps" 'manifest_lookup secrets.env FLINT_INFERENCE_MODE && [[ $REPLY == reenter && $REPLY2 == Routing-Mode ]] && manifest_lookup file inference.json && [[ $REPLY == reenter && $REPLY2 == Routing-Mode ]]'
+for name in FLINT_LOCAL_BASE_URL FLINT_LOCAL_API_KEY FLINT_LOCAL_ALLOW_REMOTE FLINT_LOCAL_ALLOW_INSECURE_REMOTE; do
+  check "$name is re-entered, never restored" 'manifest_lookup secrets.env $name && [[ $REPLY == reenter ]]'
+done
+# The wire and the kind of server are words, and may be put back: neither decides whether a model is taken for
+# one on this Mac (the model server itself is asked, whatever they say: apps/server/src/policy.ts brainIsLocal).
+for name in FLINT_LOCAL_PROVIDER FLINT_LOCAL_SERVER; do
+  check "$name is a word a rebuild may put back" 'manifest_lookup secrets.env $name && [[ $REPLY == restore && $REPLY2 == word ]]'
+done
+check "and the server does not take either word for where a model runs" 'grep -q "return said === .ollama. ? listed(brain.baseURL, brain.model) : said === .other.;" "$here/../../server/src/policy.ts"'
 check "no restorable name says it is a secret" '! grep -E "^[a-z.]+ +[A-Z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)[A-Z0-9_]* +restore" "$SETTINGS_MANIFEST"'
 check "the manifest holds names, never a value" '! grep -vE "^#|^$" "$SETTINGS_MANIFEST" | grep -E "=|://|sk-|[0-9a-f]{32}"'
 
@@ -81,6 +94,11 @@ FLINT_RUNTIME_URL=http://[::1]:8090
 FLINT_TAILNET_USER="someone@example.com"
 export FLINT_TIER_HARD='openai:gpt-5'
 FLINT_WORLD_NOW=1
+FLINT_INFERENCE_MODE=cloud
+FLINT_LOCAL_PROVIDER=openai
+FLINT_LOCAL_SERVER=openai
+FLINT_LOCAL_BASE_URL=http://gpu-box.example.com:8080/v1
+FLINT_LOCAL_ALLOW_REMOTE=1
 FLINT_TTS_VOICE=$hex
 PARITY_GOOGLE_MODEL=sk-ant-looks-like-a-key
 FLINT_TIER_CODE=\$(touch "$fx/pwned-by-env")
@@ -121,7 +139,7 @@ print -r -- 'not-a-commit; rm -rf ~' > "$data/runtime/version"
 out=$(env -i HOME="$home" PATH=/usr/bin:/bin /bin/zsh "$script" 2>"$fx/err.log"); st=$?
 snap="$data/settings-snapshot.tsv"
 check "the snapshot run succeeds" '[ "$st" = 0 ]'
-check "it says what it did, in one sentence" '[[ "$out" == "Flint saved 12 settings for a rebuild. It left out 7 it does not know or whose value looks like a secret." ]]'
+check "it says what it did, in one sentence" '[[ "$out" == "Flint saved 14 settings for a rebuild. It left out 7 it does not know or whose value looks like a secret." ]]'
 check "the snapshot is 0600" '[ "$(stat -f %Lp "$snap")" = 600 ]'
 check "nothing was left half-written" '[ ! -e "$snap.partial" ]'
 T=$'\t'
@@ -129,6 +147,8 @@ want_set=(
   "secrets.env${T}FLINT_RUNTIME_URL${T}http://[::1]:8090"
   "secrets.env${T}FLINT_TIER_HARD${T}openai:gpt-5"
   "secrets.env${T}FLINT_WORLD_NOW${T}1"
+  "secrets.env${T}FLINT_LOCAL_PROVIDER${T}openai"
+  "secrets.env${T}FLINT_LOCAL_SERVER${T}openai"
   "runtime.override.env${T}FLINT_RUNTIME_TRIAGE${T}on"
   "runtime.override.env${T}FLINT_SOURCE_APPLE_CALENDAR${T}on"
   "backup.env${T}FLINT_OFFSITE_DIR${T}~/Library/Mobile Documents/com~apple~CloudDocs/FlintBackups/pg"
@@ -170,6 +190,12 @@ check "connectors are recorded by name alone" 'grep -qxF "connector${T}web" "$sn
 for n in "secrets.env${T}ANTHROPIC_API_KEY" "runtime.override.env${T}NEXUS_READ_TOKEN" "file${T}mcp.json"; do
   check "recorded as present, by name: ${n#*$T}" 'grep -qxF "present${T}$n" "$snap"'
 done
+# The routing mode, where the local model server is, and the switch that lets it be another machine: recorded by
+# name alone, so a rebuild can say what it did about each, and never by value. No backup carries a mode to restore.
+for n in FLINT_INFERENCE_MODE FLINT_LOCAL_BASE_URL FLINT_LOCAL_ALLOW_REMOTE; do
+  check "recorded as present, by name alone: $n" 'grep -qxF "present${T}secrets.env${T}$n" "$snap" && ! grep -E "^(set|skipped|unknown)${T}.*$n" "$snap"'
+done
+check "no mode and no model server address is in the snapshot" '! grep -q "cloud$" "$snap" && ! grep -q "gpu-box" "$snap"'
 check "nothing Flint makes for itself is recorded as present" '! grep -E "^present${T}.*(FLINT_TOKEN|FLINT_DB_|DATABASE_URL)" "$snap"'
 check "every line is one of the six kinds" '! grep -vE "^(#|set${T}|skipped${T}|unknown${T}|present${T}|connector${T}|deployed${T})" "$snap"'
 
@@ -184,7 +210,7 @@ out=$(env -i HOME="$home" PATH=/usr/bin:/bin /bin/zsh "$script" --check 2>&1); s
 check "--check passes when every name is listed" '[ "$st" = 0 ] && [[ "$out" == "Every setting on this Mac is listed in the settings manifest." ]]'
 rm -f "$snap"
 out=$(env -i HOME="$home" PATH=/usr/bin:/bin /bin/zsh "$script" --preview 2>&1); st=$?
-check "--preview names what would be saved and what would not, and writes nothing" '[ "$st" = 0 ] && [ ! -e "$snap" ] && [[ "$out" == *"Flint would save 12 settings for a rebuild: "*"OLLAMA_MODEL"*"It would leave out 5 whose value has an unexpected shape or looks like a secret: "*"FLINT_TTS_VOICE"*"It would leave out 0 it does not know: none."*"ANTHROPIC_API_KEY"*"The connectors it would name: web, runtime."* ]]'
+check "--preview names what would be saved and what would not, and writes nothing" '[ "$st" = 0 ] && [ ! -e "$snap" ] && [[ "$out" == *"Flint would save 14 settings for a rebuild: "*"OLLAMA_MODEL"*"It would leave out 5 whose value has an unexpected shape or looks like a secret: "*"FLINT_TTS_VOICE"*"It would leave out 0 it does not know: none."*"ANTHROPIC_API_KEY"*"The connectors it would name: web, runtime."* ]]'
 check "--preview prints names, never values" '[[ "$out" != *"$hex"* && "$out" != *hunter* && "$out" != *"muse-glimmer"* && "$out" != *"sk-ant"* && "$out" != *"example.com"* ]]'
 out=$(env -i HOME="$home" PATH=/usr/bin:/bin /bin/zsh "$script" --everything 2>&1); st=$?
 check "an unknown option is refused with a sentence" '[ "$st" = 1 ] && [[ "$out" == *"with no option"* ]]'
@@ -197,7 +223,7 @@ env -i HOME="$home" PATH=/usr/bin:/bin FLINT_BACKUP_DIR="$fx/local" FLINT_BACKUP
   FLINT_BACKUP_TS=20261012-0230 /bin/zsh "$here/../backup_flint.sh" >"$fx/backup.out" 2>"$fx/backup.err"
 check "the nightly backup ran" '[ -f "$fx/local/flint-20261012-0230.tar.gz" ]'
 check "and its archive carries the snapshot" 'tar -tzf "$fx/local/flint-20261012-0230.tar.gz" | grep -qx "./settings-snapshot.tsv"'
-check "and said so in its log" 'grep -q "Flint saved 12 settings for a rebuild" "$fx/backup.out"'
+check "and said so in its log" 'grep -q "Flint saved 14 settings for a rebuild" "$fx/backup.out"'
 # A snapshot that cannot be written never stops the backup.
 chmod 500 "$data"; rm -f "$fx/local/flint-20261012-0231.tar.gz"
 env -i HOME="$home" PATH=/usr/bin:/bin FLINT_BACKUP_DIR="$fx/local" FLINT_BACKUP_OFFSITE="$fx/icloud/FlintBackups" FLINT_BACKUP_MANIFEST="$fx/offsite.txt" \
@@ -213,6 +239,12 @@ check "the manifest has things a rebuild leaves to the owner" '(( ${#details} >=
 for d in $details; do
   check "a rebuild says what to do about: $d" 'grep -qE "^  $d +\"[A-Z][^\"]*\\.\"$" "$here/../rebuild.sh"'
 done
+
+# The mode has one sentence, said on a line of its own whatever the backup held, and the rebuild writes Local for
+# the new Mac itself (the rehearsal test runs it: rebuild_rehearse.test.sh).
+check "the mode's sentence is the one sentence" 'grep -qxF "  Routing-Mode   \"Flint is in Local mode after a rebuild. Choose another mode in Settings if you want one.\"" "$here/../rebuild.sh"'
+check "it is said always, not only when a backup held a mode" 'grep -qxF "say \"\${WHERE_TO[Routing-Mode]}\"" "$here/../rebuild.sh" && grep -qxF "outside=(\${outside:#Routing-Mode})" "$here/../rebuild.sh"'
+check "the rebuild writes Local mode for the new Mac, and no restored line can name another" 'grep -qxF "    print -r -- \"FLINT_INFERENCE_MODE=local\"" "$here/../rebuild.sh" && grep -qF "[[ \$kv == (FLINT_RUNTIME_URL|FLINT_INFERENCE_MODE)=* ]] || print -r -- \"\$kv\"" "$here/../rebuild.sh"'
 
 (( fail )) && exit 1
 print "ok: the settings manifest holds names only, and the snapshot keeps ${#want_set} plain settings and no secret"
