@@ -659,6 +659,11 @@ describe('one task, open', () => {
     expect(body().with('gnote')).toEqual([]);
     expect(foot().hidden).toBe(true);
     plainScreen();
+    // A task that ended before it was checked: its checks are not still "Waiting".
+    routes = answers({ [`GET /tasks/${T_OUT}`]: { status: 200, body: { task: view(T_OUT, { status: 'failed', line: 'It ran out of time.', can: { cancel: false, accept: false, reject: false, again: true } }) } } });
+    await openTask(T_OUT);
+    expect(rows().slice(0, 3)).toEqual([['', ['It has no result to show.'], ''], ['CI Run Passed', [], 'Not Checked'], ['Names Only Your Items', [], 'Not Checked']]);
+    expect(body().with('st').map((e) => e.className)).toEqual(['st off', 'st off']);
     // Its forecast is shown while there is something to forecast: an ended task says how it ended, not how likely that was.
     routes = answers();
     await openTask(T_RED);
@@ -1426,7 +1431,7 @@ describe('what the panel holds', () => {
       ownWords(words.slice(0, 2), words.slice(2));
     }
     for (const t of ['Tasks', 'New Task', 'Active', 'Finished', 'Tasks Are Off', 'No Tasks Yet', 'Nothing Finished Yet', 'Couldn’t Load Tasks', 'Couldn’t Load the Card', 'Couldn’t Load Assets', 'You’re Signed Out', 'Cancel This Task', 'Keep Task', 'Cancel Task',
-      'Accept Anyway', 'Reject Anyway', 'Run Again', 'Review Card', 'Show Details', 'Hide Details', 'Not Now', 'Open Settings', 'Open Approvals', 'Try Again', 'Turn On', 'Turn Off', 'Create Task', 'Passed', 'Failed', 'Waiting', 'Outside Text', 'Costs Money',
+      'Accept Anyway', 'Reject Anyway', 'Run Again', 'Review Card', 'Show Details', 'Hide Details', 'Not Now', 'Open Settings', 'Open Approvals', 'Try Again', 'Turn On', 'Turn Off', 'Create Task', 'Passed', 'Failed', 'Waiting', 'Not Checked', 'Outside Text', 'Costs Money',
       'About', 'Runs On', 'Asked By', 'Goal', 'Due', 'Chance It Passes', 'Cost', 'No Cost', 'Not Known Yet', 'No Goal', 'No Due Date']) {
       expect(tasksJs, t).toContain(`'${t}'`);
       ownWords([t], []);

@@ -3306,6 +3306,8 @@ function taskFact(label,value){var row=gEl('div','row');var l=gEl('span','lbl');
 function taskCost(t){var c=t.cost,money=typeof apprDollars==='function'?apprDollars:function(m){return '$'+(m/1000000).toFixed(2);};
   if(!c)return t.costs?'Not Known Yet':'No Cost';return c.micros===0?'No Cost':(c.estimate?'About ':'')+money(c.micros);}
 var TASK_CHECK={passed:['Passed','ok'],failed:['Failed','down'],waiting:['Waiting','off']};
+/* A check that never ran, on a task that has ended, is not still waiting. */
+var TASK_UNCHECKED=['Not Checked','off'];
 function taskEnded(t){return t.status==='accepted'||t.status==='rejected'||t.status==='failed'||t.status==='cancelled';}
 function taskShow(t,say,kind){taskHead(t.title,true,false);var body=taskBody(),here=taskHere();
   body.appendChild(gEl('p','plead',t.line));
@@ -3314,7 +3316,7 @@ function taskShow(t,say,kind){taskHead(t.title,true,false);var body=taskBody(),h
   r.appendChild(t.result?predRow('',[t.result],'',null,[gTag('Outside Text')]):predLine(taskEnded(t)?TASK_SAY.noResultEnded:TASK_SAY.noResult));body.appendChild(r);
   body.appendChild(gEl('div','gsh','Checks'));var c=gEl('div','group');c.id='taskchecks';var checks=t.checks||[];
   if(!checks.length)c.appendChild(predLine(TASK_SAY.noChecks));
-  checks.forEach(function(k){var w=tGet(TASK_CHECK,k.state)||TASK_CHECK.waiting;var row=gEl('div','row');var l=gEl('span','lbl');l.appendChild(gEl('b',null,k.name));row.appendChild(l);
+  checks.forEach(function(k){var w=tGet(TASK_CHECK,k.state)||TASK_CHECK.waiting;if(w===TASK_CHECK.waiting&&taskEnded(t))w=TASK_UNCHECKED;var row=gEl('div','row');var l=gEl('span','lbl');l.appendChild(gEl('b',null,k.name));row.appendChild(l);
     var st=gEl('span','st '+w[1]);st.appendChild(gEl('i'));st.appendChild(document.createTextNode(w[0]));row.appendChild(st);c.appendChild(row);});
   body.appendChild(c);
   var by=checks.length?(t.checkedBy==='rules'?TASK_SAY.rules:t.checkedBy==='model'?TASK_SAY.model:t.checkedBy==='you'?TASK_SAY.you:''):'';
