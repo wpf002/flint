@@ -623,10 +623,10 @@ export function makePdfReader(which: { reader: PdfReaderKind; program: string },
       // Refused before anything is asked to work on it (./pdf-limits).
       if (bytes.byteLength > MAX_PDF_BYTES) return { ok: false, why: 'too_big' };
       if (countPdfPages(bytes) > MAX_PDF_PAGES) return { ok: false, why: 'too_long' };
-      if (stuck) return { ok: false, why: 'busy' };
       if (!(await turn())) return { ok: false, why: 'busy' };
       try {
-        // (It may have become busy while this read waited its turn: nothing is queued behind a stuck service.)
+        // Busy (a read ran out of time, and the Mac may still be at work on it): refused here, whether this read
+        // came just now or was waiting its turn when it happened. Nothing is handed to a stuck service.
         if (stuck) return { ok: false, why: 'busy' };
         return await once(bytes, signal, deps.timeoutMs ?? READ_TIMEOUT_MS);
       } finally {
