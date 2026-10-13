@@ -255,12 +255,14 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
   if ((input.kind === 'spend' || input.kind === 'task') && hasFraction(input.args)) throw new Refused(400, WHOLE_NUMBERS_ONLY);
   // A policy change is checked against the database's rules before Will is asked to sign it.
   if (input.action === 'policy.change') {
-    const { checkPolicyChange, checkPolicyOff } = await import('./internal.js');
+    const { checkPolicyChange, checkPolicyOff, checkPolicyRows } = await import('./internal.js');
     // It adds rows, or it switches rows off: one thing, never both on one card, and nothing the database would
     // refuse when the card ran (the database files no other shape either: Proposal_policy_shape).
     const kind = checkPolicyChange(input.args);
-    // A switch-off names rows that are there and on, on a card the database will take when it runs.
+    // A switch-off names rows that are there and on, on a card the database will take when it runs; a card that
+    // adds rows is one the database will make rows under.
     if (kind === 'off') await checkPolicyOff(db, input);
+    else checkPolicyRows(input);
     // It always asks on its own: never in Approve All, always with a fresh touch. The mark is not the
     // filer's to leave off (the database refuses a policy change without it: Proposal_policy_floor).
     input = { ...input, consequential: true };

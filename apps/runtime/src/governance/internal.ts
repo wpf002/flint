@@ -71,12 +71,19 @@ export async function proposeEnable(db: Db, source: string, now = new Date()) {
 }
 /** A policy row's pattern, as the database's own CHECK reads it. */
 const POLICY_PATTERN = z.string().max(200).regex(/^[A-Za-z0-9_:-]+(\.[A-Za-z0-9_:-]+)*(\.\*)?$/);
+/**
+ * When a rule ends, written the one way the database takes (Proposal_policy_shape, and both policy guards): in
+ * full, with its zone. A time with no zone, or a date that reads two ways, is a different moment under each
+ * session's settings, so one listed row could be made once for every way of reading it.
+ */
+export const POLICY_TIME = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,3})?(Z|[+-][0-9]{2}:[0-9]{2})$/;
 
 /**
  * A signed policy change, held to the database's own rules (pattern shape,
- * 180-day expiry, millisecond times, int4 caps, no row that covers a policy
- * change itself) so a bad row is refused when the proposal is made, not when it
- * runs. The database makes a card's rows together or not at all.
+ * 180-day expiry, times written in full with their zone and to the millisecond,
+ * int4 caps, no row that covers a policy change itself) so a bad row is refused
+ * when the proposal is made, not when it runs. The database makes a card's rows
+ * together or not at all.
  */
 export const PolicyArgs = z
   .object({
@@ -89,10 +96,11 @@ export const PolicyArgs = z
             dailyCap: z.number().int().min(0).max(2_147_483_647).optional(),
             scope: z.record(z.string(), z.unknown()).optional(),
             reason: z.string().min(1).max(500).optional(),
+            // (Nothing here throws on a text that is no time: a filing is refused with a sentence, never a fault.)
             expiresAt: z
               .string()
+              .regex(POLICY_TIME, 'a time is written in full, with its zone, to the millisecond at most')
               .datetime({ offset: true })
-              .refine((t) => new Date(t).toISOString() === new Date(Date.parse(t)).toISOString() && !/\.\d{4,}/.test(t), 'times are kept to the millisecond')
               .refine((t) => Date.parse(t) > Date.now() && Date.parse(t) <= Date.now() + 180 * 86400_000, 'a policy row expires within 180 days'),
           })
           .strict(),
@@ -123,6 +131,8 @@ export const PolicyOffArgs = z
 
 /** What Will reads when the database would not let a signed switch-off through (its guard found no card of his that still stands). */
 export const POLICY_OFF_REFUSED = 'The database refused to switch it off, so it’s still on. File it again and sign it.';
+/** What Will reads when the database would not make a signed card's rules (the same guard, on a row made). None of them is made. */
+export const POLICY_ROWS_REFUSED = 'The database refused to add the rules, so none was added. File the card again and sign it.';
 /** What the rules command and a filing say about a rule that cannot be named on a card. */
 export const POLICY_OFF_SAYS = {
   card: 'A card that switches rules off is your own: a policy card from the console or the CLI, with nothing untrusted in it.',
@@ -135,6 +145,8 @@ export const POLICY_SAYS = {
   coversPolicy: 'A rule can’t cover policy changes. Those always take your signature.',
   /** Args the database cannot digest again (p3_canonical): it would refuse the card when it ran. */
   unsignable: 'A rule card holds only whole numbers and plain names, a few levels deep.',
+  /** A card the database would make no row under: not his own policy card, or one with something untrusted in it. */
+  card: 'A card that adds rules is your own: a policy card from the console or the CLI, with nothing untrusted in it.',
 } as const;
 
 /**
@@ -167,6 +179,15 @@ export function checkPolicyChange(args: unknown): 'rows' | 'off' {
   if (!ok.success) throw new Refused(400, `invalid policy change: ${ok.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
   if (!policyArgsSignable(args)) throw new Refused(400, POLICY_SAYS.unsignable);
   return kind;
+}
+
+/**
+ * Why a card that adds rules may not be filed, checked before Will is asked to sign it: the database makes a row
+ * only under his own untainted policy card from the console or the CLI (action_policy_matches_approval). One
+ * from a chat, one with something untrusted in it, or one of another kind would be signed and then make nothing.
+ */
+export function checkPolicyRows(input: { kind: string; origin: string; tainted: boolean }): void {
+  if (input.kind !== 'policy' || (input.origin !== 'console' && input.origin !== 'cli') || input.tainted) throw new Refused(400, POLICY_SAYS.card);
 }
 
 /**
@@ -267,7 +288,7 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
       // All rows or none: a signed switch-off is applied whole. Each row only as the card names it (the database
       // checks the same three); one that went off since the card was filed is left as it is. The row's history
       // says which approval switched it off: the database's guard writes that name itself, from the card it let
-      // through, and this says the same for a database from before the guard.
+      // through and whatever is set here; this says the same for a database from before the guard.
       const switched = await db.$transaction(async (tx) => {
         await tx.$queryRaw`SELECT set_config('flint.actor', ${`will:approval:${approvalId}`}, true)`;
         let n = 0;
@@ -312,9 +333,11 @@ export async function runInternal(db: Db, id: string, rp: WebAuthnRelyingParty |
     const refusedInput = dbRefused(err) || (claimed.action === 'triage.rule.create' && (codes.includes('23505') || codes.includes('P2002') || /Code: `23505`/.test(String(e.message ?? ''))));
     // The ref is in the log above; Will reads a sentence under the card.
     if (refusedInput) throw new Refused(400, 'The database refused this change.');
-    // The database's guard on a switch-off (42501): the card has failed and is on record as failed (above), the
-    // rows are as they were, and nothing here tries again. Will reads what to do.
+    // The database's guard on a switch-off or on a row made (42501): the card has failed and is on record as
+    // failed (above), the rows are as they were (a card's rows are made together or not at all), and nothing here
+    // tries again. Will reads what to do.
     if (change === 'off' && sqlState(err) === '42501') throw new Refused(409, POLICY_OFF_REFUSED);
+    if (change === 'rows' && sqlState(err) === '42501') throw new Refused(409, POLICY_ROWS_REFUSED);
     throw new Refused(409, 'Flint couldn’t carry it out.');
   }
 }

@@ -10,7 +10,10 @@
  *  - A rule that forbids policy changes can be signed away: the card that
  *    switches rules off is judged by the code alone, and no new rule may cover
  *    a policy change at all.
- *  - A signed table is carried out whole and once.
+ *  - A signed table is carried out whole and once; one the database would
+ *    make no row under (not Will's own policy card) is never filed, and each
+ *    rule's end is a time written in full, with its zone; a refusal by the
+ *    database is one sentence and an audit entry, never a retry.
  *  - The `rules` command: Will's rules in sentences, and the card it files.
  * What the database itself holds is policy-off-guard-db.test.ts and
  * policy-rows-guard-db.test.ts. Synthetic text only.
@@ -27,7 +30,7 @@ import { enrollTestKey } from './sign';
 import { policyKit, type PolicyKit } from './policy';
 import { createDb } from '../src/db';
 import { approveProposal, createProposal } from '../src/governance/proposals';
-import { POLICY_OFF_REFUSED, POLICY_OFF_SAYS, POLICY_SAYS, policyArgsSignable, runInternal } from '../src/governance/internal';
+import { POLICY_OFF_REFUSED, POLICY_OFF_SAYS, POLICY_ROWS_REFUSED, POLICY_SAYS, POLICY_TIME, policyArgsSignable, runInternal } from '../src/governance/internal';
 import { NO_ID, RULES_SAY, proposeRulesOff, ruleSays, rulesLines, rulesOffFiledSays, rulesOffTitle, rulesOn } from '../src/governance/rules';
 
 describe.skipIf(NO_DB)('policy changes, as the runtime files and carries them out', () => {
@@ -181,7 +184,7 @@ describe.skipIf(NO_DB)('policy changes, as the runtime files and carries them ou
       }
       expect(policyArgsSignable(rowsArgs([{ pattern: `${f}.sync`, tier: 'alone', dailyCap: 3, scope: { endpoints: ['https://example.test/ä'], n: 2, deep: { a: { b: [1, 2] } } } }]))).toBe(true);
       expect(await db.proposal.count({ where: { action: 'policy.change', status: 'pending' } })).toBe(0);
-      for (const s of [POLICY_CHANGE_SHAPE, POLICY_SAYS.unsignable, POLICY_SAYS.coversPolicy, POLICY_OFF_REFUSED, ...Object.values(POLICY_OFF_SAYS)]) expect(noteProblems('Rule', s), s).toEqual([]);
+      for (const s of [POLICY_CHANGE_SHAPE, ...Object.values(POLICY_SAYS), POLICY_OFF_REFUSED, POLICY_ROWS_REFUSED, ...Object.values(POLICY_OFF_SAYS)]) expect(noteProblems('Rule', s), s).toEqual([]);
     });
 
     it('a card that says both, filed before the database held the shape and signed, is carried out as neither', async () => {
@@ -236,6 +239,71 @@ describe.skipIf(NO_DB)('policy changes, as the runtime files and carries them ou
       expect(await db.actionPolicy.count({ where: { approvalId, active: true } })).toBe(3);
       await expect(run(p.id)).rejects.toMatchObject({ status: 409, message: 'It already ran.' });
       expect(await db.actionPolicy.count({ where: { approvalId } })).toBe(3);
+    });
+
+    it('a card the database would make no row under is never filed: not Will’s own policy card, from a chat or a job, or with outside text in it', async () => {
+      const f = fam();
+      const ok = rowsArgs([{ pattern: `${f}.sync`, tier: 'alone' }]);
+      await expect(file(ok, { kind: 'tool_call' })).rejects.toMatchObject({ status: 400, message: POLICY_SAYS.card });
+      await expect(file(ok, { origin: 'chat:console-1' })).rejects.toMatchObject({ status: 400, message: POLICY_SAYS.card });
+      await expect(file(ok, { origin: 'runtime:goals', templateId: 'x' })).rejects.toMatchObject({ status: 400, message: POLICY_SAYS.card });
+      await expect(file(ok, { origin: 'will' })).rejects.toMatchObject({ status: 400, message: POLICY_SAYS.card });
+      await expect(file(ok, { tainted: true })).rejects.toMatchObject({ status: 400, message: POLICY_SAYS.card });
+      expect(await db.proposal.count({ where: { action: 'policy.change', status: 'pending' } })).toBe(0);
+      // His own card, from the CLI or the console, is filed (and asks on its own, whatever the filer said).
+      for (const origin of ['cli', 'console']) {
+        const p = await file(rowsArgs([{ pattern: `${f}.${origin}`, tier: 'alone' }]), { origin });
+        expect((await db.proposal.findUniqueOrThrow({ where: { id: p.id } })).consequential).toBe(true);
+        await db.proposal.update({ where: { id: p.id }, data: { status: 'rejected', error: 'Synthetic end' } });
+      }
+    });
+
+    it('each rule ends at a time written in full, with its zone: a card that writes one any other way is never filed', async () => {
+      const f = fam();
+      const withEnd = (expiresAt: unknown) => ({ rows: [{ pattern: `${f}.sync`, tier: 'alone', expiresAt }] });
+      const soon = pk.inDays(30);
+      // No zone (read under each session's own, it was a different moment in each); a date that reads two ways; and
+      // every other way of writing a time that the database's own check refuses.
+      for (const end of [soon.slice(0, 19).replace('T', ' '), soon.slice(0, 19), '03/04/2027 00:00:00+00', soon.replace('Z', '+0000'), soon.replace('Z', '+00'), soon.replace('Z', 'z'), soon.replace('T', ' '),
+        soon.replace('.000Z', '.0000Z'), soon.slice(0, 16) + 'Z', soon.slice(0, 10), ` ${soon}`, `${soon}\n`, 'now', 'tomorrow', 'infinity', '', null, 1798859045, soon.replace(/-\d\d-/, '-13-')]) {
+        await expect(file(withEnd(end) as Record<string, unknown>), JSON.stringify(end)).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/^invalid policy change: rows\.0\.expiresAt: /) });
+        if (typeof end === 'string') expect(POLICY_TIME.test(end) && !Number.isNaN(Date.parse(end)), JSON.stringify(end)).toBe(false);
+      }
+      expect(await db.proposal.count({ where: { action: 'policy.change', status: 'pending' } })).toBe(0);
+      // In full with its zone, UTC or any other: filed.
+      const there = `${new Date(Date.parse(soon) + 5.5 * 3_600_000).toISOString().slice(0, 23)}+05:30`;
+      for (const end of [soon, soon.replace('.000Z', 'Z'), there]) {
+        const p = await file(withEnd(end));
+        await db.proposal.update({ where: { id: p.id }, data: { status: 'rejected', error: 'Synthetic end' } });
+      }
+    });
+
+    it('refused by the database: one sentence, the card failed and on record as failed, no rule added, and no second try', async () => {
+      const f = fam();
+      // A card the runtime would never file (from a chat), written straight into the table as a runtime gone wrong
+      // could, and signed: the runtime's own checks pass it on, and the database is what refuses. Its two rows are
+      // a wide one that lets go and the brake beside it.
+      const args = rowsArgs([{ pattern: `${f}.*`, tier: 'alone' }, { pattern: `${f}.propose`, tier: 'approval' }]);
+      const pid = id('prop');
+      await pk.app(
+        `INSERT INTO "Proposal" (id, kind, origin, action, args, "argsDigest", "argsProvenance", sensitivity, consequential, "expiresAt") VALUES ($1, 'policy', 'chat:console-1', 'policy.change', $2::jsonb, $3, '{}', 'ops', true, now() + interval '1 hour')`,
+        [pid, JSON.stringify(args), digestOf(args)],
+      );
+      const approvalId = await sign({ id: pid, argsDigest: digestOf(args) });
+      const r = await quiet(() => run(pid));
+      expect(r.err).toMatchObject({ name: 'Refused', status: 409, message: POLICY_ROWS_REFUSED });
+      expect(await db.actionPolicy.count({ where: { approvalId } })).toBe(0);
+      const card = await db.proposal.findUniqueOrThrow({ where: { id: pid } });
+      expect(card.status).toBe('failed');
+      expect(card.error).toMatch(/^could not carry it out \(err[a-z0-9]+\)$/);
+      expect((await entries(pid)).map((e) => `${e.kind} ${e.outcome}`)).toEqual(['approval ok', 'intent pending', 'action failed']);
+      // The log says what failed by its class and SQLSTATE, never the database's own words.
+      expect(r.logged.join('\n')).toMatch(/running policy\.change failed: .*42501/);
+      expect(r.logged.join('\n')).not.toMatch(/still stands|policy row/);
+      // Asked again, it has failed: nothing is retried.
+      await expect(run(pid)).rejects.toMatchObject({ status: 409, message: 'It already failed.' });
+      expect((await entries(pid)).length).toBe(3);
+      expect(await db.actionPolicy.count({ where: { approvalId } })).toBe(0);
     });
   });
 
