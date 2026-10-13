@@ -31,6 +31,7 @@ outside model (Claude) answers only as a frontier tier, never as a default: see
 | POST | `/goals/:id/edit\|timing\|done\|abandon\|resume\|plan` | yes | `{ args }` | `{ id, deduped }`: that change's card |
 | POST | `/goals/:id/pause\|dismiss\|review`, `/goals/:id/criteria/:cid`, `/goals/:id/steps/:key` | yes | `{}`, `{ met }`, `{ status }` | `{ ok: true }`: unsigned, audited by the runtime (`review` is Review Now) |
 | POST | `/goals/linkable` | yes | `{ q }` | `{ items }`: items a check may watch |
+| GET | `/predictions/waiting` | yes | — | `{ questions, announce }`: what the console asks when it loads, and every few minutes. Two facts, and no number of any series |
 | GET | `/predictions`, `/predictions/series/:key`, `/predictions/questions`, `/predictions/accuracy` | yes | — | Flint's forecasts, one number open, Will's questions, and how Flint has done (`PredictionsPage`, `{ series: SeriesView }`, `QuestionsPage`, `AccuracyView` in @flint/policy). See "Predictions" |
 | POST | `/predictions/turn-on` | yes | `{ series }` | `{ id, deduped }`: the Turn On Predictions card, to sign in the console |
 | POST | `/predictions/series/:key/turn-off`, `/predictions/questions/:id/answer` | yes | `{}`, `{ answer: "yes" \| "no" \| "skip" }` | `{ ok: true }`: unsigned, audited by the runtime |
@@ -838,7 +839,8 @@ the console does; the card is filed with the runtime at once and never spooled; 
 that is down is a 503 and nothing changed; a write the runtime doesn't answer is a 504 that
 says Flint isn't sure it went through; a refusal reaches the console only as one of the
 fixed sentences, by its code; and a runtime without the routes is a 501, so the console
-hides its Predictions button. No read takes a query.
+hides its Predictions button. No read takes a query, and every answer (this proxy's and the
+goals proxy's) says `Cache-Control: no-store`, so nothing is left in a browser's disk cache.
 
 A forecast's numbers include what Flint spends and the hours on the calendar, and a
 question holds a prediction's words. They pass through this proxy from the runtime to the

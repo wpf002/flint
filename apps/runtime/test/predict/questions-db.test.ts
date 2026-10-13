@@ -11,7 +11,10 @@
  *    in the panel, and neither the digest nor the header's dot announces it.
  *    Once Will lets Flint ask on its own, new ones are not shadow, and the
  *    digest gains one sentence with their count.
- *  - A question waits two weeks; after that it is gone from the list.
+ *  - A question waits two weeks from when Will was told of it; after that it is
+ *    gone from the list. One asked in shadow was announced to nobody: its two
+ *    weeks start when he first lets Flint ask on its own, and until then it is
+ *    never run out, stays on the list and stays answerable.
  *  - A rule that forbids asking stops it, and the audit says skipped.
  *  - The job exists only while FLINT_PREDICT is on, and does nothing until
  *    Will has turned predictions on.
@@ -29,6 +32,7 @@ import { buildDigest, digestBody, digestTitle, questionsSentence } from '../../s
 import { approveProposal, createProposal } from '../../src/governance/proposals';
 import { runInternal } from '../../src/governance/internal';
 import { ASK_CRON, predictJobs } from '../../src/jobs';
+import { WILL_GRACE_MS, announcedSince, questionLapsed, sweep } from '../../src/ledger/sweep';
 import { ANSWER_ACTION, ASK_ACTION, answerQuestion, askQuestions, questionsPage, questionsWaiting } from '../../src/predict/questions';
 import { questionsAnnounced } from '../../src/predict/view';
 
@@ -55,12 +59,31 @@ describe('the questions sentence in the digest', () => {
   it('the job\'s time: 07:20, ten minutes before the digest that may count the questions', () => {
     expect(ASK_CRON).toBe('20 7 * * *');
   });
+
+  it('a question\'s two weeks: from when it was asked if it was announced then; from when Will first let Flint ask, if it was asked in shadow; never, while nothing announces it', () => {
+    const now = new Date('2026-10-20T12:00:00Z');
+    const ago = (ms: number) => new Date(now.getTime() - ms);
+    expect(WILL_GRACE_MS).toBe(14 * DAY);
+    // Announced when asked: two weeks from then, whatever came later.
+    expect(questionLapsed({ askedAt: ago(13 * DAY), shadow: false }, null, now)).toBe(false);
+    expect(questionLapsed({ askedAt: ago(14 * DAY + MIN), shadow: false }, null, now)).toBe(true);
+    expect(questionLapsed({ askedAt: ago(14 * DAY + MIN), shadow: false }, ago(DAY), now)).toBe(true);
+    // Asked in shadow and never announced: it never runs out, however old.
+    for (const days of [1, 15, 400]) expect(questionLapsed({ askedAt: ago(days * DAY), shadow: true }, null, now), String(days)).toBe(false);
+    // Asked in shadow, then announced: two weeks from the later of the two.
+    expect(questionLapsed({ askedAt: ago(40 * DAY), shadow: true }, ago(13 * DAY), now)).toBe(false);
+    expect(questionLapsed({ askedAt: ago(40 * DAY), shadow: true }, ago(14 * DAY + MIN), now)).toBe(true);
+    expect(questionLapsed({ askedAt: ago(3 * DAY), shadow: true }, ago(30 * DAY), now)).toBe(false);
+    expect(questionLapsed({ askedAt: ago(15 * DAY), shadow: true }, ago(30 * DAY), now)).toBe(true);
+  });
 });
 
 describe.skipIf(NO_DB)('Will\'s questions on flint_test', () => {
   let urls: TestUrls;
   let k: LedgerKit;
   let key: Awaited<ReturnType<typeof enrollTestKey>>;
+  /** A question asked in shadow fifteen days ago and never answered: kept from one test to the next. */
+  let quietKept: string;
   /** A prediction Flint made in a chat, which only Will resolves, due `dueAgo` ms ago. */
   const wills = (dueAgo: number, over: Record<string, unknown> = {}) =>
     k.prediction({ method: 'model_reasoning', resolver: 'will', createdBy: 'client:server', domain: 'projects', probability: 0.7, claim: `${WORDS} happens`, ...over }, { madeAgo: Math.max(dueAgo, 0) + 2 * DAY, dueAgo });
@@ -158,6 +181,34 @@ describe.skipIf(NO_DB)('Will\'s questions on flint_test', () => {
     expect([...mine].sort()).toEqual(due.slice(-5).sort());
   });
 
+  it('a question nobody announced does not start the two weeks: fifteen days on it is still open, still listed and still his to answer', async () => {
+    expect(await announcedSince(k.db)).toBeNull();
+    const [quiet, kept, skipped, announced] = [await wills(20 * DAY), await wills(21 * DAY), await wills(22 * DAY), await wills(23 * DAY)];
+    // Three asked in shadow fifteen days ago (no dot, no line in the morning summary), and one that was announced then.
+    for (const p of [quiet, kept, skipped]) await k.asked(p, 15 * DAY, { shadow: true });
+    await k.asked(announced, 15 * DAY);
+    // One of the quiet ones he saw and skipped: that one he was shown, so it runs out two weeks after it was asked.
+    await answerQuestion(k.db, skipped, 'skip', { tz: TZ });
+    const before = await questionsWaiting(k.db);
+    // (The sweep also runs out what else in this file is past its time: only these four are looked at.)
+    await sweep(k.db, { tz: TZ, resolve: true, expire: true });
+    expect([await k.status(quiet), await k.status(kept), await k.status(skipped), await k.status(announced)]).toEqual(['open', 'open', 'expired', 'expired']);
+    // Still listed, and counted, though older than two weeks.
+    const listed = (await questionsPage(k.db, { tz: TZ })).waiting.map((q) => q.id);
+    expect(listed).toEqual(expect.arrayContaining([quiet, kept]));
+    expect(listed).not.toContain(announced);
+    expect(listed).not.toContain(skipped);
+    expect(await questionsWaiting(k.db)).toBe(before);
+    // And still answerable: his answer is taken, and scored like any other.
+    await answerQuestion(k.db, quiet, 'yes', { tz: TZ });
+    expect(await k.resolution(quiet)).toMatchObject({ outcome: true, resolvedBy: 'will' });
+    await expect(answerQuestion(k.db, announced, 'yes', { tz: TZ })).rejects.toMatchObject({ name: 'Refused', status: 409, message: 'That question no longer exists.' });
+    // A second sweep changes nothing: the one left is as open as before.
+    expect((await sweep(k.db, { tz: TZ, resolve: true, expire: true })).expired).toBe(0);
+    expect(await k.status(kept)).toBe('open');
+    quietKept = kept;
+  });
+
   it('in shadow nothing announces them: no dot, no digest line; once Will lets Flint ask on its own, new ones are announced', async () => {
     const waiting = await questionsWaiting(k.db);
     expect(waiting).toBeGreaterThan(0);
@@ -172,9 +223,10 @@ describe.skipIf(NO_DB)('Will\'s questions on flint_test', () => {
     const now = new Date();
     const left = 5 - (await counter(dayKey(now)));
     expect(left).toBeGreaterThan(0);
+    const loudBefore = (await questions()).filter((q) => !q.shadow).length;
     const c = await askQuestions(k.db, { tz: TZ, now });
     expect(c).toMatchObject({ asked: left, shadow: false, allowed: true });
-    expect((await questions()).filter((q) => !q.shadow)).toHaveLength(left);
+    expect((await questions()).filter((q) => !q.shadow)).toHaveLength(loudBefore + left);
     expect((await audits())[0]).toMatchObject({ tier: 'alone', decision: 'act', outcome: 'ok' });
     // The digest counts every question that waits, in one sentence, and says none of their words.
     const loud = await buildDigest(k.db, TZ);
@@ -184,7 +236,37 @@ describe.skipIf(NO_DB)('Will\'s questions on flint_test', () => {
     expect(noteProblems(loud.title, loud.body)).toEqual([]);
   });
 
-  it('a question waits two weeks from when it was asked; after that it is off the list and can no longer be answered', async () => {
+  it('the two weeks of a question asked in shadow start when Will lets Flint ask on its own: listed and answerable for two weeks from then, and run out after', async () => {
+    // Flint was let to ask a moment ago (the test above): the old quiet question's two weeks have only just begun.
+    const since = await announcedSince(k.db);
+    expect(since).not.toBeNull();
+    expect(Date.now() - since!.getTime()).toBeLessThan(5 * MIN);
+    expect((await questionsPage(k.db, { tz: TZ })).waiting.map((q) => q.id)).toContain(quietKept);
+    expect((await sweep(k.db, { tz: TZ, resolve: true, expire: true })).expired).toBe(0);
+    expect(await k.status(quietKept)).toBe('open');
+    // The same question, with the rule signed thirteen days ago: still inside its two weeks.
+    const signedAgo = (ms: number) => k.past('ActionPolicy', 'USER', (q) => q(`UPDATE "ActionPolicy" SET "createdAt" = $1 WHERE pattern = $2`, [new Date(Date.now() - ms), ASK_ACTION]));
+    await signedAgo(13 * DAY);
+    expect(Math.abs(Date.now() - 13 * DAY - (await announcedSince(k.db))!.getTime())).toBeLessThan(MIN);
+    expect((await questionsPage(k.db, { tz: TZ })).waiting.map((q) => q.id)).toContain(quietKept);
+    expect((await sweep(k.db, { tz: TZ, resolve: true, expire: true })).expired).toBe(0);
+    // Signed fifteen days ago: he has had two weeks of the dot and the morning line. Now it runs out, like any other.
+    await signedAgo(15 * DAY);
+    const recent = await wills(2 * DAY);
+    await k.asked(recent, DAY, { shadow: true });
+    const waiting = (await questionsPage(k.db, { tz: TZ })).waiting.map((q) => q.id);
+    expect(waiting).not.toContain(quietKept);
+    // One asked in shadow only yesterday has its own two weeks, from when it was asked.
+    expect(waiting).toContain(recent);
+    await expect(answerQuestion(k.db, quietKept, 'no', { tz: TZ })).rejects.toMatchObject({ name: 'Refused', status: 409, message: 'That question no longer exists.' });
+    expect(await k.resolution(quietKept)).toBeUndefined();
+    expect((await sweep(k.db, { tz: TZ, resolve: true, expire: true })).expired).toBe(1);
+    expect([await k.status(quietKept), await k.status(recent)]).toEqual(['expired', 'open']);
+    // Back to a rule signed just now, for the tests below.
+    await signedAgo(0);
+  });
+
+  it('a question announced when it was asked waits two weeks from then; after that it is off the list and can no longer be answered', async () => {
     const fresh = await wills(3 * HOUR, { claim: `${WORDS} fresh` });
     const stale = await wills(20 * DAY, { claim: `${WORDS} stale` });
     await k.asked(fresh, 13 * DAY);
@@ -194,10 +276,10 @@ describe.skipIf(NO_DB)('Will\'s questions on flint_test', () => {
     expect(page.waiting.map((q) => q.id)).toContain(fresh);
     expect(page.waiting.map((q) => q.id)).not.toContain(stale);
     expect(page.waiting).toHaveLength(Math.min(50, before));
-    await expect(answerQuestion(k.db, stale, 'yes')).rejects.toMatchObject({ name: 'Refused', status: 409, message: 'That question no longer exists.' });
+    await expect(answerQuestion(k.db, stale, 'yes', { tz: TZ })).rejects.toMatchObject({ name: 'Refused', status: 409, message: 'That question no longer exists.' });
     expect(await k.resolution(stale)).toBeUndefined();
     // The one still inside its two weeks takes his answer.
-    await answerQuestion(k.db, fresh, 'no');
+    await answerQuestion(k.db, fresh, 'no', { tz: TZ });
     expect(await k.resolution(fresh)).toMatchObject({ outcome: false, resolvedBy: 'will', evidence: { via: ANSWER_ACTION } });
     expect(await questionsWaiting(k.db)).toBe(before - 1);
   });

@@ -98,6 +98,7 @@ export const PanelWords = z.string().min(1).max(80).regex(/^[^{}[\]`()]+$/);
  * Where one number stands today (or this week):
  *  - `range`: a forecast that beat a plain guess, with its range;
  *  - `no_trend`: no reliable trend, so only a plain guess's range;
+ *  - `early`: too early to tell a trend (not enough history to believe a forecast over a plain guess), so only a plain guess's range;
  *  - `steady`: the number has not changed, so there is nothing to forecast;
  *  - `waiting`: the number for the step just ended is not in, and Flint never forecasts from a made-up one;
  *  - `short`: not enough history yet;
@@ -106,7 +107,7 @@ export const PanelWords = z.string().min(1).max(80).regex(/^[^{}[\]`()]+$/);
  *  - `failed`: last night's forecast failed;
  *  - `off`: its forecasts are off.
  */
-export const FORECAST_STATES = ['range', 'no_trend', 'steady', 'waiting', 'short', 'no_data', 'tonight', 'failed', 'off'] as const;
+export const FORECAST_STATES = ['range', 'no_trend', 'early', 'steady', 'waiting', 'short', 'no_data', 'tonight', 'failed', 'off'] as const;
 export type ForecastState = (typeof FORECAST_STATES)[number];
 
 /** One number in the list. `about`: what it is, for the Turn On sheet. */
@@ -176,8 +177,14 @@ export type QuestionAnswer = (typeof QUESTION_ANSWERS)[number];
 export const PredictionRef = Ref;
 /**
  * One question for Will. `title` is the prediction, as Flint made it in a chat:
- * its own words, or (for one made from outside text) fixed words around the
- * item's own label. Shown as text only.
+ * its own words, or (for a templated one) fixed words around the item's own
+ * label. Shown as text only. `says`: what Flint said, when, and when it was
+ * due (his answer is recorded as of that moment).
+ *
+ * `answerable`: Flint can say plainly what the prediction was about. One it
+ * cannot (its item is gone or is a person, its number is not one of Flint's,
+ * or its words are from outside text) is never answered Yes or No, by anyone:
+ * the console offers only Skip for it, and the runtime refuses the rest.
  */
 export const QuestionView = z
   .object({
@@ -185,18 +192,27 @@ export const QuestionView = z
     title: z.string().min(1).max(300),
     says: PanelSentence,
     answer: z.enum(QUESTION_ANSWERS).nullable(),
+    answerable: z.boolean(),
   })
   .strict();
 export type QuestionView = z.infer<typeof QuestionView>;
-export const QuestionsPage = z.object({ waiting: z.array(QuestionView).max(50), answered: z.array(QuestionView).max(20) }).strict();
+/** The Questions tab. `offHere`: predictions are switched off on this Mac, so nothing here can be answered. */
+export const QuestionsPage = z.object({ waiting: z.array(QuestionView).max(50), answered: z.array(QuestionView).max(20), offHere: z.boolean() }).strict();
 export type QuestionsPage = z.infer<typeof QuestionsPage>;
 export const AnswerBody = z.object({ answer: z.enum(QUESTION_ANSWERS) }).strict();
 
 /** One area's record: how many results it has, and what they say, a sentence each. */
 export const AccuracyArea = z.object({ name: PanelWords, value: PanelWords, lines: z.array(PanelSentence).min(1).max(8) }).strict();
 export type AccuracyArea = z.infer<typeof AccuracyArea>;
-/** The Accuracy tab: each area Flint has predicted in, and what was left unsettled. `scored`: false until a night's scores exist. */
-export const AccuracyView = z.object({ scored: z.boolean(), areas: z.array(AccuracyArea).max(20), unsettled: z.array(PanelSentence).max(8) }).strict();
+/**
+ * The Accuracy tab: each area Flint has predicted in, and what was left
+ * unsettled. `scored`: false until a night's scores exist. `scoring`: whether
+ * anything scores them now: `off_here` (predictions are switched off on this
+ * Mac), `not_started` (Will has never turned them on) or `on`.
+ */
+export const AccuracyView = z
+  .object({ scored: z.boolean(), scoring: z.enum(['off_here', 'not_started', 'on']), areas: z.array(AccuracyArea).max(20), unsettled: z.array(PanelSentence).max(8) })
+  .strict();
 export type AccuracyView = z.infer<typeof AccuracyView>;
 
 /** Turn On Predictions from the console: the numbers Will ticked. The card is `{series, reason: []}`, sorted, as he signs it. */
@@ -229,6 +245,7 @@ export const PREDICT_SAYS = {
   alreadyOff: 'Forecasts for this number are already off.',
   answered: 'That question was already answered.',
   noQuestion: 'That question no longer exists.',
+  unanswerable: 'Flint can’t show what this one was about, so it can only be skipped.',
   busy: 'Flint is busy with this. Try again shortly.',
 } as const;
 export type PredictSay = keyof typeof PREDICT_SAYS;

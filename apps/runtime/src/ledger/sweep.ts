@@ -32,6 +32,7 @@
  */
 import { randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
+import { patternMatches, resolveTier } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
 import { failureOf } from '../dbcodes.js';
@@ -40,8 +41,38 @@ import { DUE_COLUMNS, ESCALATION_ACTION, decisionOf, ruleOwner, verdictFor, type
 const HOUR = 3_600_000;
 /** How long past its resolve time a prediction that resolves by itself may still be settled before it runs out. */
 export const AUTO_GRACE_MS = 72 * HOUR;
-/** A prediction only Will resolves runs out this long after Flint asked him about it: two weeks to answer. Never asked, it never runs out. */
+/**
+ * A prediction only Will resolves runs out this long after he was told its question waits: two weeks to answer.
+ * Never asked, it never runs out; asked quietly (in shadow: no dot, no line in the morning summary), the two weeks
+ * have not begun (announcedSince, questionLapsed).
+ */
 export const WILL_GRACE_MS = 14 * 24 * HOUR;
+/** The policy action Will's questions are asked under. */
+const ASK_ACTION = 'ledger.resolve.ask_will';
+
+/**
+ * Since when Will is told that questions wait for him: the moment he let Flint ask on its own (the earliest of his
+ * rules in force that do), for as long as Flint still may. Null while it may not: the questions are asked in shadow,
+ * they wait in the panel, and nothing announces them.
+ */
+export async function announcedSince(db: Db | Tx, now = new Date()): Promise<Date | null> {
+  const rows = await db.actionPolicy.findMany({ where: { active: true, expiresAt: { gt: now } }, select: { pattern: true, tier: true, dailyCap: true, scope: true, active: true, expiresAt: true, createdAt: true } });
+  const policies = rows.map((r) => ({ pattern: r.pattern, tier: r.tier as 'alone' | 'approval' | 'forbidden', dailyCap: r.dailyCap, scope: r.scope ?? undefined, active: r.active, expiresAt: r.expiresAt }));
+  if (resolveTier(ASK_ACTION, { context: 'autonomous', tainted: false, policies, now }).tier !== 'alone') return null;
+  const since = rows.filter((r) => r.tier === 'alone' && patternMatches(r.pattern, ASK_ACTION)).map((r) => r.createdAt.getTime());
+  return since.length ? new Date(Math.min(...since)) : null;
+}
+
+/**
+ * Has a question's two weeks run out? One asked while Flint may ask on its own was announced when it was asked. One
+ * asked in shadow was announced to nobody: its two weeks start when Will first lets Flint ask on its own (`since`),
+ * and while he has not, they never start. A question nobody announced never costs him a prediction.
+ */
+export function questionLapsed(q: { askedAt: Date; shadow: boolean }, since: Date | null, now: Date): boolean {
+  const cutoff = now.getTime() - WILL_GRACE_MS;
+  if (!q.shadow) return q.askedAt.getTime() <= cutoff;
+  return since !== null && Math.max(q.askedAt.getTime(), since.getTime()) <= cutoff;
+}
 /** A superseded prediction cannot run out (the ledger keeps it superseded), so the sweep stops trying one after this long. */
 export const SUPERSEDED_RETRY_MS = 14 * 24 * HOUR;
 /** Predictions read per page, and the most one sweep takes on (the rest wait an hour). */
@@ -244,18 +275,29 @@ async function expireOne(tx: Tx, id: string, counts: SweepCounts, log: Log): Pro
 
 /**
  * Step 3: predictions that ran out.
- *  - One only Will resolves: 14 days after Flint asked him about it (its question's time). Never asked, it stays open:
- *    Flint does not let a prediction of his lapse before it has put the question to him.
+ *  - One only Will resolves: 14 days after he was told its question waits. Never asked, it stays open: Flint does
+ *    not let a prediction of his lapse before it has put the question to him. Asked in shadow (nothing announced
+ *    it), the 14 days start when he first lets Flint ask on its own; until then it stays open too. One he skipped
+ *    he has seen: it runs out 14 days after it was asked.
  *  - One that resolves by itself: 72 hours past its resolve time, if it is the sweep's own or nobody's. Another
  *    module's rule is left to that module. `auto` says which of them may run out this time: all (`all`), none
  *    (`none`), or, after a sweep that stopped at its limit, only those at or before the last one it took on. So a
  *    head of rows that can never be settled runs out and makes way, and nothing runs out that the sweep has not tried.
  */
 async function expire(tx: Tx, now: Date, auto: 'all' | 'none' | Cursor, counts: SweepCounts, log: Log): Promise<void> {
+  const cutoff = new Date(now.getTime() - WILL_GRACE_MS);
+  // Since when he is told of questions asked quietly; null while nothing tells him (questionLapsed says the same rule in code).
+  const since = await announcedSince(tx, now);
+  const quiet = since === null ? Prisma.sql`false` : Prisma.sql`GREATEST(q."askedAt", ${since}::timestamptz) < ${cutoff}`;
   const asked = await tx.$queryRaw<Array<{ id: string }>>`
     SELECT p.id FROM "Prediction" p
     WHERE p.status = 'open' AND p.resolver = 'will' AND NOT EXISTS (SELECT 1 FROM "Resolution" r WHERE r."predictionId" = p.id)
-      AND EXISTS (SELECT 1 FROM "PredictionQuestion" q WHERE q."predictionId" = p.id AND q."askedAt" < ${new Date(now.getTime() - WILL_GRACE_MS)})
+      AND EXISTS (
+        SELECT 1 FROM "PredictionQuestion" q WHERE q."predictionId" = p.id AND (
+          (q.answer = 'skip' AND q."askedAt" < ${cutoff})
+          OR (q.answer IS NULL AND NOT q.shadow AND q."askedAt" < ${cutoff})
+          OR (q.answer IS NULL AND q.shadow AND ${quiet})
+        ))
     ORDER BY p."resolveBy", p.id LIMIT ${SWEEP_LIMIT}`;
   for (const p of asked) await expireOne(tx, p.id, counts, log);
   if (auto === 'none') return;

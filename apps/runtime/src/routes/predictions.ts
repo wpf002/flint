@@ -14,6 +14,11 @@
  *   POST /v1/predictions/series/:key/turn-off {}      unsigned, audited
  *   POST /v1/predictions/questions/:id/answer {answer}  his yes, no or skip: unsigned, audited, recorded as his
  *
+ * With predictions switched off on this Mac (FLINT_PREDICT), turning on and
+ * answering are refused with the sentence that says so, and the page, the
+ * questions and the scores say it too. Turning a number off stays allowed: it
+ * only narrows what Flint does. The reads still answer.
+ *
  * Input is checked with the shared contracts (@flint/policy); a refusal is one
  * of PREDICT_SAYS's sentences with its code, and a zod failure is logged by
  * field paths and codes only. Answers are checked against their contracts on
@@ -82,6 +87,8 @@ export function registerPredictionRoutes(app: FastifyInstance, d: PredictionRout
   // Will opens the panel.
   app.get('/v1/predictions/waiting', pre, guarded(async (req) => {
     parse(None, req.query ?? {});
+    // Switched off on this Mac, nothing can be answered here: nothing is said to wait.
+    if (!view.predict) return out(PredictionsWaiting, { questions: 0, announce: false });
     return out(PredictionsWaiting, { questions: await questionsWaiting(db), announce: await questionsAnnounced(db) });
   }));
 
@@ -92,12 +99,12 @@ export function registerPredictionRoutes(app: FastifyInstance, d: PredictionRout
 
   app.get('/v1/predictions/questions', pre, guarded(async (req) => {
     parse(None, req.query ?? {});
-    return out(QuestionsPage, await questionsPage(db, { tz }));
+    return out(QuestionsPage, await questionsPage(db, { tz, predict: view.predict }));
   }));
 
   app.get('/v1/predictions/accuracy', pre, guarded(async (req) => {
     parse(None, req.query ?? {});
-    return out(AccuracyView, await accuracyView(db));
+    return out(AccuracyView, await accuracyView(db, view));
   }));
 
   app.get('/v1/predictions/series/:key', pre, guarded(async (req) => {
@@ -127,7 +134,9 @@ export function registerPredictionRoutes(app: FastifyInstance, d: PredictionRout
   app.post('/v1/predictions/questions/:id/answer', pre, guarded(async (req) => {
     const { id } = parse(Question, req.params);
     const { answer } = parse(AnswerBody, req.body);
-    await answerQuestion(db, id, answer);
+    // Switched off on this Mac, nothing is recorded here: an answer waits until predictions are on again.
+    if (!view.predict) throw new Refused(409, PREDICT_SAYS.offHere);
+    await answerQuestion(db, id, answer, { tz });
     return out(PredictDone, { ok: true });
   }));
 }

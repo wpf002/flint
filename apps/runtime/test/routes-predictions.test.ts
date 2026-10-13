@@ -5,8 +5,9 @@
  * connector's token (world:read|ledger) on every route, reads included, so a
  * model can never read a forecast's numbers or a question's words, nor answer
  * one for Will; 400 on the strict contracts, with a code and field paths only;
- * turning predictions on is refused in a sentence while they are switched off
- * on this Mac. Nothing a request carried reaches the log.
+ * turning predictions on and answering a question are refused in a sentence
+ * while they are switched off on this Mac. Nothing a request carried reaches
+ * the log.
  */
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -115,12 +116,17 @@ describe('the prediction routes, before the database', () => {
     await h.app.close();
   });
 
-  it('turning predictions on is refused in a sentence while they are switched off on this Mac (the default), before the database', async () => {
+  it('turning predictions on, and answering a question, are refused in a sentence while they are switched off on this Mac (the default), before the database', async () => {
     for (const predict of [undefined, false]) {
       const h = harness(predict);
-      const r = await h.call('POST', '/v1/predictions/turn-on', { series: [KEY] });
-      expect(r.statusCode).toBe(409);
-      expect(JSON.parse(r.body)).toEqual({ error: 'Predictions are switched off on this Mac.', code: 'offHere' });
+      for (const [url, body] of [['/v1/predictions/turn-on', { series: [KEY] }], [`/v1/predictions/questions/${PID}/answer`, { answer: 'yes' }], [`/v1/predictions/questions/${PID}/answer`, { answer: 'skip' }]] as const) {
+        const r = await h.call('POST', url, body);
+        expect(r.statusCode, url).toBe(409);
+        expect(JSON.parse(r.body), url).toEqual({ error: 'Predictions are switched off on this Mac.', code: 'offHere' });
+      }
+      // And nothing is said to wait where nothing can be answered: no count is even read.
+      const w = await h.call('GET', '/v1/predictions/waiting');
+      expect([w.statusCode, JSON.parse(w.body)]).toEqual([200, { questions: 0, announce: false }]);
       expect(h.touched()).toBe(0);
       await h.app.close();
     }

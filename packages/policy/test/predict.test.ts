@@ -140,7 +140,7 @@ describe('P4 part 4: the Predictions panel\'s wire', () => {
   });
 
   it('a row says one of the closed states, and nothing but what the contract names', () => {
-    expect(FORECAST_STATES).toEqual(['range', 'no_trend', 'steady', 'waiting', 'short', 'no_data', 'tonight', 'failed', 'off']);
+    expect(FORECAST_STATES).toEqual(['range', 'no_trend', 'early', 'steady', 'waiting', 'short', 'no_data', 'tonight', 'failed', 'off']);
     expect(ForecastRow.parse(row)).toEqual(row);
     for (const state of FORECAST_STATES) expect(ForecastRow.safeParse({ ...row, state }).success, state).toBe(true);
     expect(ForecastRow.safeParse({ ...row, state: 'sure' }).success).toBe(false);
@@ -166,13 +166,23 @@ describe('P4 part 4: the Predictions panel\'s wire', () => {
     expect(SeriesAnswer.safeParse({ series: { ...series, chance: null } }).success).toBe(true);
     expect(SeriesAnswer.safeParse({ series: { ...series, forecast: Array.from({ length: 9 }, () => fact) } }).success).toBe(false);
     expect(SeriesAnswer.safeParse({ series: { ...series, points: [{ mean: 4 }] } }).success).toBe(false);
-    const q = { id: 'pdabc123', title: 'The deploy lands by Friday', says: 'Flint said likely, around 70%, on Oct 3.', answer: null };
-    expect(QuestionsPage.parse({ waiting: [q], answered: [{ ...q, answer: 'yes' }] })).toEqual({ waiting: [q], answered: [{ ...q, answer: 'yes' }] });
-    expect(QuestionsPage.safeParse({ waiting: [{ ...q, answer: 'maybe' }], answered: [] }).success).toBe(false);
-    expect(QuestionsPage.safeParse({ waiting: [{ ...q, probability: 0.7 }], answered: [] }).success).toBe(false);
-    expect(QuestionsPage.safeParse({ waiting: [{ ...q, id: 'pd abc' }], answered: [] }).success).toBe(false);
-    const acc = { scored: true, areas: [{ name: 'Deploys', value: '12 Scored', lines: ['Flint has 12 of the 30 range results it needs.'] }], unsettled: ['3 predictions ran out before they could be checked.'] };
+    const q = { id: 'pdabc123', title: 'The deploy lands by Friday', says: 'Flint said likely, around 70%, on Oct 3. It was due Oct 5 at 3:00 PM.', answer: null, answerable: true };
+    const qs = { waiting: [q], answered: [{ ...q, answer: 'yes' }], offHere: false };
+    expect(QuestionsPage.parse(qs)).toEqual(qs);
+    expect(QuestionsPage.safeParse({ ...qs, waiting: [{ ...q, answer: 'maybe' }] }).success).toBe(false);
+    expect(QuestionsPage.safeParse({ ...qs, waiting: [{ ...q, probability: 0.7 }] }).success).toBe(false);
+    expect(QuestionsPage.safeParse({ ...qs, waiting: [{ ...q, id: 'pd abc' }] }).success).toBe(false);
+    // Whether a question can be answered Yes or No is always said, and so is whether anything can be answered here at all.
+    const { answerable: _a, ...unsaid } = q;
+    expect(QuestionsPage.safeParse({ ...qs, waiting: [unsaid] }).success).toBe(false);
+    expect(QuestionsPage.safeParse({ ...qs, waiting: [{ ...q, answerable: 'yes' }] }).success).toBe(false);
+    expect(QuestionsPage.safeParse({ waiting: [q], answered: [] }).success).toBe(false);
+    // A title is at most 300 characters: one over is refused, never cut.
+    expect(QuestionsPage.safeParse({ ...qs, waiting: [{ ...q, title: 'x'.repeat(301) }] }).success).toBe(false);
+    const acc = { scored: true, scoring: 'on', areas: [{ name: 'Deploys', value: '12 Scored', lines: ['Flint has 12 of the 30 range results it needs.'] }], unsettled: ['3 predictions ran out before they could be checked.'] };
     expect(AccuracyView.parse(acc)).toEqual(acc);
+    for (const scoring of ['off_here', 'not_started', 'on']) expect(AccuracyView.safeParse({ ...acc, scoring }).success, scoring).toBe(true);
+    for (const bad of [{ ...acc, scoring: 'maybe' }, { scored: true, areas: acc.areas, unsettled: acc.unsettled }]) expect(AccuracyView.safeParse(bad).success).toBe(false);
     expect(AccuracyView.safeParse({ ...acc, areas: [{ ...acc.areas[0], lines: [] }] }).success).toBe(false);
     expect(AccuracyView.safeParse({ ...acc, areas: [{ ...acc.areas[0], brier: 0.2 }] }).success).toBe(false);
   });

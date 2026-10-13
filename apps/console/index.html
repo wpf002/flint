@@ -368,7 +368,9 @@
   #predfoot #predmsg{flex-basis:100%;margin:0;}
   #predlist>.gsh:first-child{margin-top:8px;}
   .plead{color:var(--t2);margin:4px 4px 0;} .plead+.plead{margin-top:8px;}
-  .pacts{display:flex;align-items:center;gap:4px;flex:none;}
+  .pacts{display:flex;align-items:center;gap:8px;flex:none;}
+  /* A title or a sentence with no place to break (a long unbroken word) wraps anywhere rather than run off the row. */
+  #predbody .lbl b,#predbody .lbl span,#predbody .plead,#predbody .empty span{overflow-wrap:anywhere;}
   .pmany .lbl span+span{margin-top:4px;}
   .ppick{cursor:pointer;}
   @media (max-width:600px){
@@ -2429,6 +2431,12 @@ goalsProbe();
  * The helpers are the Goals panel's (goals-js): one of each for both panels. ES5, no confirm(), alert() or
  * prompt(): the Mac app's web view has none. */
 var PRED={tab:'forecasts',view:'list',page:null,series:null,picked:null,busy:false,seq:0,nav:0,questions:0,announce:false};
+/* An answer is never recorded on one tap, and it cannot be changed afterwards. The first tap arms the row: the other
+   choices go, and the row offers Cancel and the one thing the second tap will record. A second tap that lands within
+   this long of the first (a double tap) is not taken for the second. */
+var PRED_ARM_MS=400;
+var PRED_RECORD={yes:'Record Yes',no:'Record No',skip:'Skip for Good'};
+function predNow(){return Date.now();}
 var PRED_TABS=[['forecasts','Forecasts'],['questions','Questions'],['accuracy','Accuracy']];
 var PRED_PATHS={forecasts:'/predictions',questions:'/predictions/questions',accuracy:'/predictions/accuracy'};
 /* What the page asks on load, and every few minutes: is the panel there, and do questions wait. Two facts and no
@@ -2438,7 +2446,9 @@ var PRED_WAITING='/predictions/waiting';
 var PRED_ANSWERS={yes:'Yes',no:'No',skip:'Skipped'};
 var PRED_SAY={recorded:'Flint recorded your answer.',on:'Approved. Flint starts keeping these numbers tonight.',off:'Flint stopped forecasting this number.',
   waiting:'Flint is waiting for your approval.',cancelled:'Cancelled. It’s waiting in Approvals.',approved:'Approved. It hasn’t run yet.',none:'Choose at least one number.',
-  key:'This device needs an approval key.',offHere:'Predictions are switched off on this Mac.',starts:'It starts once you approve it.'};
+  key:'This device needs an approval key.',offHere:'Predictions are switched off on this Mac.',starts:'It starts once you approve it.',
+  answers:'Yes means it happened. Skip leaves it unscored. An answer can’t be changed.',notStarted:'Flint scores its predictions once you turn them on.',
+  nightly:'Flint scores its predictions each night, once they come due.'};
 
 /* ---------- the panel ---------- */
 function predShown(on){var b=document.getElementById('predbtn');if(b)b.hidden=!on;}
@@ -2454,8 +2464,14 @@ function predNav(view){PRED.view=view;return ++PRED.nav;}
 function predHere(){var n=PRED.nav;return function(){return PRED.nav===n&&predIsOpen();};}
 function openPredictions(){if(typeof TOKEN!=='undefined'&&!TOKEN){if(typeof openSettings==='function')openSettings();return;}
   if(typeof showPanel==='function')showPanel('predictions',true);if(typeof loadCreds==='function')loadCreds();predTab(PRED.tab);}
-function closePredictions(){if(typeof showPanel==='function')showPanel('predictions',false);predNav('list');PRED.picked=null;PRED.busy=false;
+/* Closing drops what the panel holds: a read still on its way is no longer wanted (the sequence moves on, so its
+   answer is not drawn), and the numbers and questions already drawn leave the page and its memory. */
+function closePredictions(){if(typeof showPanel==='function')showPanel('predictions',false);predNav('list');++PRED.seq;
+  PRED.page=null;PRED.series=null;PRED.picked=null;PRED.busy=false;
+  var b=document.getElementById('predbody');if(b)b.textContent='';if(document.getElementById('predfoot'))predFoot();
   if(typeof pollApprovals==='function')pollApprovals();predProbe();}
+/* The keyboard's place follows what was drawn: a view that replaces the one the cursor was in takes the cursor with it. */
+function predFocus(el){try{if(el&&typeof el.focus==='function'&&predIsOpen())el.focus();}catch(e){}}
 function predHead(title,back){document.getElementById('predttl').textContent=title;document.getElementById('predback').hidden=!back;}
 /* The footer: what the panel has to say, on a line of its own that never scrolls away, then the view's buttons. */
 function predFoot(){var f=document.getElementById('predfoot');f.textContent='';f.hidden=true;var m=gEl('div','res');m.id='predmsg';m.hidden=true;m.setAttribute('role','status');f.appendChild(m);return f;}
@@ -2477,7 +2493,8 @@ function predRow(label,lines,value,open,tags){var row=gEl('div','row two gwrap'+
   if(label)l.appendChild(gEl('b',null,label));lines.forEach(function(t){l.appendChild(gEl('span',null,t));});row.appendChild(l);
   (tags||[]).forEach(function(t){row.appendChild(t);});
   if(value)row.appendChild(gEl('span','val',value));
-  if(open){row.tabIndex=0;row.setAttribute('role','button');row.appendChild(gIcon('chev'));row.onclick=open;row.onkeydown=function(e){if(e&&(e.key==='Enter'||e.key===' '))open();};}
+  if(open){row.tabIndex=0;row.setAttribute('role','button');row.appendChild(gIcon('chev'));row.onclick=open;
+    row.onkeydown=function(e){if(!e||(e.key!=='Enter'&&e.key!==' '))return;if(e.preventDefault)e.preventDefault();open();};}
   return row;}
 /* A sentence on a row of its own. */
 function predLine(t){var row=gEl('div','row');var l=gEl('span','lbl gwhy');l.appendChild(gEl('span',null,t));row.appendChild(l);return row;}
@@ -2493,6 +2510,7 @@ function predTab(tab,say,kind){predNav('list');PRED.tab=PRED_PATHS[tab]?tab:'for
     if(t[0]==='questions'){var n=gEl('em',null,PRED.questions?String(PRED.questions):'');n.id='predqn';n.hidden=!PRED.questions;b.appendChild(n);}
     seg.appendChild(b);});
   body.appendChild(seg);var list=gEl('div');list.id='predlist';list.appendChild(gEl('div','empty','Loading…'));body.appendChild(list);
+  predFocus(document.getElementById('predtab-'+PRED.tab));
   if(say)predMsg(say,kind||'ok');
   gCall(PRED_PATHS[PRED.tab]).then(function(d){if(seq!==PRED.seq)return;predShown(true);list.textContent='';
     if(PRED.tab==='questions')predQuestions(list,d);else if(PRED.tab==='accuracy')predAccuracy(list,d);else predForecasts(list,d);
@@ -2530,6 +2548,7 @@ function predSeriesShow(s,say){var n=s.number;predHead(n.name,true);var body=pre
   else if(s.offHere)foot.appendChild(gEl('span','note',PRED_SAY.offHere));
   else if(s.waiting){foot.appendChild(gEl('span','note',PRED_SAY.waiting));foot.appendChild(gBtn('btn','Open Approvals',predToApprovals));}
   else{foot.appendChild(gEl('span','note'));foot.appendChild(gBtn('btn pri','Turn On',function(){predSheet([n.key]);}));}
+  predFocus(document.getElementById('predback'));
   if(say)predMsg(say,'ok');}
 /* Unsigned: it only narrows what Flint does. Turning it on again takes the card. */
 function predTurnOff(n,b){if(PRED.busy)return;PRED.busy=true;if(b)b.disabled=true;var here=predHere();
@@ -2550,7 +2569,7 @@ function predSheet(only){var numbers=((PRED.page&&PRED.page.numbers)||[]).filter
   body.appendChild(g);
   foot.hidden=false;foot.appendChild(gEl('span','note'));
   var cancel=gBtn('btn','Cancel',function(){predBack();});var go=gBtn('btn pri','Continue',function(){predFile([cancel,go]);});
-  foot.appendChild(cancel);foot.appendChild(go);}
+  foot.appendChild(cancel);foot.appendChild(go);predFocus(document.getElementById('predback'));}
 /* What the card will hold, as the runtime files it: the numbers sorted, no repeats, and no second opinion. */
 function predArgs(){var keys=[];for(var k in (PRED.picked||{}))if(Object.prototype.hasOwnProperty.call(PRED.picked,k)&&PRED.picked[k])keys.push(k);return {series:gSorted(keys),reason:[]};}
 function predFile(buttons){var args=predArgs();if(!args.series.length){predMsg(PRED_SAY.none);return;}
@@ -2576,7 +2595,7 @@ function predCard(id,args){predNav('card');predHead('Turn On Predictions',true);
   foot.hidden=false;foot.appendChild(gEl('span','note',predStartSays()));
   var later=gBtn('btn','Not Now',function(){predTab('forecasts',PRED_SAY.cancelled);});
   var ok=gBtn('btn pri',typeof approveLabel==='function'?approveLabel():'Approve',function(){predApprove(p,[later,ok]);});
-  foot.appendChild(later);foot.appendChild(ok);}
+  foot.appendChild(later);foot.appendChild(ok);predFocus(document.getElementById('predback'));}
 /* Sign exactly the args the card showed, with a fresh touch. While the prompt is up the buttons are off and the
    footer says it is waiting. A cancelled prompt leaves the card waiting in Approvals. */
 function predApprove(p,buttons){if(PRED.busy)return;if(typeof approveAction!=='function'||!gKeyed()){predNeedsKey();return;}
@@ -2588,31 +2607,46 @@ function predApprove(p,buttons){if(PRED.busy)return;if(typeof approveAction!=='f
   },function(e){end();if(here())predMsg(goalCancelled(e)?PRED_SAY.cancelled:gSay(e));});}
 
 /* ---------- Questions ---------- */
-function predQuestions(list,d){var waiting=d.waiting||[],answered=d.answered||[];predCount(waiting.length);
+function predQuestions(list,d){var waiting=d.waiting||[],answered=d.answered||[],off=d.offHere===true;predCount(off?0:waiting.length);
   if(!waiting.length&&!answered.length){list.appendChild(goalEmpty('No Questions','No questions are waiting.'));return;}
   list.appendChild(gEl('div','gsh','For You'));var g=gEl('div','group');
   if(!waiting.length)g.appendChild(predLine('No questions are waiting.'));
-  waiting.forEach(function(q){g.appendChild(predQuestion(q));});list.appendChild(g);
-  if(waiting.length)list.appendChild(gEl('p','gnote','Yes means it happened. Skip leaves it unscored.'));
+  waiting.forEach(function(q){g.appendChild(predQuestion(q,off));});list.appendChild(g);
+  /* Switched off on this Mac, nothing here can be answered: the rows say what waits, and offer nothing. */
+  if(waiting.length)list.appendChild(gEl('p','gnote',off?PRED_SAY.offHere:PRED_SAY.answers));
   if(answered.length){list.appendChild(gEl('div','gsh','Answered'));var a=gEl('div','group');
     answered.forEach(function(q){a.appendChild(predRow(q.title,[q.says],PRED_ANSWERS[q.answer]||''));});list.appendChild(a);}}
-/* One question: the prediction (text only), what Flint said and when, and one clear choice. */
-function predQuestion(q){var row=predRow(q.title,[q.says],'');var acts=gEl('span','pacts'),buttons=[];
-  [['yes','Yes'],['no','No'],['skip','Skip']].forEach(function(a){var b=gBtn(a[0]==='skip'?'ghost':'btn',a[1],function(){predAnswer(q,a[0],row,buttons);});buttons.push(b);acts.appendChild(b);});
-  row.appendChild(acts);return row;}
+/* One question: the prediction (text only), what Flint said, when, and when it was due, and one clear choice. */
+function predQuestion(q,off){var row=predRow(q.title,[q.says],'');if(off)return row;var acts=gEl('span','pacts');row.appendChild(acts);predChoices(q,row,acts);return row;}
+/* Yes, No and Skip; or Skip alone, for a prediction Flint cannot say plainly (the runtime says which, and refuses the
+   rest itself). Yes and No are apart from each other and from Skip. A tap records nothing: it arms the row. */
+function predChoices(q,row,acts){acts.textContent='';
+  var list=q.answerable===true?[['yes','Yes','btn'],['no','No','btn'],['skip','Skip','ghost']]:[['skip','Skip','ghost']];
+  list.forEach(function(a){acts.appendChild(gBtn(a[2],a[1],function(){predArm(q,a[0],row,acts);}));});}
+/* Armed: the other choices are gone. Cancel puts them back; the one button left says what it records, and records it. */
+function predArm(q,answer,row,acts){if(PRED.busy)return;acts.textContent='';var at=predNow();
+  var cancel=gBtn('ghost','Cancel',function(){if(PRED.busy)return;predChoices(q,row,acts);predMsg('');predFocus(acts.children&&acts.children[0]);});
+  var go=gBtn('btn pri',PRED_RECORD[answer],function(){if(predNow()-at<PRED_ARM_MS)return;predAnswer(q,answer,row,[cancel,go]);});
+  acts.appendChild(cancel);acts.appendChild(go);predFocus(cancel);}
 /* His answer, recorded once. The row then says so, with what he answered; nothing else on the tab moves. */
 function predAnswer(q,answer,row,buttons){if(PRED.busy)return;PRED.busy=true;buttons.forEach(function(b){b.disabled=true;});var here=predHere();
   gCall('/predictions/questions/'+encodeURIComponent(q.id)+'/answer',{answer:answer}).then(function(){PRED.busy=false;if(!here())return;
     row.textContent='';var l=gEl('span','lbl');l.appendChild(gEl('b',null,q.title));l.appendChild(gEl('span',null,PRED_SAY.recorded));row.appendChild(l);row.appendChild(gEl('span','val',PRED_ANSWERS[answer]));
     predCount(PRED.questions-1);predDot({announce:PRED.announce,questions:PRED.questions});predMsg('');
   },function(e){PRED.busy=false;if(!here())return;
-    /* Already answered, or no longer open: the list is stale. It is read again, and the footer says why. */
-    if(e.code==='answered'||e.code==='noQuestion'){predTab('questions',gSay(e),'bad');return;}
+    /* Already answered, no longer open, or not one that can be answered that way: the list is stale. It is read again, and the footer says why. */
+    if(e.code==='answered'||e.code==='noQuestion'||e.code==='unanswerable'||e.code==='offHere'){predTab('questions',gSay(e),'bad');return;}
     buttons.forEach(function(b){b.disabled=false;});predMsg(gSay(e));});}
 
 /* ---------- Accuracy ---------- */
 function predAccuracy(list,d){var areas=d.areas||[],left=d.unsettled||[];
-  if(!d.scored||!areas.length){list.appendChild(goalEmpty('No Results Yet','Flint scores its predictions each night, once they come due.'));return;}
+  /* Nothing scored yet: said as what it is. "Each night" only when something scores them each night. */
+  if(!d.scored||!areas.length){
+    if(d.scoring==='off_here')list.appendChild(goalEmpty('Predictions Are Off',PRED_SAY.offHere));
+    else if(d.scoring==='not_started')list.appendChild(goalEmpty('Predictions Are Off',PRED_SAY.notStarted));
+    else list.appendChild(goalEmpty('No Results Yet',PRED_SAY.nightly));
+    return;}
+  if(d.scoring==='off_here')list.appendChild(gEl('p','gnote',PRED_SAY.offHere));
   list.appendChild(gEl('div','gsh','How Flint Has Done'));var g=gEl('div','group');
   areas.forEach(function(a){g.appendChild(predRow(a.name,a.lines||[],a.value));});list.appendChild(g);
   list.appendChild(gEl('div','gsh','Left Unsettled'));var u=gEl('div','group');

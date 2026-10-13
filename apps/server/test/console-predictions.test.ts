@@ -20,6 +20,9 @@
  *  - Loading, failed, signed out, off, and empty are each said in words.
  *  - An answer that lands after Will has gone elsewhere neither throws nor
  *    pulls him back.
+ *  - No answer is recorded on one tap: the first arms the row, the second
+ *    records. A prediction Flint cannot say plainly offers only Skip.
+ *  - Closing drops what the panel holds.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -82,6 +85,9 @@ class El {
   querySelector(_sel: string): El | null {
     return null;
   }
+  focus() {
+    focused = this;
+  }
   all(): El[] {
     return this.children.flatMap((c) => [c, ...c.all()]);
   }
@@ -104,6 +110,9 @@ class El {
     return this.visible().filter((e) => e.className.split(' ').includes(cls));
   }
 }
+
+/** The element that has the cursor. */
+let focused: El | null;
 
 type Call = { url: string; method: string; body: unknown };
 let calls: Call[];
@@ -153,9 +162,12 @@ const seriesOf = (n: ReturnType<typeof number>, over: Record<string, unknown> = 
   record: '22 of its last 27 ranges held.', waiting: false, offHere: false, ...over,
 });
 const QID = 'pdq1abc123def';
-const question = (over: Record<string, unknown> = {}) => ({ id: QID, title: 'The <b>deploy</b> lands by Friday', says: 'Flint said likely, around 70%, on Oct 3.', answer: null, ...over });
+const SAID = 'Flint said likely, around 70%, on Oct 3. It was due Oct 5 at 3:00 PM.';
+const question = (over: Record<string, unknown> = {}) => ({ id: QID, title: 'The <b>deploy</b> lands by Friday', says: SAID, answer: null, answerable: true, ...over });
+/** One Flint cannot say plainly: the runtime's own row for it. */
+const UNSAID = { id: 'pdq9unsaid', title: 'Flint made this prediction in a chat.', says: 'Flint can’t show what this one was about, so it can only be skipped.', answer: null, answerable: false };
 const ACCURACY = {
-  scored: true,
+  scored: true, scoring: 'on',
   areas: [
     { name: 'Spend', value: '161 Scored', lines: ['When Flint said about 71%, it happened 64% of the time, over 41 predictions.', 'Flint did better than always guessing the usual rate.', 'Its 80% ranges held 79% of the time, over 120 forecasts.'] },
     { name: 'Deploys', value: '12 Scored', lines: ['Flint has 12 of the 30 results it needs for its ranges.'] },
@@ -169,7 +181,7 @@ const answers = (over: Partial<Record<string, { status: number; body: unknown }>
   if (over[key]) return over[key]!;
   if (c.url === '/predictions/waiting') return { status: 200, body: { questions: 0, announce: false } };
   if (c.url === '/predictions') return { status: 200, body: onPage() };
-  if (c.url === '/predictions/questions') return { status: 200, body: { waiting: [], answered: [] } };
+  if (c.url === '/predictions/questions') return { status: 200, body: { waiting: [], answered: [], offHere: false } };
   if (c.url === '/predictions/accuracy') return { status: 200, body: ACCURACY };
   if (c.method === 'GET' && c.url.startsWith('/predictions/series/')) {
     const n = onPage().numbers.find((x) => c.url.endsWith(`/${x.key}`))!;
@@ -187,6 +199,7 @@ beforeEach(async () => {
   keyed = true;
   panels = {};
   listeners = [];
+  focused = null;
   signAnswer = async () => ({ action: { status: 'done' } });
   routes = answers();
   ids = Object.fromEntries(
@@ -329,12 +342,15 @@ describe('the header button', () => {
       expect(!ids.preddot!.hidden, JSON.stringify(waiting)).toBe(dot);
     }
     // The open panel keeps it in step: the page's own count, and each answer he gives.
-    routes = answers({ 'GET /predictions': { status: 200, body: onPage({ questions: 1, announce: true }) }, 'GET /predictions/questions': { status: 200, body: { waiting: [question()], answered: [] } } });
+    routes = answers({ 'GET /predictions': { status: 200, body: onPage({ questions: 1, announce: true }) }, 'GET /predictions/questions': { status: 200, body: { waiting: [question()], answered: [], offHere: false } } });
     await open();
     expect(ids.preddot!.hidden).toBe(false);
     run("predTab('questions')");
     await settle();
+    run('var PRED_T=1000000;predNow=function(){return PRED_T;};');
     body().with('pacts')[0]!.children[0]!.onclick!();
+    run('PRED_T+=1000');
+    body().with('pacts')[0]!.children[1]!.onclick!();
     await settle();
     expect(ids.preddot!.hidden).toBe(true);
   });
@@ -714,41 +730,104 @@ describe('turning predictions on', () => {
 });
 
 describe('Questions', () => {
-  const second = question({ id: 'pdq2zzz999', title: 'Deploys is above 4.', says: 'Flint said unlikely, around 20%, on Oct 5.' });
+  const SECOND_SAID = 'Flint said unlikely, around 20%, on Oct 5. It was due Oct 7 at 9:00 AM.';
+  const second = question({ id: 'pdq2zzz999', title: 'Deploys ran above 4.', says: SECOND_SAID });
   const questions = async (page: Record<string, unknown>, over: Partial<Record<string, { status: number; body: unknown }>> = {}) => {
-    routes = answers({ 'GET /predictions/questions': { status: 200, body: page }, ...over });
+    routes = answers({ 'GET /predictions/questions': { status: 200, body: { offHere: false, ...page } }, ...over });
     await open('questions');
   };
   const acts = (label: string) => rowOf(label).children.find((c) => c.className === 'pacts')!;
+  const choices = (label: string) => acts(label).children.map((b) => [b.tagName, b.className, b.textContent]);
+  /** The page's clock, in the test's hands: a tap is this long after the one before it. */
+  const later = (ms: number) => run(`PRED_T+=${ms}`);
+  /** Tap a row's choice, wait past the double-tap guard, and tap the button that records it. */
+  const record = (label: string, choice: string) => {
+    acts(label).children.find((b) => b.textContent === choice)!.onclick!();
+    later(1000);
+    acts(label).children[1]!.onclick!();
+  };
+  beforeEach(() => {
+    run('var PRED_T=1000000;predNow=function(){return PRED_T;};');
+  });
 
-  it('each question is the prediction as text, what Flint said and when, and one clear choice: Yes, No or Skip', async () => {
+  it('each question is the prediction as text, what Flint said, when, and when it was due, and one clear choice: Yes, No or Skip', async () => {
     await questions({ waiting: [question(), second], answered: [] });
     expect(body().visible().find((e) => e.id === 'predtab-questions')!.getAttribute('aria-selected')).toBe('true');
     expect(headers()).toEqual(['For You']);
-    expect(rows()).toEqual([['The <b>deploy</b> lands by Friday', ['Flint said likely, around 70%, on Oct 3.'], ''], ['Deploys is above 4.', ['Flint said unlikely, around 20%, on Oct 5.'], '']]);
+    // The second line is the runtime's, as sent: it ends with when the prediction was due, the moment his answer is recorded as of.
+    expect(rows()).toEqual([['The <b>deploy</b> lands by Friday', [SAID], ''], ['Deploys ran above 4.', [SECOND_SAID], '']]);
     // Yes and No are outlined buttons; Skip is the quiet one.
-    for (const q of [question(), second]) expect(acts(q.title).children.map((b) => [b.tagName, b.className, b.textContent])).toEqual([['button', 'btn', 'Yes'], ['button', 'btn', 'No'], ['button', 'ghost', 'Skip']]);
-    expect(body().with('gnote').map((e) => e.textContent)).toEqual(['Yes means it happened. Skip leaves it unscored.']);
+    for (const q of [question(), second]) expect(choices(q.title)).toEqual([['button', 'btn', 'Yes'], ['button', 'btn', 'No'], ['button', 'ghost', 'Skip']]);
+    // What an answer means, and that it is for good, is said under the list.
+    expect(body().with('gnote').map((e) => e.textContent)).toEqual(['Yes means it happened. Skip leaves it unscored. An answer can’t be changed.']);
     // The tab says how many wait.
     expect(body().visible().find((e) => e.id === 'predqn')!.textContent).toBe('2');
     plainScreen();
-    ownWords(['For You', 'Yes', 'No', 'Skip', 'Questions'], ['Yes means it happened. Skip leaves it unscored.']);
+    ownWords(['For You', 'Yes', 'No', 'Skip', 'Questions'], ['Yes means it happened. Skip leaves it unscored. An answer can’t be changed.']);
+    // Yes and No are not side by side at 4 px: the choices sit 8 px apart.
+    expect(html).toContain('.pacts{display:flex;align-items:center;gap:8px;flex:none;}');
   });
 
-  it('an answer is one unsigned POST; the row then says it was recorded, with what he answered, and the rest stays put', async () => {
-    for (const [answer, value] of [['yes', 'Yes'], ['no', 'No'], ['skip', 'Skipped']] as const) {
+  it('no answer is recorded on one tap: the first arms the row (the other choices go), Cancel puts them back, and only the second records', async () => {
+    await questions({ waiting: [question(), second], answered: [] });
+    calls = [];
+    for (const [choice, armed] of [['Yes', 'Record Yes'], ['No', 'Record No'], ['Skip', 'Skip for Good']] as const) {
+      acts(question().title).children.find((b) => b.textContent === choice)!.onclick!();
+      // Armed: Cancel, and the one thing a second tap will record. The other choices are gone, and nothing was sent.
+      expect(choices(question().title), choice).toEqual([['button', 'ghost', 'Cancel'], ['button', 'btn pri', armed]]);
+      expect(calls).toEqual([]);
+      // The cursor is on Cancel: a second Enter cancels, it does not record.
+      expect(focused?.textContent).toBe('Cancel');
+      // The other row is as it was.
+      expect(choices(second.title)).toEqual([['button', 'btn', 'Yes'], ['button', 'btn', 'No'], ['button', 'ghost', 'Skip']]);
+      later(1000);
+      acts(question().title).children[0]!.onclick!();
+      expect(choices(question().title), choice).toEqual([['button', 'btn', 'Yes'], ['button', 'btn', 'No'], ['button', 'ghost', 'Skip']]);
+    }
+    await settle();
+    expect(calls).toEqual([]);
+    expect(rows()[0]).toEqual(['The <b>deploy</b> lands by Friday', [SAID], '']);
+    ownWords(['Cancel', 'Record Yes', 'Record No', 'Skip for Good'], []);
+  });
+
+  it('a double tap does not record: the second tap of one, landing on the armed button at once, is not taken for the second', async () => {
+    await questions({ waiting: [question()], answered: [] });
+    calls = [];
+    expect(run('PRED_ARM_MS')).toBe(400);
+    acts(question().title).children[0]!.onclick!();
+    // The same instant, and a little after: still inside the double tap.
+    acts(question().title).children[1]!.onclick!();
+    later(399);
+    acts(question().title).children[1]!.onclick!();
+    await settle();
+    expect(calls).toEqual([]);
+    expect(choices(question().title)).toEqual([['button', 'ghost', 'Cancel'], ['button', 'btn pri', 'Record Yes']]);
+    // A deliberate second tap records it.
+    later(1);
+    acts(question().title).children[1]!.onclick!();
+    await settle();
+    expect(calls).toEqual([{ url: `/predictions/questions/${QID}/answer`, method: 'POST', body: { answer: 'yes' } }]);
+  });
+
+  it('the second tap is one unsigned POST; the row then says it was recorded, with what he answered, and the rest stays put', async () => {
+    for (const [choice, answer, value] of [['Yes', 'yes', 'Yes'], ['No', 'no', 'No'], ['Skip', 'skip', 'Skipped']] as const) {
       await questions({ waiting: [question(), second], answered: [] });
       calls = [];
-      const buttons = acts(question().title).children;
-      buttons[['yes', 'no', 'skip'].indexOf(answer)]!.onclick!();
-      // The three buttons of the row take no second tap while it is on its way.
-      expect(buttons.map((b) => b.disabled)).toEqual([true, true, true]);
-      buttons[0]!.onclick!();
+      acts(question().title).children.find((b) => b.textContent === choice)!.onclick!();
+      later(1000);
+      const [cancel, go] = acts(question().title).children;
+      go!.onclick!();
+      // Neither button of the armed row takes another tap while it is on its way, and no other row can be armed.
+      expect([cancel!.disabled, go!.disabled]).toEqual([true, true]);
+      go!.onclick!();
+      cancel!.onclick!();
+      acts(second.title).children[0]!.onclick!();
+      expect(choices(second.title)).toEqual([['button', 'btn', 'Yes'], ['button', 'btn', 'No'], ['button', 'ghost', 'Skip']]);
       await settle();
       expect(calls).toEqual([{ url: `/predictions/questions/${QID}/answer`, method: 'POST', body: { answer } }]);
       expect(AnswerBody.safeParse(calls[0]!.body).success).toBe(true);
       expect(signed).toEqual([]);
-      expect(rows()).toEqual([['The <b>deploy</b> lands by Friday', ['Flint recorded your answer.'], value], ['Deploys is above 4.', ['Flint said unlikely, around 20%, on Oct 5.'], '']]);
+      expect(rows()).toEqual([['The <b>deploy</b> lands by Friday', ['Flint recorded your answer.'], value], ['Deploys ran above 4.', [SECOND_SAID], '']]);
       expect(rowOf(question().title).children.some((c) => c.className === 'pacts')).toBe(false);
       expect(acts(second.title).children.map((b) => b.disabled)).toEqual([false, false, false]);
       expect(body().visible().find((e) => e.id === 'predqn')!.textContent).toBe('1');
@@ -757,21 +836,56 @@ describe('Questions', () => {
     ownWords(['Skipped'], ['Flint recorded your answer.']);
   });
 
-  it('answered already, or no longer open: the list is read again and the footer says why; any other failure leaves the choice', async () => {
-    for (const [status, code] of [[409, 'answered'], [404, 'noQuestion']] as const) {
+  it('a prediction Flint cannot say plainly offers Skip and nothing else, and Skip is armed like any other', async () => {
+    await questions({ waiting: [UNSAID, question()], answered: [] });
+    expect(rows()[0]).toEqual(['Flint made this prediction in a chat.', ['Flint can’t show what this one was about, so it can only be skipped.'], '']);
+    expect(choices(UNSAID.title)).toEqual([['button', 'ghost', 'Skip']]);
+    expect(choices(question().title)).toEqual([['button', 'btn', 'Yes'], ['button', 'btn', 'No'], ['button', 'ghost', 'Skip']]);
+    // Only a row the runtime marks answerable offers Yes and No: a row that does not say is treated as one that is not.
+    await questions({ waiting: [{ ...question(), answerable: undefined }, { ...question({ id: 'pdq3', title: 'Third' }), answerable: 'yes' }], answered: [] });
+    expect(choices(question().title)).toEqual([['button', 'ghost', 'Skip']]);
+    expect(choices('Third')).toEqual([['button', 'ghost', 'Skip']]);
+    await questions({ waiting: [UNSAID], answered: [] });
+    calls = [];
+    acts(UNSAID.title).children[0]!.onclick!();
+    expect(choices(UNSAID.title)).toEqual([['button', 'ghost', 'Cancel'], ['button', 'btn pri', 'Skip for Good']]);
+    later(1000);
+    acts(UNSAID.title).children[1]!.onclick!();
+    await settle();
+    expect(calls).toEqual([{ url: `/predictions/questions/${UNSAID.id}/answer`, method: 'POST', body: { answer: 'skip' } }]);
+    expect(rows()[0]).toEqual(['Flint made this prediction in a chat.', ['Flint recorded your answer.'], 'Skipped']);
+  });
+
+  it('switched off on this Mac: the questions are listed, and none can be answered; the page says why', async () => {
+    await questions({ waiting: [question(), UNSAID], answered: [question({ id: 'pdq4', answer: 'yes', says: 'You said yes on Oct 12.' })], offHere: true });
+    expect(rows().slice(0, 2)).toEqual([['The <b>deploy</b> lands by Friday', [SAID], ''], [UNSAID.title, [UNSAID.says], '']]);
+    expect(body().visible().filter((e) => e.className === 'pacts')).toEqual([]);
+    expect(body().buttons().filter((b) => !['Forecasts', 'Questions', 'Accuracy'].includes(b))).toEqual([]);
+    expect(body().with('gnote').map((e) => e.textContent)).toEqual(['Predictions are switched off on this Mac.']);
+    // Nothing is said to wait where nothing can be answered.
+    expect(body().visible().find((e) => e.id === 'predqn')).toBeUndefined();
+  });
+
+  it('answered already, no longer open, not answerable that way or switched off: the list is read again and the footer says why; any other failure leaves the armed choice', async () => {
+    for (const [status, code] of [[409, 'answered'], [404, 'noQuestion'], [409, 'unanswerable'], [409, 'offHere']] as const) {
       await questions({ waiting: [question()], answered: [] }, { [`POST /predictions/questions/${QID}/answer`]: { status, body: { error: PREDICT_SAYS[code], code } } });
       calls = [];
-      acts(question().title).children[0]!.onclick!();
+      record(question().title, 'Yes');
       await settle();
       expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([`POST /predictions/questions/${QID}/answer`, 'GET /predictions/questions']);
       expect(said()).toEqual([PREDICT_SAYS[code], 'res bad']);
     }
     await questions({ waiting: [question()], answered: [] }, { [`POST /predictions/questions/${QID}/answer`]: { status: 504, body: { error: PREDICTIONS_SAY.unsure } } });
-    acts(question().title).children[1]!.onclick!();
+    record(question().title, 'No');
     await settle();
     expect(said()).toEqual(['Flint isn’t sure it went through. Check Predictions before trying again.', 'res bad']);
-    expect(acts(question().title).children.map((b) => b.disabled)).toEqual([false, false, false]);
-    expect(rows()[0]![1]).toEqual(['Flint said likely, around 70%, on Oct 3.']);
+    // Still armed, and both buttons take a tap again: he can try once more, or cancel.
+    expect(choices(question().title)).toEqual([['button', 'ghost', 'Cancel'], ['button', 'btn pri', 'Record No']]);
+    expect(acts(question().title).children.map((b) => b.disabled)).toEqual([false, false]);
+    expect(rows()[0]![1]).toEqual([SAID]);
+    acts(question().title).children[0]!.onclick!();
+    expect(choices(question().title)).toEqual([['button', 'btn', 'Yes'], ['button', 'btn', 'No'], ['button', 'ghost', 'Skip']]);
+    expect(said()).toBeNull();
   });
 
   it('none waiting: it says so; what he answered is listed under ANSWERED with what he said', async () => {
@@ -787,20 +901,25 @@ describe('Questions', () => {
     ownWords(['No Questions', 'Answered'], ['No questions are waiting.']);
   });
 
-  it('an answer that lands after he has gone elsewhere neither throws nor pulls him back', async () => {
-    await questions({ waiting: [question()], answered: [] });
-    acts(question().title).children[0]!.onclick!();
-    run("predTab('accuracy')");
+  it('an answer that lands after he has gone elsewhere neither throws nor pulls him back, and writes nothing into the view he is in', async () => {
+    await questions({ waiting: [question(), second], answered: [] });
+    record(question().title, 'Yes');
+    // He goes to another tab, which has something to say in its footer, before the answer lands.
+    run("predTab('accuracy','It’s waiting in Approvals.','ok')");
     await settle();
     expect(body().visible().find((e) => e.id === 'predtab-accuracy')!.getAttribute('aria-selected')).toBe('true');
     expect(headers()).toEqual(['How Flint Has Done', 'Left Unsettled']);
+    // The late answer cleared no message of this view, and counted nothing down in it.
+    expect(said()).toEqual(['It’s waiting in Approvals.', 'res ok']);
+    expect(run('PRED.questions')).toBe(2);
     // And one that lands after the panel was closed.
     await questions({ waiting: [question()], answered: [] });
-    acts(question().title).children[2]!.onclick!();
+    record(question().title, 'Skip');
     run('closePredictions()');
     await settle();
     expect(panels.predictions).toBe(false);
     expect(run('PRED.busy')).toBe(false);
+    expect(body().shown()).toBe('');
   });
 });
 
@@ -816,18 +935,115 @@ describe('Accuracy', () => {
       ['', ['1 was set aside with your approval.'], ''],
     ]);
     for (const r of body().with('row')) expect([r.tabIndex, r.onclick], r.textContent).toEqual([-1, null]);
+    expect(body().with('gnote')).toEqual([]);
     plainScreen();
     ownWords(['How Flint Has Done', 'Left Unsettled', 'Accuracy'], []);
   });
 
-  it('no scores yet, and nothing left unsettled, are each said', async () => {
-    routes = answers({ 'GET /predictions/accuracy': { status: 200, body: { scored: false, areas: [], unsettled: [] } } });
+  it('nothing scored yet is said as what it is: "each night" only when something scores them each night', async () => {
+    const empty = (scoring: string) => ({ 'GET /predictions/accuracy': { status: 200, body: { scored: false, scoring, areas: [], unsettled: [] } } });
+    routes = answers(empty('on'));
     await open('accuracy');
     expect(body().with('empty').map((e) => e.children.map((c) => c.textContent))).toEqual([['No Results Yet', 'Flint scores its predictions each night, once they come due.']]);
+    // Never turned on: nothing scores them, and it says how that changes.
+    routes = answers(empty('not_started'));
+    await open('accuracy');
+    expect(body().with('empty').map((e) => e.children.map((c) => c.textContent))).toEqual([['Predictions Are Off', 'Flint scores its predictions once you turn them on.']]);
+    // Switched off on this Mac.
+    routes = answers(empty('off_here'));
+    await open('accuracy');
+    expect(body().with('empty').map((e) => e.children.map((c) => c.textContent))).toEqual([['Predictions Are Off', 'Predictions are switched off on this Mac.']]);
+    for (const scoring of ['not_started', 'off_here']) {
+      routes = answers(empty(scoring));
+      await open('accuracy');
+      expect(screen(), scoring).not.toContain('each night');
+    }
+    // Scores from before the switch went off are still shown, with a line that says nothing updates them.
+    routes = answers({ 'GET /predictions/accuracy': { status: 200, body: { ...ACCURACY, scoring: 'off_here' } } });
+    await open('accuracy');
+    expect(body().with('gnote').map((e) => e.textContent)).toEqual(['Predictions are switched off on this Mac.']);
+    expect(headers()).toEqual(['How Flint Has Done', 'Left Unsettled']);
     routes = answers({ 'GET /predictions/accuracy': { status: 200, body: { ...ACCURACY, unsettled: [] } } });
     await open('accuracy');
     expect(rows().at(-1)).toEqual(['', ['Nothing was left unsettled.'], '']);
-    ownWords(['No Results Yet'], ['Flint scores its predictions each night, once they come due.', 'Nothing was left unsettled.']);
+    ownWords(['No Results Yet', 'Predictions Are Off'], ['Flint scores its predictions each night, once they come due.', 'Flint scores its predictions once you turn them on.', 'Nothing was left unsettled.']);
+  });
+});
+
+describe('closing, the keyboard and long words', () => {
+  it('closing drops what the panel holds: the numbers leave the page and its memory, and a read still on its way is not drawn', async () => {
+    routes = answers();
+    await open();
+    expect(rows().length).toBeGreaterThan(0);
+    expect(run('PRED.page')).not.toBeNull();
+    run('closePredictions()');
+    expect(body().shown()).toBe('');
+    expect(body().children).toEqual([]);
+    expect(foot().hidden).toBe(true);
+    expect(foot().shown()).toBe('');
+    expect([run('PRED.page'), run('PRED.series'), run('PRED.picked')]).toEqual([null, null, null]);
+    // Closed while the page is still being read: its answer is dropped, not drawn into the hidden panel.
+    run('openPredictions()');
+    run('closePredictions()');
+    await settle();
+    expect(body().shown()).toBe('');
+    expect(run('PRED.page')).toBeNull();
+    // The same for one number, and for the questions.
+    await open();
+    run(`predSeries('${KEYS.anthropic}')`);
+    run('closePredictions()');
+    await settle();
+    expect(body().shown()).toBe('');
+    expect(run('PRED.series')).toBeNull();
+    routes = answers({ 'GET /predictions/questions': { status: 200, body: { waiting: [question()], answered: [], offHere: false } } });
+    run("PRED.tab='questions';openPredictions()");
+    run('closePredictions()');
+    await settle();
+    expect(screen()).not.toContain('deploy');
+    // Opened again, it reads again.
+    calls = [];
+    await open('forecasts');
+    expect(calls.map((c) => c.url)).toContain('/predictions');
+    expect(rows().length).toBeGreaterThan(0);
+  });
+
+  it('the cursor goes into the dialog and follows what is drawn; Space on a row opens it without scrolling the page', async () => {
+    routes = answers();
+    await open();
+    // On opening, and on each change of tab, the cursor is on the tab that is shown.
+    expect(focused?.id).toBe('predtab-forecasts');
+    run("predTab('accuracy')");
+    expect(focused?.id).toBe('predtab-accuracy');
+    await settle();
+    // Into one number, the sheet and the card: on Back.
+    run("predTab('forecasts')");
+    await settle();
+    let prevented = 0;
+    // Tab moves on as it always does; Space opens the row, and the page behind does not scroll.
+    rowOf('Deploys').onkeydown!({ key: 'Tab', preventDefault: () => void prevented++ } as never);
+    expect(prevented).toBe(0);
+    rowOf('Deploys').onkeydown!({ key: ' ', preventDefault: () => void prevented++ } as never);
+    expect(prevented).toBe(1);
+    await settle();
+    expect(title()).toBe('Deploys');
+    expect(focused?.id).toBe('predback');
+    focused = null;
+    run(`predSheet(['${KEYS.nexus}'])`);
+    expect(focused?.id).toBe('predback');
+    // Nothing takes the cursor while the panel is closed.
+    run('closePredictions()');
+    focused = null;
+    run('predProbe()');
+    await settle();
+    expect(focused).toBeNull();
+  });
+
+  it('a long title with no place to break wraps inside its row, on every line of the panel', () => {
+    expect(html).toContain('#predbody .lbl b,#predbody .lbl span,#predbody .plead,#predbody .empty span{overflow-wrap:anywhere;}');
+    // The rows the panel draws are the wrapping kind (not the one-line, cut-short kind the page's plain rows are).
+    expect(html).toContain('.gwrap .lbl b,.gwrap .lbl span{white-space:normal;overflow:visible;}');
+    const code = predJs.replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(code).toContain("var row=gEl('div','row two gwrap'");
   });
 });
 

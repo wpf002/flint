@@ -79,8 +79,12 @@ export const PREDICTIONS_SAY = {
   tooLarge: 'That is too large to send.',
 } as const;
 
+/**
+ * Every answer, whatever its status: never kept by a browser or anything between. A forecast's numbers and a
+ * question's words are for the open panel only, and a disk cache would outlive it.
+ */
 function reply(res: ServerResponse, status: number, body: unknown): true {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(body));
   return true;
 }

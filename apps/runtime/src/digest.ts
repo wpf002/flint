@@ -53,7 +53,7 @@ async function didOnItsOwn(db: Db, start: Date, end: Date): Promise<number> {
   return row?.n ?? 0;
 }
 
-export async function buildDigest(db: Db, tz: string, now = new Date()): Promise<Digest> {
+export async function buildDigest(db: Db, tz: string, now = new Date(), o: { predict?: boolean } = {}): Promise<Digest> {
   const day = previousDay(localDay(tz, now));
   const { start, end } = localDayBounds(tz, day);
   const today = localDayBounds(tz, localDay(tz, now));
@@ -79,7 +79,8 @@ export async function buildDigest(db: Db, tz: string, now = new Date()): Promise
   ]);
   // Will's questions in Predictions, counted only once he has let Flint ask on its own: until then they wait in the
   // panel and nothing announces them.
-  const questions = (await questionsAnnounced(db, now)) ? await questionsWaiting(db, now) : 0;
+  // And never while predictions are switched off on this Mac: nothing can be answered then.
+  const questions = o.predict !== false && (await questionsAnnounced(db, now)) ? await questionsWaiting(db, now) : 0;
   const degraded = latest.filter((c) => c.status !== 'ok' && c.status !== 'disabled' && !c.component.includes('.')).map((c) => c.component).sort();
   const counts = { relevant, quiet, escalated, did, queued, open, due, goalsReviewed: goals[0]?.reviewed ?? 0, goalsLate: goals[0]?.late ?? 0, questions };
   return { day, title: digestTitle(day), body: digestBody(counts, degraded).slice(0, 500), counts: { ...counts, degraded: degraded.length }, degraded };
@@ -150,7 +151,7 @@ async function closeStaleDigests(db: Db, today: string, now: Date): Promise<void
 
 export async function runDigest(
   db: Db,
-  config: Pick<Config, 'tz' | 'server'>,
+  config: Pick<Config, 'tz' | 'server'> & Partial<Pick<Config, 'predict'>>,
   now = new Date(),
   post: (req: Parameters<typeof notifyServer>[1]) => Promise<NotifyOutcome> = (req) => notifyServer(config, req),
 ): Promise<DigestOutcome> {
@@ -159,7 +160,7 @@ export async function runDigest(
   const digestTier = tier('digest.daily');
   if (digestTier === 'forbidden' || (digestTier === 'approval' && !runsInShadow('digest.daily'))) return 'skipped';
   const deliver = digestTier === 'alone' && tier('notify.inapp') === 'alone';
-  const d = await buildDigest(db, config.tz, now);
+  const d = await buildDigest(db, config.tz, now, { ...(config.predict === undefined ? {} : { predict: config.predict }) });
   const ref = `digest:${d.day}`;
   await closeStaleDigests(db, ref, now);
   // The day's claim and the intent, together: a second run that day finds the claim taken.

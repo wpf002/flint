@@ -37,8 +37,11 @@ export function chancePhrase(p: number, by: Date | undefined, tz: string): strin
 
 /** A plain number: thousands separated, at most two decimals, no trailing zeros. */
 const plain = (n: number): string => n.toLocaleString('en-US', { maximumFractionDigits: 2 });
-/** Dollars: always to the cent. */
-const dollars = (n: number): string => `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+/** Dollars: always to the cent. A negative amount carries its sign before the dollar sign: "-$5.00", never "$-5.00" (and never "-$0.00"). */
+const dollars = (n: number): string => {
+  const cents = Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `${n < 0 && cents !== '0.00' ? '-' : ''}$${cents}`;
+};
 
 /** One value in its unit's words: "$1.20", "4", "12 minutes", "1 minute", "3.5 hours". */
 export function unitValue(value: number, unit: ForecastUnit): string {
@@ -117,7 +120,8 @@ export const PANEL = {
   better: 'Flint did better than always guessing the usual rate.',
   noBetter: 'Flint did no better than guessing the usual rate.',
   outsideClaim: 'Flint made this prediction in a chat.',
-  values: { noTrend: 'No Trend', steady: 'Steady', waiting: 'Waiting', short: 'Not Enough History', noData: 'No Data', tonight: 'Tonight', failed: 'Failed', off: 'Off' },
+  steady: 'This number hasn’t changed lately.',
+  values: { noTrend: 'No Trend', early: 'Too Early', steady: 'Steady', waiting: 'Waiting', short: 'Not Enough History', noData: 'No Data', tonight: 'Tonight', failed: 'Failed', off: 'Off' },
 } as const;
 
 /** "About 4", "About $1.20", "About 12 Minutes". */
@@ -135,9 +139,22 @@ export function noTrendSays(r: Omit<RangeWords, 'point'>): string {
   return `There’s ${noTrendPhrase(r)}.`;
 }
 
-/** The last 28 values are all the same. */
-export function steadySays(step: StepName): string {
-  return `This number hasn’t changed in ${steps(28, step)}.`;
+/**
+ * Too early to tell: the history is too short to believe any forecast over a plain guess (under 56 days, or 26
+ * weeks). Said as that, never as "no reliable trend": nothing has been found wanting yet. Only the plain guess's range.
+ */
+export function earlySays(r: Omit<RangeWords, 'point'>): string {
+  return `It’s too early to tell a trend, and a plain guess gives ${leveled(r.level)} of ${unitSpan(r.lower, r.upper, r.unit)}.`;
+}
+
+/**
+ * The number has not changed. `unchanged`: how many of its latest steps are the same, as counted (at most the 28 a
+ * steady number is judged over). It never claims more history than there is: 24 equal days are "24 days". Not
+ * counted, it says so without a number.
+ */
+export function steadySays(step: StepName, unchanged?: number): string {
+  if (unchanged === undefined || !Number.isInteger(unchanged) || unchanged < 2) return PANEL.steady;
+  return `This number hasn’t changed in ${steps(Math.min(28, unchanged), step)}.`;
 }
 
 /** The number for the step just ended is not in: Flint never forecasts from a made-up one. */
@@ -180,6 +197,15 @@ export function recordSays(held: number, of: number): string {
   return `${held} of its last ${of} ranges held.`;
 }
 
+/**
+ * When a question's prediction was due: "It was due Oct 5 at 3:00 PM." His answer is recorded as of that moment, so
+ * the question says it.
+ */
+export function dueSays(at: Date, tz: string, now: Date): string {
+  const clock = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).format(at);
+  return `It was due ${dayWords(at, tz, now)} at ${clock}.`;
+}
+
 /** Under a question for Will: what Flint said, and when. "Flint said likely, around 70%, on Oct 3." */
 export function saidSays(p: number, on: string): string {
   const x = chanceParts(p, undefined, 'UTC');
@@ -196,9 +222,12 @@ export function templatedClaim(kind: 'healthy' | 'deploy' | 'closed', label: str
   return kind === 'healthy' ? `${label} reports healthy.` : kind === 'deploy' ? `The next deploy of ${label} succeeds.` : `${label} is closed.`;
 }
 
-/** A templated claim about one of Flint's own numbers: "Deploys is above 4." */
+/**
+ * A templated claim about one of Flint's own numbers: "Deploys ran above 4." "Ran" needs no agreement with the
+ * name (Deploys, Flint Commits, Service Downtime all read right), and is the word the forecast's own chance uses.
+ */
 export function thresholdClaim(name: string, op: 'above' | 'below', value: number, unit: ForecastUnit): string {
-  return `${name} is ${op} ${unitValue(value, unit)}.`;
+  return `${name} ran ${op} ${unitValue(value, unit)}.`;
 }
 
 /** "41 Scored". */

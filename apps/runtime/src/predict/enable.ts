@@ -28,7 +28,7 @@ import { FORECAST_REASONS, ForecastEnableArgs, PREDICT_SAYS, digestOf, isForecas
 import type { z } from 'zod';
 import type { Db, Tx } from '../db.js';
 import { appendAudit } from '../governance/audit.js';
-import { Refused, claimIn, completeIn, contextOf, createProposal, rejectProposal, type CreateProposal } from '../governance/proposals.js';
+import { Refused, claimIn, completeIn, contextOf, createProposal, rejectPendingIn, type CreateProposal } from '../governance/proposals.js';
 import { dbRefused, failureOf, failureReport, schemaSkew, sqlState } from '../dbcodes.js';
 import { GoalFailure, sanitize } from '../goals/errors.js';
 import { failApproved } from '../goals/apply.js';
@@ -177,21 +177,29 @@ export async function applyEnable(tx: Tx, raw: unknown, ctx: ApplyContext): Prom
  * From the console the newer card wins: his other Turn On cards still waiting
  * (from the console or the command line) are rejected, unsigned, with a fixed
  * sentence. A card left waiting after a cancelled prompt can then never be
- * approved later in place of the one that replaced it.
+ * approved later in place of the one that replaced it. Only cards filed
+ * before this one are rejected, and in the transaction that files it: Turn On
+ * filings run one at a time (createProposal's `serial`), so each sees every
+ * card filed before it and none filed after, and filings made at the same
+ * moment can never reject each other. The last one filed is the one left.
  */
 export async function proposeForecasts(db: Db, keys: readonly string[] = FORECAST_SERIES_KEYS, now = new Date(), from: 'cli' | 'console' = 'cli') {
   const series = [...new Set(keys)].sort();
   const actor = `will:${from}`;
-  const filed = await createProposal(db, {
-    kind: 'tool_call', origin: from, action: 'forecast.series.enable', args: { series, reason: [] },
+  const action = 'forecast.series.enable';
+  return createProposal(db, {
+    kind: 'tool_call', origin: from, action, args: { series, reason: [] },
     argsProvenance: { series: { source: 'will', tainted: false }, reason: { source: 'will', tainted: false } },
     tainted: false, sensitivity: 'ops', destructive: false, consequential: true, ttlMinutes: 7 * 24 * 60,
-  }, actor, now);
-  if (from === 'console' && !filed.deduped) {
-    const older = await db.proposal.findMany({ where: { status: 'pending', action: 'forecast.series.enable', origin: { in: ['console', 'cli'] }, id: { not: filed.id } }, select: { id: true } });
-    for (const o of older) await rejectProposal(db, o.id, { error: SAY.replaced }, undefined, actor).catch(() => {});
-  }
-  return filed;
+  }, actor, now, undefined, undefined, {
+    serial: action,
+    ...(from === 'console' ? {
+      filed: async (tx: Tx, id: string) => {
+        const older = await tx.proposal.findMany({ where: { status: 'pending', action, origin: { in: ['console', 'cli'] }, id: { not: id } }, select: { id: true, action: true, argsDigest: true, tainted: true, origin: true } });
+        for (const o of older) await rejectPendingIn(tx, o, SAY.replaced, actor);
+      },
+    } : {}),
+  });
 }
 
 /** Who the panel's writes are by. */

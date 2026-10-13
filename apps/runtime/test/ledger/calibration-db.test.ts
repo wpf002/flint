@@ -255,6 +255,12 @@ describe.skipIf(NO_DB)('calibration snapshots on flint_test', () => {
     try {
       const { start, end } = window();
       await snapshotCalibration(k.db, start, end, TZ);
+      // Two scored groups in the areas whose series are what Flint spends and what is on the calendar, each with a range loss.
+      const sensitive = { windowStart: start, windowEnd: end, type: 'trend', kind: 'interval', nOpen: 0, nExpired: 0, nConditionUnmet: 0, nVoid: 0, nLateSuperseded: 0, unresolvedRate: 0, reliability: [] };
+      await k.db.calibrationSnapshot.createMany({ data: [
+        { ...sensitive, domain: 'spend', method: 'statistical', n: 40, intervalCoverage: 0.8, pinball: 0.4242 },
+        { ...sensitive, domain: 'calendar', method: 'base_rate', n: 35, intervalCoverage: 0.75, pinball: 0.3131 },
+      ] });
       const stored = await rows();
       // As stored, a group with nothing scored has 0 for its scores (the database wants a number there).
       const emptyRange = row(stored, 'calendar', 'interval', 'statistical');
@@ -270,6 +276,18 @@ describe.skipIf(NO_DB)('calibration snapshots on flint_test', () => {
       // A scored group is given as it is stored.
       const services = given.find((x) => x.domain === 'services' && x.method === 'rule' && x.kind === 'binary')!;
       expect([services.n, services.brier, services.baseRate]).toEqual([120, row(stored, 'services').brier, row(stored, 'services').baseRate]);
+      // Chat may run on a model off this Mac: for the spend and calendar areas it is not given the range loss, which
+      // is worked out from those series' own values. It keeps their counts and the share of ranges that held.
+      expect([row(stored, 'spend', 'interval', 'statistical').pinball, row(stored, 'calendar', 'interval', 'base_rate').pinball]).toEqual([0.4242, 0.3131]);
+      const area = (domain: string, method: string) => given.find((x) => x.domain === domain && x.method === method && x.kind === 'interval')!;
+      expect([area('spend', 'statistical').pinball, area('calendar', 'base_rate').pinball]).toEqual([null, null]);
+      expect([area('spend', 'statistical').n, area('spend', 'statistical').intervalCoverage, area('calendar', 'base_rate').n, area('calendar', 'base_rate').intervalCoverage]).toEqual([40, 0.8, 35, 0.75]);
+      for (const g of given.filter((x) => x.domain === 'spend' || x.domain === 'calendar')) expect(g.pinball, `${g.domain}/${g.method}/${g.kind}`).toBeNull();
+      expect(JSON.stringify(given)).not.toMatch(/0\.4242|0\.3131/);
+      // Another area's is given as it is stored.
+      const deploys = area('deploys', 'statistical');
+      expect(deploys.pinball).toBe(row(stored, 'deploys', 'interval', 'statistical').pinball);
+      expect(deploys.pinball).not.toBeNull();
       // Aggregates only: counts and scores by area. No prediction's words, id or series, and no number a series took.
       expect(JSON.stringify(given)).not.toMatch(/synthetic|pd[a-z0-9]{8}|seriesKey|claim|31337/);
       expect((await app.inject({ method: 'GET', url: '/v1/ledger/calibration' })).statusCode).toBe(401);

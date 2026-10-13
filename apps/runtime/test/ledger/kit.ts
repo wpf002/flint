@@ -112,10 +112,13 @@ export async function ledgerKit(urls: TestUrls) {
 
   const backdate = (pid: string, t: { madeAgo: number; dueAgo: number }) => backdatePrediction(urls, pid, t);
 
-  /** Flint's question to Will about a prediction of his, asked `agoMs` ago (the database stamps a question's time itself). */
-  const asked = (pid: string, agoMs: number) =>
+  /**
+   * Flint's question to Will about a prediction of his, asked `agoMs` ago (the database stamps a question's time
+   * itself). Announced when it was asked (not in shadow) unless said otherwise: one asked in shadow was put to nobody.
+   */
+  const asked = (pid: string, agoMs: number, o: { shadow?: boolean } = {}) =>
     past('PredictionQuestion', ['PredictionQuestion_guard'], (q) =>
-      q(`INSERT INTO "PredictionQuestion" ("predictionId", "askedAt") VALUES ($1, $2)`, [pid, new Date(Date.now() - agoMs)]));
+      q(`INSERT INTO "PredictionQuestion" ("predictionId", "askedAt", shadow) VALUES ($1, $2, $3)`, [pid, new Date(Date.now() - agoMs), o.shadow ?? false]));
 
   /** A prediction as the sweep reads it. */
   const due = async (pid: string): Promise<DuePrediction> =>

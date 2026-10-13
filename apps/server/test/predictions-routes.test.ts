@@ -36,8 +36,8 @@ const fact = { label: 'Today', value: `About ${VALUE}`, says: 'The 80% range is 
 const seriesView = (over: Record<string, unknown> = {}) => ({
   number: row(), forecast: [fact], chance: { label: 'Above $3.00', value: 'Likely · 70%', says: 'It’s likely, around 70%, that today runs above $3.00.' }, record: '22 of its last 27 ranges held.', waiting: false, offHere: false, ...over,
 });
-const question = (over: Record<string, unknown> = {}) => ({ id: PID, title: `${CANARY} lands by Friday`, says: 'Flint said likely, around 70%, on Oct 3.', answer: null, ...over });
-const accuracy = { scored: true, areas: [{ name: 'Spend', value: '41 Scored', lines: ['When Flint said about 70%, it happened 64% of the time, over 41 predictions.'] }], unsettled: ['3 predictions ran out before they could be checked.'] };
+const question = (over: Record<string, unknown> = {}) => ({ id: PID, title: `${CANARY} lands by Friday`, says: 'Flint said likely, around 70%, on Oct 3. It was due Oct 5 at 3:00 PM.', answer: null, answerable: true, ...over });
+const accuracy = { scored: true, scoring: 'on', areas: [{ name: 'Spend', value: '41 Scored', lines: ['When Flint said about 70%, it happened 64% of the time, over 41 predictions.'] }], unsettled: ['3 predictions ran out before they could be checked.'] };
 
 let asked: Array<{ method: string; url: string; auth: string | undefined; body: string }>;
 let answer: (req: { method: string; url: string; body: string }) => { status: number; body: unknown };
@@ -101,13 +101,25 @@ beforeEach(() => {
   deps = { runtime: () => (up ? { url: rtUrl, token: TOKEN } : { url: downUrl, token: TOKEN }), errorRef: (_t, err) => (given.push(err), logged.push(String(err)), 'ref123'), timeoutMs: 2000 };
 });
 
+/** How many of the proxy's own answers these helpers have seen, and checked for `no-store`. */
+let answersSeen = 0;
+/** Every answer the proxy gives, whatever its status, says it is not to be kept (the harness's own 404 is not the proxy's). */
+const unkept = (r: Response, body: Record<string, unknown>) => {
+  if (r.status === 404 && body.error === 'not found') return;
+  expect(r.headers.get('cache-control'), `${r.status} ${r.url}`).toBe('no-store');
+  answersSeen += 1;
+};
 const get = async (p: string) => {
   const r = await fetch(`${base}${p}`);
-  return { status: r.status, body: (await r.json()) as Record<string, unknown> };
+  const body = (await r.json()) as Record<string, unknown>;
+  unkept(r, body);
+  return { status: r.status, body };
 };
 const post = async (p: string, body?: unknown) => {
   const r = await fetch(`${base}${p}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: typeof body === 'string' ? body : JSON.stringify(body ?? {}) });
-  return { status: r.status, body: (await r.json()) as Record<string, unknown> };
+  const answer = (await r.json()) as Record<string, unknown>;
+  unkept(r, answer);
+  return { status: r.status, body: answer };
 };
 
 describe('reads', () => {
@@ -135,8 +147,9 @@ describe('reads', () => {
     answer = () => ({ status: 200, body: { series: seriesView() } });
     expect((await get(`/predictions/series/${KEY}`)).body).toEqual({ series: seriesView() });
     expect(asked.at(-1)!.url).toBe(`/v1/predictions/series/${KEY}`);
-    answer = () => ({ status: 200, body: { waiting: [question()], answered: [question({ answer: 'yes', says: 'You said yes on Oct 12.' })] } });
-    expect((await get('/predictions/questions')).body).toEqual({ waiting: [question()], answered: [question({ answer: 'yes', says: 'You said yes on Oct 12.' })] });
+    const tab = { waiting: [question(), question({ id: 'pdunsaid1', title: 'Flint made this prediction in a chat.', says: 'Flint can’t show what this one was about, so it can only be skipped.', answerable: false })], answered: [question({ answer: 'yes', says: 'You said yes on Oct 12.' })], offHere: false };
+    answer = () => ({ status: 200, body: tab });
+    expect((await get('/predictions/questions')).body).toEqual(tab);
     expect(asked.at(-1)!.url).toBe('/v1/predictions/questions');
     answer = () => ({ status: 200, body: accuracy });
     expect((await get('/predictions/accuracy')).body).toEqual(accuracy);
@@ -178,11 +191,20 @@ describe('reads', () => {
       answer = () => ({ status: 200, body: { series: bad } });
       expect((await get(`/predictions/series/${KEY}`)).status).toBe(502);
     }
-    for (const bad of [{ waiting: [question({ answer: 'maybe' })], answered: [] }, { waiting: [question({ probability: 0.7 })], answered: [] }, { waiting: [question({ resolutionCriteria: CANARY })], answered: [] }, { waiting: [question()] }]) {
+    const { answerable: _unsaid, ...silent } = question();
+    for (const bad of [
+      { waiting: [question({ answer: 'maybe' })], answered: [], offHere: false }, { waiting: [question({ probability: 0.7 })], answered: [], offHere: false },
+      { waiting: [question({ resolutionCriteria: CANARY })], answered: [], offHere: false }, { waiting: [question()], offHere: false },
+      // Whether a question can be answered Yes or No, and whether anything can be answered here, is always said: an answer that leaves either out is not passed on.
+      { waiting: [silent], answered: [], offHere: false }, { waiting: [question()], answered: [] }, { waiting: [question({ title: 'x'.repeat(301) })], answered: [], offHere: false },
+    ]) {
       answer = () => ({ status: 200, body: bad });
       expect((await get('/predictions/questions')).status).toBe(502);
     }
     answer = () => ({ status: 200, body: { ...accuracy, areas: [{ ...accuracy.areas[0], brier: 0.21 }] } });
+    expect((await get('/predictions/accuracy')).status).toBe(502);
+    const { scoring: _s, ...unsaid } = accuracy;
+    answer = () => ({ status: 200, body: unsaid });
     expect((await get('/predictions/accuracy')).status).toBe(502);
     // Each was logged by where it broke, never by what it held.
     const log = logged.join('\n');
@@ -280,7 +302,7 @@ describe('writes', () => {
   });
 
   it('a refusal passes through only as a code in the closed set, with its fixed sentence; anything else is the server\'s own words', async () => {
-    for (const [status, code] of [[409, 'answered'], [404, 'noQuestion'], [409, 'noQuestion'], [409, 'busy']] as const) {
+    for (const [status, code] of [[409, 'answered'], [404, 'noQuestion'], [409, 'noQuestion'], [409, 'busy'], [409, 'unanswerable'], [409, 'offHere']] as const) {
       // Even a known code cannot carry the runtime's own sentence: the server writes it.
       answer = () => ({ status, body: { error: CANARY, code } });
       expect(await post(`/predictions/questions/${PID}/answer`, { answer: 'yes' })).toEqual({ status, body: { error: PREDICT_SAYS[code], code } });
@@ -336,6 +358,37 @@ describe('writes', () => {
     expect(asked).toHaveLength(2);
     up = false;
     expect(await post(`/predictions/series/${KEY}/turn-off`)).toEqual({ status: 503, body: { error: PREDICTIONS_SAY.downWrite } });
+  });
+});
+
+describe('nothing is kept', () => {
+  it('every answer of the proxy, whatever its status, says no-store: a forecast\'s numbers and a question\'s words never land in a disk cache', async () => {
+    const before = answersSeen;
+    answer = () => ({ status: 200, body: page() });
+    const seen: number[] = [(await get('/predictions')).status];
+    answer = () => ({ status: 200, body: { series: seriesView() } });
+    seen.push((await get(`/predictions/series/${KEY}`)).status);
+    seen.push((await get('/predictions?x=1')).status);
+    answer = () => ({ status: 200, body: { nonsense: true } });
+    seen.push((await get('/predictions/questions')).status);
+    answer = () => ({ status: 409, body: { error: 'x', code: 'answered' } });
+    seen.push((await post(`/predictions/questions/${PID}/answer`, { answer: 'yes' })).status);
+    answer = () => ({ status: 401, body: {} });
+    seen.push((await get('/predictions/accuracy')).status);
+    seen.push((await post('/predictions/turn-on', `{"pad":"${'x'.repeat(17_000)}"}`)).status);
+    up = false;
+    seen.push((await get('/predictions')).status);
+    seen.push((await post(`/predictions/series/${KEY}/turn-off`)).status);
+    deps = { ...deps, runtime: () => undefined };
+    seen.push((await get('/predictions/waiting')).status);
+    expect(seen).toEqual([200, 200, 400, 502, 409, 502, 413, 503, 503, 501]);
+    // Each of those ten was checked for the header by the helper that made it.
+    expect(answersSeen - before).toBe(10);
+    // It is set in the one place every answer leaves from.
+    const src = readFileSync(join(__dirname, '..', 'src', 'predictions-routes.ts'), 'utf8');
+    expect(src).toContain("res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });");
+    expect(src.match(/res\.writeHead\(/g)).toHaveLength(1);
+    expect(src.match(/res\.end\(/g)).toHaveLength(1);
   });
 });
 

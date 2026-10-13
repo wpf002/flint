@@ -6,10 +6,11 @@ import { describe, it, expect } from 'vitest';
 import { noteProblems } from '@flint/policy';
 import { PanelSentence, PanelWords, noteProblems as problems } from '@flint/policy';
 import {
-  PANEL, aboutValue, aboveLabel, answeredSays, calledSays, chanceParts, chancePhrase, chanceSays, chanceValue, dayWords, errorScoreSays, expectSays, forecastPhrase, gapSays, noTrendPhrase, noTrendSays,
+  PANEL, aboutValue, aboveLabel, answeredSays, calledSays, chanceParts, chancePhrase, chanceSays, chanceValue, dayWords, dueSays, earlySays, errorScoreSays, expectSays, forecastPhrase, gapSays, noTrendPhrase, noTrendSays,
   rangePhrase, rangesHeldSays, recordSays, saidSays, scoredValue, shortSays, steadySays, stepLabel, stepRangeSays, templatedClaim, thresholdClaim, tooFewSays, unitSpan, unitValue, unsettledSays, waitingSays,
 } from '../../src/predict/phrasing';
 import { hasLoosePrediction, phrase, phraseBefore } from '../../src/templates/escalations';
+import { FORECAST_SERIES } from '../../src/predict/series';
 import type { ForecastUnit } from '../../src/predict/forecast';
 
 const UNITS: ForecastUnit[] = ['count', 'usd', 'minutes', 'hours'];
@@ -145,23 +146,51 @@ describe('the Predictions panel\'s words (P4 part 4)', () => {
     words(PANEL.values.noTrend);
   });
 
+  it('too early to tell is said as that, never as "no reliable trend": only a plain guess\'s range, and no middle', () => {
+    expect(earlySays({ lower: 0, upper: 3, level: 0.8, unit: 'count' })).toBe('It’s too early to tell a trend, and a plain guess gives an 80% range of 0 to 3.');
+    expect(earlySays({ lower: 0.8, upper: 1.75, level: 0.8, unit: 'usd' })).toBe('It’s too early to tell a trend, and a plain guess gives an 80% range of $0.80 to $1.75.');
+    for (const unit of UNITS) {
+      const said = earlySays({ lower: 0, upper: 3, level: 0.8, unit });
+      sentence(said);
+      expect(said).not.toMatch(/about|expects|no reliable trend/);
+    }
+    words(PANEL.values.early);
+  });
+
+  it('money below zero carries its sign before the dollar sign, and nothing is ever minus zero', () => {
+    expect(unitValue(-5, 'usd')).toBe('-$5.00');
+    expect(unitValue(-1234.5, 'usd')).toBe('-$1,234.50');
+    expect(unitValue(-0.001, 'usd')).toBe('$0.00');
+    expect(unitValue(0, 'usd')).toBe('$0.00');
+    expect(unitSpan(-5, 2.5, 'usd')).toBe('-$5.00 to $2.50');
+    expect(thresholdClaim('Anthropic Spend', 'above', -5, 'usd')).toBe('Anthropic Spend ran above -$5.00.');
+    for (const s of [unitValue(-5, 'usd'), unitSpan(-5, 2.5, 'usd')]) expect(s).not.toContain('$-');
+  });
+
   it('a state with no number says so in a sentence, and carries no number of the series', () => {
     expect(waitingSays('day')).toBe('Yesterday’s number isn’t in yet, so there’s no forecast for today.');
     expect(waitingSays('week')).toBe('Last week’s number isn’t in yet, so there’s no forecast for this week.');
     expect(shortSays('day', 24, 9)).toBe('Flint needs 24 days of history. It has 9.');
     expect(shortSays('week', 19, 1)).toBe('Flint needs 19 weeks of history. It has 1.');
-    expect(steadySays('day')).toBe('This number hasn’t changed in 28 days.');
-    expect(steadySays('week')).toBe('This number hasn’t changed in 28 weeks.');
+    // A steady number says how many of its latest steps are the same, as counted, and never more than there are: 24
+    // equal days are 24 days, not the 28 a longer history is judged over.
+    expect(steadySays('day', 28)).toBe('This number hasn’t changed in 28 days.');
+    expect(steadySays('day', 24)).toBe('This number hasn’t changed in 24 days.');
+    expect(steadySays('week', 19)).toBe('This number hasn’t changed in 19 weeks.');
+    expect(steadySays('week', 28)).toBe('This number hasn’t changed in 28 weeks.');
+    // More than the 28 it is judged over is still said as 28; not counted, it says so with no number at all.
+    expect(steadySays('day', 400)).toBe('This number hasn’t changed in 28 days.');
+    for (const none of [undefined, 0, 1, 2.5, Number.NaN]) expect(steadySays('day', none), String(none)).toBe('This number hasn’t changed lately.');
     expect([PANEL.noData, PANEL.off, PANEL.failed, PANEL.tonight]).toEqual([
       'This number has no data yet.', 'Forecasts for this number are off.', 'Flint couldn’t forecast this number last night.', 'Flint makes its next forecast tonight.',
     ]);
-    for (const s of [waitingSays('day'), waitingSays('week'), steadySays('day'), steadySays('week'), PANEL.noData, PANEL.off, PANEL.failed, PANEL.tonight]) {
+    for (const s of [waitingSays('day'), waitingSays('week'), steadySays('day', 24), steadySays('week', 28), steadySays('day'), PANEL.noData, PANEL.off, PANEL.failed, PANEL.tonight]) {
       sentence(s);
-      // Nothing but the fixed 28: no value, no range, no percent.
-      expect(s.replace('28', ''), s).not.toMatch(/\d|%|\$/);
+      // Nothing but its own count of steps: no value, no range, no percent.
+      expect(s.replace(/in \d+ (days|weeks)/, ''), s).not.toMatch(/\d|%|\$/);
     }
     sentence(shortSays('day', 24, 0));
-    expect(Object.values(PANEL.values)).toEqual(['No Trend', 'Steady', 'Waiting', 'Not Enough History', 'No Data', 'Tonight', 'Failed', 'Off']);
+    expect(Object.values(PANEL.values)).toEqual(['No Trend', 'Too Early', 'Steady', 'Waiting', 'Not Enough History', 'No Data', 'Tonight', 'Failed', 'Off']);
     for (const v of Object.values(PANEL.values)) words(v);
   });
 
@@ -201,14 +230,31 @@ describe('the Predictions panel\'s words (P4 part 4)', () => {
     expect(recordSays(0, 0)).toBe('Flint has no results for this number yet.');
     expect([recordSays(1, 1), recordSays(0, 1)]).toEqual(['Its last range held.', 'Its last range didn’t hold.']);
     expect(saidSays(0.7, 'Oct 3')).toBe('Flint said likely, around 70%, on Oct 3.');
+    // When it was due, in Flint's own zone: his answer is recorded as of that moment, so the question says it.
+    const asOf = new Date('2026-10-12T12:00:00Z');
+    expect(dueSays(new Date('2026-10-05T20:00:00Z'), TZ, asOf)).toBe('It was due Oct 5 at 3:00 PM.');
+    expect(dueSays(new Date('2026-10-06T03:30:00Z'), TZ, asOf)).toBe('It was due Oct 5 at 10:30 PM.');
+    expect(dueSays(new Date('2025-12-31T18:05:00Z'), TZ, asOf)).toBe('It was due Dec 31, 2025 at 12:05 PM.');
+    expect(`${saidSays(0.7, 'Oct 3')} ${dueSays(new Date('2026-10-05T20:00:00Z'), TZ, asOf)}`).toBe('Flint said likely, around 70%, on Oct 3. It was due Oct 5 at 3:00 PM.');
+    sentence(`${saidSays(0.7, 'Oct 3')} ${dueSays(new Date('2026-10-05T20:00:00Z'), TZ, asOf)}`);
     expect(answeredSays('yes', 'Oct 12')).toBe('You said yes on Oct 12.');
     expect(answeredSays('no', 'Oct 12')).toBe('You said no on Oct 12.');
     expect(answeredSays('skip', 'Oct 12')).toBe('You skipped it on Oct 12.');
     expect(templatedClaim('healthy', 'Flint Server')).toBe('Flint Server reports healthy.');
     expect(templatedClaim('deploy', 'wpf002/flint CI')).toBe('The next deploy of wpf002/flint CI succeeds.');
     expect(templatedClaim('closed', 'wpf002/flint #57')).toBe('wpf002/flint #57 is closed.');
-    expect(thresholdClaim('Deploys', 'above', 4, 'count')).toBe('Deploys is above 4.');
-    expect(thresholdClaim('Anthropic Spend', 'below', 1.2, 'usd')).toBe('Anthropic Spend is below $1.20.');
+    // "Ran" needs no agreement with the name: every one of Flint's twelve numbers reads right.
+    expect(thresholdClaim('Deploys', 'above', 4, 'count')).toBe('Deploys ran above 4.');
+    expect(thresholdClaim('Anthropic Spend', 'below', 1.2, 'usd')).toBe('Anthropic Spend ran below $1.20.');
+    expect(FORECAST_SERIES.map((d) => thresholdClaim(d.name, 'above', 4, d.unit))).toEqual([
+      'Anthropic Spend ran above $4.00.', 'OpenAI Spend ran above $4.00.', 'Perplexity Spend ran above $4.00.', 'Tavily Spend ran above $4.00.', 'Deploys ran above 4.',
+      'Flint Commits ran above 4.', 'Nexus Commits ran above 4.', 'Trident Commits ran above 4.', 'Helm Commits ran above 4.',
+      'Service Downtime ran above 4 minutes.', 'Open Threads ran above 4.', 'Calendar Hours ran above 4 hours.',
+    ]);
+    for (const d of FORECAST_SERIES) {
+      sentence(thresholdClaim(d.name, 'below', 4, d.unit));
+      expect(thresholdClaim(d.name, 'above', 4, d.unit)).not.toMatch(/ is (above|below) /);
+    }
     for (const s of [recordSays(22, 27), recordSays(0, 0), recordSays(1, 1), recordSays(0, 1), saidSays(0.7, 'Oct 3'), saidSays(0.05, 'Dec 31, 2025'), answeredSays('yes', 'Oct 12'), answeredSays('skip', 'Oct 12'), PANEL.outsideClaim, PANEL.noRecord]) sentence(s);
   });
 

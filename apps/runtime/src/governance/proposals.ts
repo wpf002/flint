@@ -139,7 +139,18 @@ const auditInputs = (p: { id: string; action: string; argsDigest: string }, extr
 });
 
 /** Record a proposal. A FORBIDDEN action is refused (409) and the refusal audited. */
-export async function createProposal(db: Db, given: CreateProposal, actor: string, now = new Date(), via?: typeof CANDIDATES_INTAKE, inside?: Tx) {
+/**
+ * What a filer may ask of the transaction that files its card. `serial`: every filing that names the same key runs
+ * one at a time (a transaction lock), so the filer's `filed` step sees every card filed before it and none filed
+ * after. `filed`: runs once the new card's row and audit entry are written, in that transaction (not for a card that
+ * was already waiting).
+ */
+export interface FilingSteps {
+  serial?: string;
+  filed?: (tx: Tx, id: string) => Promise<void>;
+}
+
+export async function createProposal(db: Db, given: CreateProposal, actor: string, now = new Date(), via?: typeof CANDIDATES_INTAKE, inside?: Tx, steps: FilingSteps = {}) {
   let input = given;
   // `inside`: the candidates intake files its card in its own transaction (with its lock and the day's claim), on
   // its own connection. Everything below then reads and writes through it, and commits or rolls back with it.
@@ -206,6 +217,8 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
     // turn, a replayed spool, a timeout after the first one landed, Will asking
     // twice) is the same proposal: one card, one approval, one run. The lock
     // makes two concurrent filings of one call agree on which row that is.
+    // A filer that asked for it takes its own lock first (always in this order, so two filings never wait on each other).
+    if (steps.serial) await tx.$queryRaw`SELECT 1 FROM (SELECT pg_advisory_xact_lock(hashtext(${`filing:${steps.serial}`}))) AS l`;
     await tx.$queryRaw`SELECT 1 FROM (SELECT pg_advisory_xact_lock(hashtext(${`proposal:${input.action}:${argsDigest}`}))) AS l`;
     const same = await tx.proposal.findFirst({
       // A goal card from Will and the same one from a review are two cards: their reasons and their marks differ.
@@ -233,6 +246,7 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
       actor, context, kind: 'decision', action: input.action, tier: decision.tier, decision: 'queue', outcome: 'pending',
       inputs: auditInputs(row, { rule: decision.rule }), correlationId: row.id, tainted: input.tainted,
     }]);
+    await steps.filed?.(tx, row.id);
     return { id: row.id, argsDigest, expiresAt, tier: decision.tier, rule: decision.rule, reason: decision.reason, deduped: false };
   };
   return inside ? file(inside) : db.$transaction(file);
@@ -291,6 +305,20 @@ export async function approveProposal(db: Db, id: string, approvalId: string, rp
       inputs: auditInputs(p, { approvalId }), correlationId: id, tainted: p.tainted,
     }]);
   });
+}
+
+/**
+ * An unsigned rejection of one card that is still waiting, inside the caller's transaction: its status, the sentence
+ * that says why, and its audit entry. Returns false (and writes nothing) when the card is no longer waiting.
+ */
+export async function rejectPendingIn(tx: Tx, p: { id: string; action: string; argsDigest: string; tainted: boolean; origin: string }, error: string, actor: string): Promise<boolean> {
+  const n = await tx.proposal.updateMany({ where: { id: p.id, status: 'pending' }, data: { status: 'rejected', error: redact(error).slice(0, 2000) } });
+  if (!n.count) return false;
+  await appendAudit(tx, [{
+    actor, context: contextOf(p.origin), kind: 'rejection', action: p.action, decision: 'deny', outcome: 'denied',
+    inputs: auditInputs(p, { approvalId: null }), correlationId: p.id, tainted: p.tainted,
+  }]);
+  return true;
 }
 
 /** Reject: Will's signed rejection when there is one, or the runtime refusing on its own. */

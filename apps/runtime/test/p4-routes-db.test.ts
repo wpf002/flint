@@ -10,15 +10,20 @@
  *    A newer one replaces an older one still waiting. Filing turns nothing on.
  *    Signed, it turns on exactly the numbers it lists.
  *  - Each number says where it stands in a sentence made from its own run: a
- *    range, no reliable trend, steady, waiting, not enough history, no data,
- *    tonight, failed, off. A state with no number shows none.
+ *    range, no reliable trend, too early to tell, steady (with the count of
+ *    steps it really has), waiting, not enough history, no data, tonight,
+ *    failed, off. A state with no number shows none.
  *  - One number, open: every step of its forecast, its yes/no chance, and how
  *    its ranges have held.
  *  - Turning a number off needs no signature, is audited by its key, and is
  *    said to be off afterwards; a second time is refused in a sentence.
- *  - Will's answer to a question records the result as his, once, with the
- *    prediction's own resolve time; Skip records none. The database refuses a
- *    result recorded as his without his answer.
+ *  - A question says what Flint said, when, and when it was due. Will's answer
+ *    records the result as his, once, with the prediction's own resolve time;
+ *    Skip records none. The database refuses a result recorded as his without
+ *    his answer. A prediction Flint cannot say plainly is Skip only, and one
+ *    row that would break the page is replaced, never a failed page. A
+ *    prediction settled, run out or set aside meanwhile is refused in a
+ *    sentence. Switched off on this Mac, nothing is answered.
  *  - How Flint has done, from the night's scores: counts and shares in
  *    sentences, with "not enough results yet" below thirty.
  *  - No log line holds a number's value or a prediction's words.
@@ -32,12 +37,12 @@ import { CANARY, DAY, HOUR, MIN, TZ, dayStart, ledgerKit, type LedgerKit } from 
 import { enrollTestKey } from './sign';
 import { buildApp } from '../src/app';
 import type { RuntimeScope } from '../src/config';
-import { approveProposal } from '../src/governance/proposals';
+import { approveProposal, rejectProposal } from '../src/governance/proposals';
 import { runInternal } from '../src/governance/internal';
 import { sweep } from '../src/ledger/sweep';
 import { TURN_OFF_ACTION, proposeForecasts } from '../src/predict/enable';
 import { weekOf } from '../src/predict/metrics';
-import { PANEL, aboutValue, dayWords, expectSays, noTrendSays, stepLabel, stepRangeSays } from '../src/predict/phrasing';
+import { PANEL, aboutValue, dayWords, dueSays, earlySays, expectSays, noTrendSays, stepLabel, stepRangeSays } from '../src/predict/phrasing';
 import { ANSWER_ACTION, askQuestions } from '../src/predict/questions';
 import { runForecasts } from '../src/predict/run';
 import { FORECAST_SERIES } from '../src/predict/series';
@@ -146,10 +151,13 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     expect(rowOf(p, CALENDAR).about).toBe('This is how many hours of events are on the calendar each day.');
     // Switched off on this Mac: the page says that instead.
     expect((await page(offHere)).state).toBe('off_here');
-    expect(AccuracyView.parse((await call('GET', '/v1/predictions/accuracy')).body)).toEqual({ scored: false, areas: [], unsettled: [] });
+    // Nothing scores anything yet, and the page says which kind of "not yet" it is: never turned on, or switched off here.
+    expect(AccuracyView.parse((await call('GET', '/v1/predictions/accuracy')).body)).toEqual({ scored: false, scoring: 'not_started', areas: [], unsettled: [] });
+    expect(AccuracyView.parse((await call('GET', '/v1/predictions/accuracy', undefined, offHere)).body)).toEqual({ scored: false, scoring: 'off_here', areas: [], unsettled: [] });
     // What the console asks on load: two facts, whatever the Mac's switch says.
     for (const on of [app, offHere]) expect(PredictionsWaiting.parse((await call('GET', '/v1/predictions/waiting', undefined, on)).body)).toEqual({ questions: 0, announce: false });
-    expect(QuestionsPage.parse((await call('GET', '/v1/predictions/questions')).body)).toEqual({ waiting: [], answered: [] });
+    expect(QuestionsPage.parse((await call('GET', '/v1/predictions/questions')).body)).toEqual({ waiting: [], answered: [], offHere: false });
+    expect(QuestionsPage.parse((await call('GET', '/v1/predictions/questions', undefined, offHere)).body)).toEqual({ waiting: [], answered: [], offHere: true });
   });
 
   it('Turn On Predictions files the same card the command files, once; a newer one replaces it; filing turns nothing on', async () => {
@@ -217,6 +225,34 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     for (const n of here.numbers) expect(n).toMatchObject({ on: false, state: 'off' });
   });
 
+  it('Turn On cards filed at the same moment never reject each other: the last one filed is the one left, and only earlier ones are replaced', async () => {
+    const sets = [[NEXUS], [HELM], [NEXUS, HELM]];
+    const filed = await Promise.all(sets.map((series) => call('POST', '/v1/predictions/turn-on', { series })));
+    expect(filed.map((r) => r.status)).toEqual([200, 200, 200]);
+    const ids = filed.map((r) => r.body.id as string);
+    expect(new Set(ids).size).toBe(3);
+    const mine = (await cards()).filter((c) => ids.includes(c.id as string));
+    // Exactly one is still waiting; the other two were replaced by one filed after them, and say so.
+    expect(mine.map((c) => c.status).sort()).toEqual(['pending', 'rejected', 'rejected']);
+    for (const c of mine.filter((x) => x.status === 'rejected')) expect(c.error).toBe('A newer version of this card replaced it.');
+    const left = mine.find((c) => c.status === 'pending')!;
+    expect((await page()).waiting).toEqual([{ id: left.id, numbers: (left.args as { series: string[] }).series.length }]);
+    // Each rejection is in the audit trail, once, with the card's id and nothing of its numbers' values.
+    const rejections = (await k.owner(`SELECT "correlationId", actor, kind, outcome FROM "AuditEntry" WHERE kind = 'rejection' AND "correlationId" = ANY($1) ORDER BY seq`, [ids])).rows;
+    expect(rejections.map((r) => [r.actor, r.kind, r.outcome])).toEqual([['will:console', 'rejection', 'denied'], ['will:console', 'rejection', 'denied']]);
+    expect(rejections.map((r) => r.correlationId).sort()).toEqual(mine.filter((c) => c.status === 'rejected').map((c) => c.id as string).sort());
+    // One filed later replaces the one left (or, asked for the same numbers, is that very card).
+    const next = await call('POST', '/v1/predictions/turn-on', { series: [NEXUS] });
+    expect(next.status).toBe(200);
+    const now = await cards();
+    expect(now.find((c) => c.id === left.id)!.status).toBe((left.args as { series: string[] }).series.join() === NEXUS ? 'pending' : 'rejected');
+    expect(now.filter((c) => c.status === 'pending')).toHaveLength(1);
+    // Nothing is left waiting for the tests below.
+    expect(now.find((c) => c.status === 'pending')!.id).toBe(next.body.id);
+    await rejectProposal(k.db, next.body.id as string, { error: 'a test put it away' }, undefined, 'test');
+    expect((await page()).waiting).toEqual([]);
+  });
+
   it('each number says where it stands, in a sentence made from its own run; a state with no number shows none', async () => {
     // A rising line, 60 days of it: a forecast that beats a plain guess.
     await days(DEPLOYS, line(60));
@@ -224,8 +260,8 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     await days(CALENDAR, Array.from({ length: 56 }, (_, i) => week[i % 7]!));
     // Thirty days of dollars: too short for a model to be believed.
     await days(ANTHROPIC, dollars);
-    // A number that has not changed in a month.
-    await days(THREADS, Array.from({ length: 30 }, () => 7));
+    // A number that has not changed in the 24 days there are of it.
+    await days(THREADS, Array.from({ length: 24 }, () => 7));
     // Ten days: not enough history.
     await days(DOWNTIME, line(10));
     // Thirty days, but yesterday's number is not in.
@@ -242,12 +278,12 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     expect(p.state).toBe('on');
     for (const n of p.numbers) plain(n);
     expect(p.numbers.map((n) => [n.key, n.state, n.value])).toEqual([
-      [ANTHROPIC, 'no_trend', 'No Trend'],
+      [ANTHROPIC, 'early', 'Too Early'],
       [OPENAI, 'waiting', 'Waiting'],
       [PERPLEXITY, 'tonight', 'Tonight'],
       [TAVILY, 'no_data', 'No Data'],
       [DEPLOYS, 'range', 'About 130'],
-      [FLINT, 'no_trend', 'No Trend'],
+      [FLINT, 'early', 'Too Early'],
       [NEXUS, 'off', 'Off'],
       [TRIDENT, 'failed', 'Failed'],
       [HELM, 'off', 'Off'],
@@ -261,22 +297,28 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     expect(d.points[0]!.mean).toBe(130);
     expect(rowOf(p, DEPLOYS).says).toBe(expectSays({ point: 130, lower: d.points[0]!.lo, upper: d.points[0]!.hi, level: 0.8, unit: 'count' }));
     expect(rowOf(p, DEPLOYS).says).toMatch(/^Flint expects about 130, with an 80% range of \d+ to \d+\.$/);
-    // No reliable trend: a plain guess's range in dollars or hours, and no middle.
+    // Too early to tell (thirty days, twenty weeks: too short to believe a forecast over a plain guess) is said as
+    // that, never as "no reliable trend": a plain guess's range, and no middle.
     const a = await firstStep(ANTHROPIC);
-    expect(a.beatsNaive).not.toBe(true);
-    expect(rowOf(p, ANTHROPIC).says).toBe(noTrendSays({ lower: a.points[0]!.lo, upper: a.points[0]!.hi, level: 0.8, unit: 'usd' }));
-    expect(rowOf(p, ANTHROPIC).says).toMatch(/^There’s no reliable trend, and a plain guess gives an 80% range of \$\d+\.\d\d to \$\d+\.\d\d\.$/);
+    expect(a.beatsNaive).toBeNull();
+    expect(rowOf(p, ANTHROPIC).says).toBe(earlySays({ lower: a.points[0]!.lo, upper: a.points[0]!.hi, level: 0.8, unit: 'usd' }));
+    expect(rowOf(p, ANTHROPIC).says).toMatch(/^It’s too early to tell a trend, and a plain guess gives an 80% range of \$\d+\.\d\d to \$\d+\.\d\d\.$/);
+    expect(rowOf(p, FLINT).says).toMatch(/^It’s too early to tell a trend, and a plain guess gives an 80% range of \d+ to \d+\.$/);
+    // No reliable trend: with history enough to judge (56 days), the forecast did not beat a plain guess.
+    const h = (await k.owner(`SELECT "beatsNaive", points FROM "ForecastRun" WHERE "seriesKey" = $1 AND ok ORDER BY "createdAt" DESC LIMIT 1`, [CALENDAR])).rows[0] as { beatsNaive: boolean | null; points: Array<{ lo: number; hi: number }> };
+    expect(h.beatsNaive).toBe(false);
+    expect(rowOf(p, CALENDAR).says).toBe(noTrendSays({ lower: h.points[0]!.lo, upper: h.points[0]!.hi, level: 0.8, unit: 'hours' }));
     expect(rowOf(p, CALENDAR).says).toMatch(/^There’s no reliable trend, and a plain guess gives an 80% range of [\d.]+ to [\d.]+ hours\.$/);
-    expect(rowOf(p, FLINT).says).toMatch(/^There’s no reliable trend, and a plain guess gives an 80% range of \d+ to \d+\.$/);
     for (const seriesKey of [ANTHROPIC, CALENDAR, FLINT]) expect(rowOf(p, seriesKey).says).not.toMatch(/about|expects/);
     // The states with no number say why, and carry no value of the series.
     expect(rowOf(p, OPENAI).says).toBe('Yesterday’s number isn’t in yet, so there’s no forecast for today.');
     expect(rowOf(p, DOWNTIME).says).toBe('Flint needs 24 days of history. It has 10.');
-    expect(rowOf(p, THREADS).says).toBe('This number hasn’t changed in 28 days.');
+    // It has 24 days, all the same: it says 24, never the 28 a longer history is judged over.
+    expect(rowOf(p, THREADS).says).toBe('This number hasn’t changed in 24 days.');
     expect(rowOf(p, TAVILY).says).toBe('This number has no data yet.');
     expect(rowOf(p, PERPLEXITY).says).toBe('Flint makes its next forecast tonight.');
     expect(rowOf(p, TRIDENT).says).toBe('Flint couldn’t forecast this number last night.');
-    for (const seriesKey of [OPENAI, THREADS, TAVILY, PERPLEXITY, TRIDENT]) expect(rowOf(p, seriesKey).says.replace('28', ''), seriesKey).not.toMatch(/\d|\$|%/);
+    for (const seriesKey of [OPENAI, THREADS, TAVILY, PERPLEXITY, TRIDENT]) expect(rowOf(p, seriesKey).says.replace('24 days', ''), seriesKey).not.toMatch(/\d|\$|%/);
   });
 
   it('one number, open: every step of its forecast, its yes/no chance, and how its ranges have held', async () => {
@@ -309,8 +351,21 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
       expect(f.value).toBe('No Trend');
       expect(f.says).toMatch(/^A plain guess gives an 80% range of [\d.]+ to [\d.]+ hours\.$/);
     }
+    // Too early to tell: the same plain guess's range on each step, under its own value, and no middle either.
+    const spend = await series(ANTHROPIC);
+    expect(spend.forecast.length).toBeGreaterThan(0);
+    for (const f of spend.forecast) {
+      expect(f.value).toBe('Too Early');
+      expect(f.says).toMatch(/^A plain guess gives an 80% range of \$\d+\.\d\d to \$\d+\.\d\d\.$/);
+    }
     // A weekly number's first step is this week.
     expect((await series(FLINT)).forecast[0]!.label).toBe('This Week');
+    // Switched off on this Mac, one number says so and shows nothing of the forecast it holds: no step, no chance.
+    for (const seriesKey of [DEPLOYS, ANTHROPIC, CALENDAR]) {
+      const here = await series(seriesKey, offHere);
+      expect(here, seriesKey).toMatchObject({ offHere: true, forecast: [], chance: null, number: { on: false, state: 'off', value: 'Off', says: 'Forecasts for this number are off.' } });
+      expect(JSON.stringify(here), seriesKey).not.toMatch(/\$\d|About|range of/);
+    }
     // A state with no forecast has no steps and no chance.
     for (const seriesKey of [OPENAI, DOWNTIME, THREADS, TAVILY, PERPLEXITY, TRIDENT, NEXUS]) expect(await series(seriesKey), seriesKey).toMatchObject({ forecast: [], chance: null });
 
@@ -345,6 +400,17 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     const never = await call('POST', `/v1/predictions/series/${NEXUS}/turn-off`, {});
     expect([never.status, never.body]).toEqual([409, { error: 'Forecasts for this number are already off.', code: 'alreadyOff' }]);
     expect(await audits(TURN_OFF_ACTION)).toHaveLength(1);
+    // A number whose second opinion was on loses that with it: turning it on again starts from the card, for both.
+    const nexus = FORECAST_SERIES.find((x) => x.key === NEXUS)!;
+    await k.series({ key: nexus.key, unit: nexus.unit, freq: 'W', sensitivity: nexus.sensitivity, description: nexus.description });
+    await k.turnOn([NEXUS], [NEXUS]);
+    expect(await k.db.forecastSeries.findUniqueOrThrow({ where: { seriesKey: NEXUS } })).toMatchObject({ on: true, reason: true });
+    expect((await call('POST', `/v1/predictions/series/${NEXUS}/turn-off`, {})).status).toBe(200);
+    expect(await k.db.forecastSeries.findUniqueOrThrow({ where: { seriesKey: NEXUS } })).toMatchObject({ on: false, reason: false });
+    // Switched off on this Mac, turning a number off is still allowed (it only narrows what Flint does), and audited.
+    expect((await call('POST', `/v1/predictions/series/${CALENDAR}/turn-off`, {}, offHere)).status).toBe(200);
+    expect(await k.db.forecastSeries.findUniqueOrThrow({ where: { seriesKey: CALENDAR } })).toMatchObject({ on: false });
+    expect((await audits(TURN_OFF_ACTION)).map((e) => e.inputs)).toEqual([{ series: DEPLOYS }, { series: NEXUS }, { series: CALENDAR }]);
     // Turning it on again takes the card: nothing unsigned can.
     expect(await k.code(k.app(`UPDATE "ForecastSeries" SET "on" = true WHERE "seriesKey" = $1`, [DEPLOYS]))).toBe('42501');
     const back = await call('POST', '/v1/predictions/turn-on', { series: [DEPLOYS] });
@@ -353,107 +419,235 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     expect(rowOf(await page(), DEPLOYS)).toMatchObject({ on: true, state: 'range' });
   });
 
-  it('an answer records the result as Will\'s, once, as of the prediction\'s own resolve time; Skip records none', async () => {
-    const wills = (dueAgo: number, over: Record<string, unknown> = {}) =>
-      k.prediction({ method: 'model_reasoning', resolver: 'will', createdBy: 'client:server', domain: 'projects', probability: 0.7, ...over }, { madeAgo: dueAgo + 9 * DAY, dueAgo });
+  /** A prediction Flint made in a chat, which only Will resolves, due `dueAgo` ms ago. */
+  const wills = (dueAgo: number, over: Record<string, unknown> = {}) =>
+    k.prediction({ method: 'model_reasoning', resolver: 'will', createdBy: 'client:server', domain: 'projects', probability: 0.7, ...over }, { madeAgo: Math.max(dueAgo, 0) + 9 * DAY, dueAgo });
+  const made = (pid: string) => k.db.prediction.findUniqueOrThrow({ where: { id: pid }, select: { createdAt: true, resolveBy: true } });
+  const questions = async (on = app) => QuestionsPage.parse((await call('GET', '/v1/predictions/questions', undefined, on)).body);
+  const answer = (pid: string, a: string, on = app) => call('POST', `/v1/predictions/questions/${pid}/answer`, { answer: a }, on);
+  const stored = async (pid: string) => (await k.owner(`SELECT answer FROM "PredictionQuestion" WHERE "predictionId" = $1`, [pid])).rows[0]?.answer as string | null | undefined;
+  /** What a waiting question says under its title: what Flint said and when, and when it was due. */
+  const saysOf = async (pid: string, chance: string) => {
+    const m = await made(pid);
+    const now = new Date();
+    return `Flint said ${chance}, on ${dayWords(m.createdAt, TZ, now)}. ${dueSays(m.resolveBy, TZ, now)}`;
+  };
+  const UNSAID = { title: 'Flint made this prediction in a chat.', says: 'Flint can’t show what this one was about, so it can only be skipped.', answer: null, answerable: false };
+  const CANT = { error: 'Flint can’t show what this one was about, so it can only be skipped.', code: 'unanswerable' };
+  const GONE = { error: 'That question no longer exists.', code: 'noQuestion' };
+  /** The predictions of the first questions test, kept for the tests after it. */
+  let own: string, healthy: string, above: string, gone: string, closed: string;
+
+  it('a question says the prediction in plain words, what Flint said, when, and when it was due; one Flint cannot say plainly is Skip only, and can never be answered Yes or No', async () => {
     const service = await k.service(k.serviceKey(), { running: true, disabled: false }, new Date(Date.now() - 6 * HOUR));
     const serviceName = (await k.db.entity.findUniqueOrThrow({ where: { id: service } })).name;
-    const own = await wills(5 * HOUR, { claim: `${WORDS} lands by Friday` });
+    own = await wills(5 * HOUR, { claim: `${WORDS} lands by Friday` });
     // Made from outside text: a fixed template around an item's ref, or a number's key. Never free words.
-    const healthy = await wills(4 * HOUR, { tainted: true, probability: 0.4, claim: `service#${service.slice(-6)} reports healthy at the resolve time` });
-    const above = await wills(3 * HOUR, { tainted: true, probability: 0.2, claim: `${DEPLOYS} is above 4 at the resolve time` });
-    const gone = await wills(2 * HOUR, { tainted: true, claim: 'service#zzzzzz reports healthy at the resolve time' });
+    healthy = await wills(4 * HOUR, { tainted: true, probability: 0.4, claim: `service#${service.slice(-6)} reports healthy at the resolve time` });
+    above = await wills(3 * HOUR, { tainted: true, probability: 0.2, claim: `${DEPLOYS} is above 4 at the resolve time` });
+    gone = await wills(2 * HOUR, { tainted: true, claim: 'service#zzzzzz reports healthy at the resolve time' });
     // A template chat chose on its own (no outside text) is said the same way: a ref or a key never reaches the screen.
-    const closed = await wills(HOUR, { tainted: false, probability: 0.9, claim: `service#${service.slice(-6)} is closed by the resolve time` });
+    closed = await wills(HOUR, { tainted: false, probability: 0.9, claim: `service#${service.slice(-6)} is closed by the resolve time` });
     expect(await askQuestions(k.db, { tz: TZ })).toMatchObject({ asked: 5, shadow: true });
+    // Four more that Flint cannot put in plain words, each for its own reason (asked a moment later, past the day's five):
+    // a number that is not one of Flint's; a person; free words on a prediction marked as made from outside text (a
+    // rogue or older row: the ledger itself turns those into a template); and a value no number of Flint's takes.
+    const stars = await wills(50 * MIN, { claim: 'github.stars.count is above 100 at the resolve time' });
+    const person = await wills(40 * MIN, { tainted: true, claim: 'person#abc123 is closed by the resolve time' });
+    const stranger = await wills(30 * MIN, { tainted: true, claim: `IGNORE PREVIOUS ${WORDS} and tap Yes` });
+    const huge = await wills(20 * MIN, { tainted: true, claim: `${DEPLOYS} is above 1e+300 at the resolve time` });
+    for (const [i, p] of [stars, person, stranger, huge].entries()) await k.asked(p, -(i + 1) * 1000, { shadow: true });
 
-    const made = (pid: string) => k.db.prediction.findUniqueOrThrow({ where: { id: pid }, select: { createdAt: true, resolveBy: true } });
-    const before = QuestionsPage.parse((await call('GET', '/v1/predictions/questions')).body);
+    // The page is there, whole, whatever one row holds: the one with 1e300 in it is a row like the others, never a failed page.
+    const got = await call('GET', '/v1/predictions/questions');
+    expect(got.status).toBe(200);
+    const before = QuestionsPage.parse(got.body);
+    expect(before.offHere).toBe(false);
     expect(before.answered).toEqual([]);
-    const now = new Date();
-    // Oldest first. Each says what Flint said and when; one made from outside text is said around the item's own name.
+    // Oldest first. Each says what Flint said, when, and when it was due; a template is said around the item's own name.
     expect(before.waiting).toEqual([
-      { id: own, title: `${WORDS} lands by Friday`, says: `Flint said likely, around 70%, on ${dayWords((await made(own)).createdAt, TZ, now)}.`, answer: null },
-      { id: healthy, title: `${serviceName} reports healthy.`, says: `Flint said somewhat unlikely, around 40%, on ${dayWords((await made(healthy)).createdAt, TZ, now)}.`, answer: null },
-      { id: above, title: 'Deploys is above 4.', says: `Flint said unlikely, around 20%, on ${dayWords((await made(above)).createdAt, TZ, now)}.`, answer: null },
-      { id: gone, title: 'Flint made this prediction in a chat.', says: `Flint said likely, around 70%, on ${dayWords((await made(gone)).createdAt, TZ, now)}.`, answer: null },
-      { id: closed, title: `${serviceName} is closed.`, says: `Flint said very likely, around 90%, on ${dayWords((await made(closed)).createdAt, TZ, now)}.`, answer: null },
+      { id: own, title: `${WORDS} lands by Friday`, says: await saysOf(own, 'likely, around 70%'), answer: null, answerable: true },
+      { id: healthy, title: `${serviceName} reports healthy.`, says: await saysOf(healthy, 'somewhat unlikely, around 40%'), answer: null, answerable: true },
+      { id: above, title: 'Deploys ran above 4.', says: await saysOf(above, 'unlikely, around 20%'), answer: null, answerable: true },
+      { id: gone, ...UNSAID },
+      { id: closed, title: `${serviceName} is closed.`, says: await saysOf(closed, 'very likely, around 90%'), answer: null, answerable: true },
+      { id: stars, ...UNSAID },
+      { id: person, ...UNSAID },
+      { id: stranger, ...UNSAID },
+      { id: huge, ...UNSAID },
     ]);
+    expect(before.waiting[0]!.says).toMatch(/^Flint said likely, around 70%, on [A-Z][a-z]{2} \d{1,2}(, \d{4})?\. It was due [A-Z][a-z]{2} \d{1,2}(, \d{4})? at \d{1,2}:\d\d [AP]M\.$/);
     for (const q of before.waiting) {
-      expect(q.title).not.toMatch(/#|daily\.|at the resolve time/);
+      expect(q.title).not.toMatch(/#|daily\.|github\.|at the resolve time|1e\+?300|IGNORE/);
+      expect(q.title.length).toBeLessThanOrEqual(300);
       expect(noteProblems('Predictions', q.says), q.says).toEqual([]);
     }
+    // A stranger's words are on no part of the page, and neither is a ref, a key or the number that would not fit.
+    expect(JSON.stringify(got.body)).not.toMatch(/IGNORE|tap Yes|person#|service#|github\.stars|1e\+?300|0{20}/);
     // In shadow they wait in the panel, counted, and nothing announces them.
-    expect(await page()).toMatchObject({ questions: 5, announce: false });
+    expect(await page()).toMatchObject({ questions: 9, announce: false });
     // The console's own question says the same, and nothing else: no number of a series rides along.
     const waiting = await call('GET', '/v1/predictions/waiting');
-    expect([waiting.status, waiting.body]).toEqual([200, { questions: 5, announce: false }]);
+    expect([waiting.status, waiting.body]).toEqual([200, { questions: 9, announce: false }]);
 
+    // What he was not shown, he cannot answer: Yes and No are refused for each of them, by the runtime itself, and
+    // nothing is recorded. Skip is all there is.
+    for (const pid of [gone, stars, person, stranger, huge]) {
+      for (const a of ['yes', 'no']) {
+        const r = await answer(pid, a);
+        expect([r.status, r.body], `${pid} ${a}`).toEqual([409, CANT]);
+      }
+      expect([await stored(pid), await k.resolution(pid), await k.status(pid)], pid).toEqual([null, undefined, 'open']);
+    }
+    expect(await audits(ANSWER_ACTION)).toEqual([]);
+    for (const pid of [stars, person, stranger, huge]) expect((await answer(pid, 'skip')).status, pid).toBe(200);
+    for (const pid of [stars, person, stranger, huge]) expect([await stored(pid), await k.resolution(pid)], pid).toEqual(['skip', undefined]);
+  });
+
+  it('an answer records the result as Will\'s, once, as of the prediction\'s own resolve time; Skip records none', async () => {
     // The database takes no result as Will's without his answer, whoever says it is his.
     const ownDue = (await made(own)).resolveBy;
     const forged = k.inTx((q) => q(`INSERT INTO "Resolution" (id, "predictionId", outcome, "eventAt", "resolvedBy") VALUES ($1, $2, true, $3, 'will')`, [id('rs'), own, ownDue]), { actor: 'will:console' });
     expect(await k.code(forged)).toBe('42501');
+    const entriesBefore = (await audits(ANSWER_ACTION)).length;
 
-    const yes = await call('POST', `/v1/predictions/questions/${own}/answer`, { answer: 'yes' });
+    const yes = await answer(own, 'yes');
     expect([yes.status, yes.body]).toEqual([200, { ok: true }]);
-    expect(await k.resolution(own)).toMatchObject({ outcome: true, outcomeValue: null, resolvedBy: 'will', eventAt: (await made(own)).resolveBy, evidence: { via: ANSWER_ACTION } });
+    expect(await k.resolution(own)).toMatchObject({ outcome: true, outcomeValue: null, resolvedBy: 'will', eventAt: ownDue, evidence: { via: ANSWER_ACTION } });
     expect((await k.resolution(own))!.brier).toBeCloseTo(0.09, 10);
     expect(await k.status(own)).toBe('resolved');
-    const no = await call('POST', `/v1/predictions/questions/${above}/answer`, { answer: 'no' });
+    const no = await answer(above, 'no');
     expect([no.status, no.body]).toEqual([200, { ok: true }]);
     expect(await k.resolution(above)).toMatchObject({ outcome: false, resolvedBy: 'will', eventAt: (await made(above)).resolveBy });
     // Skip: his answer is on record, and no result is. The prediction stays open, to run out unscored.
-    const skip = await call('POST', `/v1/predictions/questions/${healthy}/answer`, { answer: 'skip' });
+    const skip = await answer(healthy, 'skip');
     expect([skip.status, skip.body]).toEqual([200, { ok: true }]);
     expect(await k.resolution(healthy)).toBeUndefined();
     expect(await k.status(healthy)).toBe('open');
-    const stored = (await k.owner(`SELECT "predictionId", answer, "answeredAt" FROM "PredictionQuestion" WHERE "predictionId" = ANY($1)`, [[own, above, healthy, gone, closed]])).rows;
-    expect(Object.fromEntries(stored.map((r) => [r.predictionId, r.answer]))).toEqual({ [own]: 'yes', [above]: 'no', [healthy]: 'skip', [gone]: null, [closed]: null });
-    for (const r of stored.filter((x) => x.answer)) expect(Math.abs((r.answeredAt as Date).getTime() - Date.now())).toBeLessThan(MIN);
+    const rows = (await k.owner(`SELECT "predictionId", answer, "answeredAt" FROM "PredictionQuestion" WHERE "predictionId" = ANY($1)`, [[own, above, healthy, gone, closed]])).rows;
+    expect(Object.fromEntries(rows.map((r) => [r.predictionId, r.answer]))).toEqual({ [own]: 'yes', [above]: 'no', [healthy]: 'skip', [gone]: null, [closed]: null });
+    for (const r of rows.filter((x) => x.answer)) expect(Math.abs((r.answeredAt as Date).getTime() - Date.now())).toBeLessThan(MIN);
 
     // Once: a second answer, the same or another, is refused, and nothing changes.
-    for (const [pid, answer] of [[own, 'yes'], [own, 'no'], [healthy, 'yes'], [above, 'skip']] as const) {
-      const r = await call('POST', `/v1/predictions/questions/${pid}/answer`, { answer });
-      expect([r.status, r.body], `${pid} ${answer}`).toEqual([409, { error: 'That question was already answered.', code: 'answered' }]);
+    for (const [pid, a] of [[own, 'yes'], [own, 'no'], [healthy, 'yes'], [above, 'skip']] as const) {
+      const r = await answer(pid, a);
+      expect([r.status, r.body], `${pid} ${a}`).toEqual([409, { error: 'That question was already answered.', code: 'answered' }]);
     }
     expect(await k.resolution(own)).toMatchObject({ outcome: true });
     expect(await k.resolution(healthy)).toBeUndefined();
-    // Two answers at the same moment (a double tap, two devices): one is taken, the other is told it was answered,
-    // and one result is on record, the taken one's.
-    const both = await Promise.all([call('POST', `/v1/predictions/questions/${closed}/answer`, { answer: 'yes' }), call('POST', `/v1/predictions/questions/${closed}/answer`, { answer: 'no' })]);
-    expect(both.map((r) => r.status).sort()).toEqual([200, 409]);
-    expect(both.find((r) => r.status === 409)!.body).toEqual({ error: 'That question was already answered.', code: 'answered' });
-    const took = both[0]!.status === 200 ? 'yes' : 'no';
-    expect((await k.owner(`SELECT answer FROM "PredictionQuestion" WHERE "predictionId" = $1`, [closed])).rows).toEqual([{ answer: took }]);
-    expect((await k.owner(`SELECT outcome, "resolvedBy" FROM "Resolution" WHERE "predictionId" = $1`, [closed])).rows).toEqual([{ outcome: took === 'yes', resolvedBy: 'will' }]);
-
     // A question that was never asked is not there to answer.
     const never = await wills(HOUR);
     for (const pid of [never, 'pdnosuchprediction']) {
-      const r = await call('POST', `/v1/predictions/questions/${pid}/answer`, { answer: 'yes' });
-      expect([r.status, r.body], pid).toEqual([404, { error: 'That question no longer exists.', code: 'noQuestion' }]);
+      const r = await answer(pid, 'yes');
+      expect([r.status, r.body], pid).toEqual([404, GONE]);
     }
     expect(await k.resolution(never)).toBeUndefined();
 
-    // One audit entry an answer: the prediction's id and the answer, never its words.
-    const entries = await audits(ANSWER_ACTION);
+    // One audit entry an answer: the prediction's id and the answer, never its words. That entry is how a wrong one is found.
+    const entries = (await audits(ANSWER_ACTION)).slice(entriesBefore);
     expect(entries.map((e) => [e.actor, e.context, e.kind, e.outcome, e.inputs, e.correlationId, e.tainted])).toEqual([
       ['will:console', 'console', 'action', 'ok', { predictionId: own, answer: 'yes' }, `${own}.answer`, false],
       ['will:console', 'console', 'action', 'ok', { predictionId: above, answer: 'no' }, `${above}.answer`, false],
       ['will:console', 'console', 'action', 'ok', { predictionId: healthy, answer: 'skip' }, `${healthy}.answer`, false],
-      // The two at once: one entry, for the one that was taken.
-      ['will:console', 'console', 'action', 'ok', { predictionId: closed, answer: took }, `${closed}.answer`, false],
     ]);
-    expect(JSON.stringify(entries)).not.toContain(WORDS);
+    expect(JSON.stringify(await audits(ANSWER_ACTION))).not.toContain(WORDS);
 
-    // The list now: one still waits, and the four he answered say what he said, newest first.
-    const after = QuestionsPage.parse((await call('GET', '/v1/predictions/questions')).body);
-    expect(after.waiting.map((q) => q.id)).toEqual([gone]);
+    // The list now: two still wait, and the latest he answered say what he said, newest first.
+    const after = await questions();
+    expect(after.waiting.map((q) => [q.id, q.answerable])).toEqual([[gone, false], [closed, true]]);
     const today = dayWords(new Date(), TZ, new Date());
-    expect(after.answered.map((q) => [q.id, q.answer, q.says])).toEqual([
-      [closed, took, `You said ${took} on ${today}.`], [healthy, 'skip', `You skipped it on ${today}.`], [above, 'no', `You said no on ${today}.`], [own, 'yes', `You said yes on ${today}.`],
+    expect(after.answered.slice(0, 3).map((q) => [q.id, q.answer, q.says])).toEqual([
+      [healthy, 'skip', `You skipped it on ${today}.`], [above, 'no', `You said no on ${today}.`], [own, 'yes', `You said yes on ${today}.`],
     ]);
-    expect((await page()).questions).toBe(1);
+    expect(after.answered).toHaveLength(7);
+    expect((await page()).questions).toBe(2);
+  });
+
+  it('two answers at the same moment (a double tap, two devices): one is taken and the other is told it was answered', async () => {
+    // Really at the same moment: the question's row is held, both answers arrive and wait on it, and then it is let go.
+    const holder = await k.client(urls.owner);
+    const waitingOnLock = async () => Number((await k.owner(`SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted`)).rows[0].n);
+    let both: Array<{ status: number; body: Record<string, unknown> }>;
+    try {
+      await holder.query('BEGIN');
+      await holder.query(`SELECT 1 FROM "PredictionQuestion" WHERE "predictionId" = $1 FOR UPDATE`, [closed]);
+      const racing = Promise.all([answer(closed, 'yes'), answer(closed, 'no')]);
+      for (let i = 0; i < 100 && (await waitingOnLock()) < 2; i++) await new Promise((r) => setTimeout(r, 50));
+      expect(await waitingOnLock()).toBe(2);
+      await holder.query('COMMIT');
+      both = await racing;
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {});
+      await holder.end();
+    }
+    expect(both.map((r) => r.status).sort()).toEqual([200, 409]);
+    // The one that lost is told plainly that it was answered: never an error, and never "no longer exists".
+    expect(both.find((r) => r.status === 409)!.body).toEqual({ error: 'That question was already answered.', code: 'answered' });
+    const took = both[0]!.status === 200 ? 'yes' : 'no';
+    expect(await stored(closed)).toBe(took);
+    expect((await k.owner(`SELECT outcome, "resolvedBy" FROM "Resolution" WHERE "predictionId" = $1`, [closed])).rows).toEqual([{ outcome: took === 'yes', resolvedBy: 'will' }]);
+    // One audit entry, for the one that was taken.
+    expect((await audits(ANSWER_ACTION)).filter((e) => e.correlationId === `${closed}.answer`).map((e) => e.inputs)).toEqual([{ predictionId: closed, answer: took }]);
+  });
+
+  it('a prediction settled, run out or set aside since the question was asked is refused in a sentence, with nothing recorded: never an error', async () => {
+    const entries = (await audits(ANSWER_ACTION)).length;
+    const lines500 = () => lines.filter((l) => l.includes('"statusCode":500') || l.includes('request failed')).length;
+    const errorsBefore = lines500();
+    // Run out (the sweep got there first): its status alone says so.
+    const ranOut = await wills(3 * HOUR);
+    await k.asked(ranOut, HOUR, { shadow: true });
+    await k.app(`UPDATE "Prediction" SET status = 'expired' WHERE id = $1`, [ranOut]);
+    // Set aside (void).
+    const setAside = await wills(3 * HOUR);
+    await k.asked(setAside, HOUR, { shadow: true });
+    await k.past('Prediction', ['Prediction_guard', 'Prediction_valid_update'], (q) => q(`UPDATE "Prediction" SET status = 'void' WHERE id = $1`, [setAside]));
+    // Settled another way while still open (as the card that finishes a goal settles its forecasts): a result is there.
+    const settled = await wills(3 * HOUR);
+    await k.asked(settled, HOUR, { shadow: true });
+    const settledDue = (await made(settled)).resolveBy;
+    await k.past('Resolution', 'USER', (q) => q(`INSERT INTO "Resolution" (id, "predictionId", outcome, "eventAt", "resolvedBy") VALUES ($1, $2, true, $3, 'will')`, [id('rs'), settled, settledDue]));
+    expect(await k.status(settled)).toBe('open');
+    // Not his to settle at all: a prediction that resolves by itself, with a question that should never have been asked.
+    const notHis = await k.prediction({ method: 'rule', resolver: 'auto_world' }, { madeAgo: 2 * DAY, dueAgo: 3 * HOUR });
+    await k.asked(notHis, HOUR, { shadow: true });
+    for (const [what, pid] of [['run out', ranOut], ['set aside', setAside], ['settled', settled], ['not his', notHis]] as const) {
+      for (const a of ['yes', 'no', 'skip']) {
+        const r = await answer(pid, a);
+        expect([r.status, r.body], `${what} ${a}`).toEqual([409, GONE]);
+      }
+      // Nothing was recorded: not even a Skip, which writes no result and so would have gone through unseen.
+      expect(await stored(pid), what).toBeNull();
+    }
+    expect([await k.resolution(ranOut), await k.resolution(setAside), await k.resolution(notHis)]).toEqual([undefined, undefined, undefined]);
+    // The database says no between the look and the write (here: a result as of a time still ahead): the same
+    // sentence, and the answer written just before it is taken back with it.
+    const ahead = await wills(-HOUR);
+    await k.asked(ahead, MIN, { shadow: true });
+    const refused = await answer(ahead, 'yes');
+    expect([refused.status, refused.body]).toEqual([409, GONE]);
+    expect([await stored(ahead), await k.resolution(ahead), await k.status(ahead)]).toEqual([null, undefined, 'open']);
+    expect((await audits(ANSWER_ACTION)).length).toBe(entries);
+    // None of it was a failed request.
+    expect(lines500()).toBe(errorsBefore);
+  });
+
+  it('switched off on this Mac, nothing is answered: the page says so, an answer is refused with the off sentence, and nothing waits', async () => {
+    const before = await questions();
+    expect(before.waiting.map((q) => q.id)).toContain(gone);
+    // The same questions are listed, marked as off here.
+    const here = await questions(offHere);
+    expect(here).toEqual({ ...before, offHere: true });
+    const entries = (await audits(ANSWER_ACTION)).length;
+    for (const a of ['yes', 'no', 'skip']) {
+      const r = await answer(gone, a, offHere);
+      expect([r.status, r.body], a).toEqual([409, { error: 'Predictions are switched off on this Mac.', code: 'offHere' }]);
+    }
+    expect([await stored(gone), await k.resolution(gone)]).toEqual([null, undefined]);
+    expect((await audits(ANSWER_ACTION)).length).toBe(entries);
+    // Nothing is said to wait where nothing can be answered.
+    expect((await call('GET', '/v1/predictions/waiting', undefined, offHere)).body).toEqual({ questions: 0, announce: false });
+    expect((await call('GET', '/v1/predictions/waiting')).body).toMatchObject({ questions: before.waiting.length });
   });
 
   it('how Flint has done: the night\'s scores by area, in sentences; "not enough" below thirty; what was left unsettled', async () => {
@@ -481,6 +675,7 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     const got = AccuracyView.parse((await call('GET', '/v1/predictions/accuracy')).body);
     expect(got).toEqual({
       scored: true,
+      scoring: 'on',
       areas: [
         { name: 'Spend', value: '161 Scored', lines: [
           'When Flint said about 71%, it happened 64% of the time, over 41 predictions.',

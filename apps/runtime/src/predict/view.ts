@@ -8,8 +8,11 @@
  * so the panel never says "waiting" for a number the runner would forecast, nor
  * shows a range the runner did not record:
  *  - a run recorded for the step now under way: its range, as a forecast when
- *    it beat a plain guess and as "no reliable trend" when it did not; a run
- *    with no predictions is a steady number;
+ *    it beat a plain guess, as "no reliable trend" when it did not, and as
+ *    "too early to tell" when the history is too short to judge either way
+ *    (the run's verdict is null); a run with no predictions is a steady
+ *    number, said with how many of its latest steps are the same and never
+ *    more than there are;
  *  - no such run: last night's failed, or the latest number is not in
  *    (waiting), or there is not enough history yet, or none at all, or it is
  *    ready and forecast tonight.
@@ -18,13 +21,13 @@
  * them). They go to Will's console only, over the runtime's `proposals` scope:
  * nothing here writes a log line, an audit entry or a note.
  */
-import { ACCURACY_MIN, localDay, localDayBounds, resolveTier, type AccuracyArea, type AccuracyView, type ForecastRow, type PanelFact, type PredictionsPage, type SeriesView } from '@flint/policy';
+import { ACCURACY_MIN, localDay, localDayBounds, type AccuracyArea, type AccuracyView, type ForecastRow, type PanelFact, type PredictionsPage, type SeriesView } from '@flint/policy';
 import { z } from 'zod';
 import type { Db } from '../db.js';
-import { activePolicies } from '../governance/proposals.js';
 import { FORECAST_WRITER } from '../ledger/emit.js';
 import { reliabilityGap, type Bin } from '../ledger/scoring.js';
 import { MIN_SCORED } from '../ledger/calibration.js';
+import { announcedSince, predictionsStarted } from '../ledger/sweep.js';
 import { LEVEL, minHistory, prepare, type ForecastUnit } from './forecast.js';
 import { stepIndex, weekOf } from './metrics.js';
 import {
@@ -34,6 +37,7 @@ import {
   calledSays,
   chanceSays,
   chanceValue,
+  earlySays,
   errorScoreSays,
   expectSays,
   gapSays,
@@ -62,8 +66,6 @@ export interface ViewDeps {
 
 /** The action Will signs to turn numbers on. */
 const ENABLE = 'forecast.series.enable';
-/** The action questions are asked under: promoted, the header may show a dot for them. */
-const ASK = 'ledger.resolve.ask_will';
 /** How many of a number's latest ranges its record counts. */
 export const RECORD_RANGES = 30;
 
@@ -78,8 +80,8 @@ interface Standing {
   state: ForecastRow['state'];
   value: string;
   says: string;
-  /** The run behind a range (or a plain guess's range): its steps, level and id. */
-  run?: { id: string; level: number; beatsNaive: boolean; points: Points };
+  /** The run behind a range (or a plain guess's range): its steps, level and id. `beatsNaive`: the run's own verdict (null: too early to tell). */
+  run?: { id: string; level: number; beatsNaive: boolean | null; points: Points };
 }
 
 /** Which numbers are on, as the runner reads it: on, not forgotten, and stored at the step the registry says. */
@@ -107,21 +109,29 @@ async function standingOf(db: Db, def: ForecastSeriesDef, on: boolean, tz: strin
     select: { id: true, level: true, beatsNaive: true, points: true, _count: { select: { predictions: true } } },
   });
   const points = run ? Points.safeParse(run.points) : undefined;
+  const m = def.step === 'day' ? 7 : 1;
   if (run && points?.success) {
-    // A run with nothing to score is a steady number's: a flat line, and nothing to ask.
-    if (run._count.predictions === 0) return { state: 'steady', value: PANEL.values.steady, says: steadySays(def.step) };
+    // A run with nothing to score is a steady number's: a flat line, and nothing to ask. It says how many of its
+    // latest steps are the same, counted from the history itself (at most the 28 it is judged over).
+    if (run._count.predictions === 0) {
+      const ready = prepare(await history(db, tz, def, targetDay), stepIndex(def, targetDay), m);
+      let same = 0;
+      if (ready.ok) for (let i = ready.values.length - 1; i >= 0 && ready.values[i] === ready.values[ready.values.length - 1] && same < 28; i--) same += 1;
+      return { state: 'steady', value: PANEL.values.steady, says: steadySays(def.step, ready.ok ? same : undefined) };
+    }
     const first = points.data[0]!;
     const range = { lower: first.lo, upper: first.hi, level: run.level, unit };
-    const kept = { id: run.id, level: run.level, beatsNaive: run.beatsNaive === true, points: points.data };
-    return run.beatsNaive === true
-      ? { state: 'range', value: aboutValue(first.mean, unit), says: expectSays({ ...range, point: first.mean }), run: kept }
+    const kept = { id: run.id, level: run.level, beatsNaive: run.beatsNaive, points: points.data };
+    if (run.beatsNaive === true) return { state: 'range', value: aboutValue(first.mean, unit), says: expectSays({ ...range, point: first.mean }), run: kept };
+    // Null is not "did not beat a plain guess": the history is too short to tell (under 56 days, or 26 weeks).
+    return run.beatsNaive === null
+      ? { state: 'early', value: PANEL.values.early, says: earlySays(range), run: kept }
       : { state: 'no_trend', value: PANEL.values.noTrend, says: noTrendSays(range), run: kept };
   }
   // No forecast of this step. Last night's failed; or it is not ready, and why; or it is, and the next run makes it.
   if (await db.forecastRun.findFirst({ where: { seriesKey: def.key, ok: false, createdAt: { gte: at } }, select: { id: true } })) {
     return { state: 'failed', value: PANEL.values.failed, says: PANEL.failed };
   }
-  const m = def.step === 'day' ? 7 : 1;
   const values = await history(db, tz, def, targetDay);
   if (!values.size) return { state: 'no_data', value: PANEL.values.noData, says: PANEL.noData };
   const ready = prepare(values, stepIndex(def, targetDay), m);
@@ -144,9 +154,9 @@ async function waitingCards(db: Db, now: Date): Promise<Array<{ id: string; seri
   });
 }
 
-/** May the header show a dot for questions: only once Will has let Flint ask on its own. */
+/** May the header show a dot for questions: only once Will has let Flint ask on its own (the sweep's own reading: announcedSince). */
 export async function questionsAnnounced(db: Db, now = new Date()): Promise<boolean> {
-  return resolveTier(ASK, { context: 'autonomous', tainted: false, policies: await activePolicies(db, now), now }).tier === 'alone';
+  return (await announcedSince(db, now)) !== null;
 }
 
 /** The Forecasts tab. */
@@ -179,8 +189,8 @@ export async function seriesView(db: Db, key: string, d: ViewDeps): Promise<Seri
     run.points.slice(0, 8).forEach((p, i) => {
       forecast.push({
         label: i === 0 ? (def.step === 'day' ? 'Today' : 'This Week') : stepLabel(new Date(p.at), d.tz, def.step),
-        value: run.beatsNaive ? aboutValue(p.mean, unit) : PANEL.values.noTrend,
-        says: stepRangeSays({ lower: p.lo, upper: p.hi, level: run.level, unit }, run.beatsNaive),
+        value: run.beatsNaive === true ? aboutValue(p.mean, unit) : run.beatsNaive === null ? PANEL.values.early : PANEL.values.noTrend,
+        says: stepRangeSays({ lower: p.lo, upper: p.hi, level: run.level, unit }, run.beatsNaive === true),
       });
     });
     // The run's yes/no question: the chance its first step runs above a value.
@@ -269,10 +279,15 @@ function areaOf(name: string, rows: readonly Snapshot[]): AccuracyArea {
   return { name, value: scoredValue(bn + rn), lines };
 }
 
-/** The Accuracy tab, from the latest night's scores: counts and shares by area, never a prediction's words or a number it was about. */
-export async function accuracyView(db: Db): Promise<AccuracyView> {
+/**
+ * The Accuracy tab, from the latest night's scores: counts and shares by area, never a prediction's words or a number
+ * it was about. `scoring`: whether anything scores them now, so the panel never says "each night" of a job that
+ * is not running (switched off on this Mac, or never turned on).
+ */
+export async function accuracyView(db: Db, d: Pick<ViewDeps, 'predict'>): Promise<AccuracyView> {
+  const scoring: AccuracyView['scoring'] = !d.predict ? 'off_here' : (await predictionsStarted(db)) ? 'on' : 'not_started';
   const latest = await db.calibrationSnapshot.findFirst({ orderBy: { windowEnd: 'desc' }, select: { windowEnd: true } });
-  if (!latest) return { scored: false, areas: [], unsettled: [] };
+  if (!latest) return { scored: false, scoring, areas: [], unsettled: [] };
   const rows = await db.calibrationSnapshot.findMany({ where: { windowEnd: latest.windowEnd } });
   const areas = AREAS.flatMap(([domain, name]) => {
     const own = rows.filter((r) => r.domain === domain);
@@ -282,5 +297,5 @@ export async function accuracyView(db: Db): Promise<AccuracyView> {
   const left: Array<['expired' | 'late' | 'declined' | 'void', number]> = [
     ['expired', sum((r) => r.nExpired)], ['late', sum((r) => r.nLateSuperseded)], ['declined', sum((r) => r.nConditionUnmet)], ['void', sum((r) => r.nVoid)],
   ];
-  return { scored: true, areas, unsettled: left.filter(([, n]) => n > 0).map(([kind, n]) => unsettledSays(kind, n)) };
+  return { scored: true, scoring, areas, unsettled: left.filter(([, n]) => n > 0).map(([kind, n]) => unsettledSays(kind, n)) };
 }

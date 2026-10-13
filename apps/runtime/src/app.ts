@@ -79,6 +79,8 @@ export interface AppDeps {
 }
 
 const Id = z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/) }).strict();
+/** The ledger's areas whose series are financial or personal (predict/series.ts: spend, calendar): chat is given no value scaled by one of them. */
+export const SENSITIVE_AREAS: ReadonlySet<string> = new Set(['spend', 'calendar']);
 
 export function buildApp(deps: AppDeps): FastifyInstance {
   const app = Fastify({
@@ -325,7 +327,15 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     // words or a number it was about. A group with nothing scored yet is stored with 0 for its scores (the database wants
     // a number); a reader would take "Brier 0" for perfect and "coverage 0" for never held, so here those are null.
     const rows = await db.calibrationSnapshot.findMany({ where: { windowEnd: latest.windowEnd } });
-    return { snapshots: rows.map((r) => (r.n === 0 ? { ...r, brier: null, baseRate: null, brierSkill: null, intervalCoverage: null } : r)) };
+    // Chat may run on a model off this Mac. The range loss (`pinball`) is worked out from a series' own values and its
+    // own scale; for the areas whose series are what Flint spends and what is on the calendar, chat is not given it.
+    // What it keeps for them are counts and shares (how often a range held), which carry nothing of a value.
+    return {
+      snapshots: rows.map((r) => {
+        const row = r.n === 0 ? { ...r, brier: null, baseRate: null, brierSkill: null, intervalCoverage: null } : r;
+        return SENSITIVE_AREAS.has(r.domain) ? { ...row, pinball: null } : row;
+      }),
+    };
   });
 
   registerP2Routes(app, { db, config: { triage: config.triage ?? false, tz: config.tz, ...(config.home ? { home: config.home } : {}) }, need, bus: () => deps.status?.bus });
