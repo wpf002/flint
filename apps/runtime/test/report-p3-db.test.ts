@@ -30,7 +30,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { GOALS_BLOCK_MAX_TOKENS, digestOf, localDay, localDayBounds, previousDay } from '@flint/policy';
-import { NO_DB, RUNTIME, freshDb, healthRows, withClient, type TestUrls } from './db';
+import { NO_DB, RUNTIME, freshDb, healthRows, withClient, type TestUrls, withoutChatGoalFloor } from './db';
 import { buildApp } from '../src/app';
 import type { RuntimeScope } from '../src/config';
 import { createDb, type Db } from '../src/db';
@@ -471,8 +471,17 @@ describe.skipIf(NO_DB)('the P3 report on flint_test', () => {
       expect(gate.code).not.toBe(0);
       expect(gate.stderr).toContain('the shadow week does not count yet: goal reviews are off right now');
       expect(await cards()).toBe(before);
-      // Its other table is not filed at all yet: nothing from chat runs without a card until the database holds what it adds to one.
-      expect((await cli('promotion-table', '--phase', 'p3c')).stderr).toContain('Suggestions from chat stay cards for now: the database does not yet hold a goal Flint adds from chat to a card you signed.');
+      // Its other table asks its own gate too, now that the database holds a goal from chat to a signed card or rule: two weeks of goal suggestions.
+      const later = await cli('promotion-table', '--phase', 'p3c');
+      expect(later.code).not.toBe(0);
+      expect(later.stderr).toMatch(/the shadow weeks are not over: \d+(\.\d)? of 14 days of goal suggestions from chat/);
+      expect(await cards()).toBe(before);
+      // Against a database without that guard (rolled back by its own down.sql), the same command files nothing and says why, in one sentence.
+      await withoutChatGoalFloor(urls.owner, async () => {
+        const refused = await cli('promotion-table', '--phase', 'p3c');
+        expect(refused.code).not.toBe(0);
+        expect(refused.stderr).toContain('Suggestions from chat stay cards for now: the database does not yet hold a goal Flint adds from chat to a card you signed.');
+      });
       expect(await cards()).toBe(before);
       // A phase it does not have is refused by name.
       const unknown = await cli('promotion-table', '--phase', 'p9');

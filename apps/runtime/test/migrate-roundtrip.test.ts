@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { NO_DB, URLS, MIGRATIONS, migrationDirs, migrateDown, migrateUp, pgError, prisma, withClient } from './db';
+import { CHAT_GOAL_FLOOR, NO_DB, URLS, MIGRATIONS, migrationDirs, migrateDown, migrateUp, pgError, prisma, withClient } from './db';
 import { grantLines } from '../src/backup/grants';
 import { buildReference, catalogLines, checkoutMigrations } from '../src/backup/catalog';
 import { p5Kit } from './p5';
@@ -113,12 +113,15 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
   // down.sql alone no longer can: p1_ledger's would recreate Prediction without the columns P3 and P4 add.)
   const rollsBack = async (target: string): Promise<void> => {
     // Something true only while the target migration is applied, to see it go and come back. A new migration names its own here.
-    // (P4 part 3's: its two columns, how many of a forecast's steps were filled in and where each number was read to. P5's: its first table.)
+    // (P4 part 3's: its two columns, how many of a forecast's steps were filled in and where each number was read to. P5's: its first
+    // table. The chat goal floor's: its two triggers on Goal, switched on, and their function.)
     const applied: Record<string, string> = {
       '20261014000000_p4_forecast_inputs': `(SELECT count(*) = 2 FROM information_schema.columns WHERE table_schema = 'public'
         AND ((table_name = 'ForecastRun' AND column_name = 'filled') OR (table_name = 'MetricSeries' AND column_name = 'readTo')))`,
       [P5]: `(SELECT to_regclass('public."Asset"') IS NOT NULL)`,
       '20261015000000_p7_resilience': `to_regclass('public."BackupRun_kind_location_path_key"') IS NOT NULL`,
+      [CHAT_GOAL_FLOOR]: `(SELECT to_regprocedure('goal_chat_floor()') IS NOT NULL AND (SELECT count(*) FROM pg_trigger
+        WHERE tgrelid = to_regclass('public."Goal"') AND tgname IN ('Goal_chat_floor', 'Goal_chat_floor_bind') AND NOT tgisinternal AND tgenabled = 'O') = 2)`,
     };
     expect(applied[target], `say what ${target} makes true`).toBeTruthy();
     const there = async () => withClient(owner, async (c) => (await c.query<{ t: boolean }>(`SELECT ${applied[target]} AS t`)).rows[0]!.t);
@@ -135,6 +138,13 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
       expect(during.endsWith(lastLine)).toBe(true);
       expect(during).toContain(`NEW."kind" = 'asset_task'`);
     }
+    /** Goal's own triggers and the functions the goal store's guards call: what the floor's rollback must leave exactly as it was. */
+    const goalStore = () => withClient(owner, async (c) => ({
+      triggers: (await c.query(`SELECT tgname, tgenabled, pg_get_triggerdef(oid) AS def FROM pg_trigger WHERE tgrelid = to_regclass('public."Goal"') AND NOT tgisinternal AND tgname NOT LIKE 'Goal_chat_floor%' ORDER BY 1`)).rows,
+      functions: await functionsNamed(['goal_insert_check', 'goal_guard', 'goal_valid', 'p3_signed_proposal', 'p3_bind_approval', 'p3_args_digest', 'proposal_quote_check']),
+      used: (await c.query(`SELECT to_regclass('public."GoalApprovalUse"') IS NOT NULL AS t`)).rows[0].t as boolean,
+    }));
+    const goalsBefore = target === CHAT_GOAL_FLOOR ? await goalStore() : undefined;
     // Everything newer goes first, newest first, as a rollback past it would run them.
     for (const newer of migrationDirs().filter((d) => d > target).reverse()) await runDown(newer);
     await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, target, 'down.sql'), 'utf8')));
@@ -170,10 +180,38 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
       expect(await withClient(owner, async (c) => (await c.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname IN ('Proposal_policy_floor', 'Proposal_clock', 'HealthCheck_clock') AND NOT tgisinternal`)).rows[0]!.n)).toBe(3);
       expect((await functionsNamed(['p3_bind_approval']))[0]!.prosrc).toContain('pg_trigger_depth()');
     }
+    if (target === CHAT_GOAL_FLOOR) {
+      // The floor is rules only: its two triggers and their function are gone, and the goal store under it is to the
+      // letter what it was (its own triggers, its helpers' bodies and grants, the record of which approvals were used).
+      expect(await withClient(owner, async (c) => (await c.query(
+        `SELECT (SELECT count(*)::int FROM pg_trigger WHERE NOT tgisinternal AND tgname LIKE 'Goal_chat_floor%') AS triggers,
+                (SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'goal_chat_floor') AS functions`)).rows[0])).toEqual({ triggers: 0, functions: 0 });
+      expect(await goalStore()).toEqual(goalsBefore);
+      expect(goalsBefore!.triggers.map((t) => t.tgname)).toEqual(['Goal_guard', 'Goal_history', 'Goal_insert_check', 'Goal_no_truncate', 'Goal_valid']);
+      // And what a database built without it has, line for line (a restore compares the two).
+      const all = checkoutMigrations(MIGRATIONS);
+      const newer = migrationDirs().filter((d) => d > target);
+      const rolledBack = await withClient(owner, (c) => catalogLines(c));
+      await migrateDown(owner);
+      const without = await withClient(owner, async (c) => {
+        await buildReference(c, all.filter((m) => m.name < CHAT_GOAL_FLOOR));
+        return catalogLines(c);
+      });
+      // Back to where this test stood: everything up, then this migration (and any newer) down again.
+      await migrateDown(owner);
+      await migrateUp(owner);
+      for (const d of [...newer].reverse()) await runDown(d);
+      await runDown(target);
+      // Compared whatever came after it: anything newer was rolled back first (above), so what is left is exactly the
+      // migrations before this one, and the reference is built from the same ones.
+      expect({ gone: without.filter((l) => !rolledBack.includes(l)), left: rolledBack.filter((l) => !without.includes(l)) }).toEqual({ gone: [], left: [] });
+      expect(without.length).toBeGreaterThan(100);
+    }
     const status = await prisma(['migrate', 'status'], owner);
     expect(status.stdout + status.stderr).toMatch(new RegExp(`not yet been applied:[\\s\\S]*${target}`));
     await migrateUp(owner);
     expect(await there()).toBe(true);
+    if (goalsBefore) expect(await goalStore()).toEqual(goalsBefore);
     const diff = await prisma(['migrate', 'diff', '--from-url', owner, '--to-schema-datamodel', 'prisma/schema.prisma', '--exit-code'], owner);
     expect(diff.code, diff.stdout + diff.stderr).toBe(0);
     // Re-applied on top of P3's body: P5's rule is back.
@@ -185,6 +223,19 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
   it('P5\'s down.sql, after the newer one\'s, then deploy, re-applies it: P3\'s plan_step_guard is back to the letter in between', async () => {
     expect(migrationDirs().at(-1)).not.toBe(P5);
     await rollsBack(P5);
+  });
+
+  // P7's, with the newer ones' first: its own rows are in the test after these.
+  it('P7\'s down.sql, after the newer ones\', then deploy, re-applies it', async () => {
+    await rollsBack('20261015000000_p7_resilience');
+  });
+
+  // The guard under goals from chat (P3 part 5's floor): rules only, so its down.sql takes two triggers and their
+  // function away, leaves the goal store to the letter what it was, and gives back the catalog of a database built
+  // without it, line for line. Named here, not left to "the newest" below: whatever lands after it is rolled back
+  // first (newest first), so these checks keep running when it is no longer the newest.
+  it('the chat goal floor\'s down.sql, after any newer one\'s, leaves the goal store as it was and the catalog of a database built without it; a deploy re-applies it', async () => {
+    await rollsBack(CHAT_GOAL_FLOOR);
   });
 
   it('the newest migration\'s down.sql, then deploy, re-applies it (the documented rollback)', async () => {

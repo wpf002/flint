@@ -26,12 +26,15 @@
  * claim: identical or racing posts make one card and use one slot, and a card
  * that could not be filed uses none.
  *
- * NOTHING FROM CHAT RUNS WITHOUT A CARD YET (CHAT_FLOOR_IN_DATABASE). The
- * code that adds a suggestion directly under a rule Will signed (ALONE) is
- * here and tested, but it is switched off: the database does not yet hold a
- * goal Flint adds from chat to a card, so until a migration adds that floor
- * the intake files a card whatever a rule says, and the later promotion table
- * is refused (governance/promotion.ts).
+ * WHAT RUNS WITHOUT A CARD rests on the database (chatFloorInDatabase). A
+ * goal is added directly, under a rule Will signed (ALONE), only while the
+ * database itself holds a goal from chat to a signed card or to that rule
+ * (the p3_chat_goal_floor migration: the intake asks the database whether the
+ * guard is there, every time). Without it the intake files a card whatever a
+ * rule says, and the later promotion table is refused
+ * (governance/promotion.ts). The database has the last word after that too:
+ * if it refuses the add, the suggestion becomes a card. A commitment is never
+ * added without a card: the database has no such floor under commitments.
  *
  * Nothing but this intake files these two actions (createProposal refuses any
  * other caller), and no model can reach it: the route takes the server's own
@@ -98,16 +101,31 @@ const CARD_TTL_MINUTES = 7 * 24 * 60;
 /** A turn's time may be this far ahead of the runtime's clock (the two share a Mac). */
 const CLOCK_SKEW_MS = 5 * 60_000;
 /**
- * Does the database hold a goal Flint adds from chat to the card behind it? Not
- * yet: a proposed goal's row is checked for its shape, not for a card (that
- * floor is a migration of its own). While this is false nothing from chat runs
- * without a card: the intake files a card even under a rule that says ALONE,
- * and `promotion-table --phase p3c` is refused. The migration that adds the
- * floor flips it.
+ * Does the database hold a goal Flint adds from chat to a signed card, or to a
+ * rule Will signed? Asked of the database itself, each time: the guard of the
+ * p3_chat_goal_floor migration is on the Goal table, before every insert, and
+ * switched on. Never a constant: a runtime ahead of its database (a rollback,
+ * a restore of an older backup) must not believe a floor that is not there.
+ * While it is absent nothing from chat runs without a card: the intake files a
+ * card even under a rule that says ALONE, and `promotion-table --phase p3c` is
+ * refused.
  */
-export const CHAT_FLOOR_IN_DATABASE = false;
-/** What the later promotion table says while it is. */
+export async function chatFloorInDatabase(db: Db | Tx): Promise<boolean> {
+  // Both of its triggers, each switched on and running the guard's own function: the check before every insert,
+  // and the one after it that records the card's approval as used. (pg_trigger.tgtype: 1 for each row, 2 before,
+  // 4 on insert, 64 instead of. Before is 7 of those; after is 5.)
+  const [r] = await db.$queryRaw<Array<{ floor: boolean }>>`
+    SELECT count(*) = 2 AS floor
+    FROM pg_trigger t JOIN pg_proc f ON f.oid = t.tgfoid JOIN pg_namespace n ON n.oid = f.pronamespace
+    WHERE t.tgrelid = to_regclass('public."Goal"') AND NOT t.tgisinternal AND t.tgenabled IN ('O', 'A')
+      AND n.nspname = 'public' AND f.proname = 'goal_chat_floor'
+      AND ((t.tgname = 'Goal_chat_floor' AND (t.tgtype & 71) = 7) OR (t.tgname = 'Goal_chat_floor_bind' AND (t.tgtype & 71) = 5))`;
+  return r?.floor === true;
+}
+/** What the later promotion table says while it is not. */
 export const CHAT_FLOOR_SAYS = 'Suggestions from chat stay cards for now: the database does not yet hold a goal Flint adds from chat to a card you signed.';
+/** The one action the database lets a signed rule add without a card. */
+const ALONE_WITH_FLOOR: ChatSuggestionAction = 'goal.propose';
 /** The counter the day's filings are claimed under, per action. */
 export const filedCounter = (action: ChatSuggestionAction): string => `${action}:filed`;
 /** A triggered review waits this long, as the review tick's do. */
@@ -230,8 +248,6 @@ export interface IntakeDeps {
   /** The bus, once it has started. */
   bus?: () => Pick<Bus, 'boss'> | undefined;
   now?: () => Date;
-  /** Test seam: the database's floor under goals from chat is in place (CHAT_FLOOR_IN_DATABASE). Never set outside a test. */
-  floor?: boolean;
 }
 
 /** Field paths and codes of a refused request: never a value. */
@@ -302,12 +318,12 @@ export async function takeCandidate(d: IntakeDeps, raw: unknown): Promise<Candid
     }], now);
     throw new Refused(409, `forbidden: ${decision.reason}`);
   }
-  // ALONE only once the database holds what it adds to a card (CHAT_FLOOR_IN_DATABASE): until then a card, whatever a rule says.
-  const alone = decision.tier === 'alone' && (d.floor ?? CHAT_FLOOR_IN_DATABASE);
+  // ALONE only for a goal, and only while the database itself holds a goal from chat to a signed card or rule
+  // (asked of the database now, never assumed): otherwise a card, whatever a rule says.
+  const wantsAlone = decision.tier === 'alone' && action === ALONE_WITH_FLOOR && (await chatFloorInDatabase(db));
 
-  let outcome: CandidateAnswer['outcome'];
-  try {
-    outcome = await db.$transaction(async (tx) => {
+  const attempt = (alone: boolean): Promise<CandidateAnswer['outcome']> =>
+    db.$transaction(async (tx) => {
       // One at a time for a source: a second identical post waits here, then finds the first one's card.
       await tx.$queryRaw`SELECT 1 FROM (SELECT pg_advisory_xact_lock(hashtext(${`suggestion:${sourceRef}`}))) AS l`;
       if (await known(tx, action, sourceRef, turnRef)) return 'known' as const;
@@ -329,15 +345,32 @@ export async function takeCandidate(d: IntakeDeps, raw: unknown): Promise<Candid
       }
       // ALONE: only under a rule Will signed. Its cap is claimed with the write.
       if (decision.cap && (await claim(tx, decision.key, decision.cap, tz, now)) === null) throw new Refused(429, SAY.suggestionCap);
-      const r = await applySuggestion(tx, action, args, { now, tz, actor: CANDIDATES_ACTOR });
-      if (r.result.existed === true) throw KNOWN;
+      // On record first. The database lets the goal in only with this entry there, and only if the digest it
+      // carries is the digest of what the row then holds (its title, the quote, when he said it, the day).
       await appendAudit(tx, [{
         actor: CANDIDATES_ACTOR, context: 'chat', kind: 'action', action, tier: 'alone', decision: 'act', outcome: 'ok',
-        inputs: { sourceRef, turnRef, saidAt: c.sourceAt, argsDigest: digestOf(args), rule: decision.rule, ...(decision.policyPattern ? { policy: decision.policyPattern } : {}), ...r.result },
+        inputs: {
+          sourceRef, turnRef, saidAt: c.sourceAt, ...(c.dueOn ? { dueOn: c.dueOn } : {}), argsDigest: digestOf(args), rule: decision.rule,
+          ...(decision.policyPattern ? { policy: decision.policyPattern } : {}), ...subject,
+        },
         correlationId: sourceRef, tainted: false,
       }], now);
+      const r = await applySuggestion(tx, action, args, { now, tz, actor: CANDIDATES_ACTOR });
+      if (r.result.existed === true) throw KNOWN;
       return 'added' as const;
     }, { maxWait: 10_000, timeout: 30_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+
+  let outcome: CandidateAnswer['outcome'];
+  try {
+    try {
+      outcome = await attempt(wantsAlone);
+    } catch (err) {
+      // The database has the last word. It refused the add (the rule ended between the decision and the write,
+      // or it reads a row more strictly than the code did): nothing was written, and the suggestion is a card.
+      if (!wantsAlone || err === KNOWN || err instanceof Refused || sqlState(err) !== '42501') throw err;
+      console.error(`[goals] the database let no suggestion in without a card (${failureReport(err)}): filed as a card`);
+      outcome = await attempt(false);
+    }
   } catch (err) {
     if (err === KNOWN) return { outcome: 'known' };
     if (err instanceof Refused) throw err;

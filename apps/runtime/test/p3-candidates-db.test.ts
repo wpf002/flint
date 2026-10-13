@@ -38,15 +38,15 @@
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { GoalTitle, digestOf, suggestionGoalId, suggestionSourceRef, suggestionTurnRef, type GoalsPage } from '@flint/policy';
-import { NO_DB, freshDb, withClient, id, type TestUrls } from './db';
+import { GoalTitle, digestOf, localWallTime, suggestionGoalId, suggestionSourceRef, suggestionTurnRef, type GoalsPage } from '@flint/policy';
+import { NO_DB, freshDb, withClient, withoutChatGoalFloor, id, type TestUrls } from './db';
 import { enrollTestKey } from './sign';
 import { buildApp } from '../src/app';
 import { createDb, type Db } from '../src/db';
 import type { RuntimeScope } from '../src/config';
 import { approveProposal, createProposal, rejectProposal } from '../src/governance/proposals';
 import { runInternal } from '../src/governance/internal';
-import { CANDIDATES_ACTOR, CHAT_FLOOR_IN_DATABASE, RELATED_WORDS, askReviews, filedCounter, suggestionCardProblem, takeCandidate } from '../src/goals/candidates';
+import { CANDIDATES_ACTOR, RELATED_WORDS, askReviews, chatFloorInDatabase, filedCounter, suggestionCardProblem, takeCandidate } from '../src/goals/candidates';
 import { chatSuggestions } from '../src/goals/measures';
 import { REVIEW_QUEUE, runReview } from '../src/goals/review';
 import { personAllowed } from '../src/world/person-create';
@@ -727,6 +727,38 @@ describe.skipIf(NO_DB)('goals and commitments from chat on flint_test', () => {
     }
   });
 
+  it('goals proposed before the database held them to a card stay as they were: listed, made into goals with one signature, and dismissed', async () => {
+    const [a, b] = [candidate(), candidate()];
+    const [ga, gb] = [suggestionGoalId(refOf(a)), suggestionGoalId(refOf(b))];
+    // A database from before the floor (its own down.sql): the runtime's own role writes each row, with no card behind it.
+    await withoutChatGoalFloor(urls.owner, async () => {
+      for (const c of [a, b]) {
+        await db.goal.create({ data: { id: suggestionGoalId(refOf(c)), title: c.text, description: c.quote, owner: 'will', origin: 'flint', sensitivity: 'personal', tainted: false, successCriteria: [], reviewCadence: 'P1W', sourceRef: refOf(c) } });
+      }
+    });
+    expect(await chatFloorInDatabase(db)).toBe(true);
+    // With the floor in place the same write is refused: it guards new rows, and leaves these alone.
+    const c = candidate();
+    await expect(db.goal.create({ data: { id: suggestionGoalId(refOf(c)), title: c.text, description: c.quote, owner: 'will', origin: 'flint', sensitivity: 'personal', tainted: false, successCriteria: [], reviewCadence: 'P1W', sourceRef: refOf(c) } })).rejects.toBeTruthy();
+    expect(await db.goal.count({ where: { sourceRef: refOf(c) } })).toBe(0);
+    const listed = (await page()).suggestions.filter((s) => s.goalId === ga || s.goalId === gb);
+    expect(listed.map((s) => [s.goalId, s.title, s.quote, s.waiting]).sort()).toEqual([[ga, a.text, a.quote, false], [gb, b.text, b.quote, false]].sort());
+    // Made a goal: one signature, through the real signed path.
+    const args = {
+      goalId: ga, owner: 'will', origin: 'flint', sensitivity: 'personal', tainted: false, nexusProjectId: null, title: a.text, description: a.quote, horizonAt: null, reviewCadence: 'P1W',
+      successCriteria: [{ id: 'c1', text: `${CANARY} crossed the line`, check: { kind: 'manual' } }], links: [], plan: null,
+    };
+    const filed = await call('POST', `/v1/goals/${ga}/start`, { args });
+    expect(filed.status).toBe(200);
+    await sign(filed.body.id as string);
+    expect(await run(filed.body.id as string)).toMatchObject({ goalId: ga });
+    expect(await db.goal.findUniqueOrThrow({ where: { id: ga } })).toMatchObject({ status: 'active', origin: 'flint', sourceRef: refOf(a) });
+    // Dismissed: unsigned, as before.
+    expect((await call('POST', `/v1/goals/${gb}/dismiss`, {})).status).toBe(200);
+    expect(await db.goal.findUniqueOrThrow({ where: { id: gb } })).toMatchObject({ status: 'rejected' });
+    expect((await page()).suggestions.filter((s) => s.goalId === ga || s.goalId === gb)).toEqual([]);
+  });
+
   it('a card’s quote must be Will’s by its provenance, checked in code as well as by the database', () => {
     const sourceRef = suggestionSourceRef('console-1', 'turn_1', `${CANARY} I want to run a half marathon`);
     const card = (quote: unknown) => ({
@@ -784,7 +816,7 @@ describe.skipIf(NO_DB)('goals and commitments from chat on flint_test', () => {
   });
 });
 
-describe.skipIf(NO_DB)('suggestions from chat after a test promotion (ALONE, with the database floor switched on for the test)', () => {
+describe.skipIf(NO_DB)('suggestions from chat after a promotion Will signed (ALONE, on the database’s own floor)', () => {
   let urls: TestUrls;
   let db: Db;
   let key: Awaited<ReturnType<typeof enrollTestKey>>;
@@ -796,8 +828,8 @@ describe.skipIf(NO_DB)('suggestions from chat after a test promotion (ALONE, wit
       conversationId: 'console-2', turnId: `turn_${n}`, sourceAt: new Date(now.getTime() - 60_000).toISOString(), ...over,
     };
   };
-  /** The intake as it will be once the database's floor is in: the ALONE path is on. (Today it is off: see the test below.) */
-  const take = (c: Record<string, unknown>, now: Date) => takeCandidate({ db, tz: 'UTC', now: () => now, floor: true }, c);
+  /** The intake as the route calls it, at a time of the test's choosing. No seam: whether a goal may land without a card is the database's to say. */
+  const take = (c: Record<string, unknown>, now: Date) => takeCandidate({ db, tz: 'UTC', now: () => now }, c);
   const refOf = (c: { conversationId?: unknown; turnId?: unknown; quote?: unknown }) => suggestionSourceRef(String(c.conversationId), String(c.turnId), String(c.quote));
   /** A policy change Will signs and the runtime applies: the promotion's rows, with the caps given. */
   async function promote(rows: Array<{ pattern: string; dailyCap: number }>) {
@@ -807,6 +839,15 @@ describe.skipIf(NO_DB)('suggestions from chat after a test promotion (ALONE, wit
     await runInternal(db, p.id, undefined, 'UTC', 'test');
   }
   const retire = () => withClient(urls.owner, (c) => c.query(`UPDATE "ActionPolicy" SET active = false`));
+  /**
+   * The database counts the goals from chat made in the last 24 hours by its own clock, and these tests live several
+   * days in one run (the intake's clock is theirs to set). So each puts what it made into the past, as the owner.
+   */
+  const age = () => withClient(urls.owner, async (c) => {
+    await c.query('ALTER TABLE "Goal" DISABLE TRIGGER "Goal_guard"');
+    await c.query(`UPDATE "Goal" SET "createdAt" = "createdAt" - interval '3 days' WHERE "createdAt" > now() - interval '2 days'`);
+    await c.query('ALTER TABLE "Goal" ENABLE TRIGGER "Goal_guard"');
+  });
 
   beforeAll(async () => {
     urls = await freshDb();
@@ -817,6 +858,7 @@ describe.skipIf(NO_DB)('suggestions from chat after a test promotion (ALONE, wit
   afterEach(async () => {
     const audit = await db.auditEntry.findMany({ select: { inputs: true, reasoning: true, outcomeDetail: true } });
     expect(JSON.stringify(audit)).not.toContain('CANARY');
+    await age();
   });
 
   it('before the promotion nothing is added on its own: every suggestion is a card', async () => {
@@ -827,68 +869,181 @@ describe.skipIf(NO_DB)('suggestions from chat after a test promotion (ALONE, wit
     expect(await db.entity.count({ where: { kind: 'commitment' } })).toBe(0);
   });
 
-  it('after it: added directly, with no card, and the caps hold at 3 goals and 10 commitments a day', async () => {
+  it('after it: a goal is added directly, with no card, 3 a day at most; a commitment is still a card, 10 a day at most, whatever a rule says', async () => {
+    expect(await chatFloorInDatabase(db)).toBe(true);
     await promote([{ pattern: 'goal.propose', dailyCap: 3 }, { pattern: 'world.commitment.from_chat', dailyCap: 10 }]);
     // Yesterday, as the intake's clock: a day whose counters are its own.
     const now = new Date(Date.now() - DAY);
-    const cards = await db.proposal.count({ where: { action: { in: ['goal.propose', 'world.commitment.from_chat'] } } });
+    const goalCards = await db.proposal.count({ where: { action: 'goal.propose' } });
+    const commitmentCards = await db.proposal.count({ where: { action: 'world.commitment.from_chat' } });
     const first = candidate(now, { dueOn: '2030-06-01' });
     expect(await take(first, now)).toEqual({ outcome: 'added' });
     const gid = suggestionGoalId(refOf(first));
-    expect(await db.goal.findUniqueOrThrow({ where: { id: gid } })).toMatchObject({ status: 'proposed', origin: 'flint', title: first.text, description: first.quote, sourceRef: refOf(first), approvalId: null });
-    // Its audit entry: an action Flint took on its own, by ids, the rule that let it and the day he said it.
-    expect(await db.auditEntry.findFirstOrThrow({ where: { correlationId: refOf(first), kind: 'action' } })).toMatchObject({
+    const goal = await db.goal.findUniqueOrThrow({ where: { id: gid } });
+    expect(goal).toMatchObject({ status: 'proposed', origin: 'flint', owner: 'will', title: first.text, description: first.quote, sourceRef: refOf(first), approvalId: null, tainted: false, successCriteria: [] });
+    expect(goal.horizonAt?.toISOString()).toBe('2030-06-01T23:59:00.000Z');
+    // Its audit entry, written before the goal: an action Flint took on its own, by ids, the rule that let it, the day he
+    // said it, the day read from it, and the digest of what was added (never the words).
+    const entry = await db.auditEntry.findFirstOrThrow({ where: { correlationId: refOf(first), kind: 'action' } });
+    expect(entry).toMatchObject({
       actor: CANDIDATES_ACTOR, context: 'chat', tier: 'alone', decision: 'act', outcome: 'ok', action: 'goal.propose',
-      inputs: { sourceRef: refOf(first), goalId: gid, saidAt: first.sourceAt, rule: 'policy', policy: 'goal.propose' },
+      inputs: { sourceRef: refOf(first), goalId: gid, saidAt: first.sourceAt, dueOn: '2030-06-01', rule: 'policy', policy: 'goal.propose' },
     });
+    expect((entry.inputs as { argsDigest: string }).argsDigest).toBe(digestOf({ goalId: gid, title: first.text, quote: first.quote, dueOn: '2030-06-01', saidAt: first.sourceAt, sourceRef: refOf(first) }));
     expect(await take(first, now)).toEqual({ outcome: 'known' });
     expect(await take(candidate(now), now)).toEqual({ outcome: 'added' });
     expect(await take(candidate(now), now)).toEqual({ outcome: 'added' });
     const fourth = candidate(now);
     await expect(take(fourth, now)).rejects.toMatchObject({ status: 429, message: 'Flint reached today’s limit of suggestions from chat.' });
     expect(await db.goal.count({ where: { sourceRef: refOf(fourth) } })).toBe(0);
+    expect(await db.auditEntry.count({ where: { correlationId: refOf(fourth) } })).toBe(0);
     expect(await db.goal.count({ where: { origin: 'flint', status: 'proposed' } })).toBe(3);
-    for (let i = 0; i < 10; i++) expect(await take(candidate(now, { kind: 'commitment' }), now)).toEqual({ outcome: 'added' });
+    // No card was filed for any goal, and none is active: only Will starts a goal.
+    expect(await db.proposal.count({ where: { action: 'goal.propose' } })).toBe(goalCards);
+    expect(await db.goal.count({ where: { status: { not: 'proposed' } } })).toBe(0);
+    // A commitment under the very rule he signed for it: a card each time, and nothing in the world model. The
+    // database has no floor under a commitment, so nothing adds one without his signature on its card.
+    for (let i = 0; i < 10; i++) expect(await take(candidate(now, { kind: 'commitment' }), now)).toEqual({ outcome: 'filed' });
     const eleventh = candidate(now, { kind: 'commitment' });
     await expect(take(eleventh, now)).rejects.toMatchObject({ status: 429 });
-    expect(await db.entity.count({ where: { kind: 'commitment' } })).toBe(10);
-    expect(await db.entity.count({ where: { kind: 'commitment', key: refOf(eleventh) } })).toBe(0);
-    // No card was filed for any of them, and none is active: only Will starts a goal.
-    expect(await db.proposal.count({ where: { action: { in: ['goal.propose', 'world.commitment.from_chat'] } } })).toBe(cards);
-    expect(await db.goal.count({ where: { status: { not: 'proposed' } } })).toBe(0);
+    expect(await db.entity.count({ where: { kind: 'commitment' } })).toBe(0);
+    expect(await db.proposal.count({ where: { action: 'world.commitment.from_chat' } })).toBe(commitmentCards + 10);
+    // Each is on record as a card filed, never as something Flint did on its own.
+    expect(await db.auditEntry.count({ where: { action: 'world.commitment.from_chat', kind: 'action' } })).toBe(0);
     // The next day starts again.
     const next = new Date(now.getTime() + DAY);
     expect(await take(candidate(next), next)).toEqual({ outcome: 'added' });
   });
 
-  it('as it ships, nothing from chat runs without a card: under the very same signed rule the intake files a card and adds nothing', async () => {
-    expect(CHAT_FLOOR_IN_DATABASE).toBe(false);
+  it('without the database’s guard nothing from chat runs without a card: under the very same signed rule the intake files a card and adds nothing; with it back, it adds', async () => {
     const now = new Date(Date.now() - 2 * DAY);
     const goals = await db.goal.count();
-    const commitments = await db.entity.count({ where: { kind: 'commitment' } });
     const g = candidate(now);
-    const c = candidate(now, { kind: 'commitment' });
-    // No seam: the intake as the route calls it.
-    expect(await takeCandidate({ db, tz: 'UTC', now: () => now }, g)).toEqual({ outcome: 'filed' });
-    expect(await takeCandidate({ db, tz: 'UTC', now: () => now }, c)).toEqual({ outcome: 'filed' });
+    // Rolled back by its own down.sql: what this runtime would meet after a rollback, or a restore of an older backup.
+    await withoutChatGoalFloor(urls.owner, async () => {
+      expect(await chatFloorInDatabase(db)).toBe(false);
+      expect(await take(g, now)).toEqual({ outcome: 'filed' });
+      expect(await take(candidate(now, { kind: 'commitment' }), now)).toEqual({ outcome: 'filed' });
+    });
     expect(await db.goal.count()).toBe(goals);
-    expect(await db.entity.count({ where: { kind: 'commitment' } })).toBe(commitments);
     const [card] = await db.$queryRaw<Array<{ status: string; consequential: boolean }>>`SELECT status, consequential FROM "Proposal" WHERE args->>'sourceRef' = ${refOf(g)}`;
     expect(card).toEqual({ status: 'pending', consequential: true });
     expect(await db.auditEntry.count({ where: { correlationId: refOf(g), kind: 'action' } })).toBe(0);
+    // The guard is back (a deploy re-applied it): the same rule adds the next one directly.
+    expect(await chatFloorInDatabase(db)).toBe(true);
+    expect(await take(candidate(now), now)).toEqual({ outcome: 'added' });
   });
 
-  it('a signed rule with a smaller cap stops sooner; one with an invented cap still stops at 3 and 10', async () => {
+  it('the database has the last word: a rule that ended between the decision and the write adds nothing, and the suggestion is filed as a card', async () => {
     await retire();
-    await promote([{ pattern: 'goal.propose', dailyCap: 2 }, { pattern: 'world.commitment.from_chat', dailyCap: 2_147_483_647 }]);
+    // A rule that runs out in a moment. The intake's clock is days behind (as in the tests above), so its own reading
+    // still finds the rule live; the database reads the wall clock, and by then the rule is over.
+    const ends = new Date(Date.now() + 5_000);
+    const args = { rows: [{ pattern: 'goal.propose', tier: 'alone', dailyCap: 3, reason: 'P3 chat promotion table, a test', expiresAt: ends.toISOString() }] };
+    const p = await createProposal(db, { kind: 'policy', origin: 'cli', action: 'policy.change', templateId: 'p3c.promotion', args, argsProvenance: { rows: { source: 'template', tainted: false } }, tainted: false, sensitivity: 'ops', destructive: false, consequential: true, ttlMinutes: 60 }, 'will:cli');
+    await approveProposal(db, p.id, await key.approve({ subjectId: p.id, action: 'policy.change', argsDigest: p.argsDigest }), undefined, 'test');
+    await runInternal(db, p.id, undefined, 'UTC', 'test');
+    await new Promise((r) => setTimeout(r, Math.max(0, ends.getTime() - Date.now()) + 300));
+    const now = new Date(Date.now() - 4 * DAY);
+    const c = candidate(now);
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => void errors.push(a.map(String).join(' ')));
+    try {
+      expect(await take(c, now)).toEqual({ outcome: 'filed' });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await db.goal.count({ where: { sourceRef: refOf(c) } })).toBe(0);
+    // Nothing of the refused add is left: no audit entry says Flint acted on its own, and the day's rule cap was not used.
+    expect(await db.auditEntry.count({ where: { correlationId: refOf(c), kind: 'action' } })).toBe(0);
+    expect(await db.auditEntry.findFirstOrThrow({ where: { correlationId: refOf(c) } })).toMatchObject({ kind: 'decision', tier: 'approval', outcome: 'ok' });
+    const [card] = await db.$queryRaw<Array<{ status: string; consequential: boolean }>>`SELECT status, consequential FROM "Proposal" WHERE args->>'sourceRef' = ${refOf(c)}`;
+    expect(card).toEqual({ status: 'pending', consequential: true });
+    // Said once, by the failure's class and SQLSTATE, never its words or the suggestion's.
+    expect(errors.filter((l) => l.startsWith('[goals] the database let no suggestion in without a card (')).length).toBe(1);
+    expect(errors.join('\n')).toContain('42501');
+    expect(errors.join('\n')).not.toContain('CANARY');
+    await retire();
+  });
+
+  it('a signed rule with a smaller cap stops sooner; one with an invented cap still stops at 3', async () => {
+    await retire();
+    await promote([{ pattern: 'goal.propose', dailyCap: 2 }]);
     const now = new Date(Date.now() - 5 * DAY);
     expect(await take(candidate(now), now)).toEqual({ outcome: 'added' });
     expect(await take(candidate(now), now)).toEqual({ outcome: 'added' });
     const third = candidate(now);
     await expect(take(third, now)).rejects.toMatchObject({ status: 429 });
     expect(await db.goal.count({ where: { sourceRef: refOf(third) } })).toBe(0);
-    for (let i = 0; i < 10; i++) expect(await take(candidate(now, { kind: 'commitment' }), now)).toEqual({ outcome: 'added' });
-    await expect(take(candidate(now, { kind: 'commitment' }), now)).rejects.toMatchObject({ status: 429 });
+    await retire();
+    await promote([{ pattern: 'goal.propose', dailyCap: 2_147_483_647 }]);
+    const later = new Date(Date.now() - 6 * DAY);
+    for (let i = 0; i < 3; i++) expect(await take(candidate(later), later)).toEqual({ outcome: 'added' });
+    await expect(take(candidate(later), later)).rejects.toMatchObject({ status: 429 });
+  });
+
+  it('the day he named is the end of that day wherever Will is, and the database takes it from the real intake: Chicago, Kiritimati (UTC+14) and Pago Pago (UTC-11), under the rule and by card', async () => {
+    await retire();
+    await promote([{ pattern: 'goal.propose', dailyCap: 3 }]);
+    const now = new Date();
+    const zones = ['America/Chicago', 'Pacific/Kiritimati', 'Pacific/Pago_Pago'];
+    const day = '2030-06-01';
+    const horizonOf = async (c: Record<string, unknown>) => (await db.goal.findUniqueOrThrow({ where: { id: suggestionGoalId(refOf(c)) } })).horizonAt?.toISOString();
+    // "Today" is a different day in each of these zones, and other tests here have used some of each: the day's own
+    // counts are not what this test is about, so each take starts with them clear.
+    const clear = () => withClient(urls.owner, (c) => c.query(`DELETE FROM "ActionCounter" WHERE action LIKE 'goal.propose%'`));
+    // Under the rule: the intake's own arithmetic, the entry's day, and the database's reading of both.
+    for (const zone of zones) {
+      const c = candidate(now, { dueOn: day });
+      await clear();
+      expect(await takeCandidate({ db, tz: zone, now: () => now }, c), zone).toEqual({ outcome: 'added' });
+      expect(await horizonOf(c), zone).toBe(localWallTime(zone, day, 23, 59).toISOString());
+    }
+    // By card: filed with no rule in force, signed, and carried out in that zone.
+    await retire();
+    for (const zone of zones) {
+      const c = candidate(now, { dueOn: day });
+      await clear();
+      expect(await takeCandidate({ db, tz: zone, now: () => now }, c), zone).toEqual({ outcome: 'filed' });
+      const [card] = await db.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Proposal" WHERE args->>'sourceRef' = ${refOf(c)}`;
+      const waiting = await db.proposal.findUniqueOrThrow({ where: { id: card!.id } });
+      await approveProposal(db, waiting.id, await key.approve({ subjectId: waiting.id, action: waiting.action, argsDigest: waiting.argsDigest }), undefined, 'test');
+      expect(await runInternal(db, waiting.id, undefined, zone, 'test'), zone).toMatchObject({ goalId: suggestionGoalId(refOf(c)) });
+      expect(await horizonOf(c), zone).toBe(localWallTime(zone, day, 23, 59).toISOString());
+    }
+    expect([localWallTime('Pacific/Kiritimati', day, 23, 59).toISOString(), localWallTime('Pacific/Pago_Pago', day, 23, 59).toISOString()]).toEqual(['2030-06-01T09:59:00.000Z', '2030-06-02T10:59:00.000Z']);
+  });
+
+  it('the database counts too: with the runtime’s own counters gone, the seventh goal in 24 hours is not added, and is filed as a card', async () => {
+    await retire();
+    await promote([{ pattern: 'goal.propose', dailyCap: 3 }]);
+    const now = new Date();
+    // A runtime whose counters fail it (a bug, a reset): every count it keeps is wiped as it goes.
+    const forget = () => withClient(urls.owner, (c) => c.query(`DELETE FROM "ActionCounter" WHERE action LIKE 'goal.propose%'`));
+    for (let i = 0; i < 6; i++) {
+      await forget();
+      expect(await take(candidate(now), now), `goal ${i + 1}`).toEqual({ outcome: 'added' });
+    }
+    await forget();
+    const seventh = candidate(now);
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => void errors.push(a.map(String).join(' ')));
+    try {
+      expect(await take(seventh, now)).toEqual({ outcome: 'filed' });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await db.goal.count({ where: { sourceRef: refOf(seventh) } })).toBe(0);
+    expect(await db.auditEntry.count({ where: { correlationId: refOf(seventh), kind: 'action' } })).toBe(0);
+    expect(errors.filter((l) => l.startsWith('[goals] the database let no suggestion in without a card (')).length).toBe(1);
+    // His signature on that card still adds it: the limit is on what lands without him.
+    const [card] = await db.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Proposal" WHERE args->>'sourceRef' = ${refOf(seventh)}`;
+    const waiting = await db.proposal.findUniqueOrThrow({ where: { id: card!.id } });
+    await approveProposal(db, waiting.id, await key.approve({ subjectId: waiting.id, action: waiting.action, argsDigest: waiting.argsDigest }), undefined, 'test');
+    await forget();
+    expect(await runInternal(db, waiting.id, undefined, 'UTC', 'test')).toMatchObject({ goalId: suggestionGoalId(refOf(seventh)) });
+    expect(await db.goal.count({ where: { sourceRef: refOf(seventh), status: 'proposed' } })).toBe(1);
+    await retire();
   });
 
   it('a card filed before the promotion and approved after runs under the rule’s cap, and a rule that forbids stops the intake', async () => {

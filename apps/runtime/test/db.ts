@@ -231,6 +231,23 @@ export async function freshDb(): Promise<TestUrls> {
 }
 const counted = (n: number, what: string): string => `${n} ${what}${n === 1 ? '' : 's'}`;
 
+/** The migration that holds a goal from chat to a signed card or rule (P3 part 5's floor). */
+export const CHAT_GOAL_FLOOR = '20261015000100_p3_chat_goal_floor';
+
+/**
+ * A database without that floor for the length of `fn`: its own down.sql (the
+ * documented rollback), then a deploy puts it back, whatever `fn` did. What a
+ * runtime ahead of its database meets after a rollback or an older restore.
+ */
+export async function withoutChatGoalFloor<T>(owner: string, fn: () => Promise<T>): Promise<T> {
+  await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, CHAT_GOAL_FLOOR, 'down.sql'), 'utf8')));
+  try {
+    return await fn();
+  } finally {
+    await migrateUp(owner);
+  }
+}
+
 /**
  * Health checks dated as a test needs them (hours ago, a day last August). The
  * database dates the runtime's own rows itself (HealthCheck_clock, P3 part 4),
