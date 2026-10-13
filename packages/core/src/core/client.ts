@@ -361,6 +361,7 @@ export class Flint {
           provider: provider.name,
           context: observeContext,
         },
+        unknownTool: this.config.unknownTool,
       },
       sink,
     );

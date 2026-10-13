@@ -7,6 +7,11 @@ but are called out explicitly here.
 
 ### Added
 
+- **`FlintConfig.unknownTool`**: what to tell the model when it calls a tool
+  the call did not offer, in place of the default "Unknown tool 'x'. Available
+  tools: ...". An app that holds a tool back on purpose can say why. Nothing is
+  run for such a call either way; unset, or returning undefined, nothing
+  changes.
 - **`OllamaProvider.baseURL`** is readable: the server every request goes to,
   without a trailing slash. An app can tell a model on this machine from one on
   a server elsewhere before it decides what to send it. Nothing else changes.

@@ -1,6 +1,7 @@
 import type { ProviderAdapter } from '../provider/adapter.js';
 import type { AiObserver } from '../observability/observer.js';
 import type { MemoryStore } from '../memory/store.js';
+import type { ToolCall } from './tool.js';
 
 /**
  * Context-assembly strategy (context.ts). The default is ALWAYS explicit —
@@ -95,4 +96,14 @@ export interface FlintConfig {
    * What was left out is reported through the observer (`onContext`).
    */
   fitToWindow?: boolean;
+  /**
+   * What to tell the model when it calls a tool this call did not offer, in
+   * place of the default ("Unknown tool 'x'. Available tools: ..."). An app
+   * that holds a tool back on purpose (a turn that must not reach outside
+   * services) can say why, so the model tells the user instead of guessing.
+   * Return undefined for the default. Whatever it returns is the call's
+   * result, marked as an error; Flint runs nothing for such a call, and a
+   * function that throws gets the default.
+   */
+  unknownTool?: (call: ToolCall, offered: readonly string[]) => unknown;
 }

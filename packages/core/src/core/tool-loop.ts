@@ -50,6 +50,11 @@ export interface ToolLoopParams {
     provider: string;
     context: unknown;
   };
+  /**
+   * What to tell the model when it calls a tool that was not offered
+   * (FlintConfig.unknownTool). Undefined, or returning undefined: the default.
+   */
+  unknownTool?: ((call: ToolCall, offered: readonly string[]) => unknown) | undefined;
   /** Hard ceiling on model→tool→model round-trips (runaway guard). */
   maxIterations?: number;
   /** Deterministic jitter source for tests. */
@@ -361,11 +366,18 @@ async function executeTool(params: ToolLoopParams, call: ToolCall): Promise<Tool
   const name = resolveToolName(call.toolName, offered);
   if (name === undefined) {
     // Nothing ran, so letting the model try again is safe: tell it which tools
-    // exist instead of failing the whole turn on one misspelled name.
+    // exist instead of failing the whole turn on one misspelled name. An app
+    // that held the tool back on purpose may say why instead (unknownTool).
+    let said: unknown;
+    try {
+      said = await params.unknownTool?.(call, offered);
+    } catch {
+      said = undefined;
+    }
     return {
       toolCallId: call.id,
       toolName: call.toolName,
-      result: { error: `Unknown tool '${call.toolName}'. Available tools: ${offered.join(', ')}` },
+      result: said ?? { error: `Unknown tool '${call.toolName}'. Available tools: ${offered.join(', ')}` },
       isError: true,
     };
   }
