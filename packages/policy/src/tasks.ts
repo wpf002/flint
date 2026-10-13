@@ -414,7 +414,6 @@ export const TASK_SAYS = {
   nothing: 'It changes nothing.',
   noAsset: 'Flint doesn’t know this asset.',
   assetOff: 'Its asset is off. Turn it on in Settings.',
-  noModel: 'Flint has no local model set up.',
   needsGithub: 'It needs the GitHub source first.',
   paidOff: 'Paid tasks are off.',
   noTask: 'This task no longer exists.',
@@ -430,11 +429,9 @@ export const TASK_SAYS = {
   scored: 'Its result is already scored.',
   notChecked: 'Flint hasn’t checked its result yet.',
   notOverride: 'That is already how it ended.',
+  decided: 'You already decided this result.',
   reviewerFirst: 'Turn on Local Reviews first.',
   reviewerStays: 'Reviews are required, so this stays on.',
-  again: 'A task can run again 3 times at most.',
-  notEnded: 'It hasn’t ended yet.',
-  busy: 'Flint is busy with this task. Try again shortly.',
 } as const;
 export type TaskSay = keyof typeof TASK_SAYS;
 
@@ -535,16 +532,16 @@ export const NewTaskBody = z
   })
   .strict();
 export type NewTaskBody = z.infer<typeof NewTaskBody>;
-/** POST /tasks/:id/again: the same task once more, under a new form's key. */
-export const AgainBody = z.object({ draftKey: DraftKey }).strict();
 
 const ProposalRef = z.string().regex(/^[A-Za-z0-9_-]{1,40}$/);
 const Sentence = z.string().min(1).max(200);
-/** A task's row in a tab: its title (Will's, or a template's with an item's label), and where it stands. */
+/** A task's row in a tab: its title (its template's fixed words), what it is about, and where it stands. */
 export const TaskRow = z
   .object({
     id: TaskId,
     title: TaskTitle,
+    /** What it is about: one item by its label (made from its key), or how many items. Never a title. */
+    about: z.string().min(1).max(120).nullable(),
     status: z.enum(TASK_STATUSES),
     line: Sentence,
     /** The asset it runs on, by the registry's name. */
@@ -574,7 +571,7 @@ export const TaskView = TaskRow.extend({
   /** Its card that is waiting for Will, if one is. */
   card: ProposalRef.nullable(),
   /** What Will can do with it now. */
-  can: z.object({ cancel: z.boolean(), accept: z.boolean(), reject: z.boolean(), again: z.boolean() }).strict(),
+  can: z.object({ cancel: z.boolean(), accept: z.boolean(), reject: z.boolean() }).strict(),
 }).strict();
 export type TaskView = z.infer<typeof TaskView>;
 export const TaskAnswer = z.object({ task: TaskView }).strict();

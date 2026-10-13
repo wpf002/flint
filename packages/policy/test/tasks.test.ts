@@ -212,7 +212,7 @@ describe('evaluateChecks: every rule against hand-made results', () => {
 
 describe('the cards', () => {
   const dispatch = (over: Record<string, unknown> = {}) => ({
-    taskId: TASK, assetId: 'as-ci-watcher-v1', assetKind: 'ci_runner', title: 'Watch wpf002/flint CI', spec: ci(), acceptance: ruleChecks(ci()),
+    taskId: TASK, assetId: 'as-ci-watcher-v1', assetKind: 'ci_runner', title: 'Watch a CI Run', spec: ci(), acceptance: ruleChecks(ci()),
     goalId: null, stepKey: null, dueAt: null, sensitivity: 'ops', tainted: false, estCostMicros: 0, ...over,
   });
 
@@ -260,10 +260,10 @@ describe('the cards', () => {
     expect(NewTaskBody.parse({ draftKey: DRAFT, template: 'watch_ci', params: { item: 'e1' } })).toEqual({ draftKey: DRAFT, template: 'watch_ci', params: { item: 'e1' }, goalId: null, dueAt: null, ownCheck: null });
     expect(NewTaskBody.safeParse({ draftKey: DRAFT, template: 'watch_ci', params: {}, taskId: TASK }).success).toBe(false);
     expect(NewTaskBody.safeParse({ draftKey: 'short', template: 'watch_ci', params: {} }).success).toBe(false);
-    const row = { id: TASK, title: 'Watch wpf002/flint CI', status: 'queued', line: 'It’s next in line.', runsOn: 'CI Watcher', outside: false, costs: false, createdAt: '2026-10-12T10:00:00.000Z' };
+    const row = { id: TASK, title: 'Watch a CI Run', about: 'wpf002/flint CI', status: 'queued', line: 'It’s next in line.', runsOn: 'CI Watcher', outside: false, costs: false, createdAt: '2026-10-12T10:00:00.000Z' };
     expect(TasksPage.safeParse({ tasks: [row], more: false }).success).toBe(true);
     expect(TasksPage.safeParse({ tasks: [{ ...row, spec: {} }], more: false }).success).toBe(false);
-    const open = { ...row, result: null, checks: [{ id: 'a1', name: 'CI Run Passed', state: 'waiting' }], checkedBy: null, askedBy: 'you', goalId: null, dueAt: null, chance: { likelihood: 'about_even', percent: 50 }, cost: null, card: null, can: { cancel: true, accept: false, reject: false, again: false } };
+    const open = { ...row, result: null, checks: [{ id: 'a1', name: 'CI Run Passed', state: 'waiting' }], checkedBy: null, askedBy: 'you', goalId: null, dueAt: null, chance: { likelihood: 'about_even', percent: 50 }, cost: null, card: null, can: { cancel: true, accept: false, reject: false } };
     expect(TaskAnswer.safeParse({ task: open }).success).toBe(true);
     expect(TaskAnswer.safeParse({ task: { ...open, output: { raw: true } } }).success).toBe(false);
     const asset = { id: 'as-ci-watcher-v1', name: 'CI Watcher', kind: 'ci_runner', on: false, waiting: false, line: 'Flint reports how your CI runs end.', canTurnOn: true, costs: false };
