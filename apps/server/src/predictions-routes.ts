@@ -4,6 +4,7 @@
  * tools: they need the console's full token (a scoped voice or eval token
  * cannot reach them, ./access).
  *
+ *   GET  /predictions/waiting                      -> is the panel there, and how many questions wait (no number of a series)
  *   GET  /predictions                              -> runtime GET /v1/predictions
  *   GET  /predictions/series/:key                  -> one number, open
  *   GET  /predictions/questions                    -> Will's questions
@@ -22,7 +23,8 @@
  * through: a refusal reaches the console only as one of PREDICT_SAYS's codes
  * and its fixed sentence. A runtime 401 or 403 is a 502 (the console forgets
  * its token on a 401); a 404 on the page is a 501 (an older runtime: the
- * console hides its Predictions button).
+ * console hides its Predictions button; the same for the console's first
+ * question, /predictions/waiting).
  *
  * A forecast's numbers are sensitive (spend and calendar hours among them),
  * and so are a question's words. They pass through here from the runtime to
@@ -31,7 +33,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { z } from 'zod';
-import { AccuracyView, AnswerBody, PredictDone, PredictEmptyBody, PredictFiled, PredictionRef, PredictionsPage, QuestionsPage, SeriesAnswer, SeriesKey, TurnOnBody, predictSayOf } from '@flint/policy';
+import { AccuracyView, AnswerBody, PredictDone, PredictEmptyBody, PredictFiled, PredictionRef, PredictionsPage, PredictionsWaiting, QuestionsPage, SeriesAnswer, SeriesKey, TurnOnBody, predictSayOf } from '@flint/policy';
 import { readJsonLimited } from './attachments';
 import type { Runtime } from './audit-sink';
 
@@ -161,6 +163,8 @@ const SERIES = /^\/predictions\/series\/([^/]+)$/;
 const TURN_OFF = /^\/predictions\/series\/([^/]+)\/turn-off$/;
 const ANSWER = /^\/predictions\/questions\/([^/]+)\/answer$/;
 const READS: Readonly<Record<string, readonly [string, z.ZodTypeAny, string]>> = {
+  // What the console asks on load: two facts, so a forecast's numbers are read only when the panel is opened.
+  '/predictions/waiting': ['/v1/predictions/waiting', PredictionsWaiting, 'waiting'],
   '/predictions': ['/v1/predictions', PredictionsPage, 'page'],
   '/predictions/questions': ['/v1/predictions/questions', QuestionsPage, 'questions'],
   '/predictions/accuracy': ['/v1/predictions/accuracy', AccuracyView, 'accuracy'],
@@ -189,7 +193,7 @@ export async function predictionsRoutes(req: IncomingMessage, res: ServerRespons
   if (read) {
     // No read takes a query: nothing about a number or a question ever rides in a URL.
     if (u.search) return invalid(res, deps, read[2]);
-    return forward(res, deps, rt, 'GET', read[0], undefined, read[1], read[2], path === '/predictions');
+    return forward(res, deps, rt, 'GET', read[0], undefined, read[1], read[2], path === '/predictions' || path === '/predictions/waiting');
   }
   if (one) {
     const key = SeriesKey.safeParse(one[1]);

@@ -45,6 +45,7 @@ function harness(predict?: boolean) {
 
 const ROUTES: Array<['GET' | 'POST', string, unknown?]> = [
   ['GET', '/v1/predictions'],
+  ['GET', '/v1/predictions/waiting'],
   ['GET', `/v1/predictions/series/${KEY}`],
   ['GET', '/v1/predictions/questions'],
   ['GET', '/v1/predictions/accuracy'],
@@ -71,6 +72,7 @@ describe('the prediction routes, before the database', () => {
     const h = harness(true);
     const bad: Array<['GET' | 'POST', string, unknown]> = [
       ['GET', '/v1/predictions?tab=forecasts', undefined],
+      ['GET', '/v1/predictions/waiting?since=1', undefined],
       ['GET', '/v1/predictions/questions?limit=500', undefined],
       ['GET', '/v1/predictions/accuracy?domain=spend', undefined],
       ['GET', `/v1/predictions/series/${KEY}?values=1`, undefined],

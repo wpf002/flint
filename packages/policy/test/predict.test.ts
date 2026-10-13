@@ -18,6 +18,7 @@ import {
   PredictEmptyBody,
   PredictFiled,
   PredictionsPage,
+  PredictionsWaiting,
   QUESTIONS_PER_DAY,
   QuestionsPage,
   SeriesAnswer,
@@ -154,6 +155,11 @@ describe('P4 part 4: the Predictions panel\'s wire', () => {
     expect(PredictionsPage.safeParse({ ...page, state: 'maybe' }).success).toBe(false);
     expect(PredictionsPage.safeParse({ ...page, extra: 1 }).success).toBe(false);
     expect(PredictionsPage.safeParse({ ...page, numbers: Array.from({ length: 61 }, () => row) }).success).toBe(false);
+    // What the console asks on load holds two facts and nothing else: no number of any series rides along.
+    expect(PredictionsWaiting.parse({ questions: 2, announce: true })).toEqual({ questions: 2, announce: true });
+    for (const bad of [{ questions: 2 }, { questions: -1, announce: false }, { questions: 2, announce: 'yes' }, { questions: 2, announce: false, numbers: [row] }, { questions: 2, announce: false, state: 'on' }]) {
+      expect(PredictionsWaiting.safeParse(bad).success, JSON.stringify(bad).slice(0, 60)).toBe(false);
+    }
     const fact = { label: 'Today', value: 'About 4', says: 'The 80% range is 2 to 6.' };
     const series = { number: row, forecast: [fact], chance: { label: 'Above 3', value: 'Likely · 70%', says: 'It’s likely, around 70%, that today runs above 3.' }, record: 'Flint has no results for this number yet.', waiting: false, offHere: false };
     expect(SeriesAnswer.parse({ series })).toEqual({ series });

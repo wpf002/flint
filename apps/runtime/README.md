@@ -1093,7 +1093,8 @@ declined, and ones set aside with your approval.
 **What stays private.** A forecast's numbers include what Flint spends and
 how many hours are on your calendar. They go from the runtime to the console
 when you open the panel, and nowhere else: not into chat, a note, a log or
-the audit trail, and never to an outside service. The chat connector's token
+the audit trail, and never to an outside service. Until you open it the
+console asks only whether questions are waiting, which holds no number. The chat connector's token
 can't read these routes or answer a question for you. The audit trail records
 that you turned a number off or answered a question, by id, and never a
 number's value or a prediction's words.

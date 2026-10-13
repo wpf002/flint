@@ -143,6 +143,13 @@ export const PredictionsPage = z
   .strict();
 export type PredictionsPage = z.infer<typeof PredictionsPage>;
 
+/**
+ * What the console asks when it loads, and now and then after: is the panel there, and should its button show a
+ * dot. Two facts and no number of any series, so that a forecast's numbers are read only when Will opens the panel.
+ */
+export const PredictionsWaiting = z.object({ questions: Count, announce: z.boolean() }).strict();
+export type PredictionsWaiting = z.infer<typeof PredictionsWaiting>;
+
 /** A labelled row with its sentence. */
 export const PanelFact = z.object({ label: PanelWords, value: PanelWords, says: PanelSentence }).strict();
 export type PanelFact = z.infer<typeof PanelFact>;

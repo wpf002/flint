@@ -2428,9 +2428,12 @@ goalsProbe();
  * own token and kept in this page's memory only: nothing here stores them, logs them or puts them in a URL.
  * The helpers are the Goals panel's (goals-js): one of each for both panels. ES5, no confirm(), alert() or
  * prompt(): the Mac app's web view has none. */
-var PRED={tab:'forecasts',view:'list',page:null,series:null,picked:null,busy:false,seq:0,nav:0,questions:0};
+var PRED={tab:'forecasts',view:'list',page:null,series:null,picked:null,busy:false,seq:0,nav:0,questions:0,announce:false};
 var PRED_TABS=[['forecasts','Forecasts'],['questions','Questions'],['accuracy','Accuracy']];
 var PRED_PATHS={forecasts:'/predictions',questions:'/predictions/questions',accuracy:'/predictions/accuracy'};
+/* What the page asks on load, and every few minutes: is the panel there, and do questions wait. Two facts and no
+   number of any series: a forecast's numbers are read only when Will opens the panel. */
+var PRED_WAITING='/predictions/waiting';
 /* What the panel says of a tap: an answer's word as a value, and each outcome as a sentence. */
 var PRED_ANSWERS={yes:'Yes',no:'No',skip:'Skipped'};
 var PRED_SAY={recorded:'Flint recorded your answer.',on:'Approved. Flint starts keeping these numbers tonight.',off:'Flint stopped forecasting this number.',
@@ -2441,9 +2444,9 @@ var PRED_SAY={recorded:'Flint recorded your answer.',on:'Approved. Flint starts 
 function predShown(on){var b=document.getElementById('predbtn');if(b)b.hidden=!on;}
 /* The header's gold dot is for what needs Will: questions wait for him. Only once he has let Flint ask on its own
    (the runtime says so): until then they wait here, and nothing announces them. */
-function predDot(d){var x=document.getElementById('preddot');if(x)x.hidden=!(d&&d.announce===true&&d.questions>0);}
+function predDot(d){var x=document.getElementById('preddot');PRED.announce=!!(d&&d.announce===true);if(x)x.hidden=!(PRED.announce&&d.questions>0);}
 /* An older runtime (or none) answers 501: no Predictions button at all. */
-function predProbe(){if(typeof TOKEN!=='undefined'&&!TOKEN)return;gCall(PRED_PATHS.forecasts).then(function(d){predShown(true);predDot(d);},function(e){predShown(e.status!==501&&e.status!==401);});}
+function predProbe(){if(typeof TOKEN!=='undefined'&&!TOKEN)return;gCall(PRED_WAITING).then(function(d){predShown(true);predDot(d);},function(e){predShown(e.status!==501&&e.status!==401);});}
 function predIsOpen(){var p=document.getElementById('predictions');return !!(p&&p.classList&&p.classList.contains('open'));}
 /* Each view Will goes to takes a new number. An answer that comes back after he has gone elsewhere finds the number
    changed (or the panel closed), and neither pulls him back nor writes into a view that is gone. */
@@ -2601,7 +2604,7 @@ function predQuestion(q){var row=predRow(q.title,[q.says],'');var acts=gEl('span
 function predAnswer(q,answer,row,buttons){if(PRED.busy)return;PRED.busy=true;buttons.forEach(function(b){b.disabled=true;});var here=predHere();
   gCall('/predictions/questions/'+encodeURIComponent(q.id)+'/answer',{answer:answer}).then(function(){PRED.busy=false;if(!here())return;
     row.textContent='';var l=gEl('span','lbl');l.appendChild(gEl('b',null,q.title));l.appendChild(gEl('span',null,PRED_SAY.recorded));row.appendChild(l);row.appendChild(gEl('span','val',PRED_ANSWERS[answer]));
-    predCount(PRED.questions-1);predDot({announce:!!(PRED.page&&PRED.page.announce),questions:PRED.questions});predMsg('');
+    predCount(PRED.questions-1);predDot({announce:PRED.announce,questions:PRED.questions});predMsg('');
   },function(e){PRED.busy=false;if(!here())return;
     /* Already answered, or no longer open: the list is stale. It is read again, and the footer says why. */
     if(e.code==='answered'||e.code==='noQuestion'){predTab('questions',gSay(e),'bad');return;}

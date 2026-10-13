@@ -5,6 +5,7 @@
  * forecast's numbers (spend and calendar hours among them), a question's words
  * or answer one for Will.
  *
+ *   GET  /v1/predictions/waiting                      is the panel there, and how many questions wait (PredictionsWaiting: no number of a series)
  *   GET  /v1/predictions                              the Forecasts tab (PredictionsPage)
  *   GET  /v1/predictions/series/:key                  one number, open (SeriesAnswer)
  *   GET  /v1/predictions/questions                    Will's questions (QuestionsPage)
@@ -20,13 +21,13 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { AccuracyView, AnswerBody, PREDICT_SAYS, PredictDone, PredictEmptyBody, PredictFiled, PredictionRef, PredictionsPage, QuestionsPage, SeriesAnswer, SeriesKey, TurnOnBody, predictCodeOf } from '@flint/policy';
+import { AccuracyView, AnswerBody, PREDICT_SAYS, PredictDone, PredictEmptyBody, PredictFiled, PredictionRef, PredictionsPage, PredictionsWaiting, QuestionsPage, SeriesAnswer, SeriesKey, TurnOnBody, predictCodeOf } from '@flint/policy';
 import type { RuntimeScope } from '../config.js';
 import type { Db } from '../db.js';
 import { Refused } from '../governance/proposals.js';
 import { proposeForecasts, turnOffSeries } from '../predict/enable.js';
-import { answerQuestion, questionsPage } from '../predict/questions.js';
-import { accuracyView, predictionsPage, seriesView } from '../predict/view.js';
+import { answerQuestion, questionsPage, questionsWaiting } from '../predict/questions.js';
+import { accuracyView, predictionsPage, questionsAnnounced, seriesView } from '../predict/view.js';
 
 export interface PredictionRouteDeps {
   db: Db;
@@ -76,6 +77,13 @@ export function registerPredictionRoutes(app: FastifyInstance, d: PredictionRout
       return reply.code(err.status).send({ error: err.message, ...(code ? { code } : {}) });
     }
   };
+
+  // What the console asks when it loads: two facts, and no number of any series. A forecast is read only when
+  // Will opens the panel.
+  app.get('/v1/predictions/waiting', pre, guarded(async (req) => {
+    parse(None, req.query ?? {});
+    return out(PredictionsWaiting, { questions: await questionsWaiting(db), announce: await questionsAnnounced(db) });
+  }));
 
   app.get('/v1/predictions', pre, guarded(async (req) => {
     parse(None, req.query ?? {});

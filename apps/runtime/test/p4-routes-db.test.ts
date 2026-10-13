@@ -26,7 +26,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createHash } from 'node:crypto';
-import { AccuracyView, FORECAST_REASONS, PredictionsPage, QuestionsPage, SeriesAnswer, digestOf, localDay, noteProblems, type ForecastRow } from '@flint/policy';
+import { AccuracyView, FORECAST_REASONS, PredictionsPage, PredictionsWaiting, QuestionsPage, SeriesAnswer, digestOf, localDay, noteProblems, type ForecastRow } from '@flint/policy';
 import { NO_DB, freshDb, id, type TestUrls } from './db';
 import { CANARY, DAY, HOUR, MIN, TZ, dayStart, ledgerKit, type LedgerKit } from './ledger/kit';
 import { enrollTestKey } from './sign';
@@ -142,6 +142,8 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     // Switched off on this Mac: the page says that instead.
     expect((await page(offHere)).state).toBe('off_here');
     expect(AccuracyView.parse((await call('GET', '/v1/predictions/accuracy')).body)).toEqual({ scored: false, areas: [], unsettled: [] });
+    // What the console asks on load: two facts, whatever the Mac's switch says.
+    for (const on of [app, offHere]) expect(PredictionsWaiting.parse((await call('GET', '/v1/predictions/waiting', undefined, on)).body)).toEqual({ questions: 0, announce: false });
     expect(QuestionsPage.parse((await call('GET', '/v1/predictions/questions')).body)).toEqual({ waiting: [], answered: [] });
   });
 
@@ -378,6 +380,9 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     }
     // In shadow they wait in the panel, counted, and nothing announces them.
     expect(await page()).toMatchObject({ questions: 5, announce: false });
+    // The console's own question says the same, and nothing else: no number of a series rides along.
+    const waiting = await call('GET', '/v1/predictions/waiting');
+    expect([waiting.status, waiting.body]).toEqual([200, { questions: 5, announce: false }]);
 
     // The database takes no result as Will's without his answer, whoever says it is his.
     const ownDue = (await made(own)).resolveBy;
@@ -408,6 +413,15 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     }
     expect(await k.resolution(own)).toMatchObject({ outcome: true });
     expect(await k.resolution(healthy)).toBeUndefined();
+    // Two answers at the same moment (a double tap, two devices): one is taken, the other is told it was answered,
+    // and one result is on record, the taken one's.
+    const both = await Promise.all([call('POST', `/v1/predictions/questions/${closed}/answer`, { answer: 'yes' }), call('POST', `/v1/predictions/questions/${closed}/answer`, { answer: 'no' })]);
+    expect(both.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect(both.find((r) => r.status === 409)!.body).toEqual({ error: 'That question was already answered.', code: 'answered' });
+    const took = both[0]!.status === 200 ? 'yes' : 'no';
+    expect((await k.owner(`SELECT answer FROM "PredictionQuestion" WHERE "predictionId" = $1`, [closed])).rows).toEqual([{ answer: took }]);
+    expect((await k.owner(`SELECT outcome, "resolvedBy" FROM "Resolution" WHERE "predictionId" = $1`, [closed])).rows).toEqual([{ outcome: took === 'yes', resolvedBy: 'will' }]);
+
     // A question that was never asked is not there to answer.
     const never = await wills(HOUR);
     for (const pid of [never, 'pdnosuchprediction']) {
@@ -422,17 +436,19 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
       ['will:console', 'console', 'action', 'ok', { predictionId: own, answer: 'yes' }, `${own}.answer`, false],
       ['will:console', 'console', 'action', 'ok', { predictionId: above, answer: 'no' }, `${above}.answer`, false],
       ['will:console', 'console', 'action', 'ok', { predictionId: healthy, answer: 'skip' }, `${healthy}.answer`, false],
+      // The two at once: one entry, for the one that was taken.
+      ['will:console', 'console', 'action', 'ok', { predictionId: closed, answer: took }, `${closed}.answer`, false],
     ]);
     expect(JSON.stringify(entries)).not.toContain(WORDS);
 
-    // The list now: two still wait, and the three he answered say what he said, newest first.
+    // The list now: one still waits, and the four he answered say what he said, newest first.
     const after = QuestionsPage.parse((await call('GET', '/v1/predictions/questions')).body);
-    expect(after.waiting.map((q) => q.id)).toEqual([gone, closed]);
+    expect(after.waiting.map((q) => q.id)).toEqual([gone]);
     const today = dayWords(new Date(), TZ, new Date());
     expect(after.answered.map((q) => [q.id, q.answer, q.says])).toEqual([
-      [healthy, 'skip', `You skipped it on ${today}.`], [above, 'no', `You said no on ${today}.`], [own, 'yes', `You said yes on ${today}.`],
+      [closed, took, `You said ${took} on ${today}.`], [healthy, 'skip', `You skipped it on ${today}.`], [above, 'no', `You said no on ${today}.`], [own, 'yes', `You said yes on ${today}.`],
     ]);
-    expect((await page()).questions).toBe(2);
+    expect((await page()).questions).toBe(1);
   });
 
   it('how Flint has done: the night\'s scores by area, in sentences; "not enough" below thirty; what was left unsettled', async () => {

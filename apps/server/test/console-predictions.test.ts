@@ -167,6 +167,7 @@ const ACCURACY = {
 const answers = (over: Partial<Record<string, { status: number; body: unknown }>> = {}) => (c: Call): { status: number; body: unknown } => {
   const key = `${c.method} ${c.url}`;
   if (over[key]) return over[key]!;
+  if (c.url === '/predictions/waiting') return { status: 200, body: { questions: 0, announce: false } };
   if (c.url === '/predictions') return { status: 200, body: onPage() };
   if (c.url === '/predictions/questions') return { status: 200, body: { waiting: [], answered: [] } };
   if (c.url === '/predictions/accuracy') return { status: 200, body: ACCURACY };
@@ -294,16 +295,22 @@ describe('the header button', () => {
     expect(ids.predbtn!.hidden).toBe(false);
     for (const status of [501, 401]) {
       ids.predbtn!.hidden = false;
-      routes = answers({ 'GET /predictions': { status, body: { error: 'x' } } });
+      routes = answers({ 'GET /predictions/waiting': { status, body: { error: 'x' } } });
       run('predProbe()');
       await settle();
       expect(ids.predbtn!.hidden, String(status)).toBe(true);
     }
     // The runtime is only down: the button stays, and the panel says so when opened.
-    routes = answers({ 'GET /predictions': { status: 503, body: { error: PREDICTIONS_SAY.down } } });
+    routes = answers({ 'GET /predictions/waiting': { status: 503, body: { error: PREDICTIONS_SAY.down } } });
     run('predProbe()');
     await settle();
     expect(ids.predbtn!.hidden).toBe(false);
+    // What the page asks on its own is two facts: no forecast is read until Will opens the panel.
+    routes = answers();
+    calls = [];
+    run('predProbe()');
+    await settle();
+    expect(calls).toEqual([{ url: '/predictions/waiting', method: 'GET', body: undefined }]);
     // Signed out, nothing is asked at all.
     calls = [];
     run("TOKEN='';predProbe()");
@@ -315,12 +322,21 @@ describe('the header button', () => {
 
   it('its dot is for questions that wait, and only once Will has let Flint ask on its own', async () => {
     expect(ids.preddot!.hidden).toBe(true);
-    for (const [page, dot] of [[{ questions: 2, announce: false }, false], [{ questions: 0, announce: true }, false], [{ questions: 2, announce: true }, true], [{ questions: 2, announce: 'yes' }, false]] as const) {
-      routes = answers({ 'GET /predictions': { status: 200, body: onPage(page) } });
+    for (const [waiting, dot] of [[{ questions: 2, announce: false }, false], [{ questions: 0, announce: true }, false], [{ questions: 2, announce: true }, true], [{ questions: 2, announce: 'yes' }, false]] as const) {
+      routes = answers({ 'GET /predictions/waiting': { status: 200, body: waiting } });
       run('predProbe()');
       await settle();
-      expect(!ids.preddot!.hidden, JSON.stringify(page)).toBe(dot);
+      expect(!ids.preddot!.hidden, JSON.stringify(waiting)).toBe(dot);
     }
+    // The open panel keeps it in step: the page's own count, and each answer he gives.
+    routes = answers({ 'GET /predictions': { status: 200, body: onPage({ questions: 1, announce: true }) }, 'GET /predictions/questions': { status: 200, body: { waiting: [question()], answered: [] } } });
+    await open();
+    expect(ids.preddot!.hidden).toBe(false);
+    run("predTab('questions')");
+    await settle();
+    body().with('pacts')[0]!.children[0]!.onclick!();
+    await settle();
+    expect(ids.preddot!.hidden).toBe(true);
   });
 
   it('is in the header beside Goals, named and hidden until then; the panel is a dialog, one of the page\'s panels, and Escape closes it', async () => {
@@ -871,9 +887,9 @@ describe('the script itself', () => {
     expect(code).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function/);
     expect(code).not.toMatch(/localStorage|sessionStorage|document\.cookie|indexedDB|console\.|navigator\.sendBeacon/);
     expect(code).not.toMatch(/\bconfirm\(|\balert\(|\bprompt\(/);
-    // Every request is one of the panel's seven, and none carries anything in a query.
+    // Every request is one of the panel's eight, and none carries anything in a query.
     expect(code).not.toMatch(/\?[a-z]+=|[&?]series=|[&?]answer=/);
-    expect([...code.matchAll(/'(\/predictions[^']*)'/g)].map((m) => m[1]).sort()).toEqual(['/predictions', '/predictions/accuracy', '/predictions/questions', '/predictions/questions/', '/predictions/series/', '/predictions/series/', '/predictions/turn-on']);
+    expect([...code.matchAll(/'(\/predictions[^']*)'/g)].map((m) => m[1]).sort()).toEqual(['/predictions', '/predictions/accuracy', '/predictions/questions', '/predictions/questions/', '/predictions/series/', '/predictions/series/', '/predictions/turn-on', '/predictions/waiting']);
     // It reaches the server only through the Goals panel's one caller, which sends the console's token.
     expect(code).not.toMatch(/\bfetch\(|XMLHttpRequest|WebSocket|EventSource/);
   });

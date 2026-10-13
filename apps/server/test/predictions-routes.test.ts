@@ -111,6 +111,23 @@ const post = async (p: string, body?: unknown) => {
 };
 
 describe('reads', () => {
+  it('what the console asks on load is two facts, and nothing of a number: an answer that carries more never reaches it', async () => {
+    answer = () => ({ status: 200, body: { questions: 2, announce: true } });
+    expect(await get('/predictions/waiting')).toEqual({ status: 200, body: { questions: 2, announce: true } });
+    expect(asked).toEqual([{ method: 'GET', url: '/v1/predictions/waiting', auth: `Bearer ${TOKEN}`, body: '' }]);
+    for (const bad of [{ questions: 2, announce: true, numbers: [row()] }, { ...page() }, { questions: 2 }, { questions: '2', announce: true }]) {
+      answer = () => ({ status: 200, body: bad });
+      expect(await get('/predictions/waiting')).toEqual({ status: 502, body: { error: PREDICTIONS_SAY.unreadable, ref: 'ref123' } });
+    }
+    expect(logged.join('\n')).not.toContain(VALUE);
+    expect((await get('/predictions/waiting?since=1')).status).toBe(400);
+    // An older runtime has no such route: a 501, and the console leaves its button hidden.
+    answer = () => ({ status: 404, body: { error: 'Route GET:/v1/predictions/waiting not found' } });
+    expect(await get('/predictions/waiting')).toEqual({ status: 501, body: { error: 'This needs a newer runtime.' } });
+    deps = { ...deps, runtime: () => undefined };
+    expect(await get('/predictions/waiting')).toEqual({ status: 501, body: { error: 'Predictions need the runtime.' } });
+  });
+
   it('the page, one number, the questions and the scores are passed through, each checked against its contract', async () => {
     answer = () => ({ status: 200, body: page() });
     expect(await get('/predictions')).toEqual({ status: 200, body: page() });
@@ -324,12 +341,12 @@ describe('writes', () => {
 
 describe('where the routes sit', () => {
   it('a predictions route is never reported back to the runtime as a route.error: a number\'s key in a path is no event', () => {
-    for (const p of ['/predictions', '/predictions/accuracy', '/predictions/questions', `/predictions/series/${KEY}`, `/predictions/series/${KEY}/turn-off`, `/predictions/questions/${PID}/answer`, '/predictions/turn-on']) expect(routeOf(p), p).toBeUndefined();
+    for (const p of ['/predictions', '/predictions/waiting', '/predictions/accuracy', '/predictions/questions', `/predictions/series/${KEY}`, `/predictions/series/${KEY}/turn-off`, `/predictions/questions/${PID}/answer`, '/predictions/turn-on']) expect(routeOf(p), p).toBeUndefined();
     expect(routeOf('/predictionsx')).toBe('other');
   });
 
   it('only the console\'s full token reaches them: a voice or eval token reaches none', () => {
-    for (const [method, p] of [['GET', '/predictions'], ['GET', `/predictions/series/${KEY}`], ['GET', '/predictions/questions'], ['GET', '/predictions/accuracy'], ['POST', '/predictions/turn-on'], ['POST', `/predictions/series/${KEY}/turn-off`], ['POST', `/predictions/questions/${PID}/answer`]] as const) {
+    for (const [method, p] of [['GET', '/predictions'], ['GET', '/predictions/waiting'], ['GET', `/predictions/series/${KEY}`], ['GET', '/predictions/questions'], ['GET', '/predictions/accuracy'], ['POST', '/predictions/turn-on'], ['POST', `/predictions/series/${KEY}/turn-off`], ['POST', `/predictions/questions/${PID}/answer`]] as const) {
       expect(scopeAllows('full', method, p), p).toBe(true);
       expect(scopeAllows('voice', method, p), p).toBe(false);
       expect(scopeAllows('eval', method, p), p).toBe(false);
