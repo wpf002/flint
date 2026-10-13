@@ -2241,7 +2241,8 @@ lets Flint do something on its own (the promotion tables file these). Or it
 holds something back: Flint asks you each time, or may not do it at all. A
 rule that holds back wins over one that lets go, so it works as a brake under
 a wider rule: goals from chat ask you each time, while everything else about
-goals runs on its own.
+goals runs on its own. A daily limit is a brake too: where two rules let the
+same thing run, the lower limit is the one in force.
 
 This lists the rules that are switched on, each as a sentence under its id:
 
@@ -2255,114 +2256,167 @@ To switch one off, give its id (or several):
 cd ~/flint && pnpm --silent --filter @flint/runtime rules --off <id>
 ```
 
-That files a card, **Switch Off 1 Rule**. Sign it in Approvals. Nothing
-changes until you do, and the card waits 7 days. It asks on its own, with its
-own touch, and is never part of Approve All. Show Details says each rule that
-ends as a sentence, with its id under References. A rule that is switched off
-stays off: to have it again, sign a new one.
+That files a card, **Switch Off 1 Rule**, and says how to approve it: open
+Flint, click Approvals in the top bar, open the card, and approve it with
+Touch ID. Nothing changes until you do, and the card waits 7 days. It asks on
+its own, with its own touch, and is never part of Approve All. Show Details
+says each rule that ends as a sentence, with its id under References. A rule
+that is switched off stays off: to have it again, sign a new one.
 
 ### What the database holds
 
 Until this update the runtime could switch off any rule by itself, a brake
-included. Two reviews found that, and it was listed under P3's and P5's
-limits. Now the database decides
-(`20261015000200_policy_off_guard`, a guard on the policy table), for every
-role but the migration owner:
+included. A card left being carried out could make its rules again for as
+long as it stayed that way. A table you signed could be carried out in part.
+And nothing kept one card from saying two things. Reviews found each of
+these. Now the database decides
+(`20261015000200_policy_off_guard`, guards on the policy table and on a
+policy card), whatever the runtime does:
 
-- **A rule that holds something back goes off only on your signed card.** The
-  card is a policy change from the console or the command line, with nothing
-  untrusted in it, marked for your own touch, signed under a key that is still
-  live, being carried out now and not expired. Its stored words are the words
-  you signed (the database computes their digest again), and they name the
-  rule by its id, what it covers and what it does. A card for one rule
-  switches off no other.
-- **The runtime may itself switch off a rule that lets Flint act on its
-  own.** That only takes power away: the action goes back to asking you.
-  There is one exception. When two such rules cover the same action, the
-  lower daily limit is the one in force. So a rule with a limit also goes off
-  only on your card while another rule that is on could run the same action
-  under a higher limit, or none.
+- **A rule card says one thing.** It adds rules, or it switches rules off,
+  and holds nothing else. A card that did both could read "Switch Off 1 Rule"
+  and add a rule that lets something run on its own. The database files no
+  such card, the runtime files and carries out none, the server starts no
+  signature for one ("It can't be signed: a rule card adds rules or switches
+  rules off, never both."), and the console never titles one as either: it
+  shows both halves, each rule said as ended or as added, and asks on its
+  own.
+- **A rule is made once, and a table whole.** A card makes one rule for each
+  time it lists one, ever. So a rule that was switched off is never made
+  again from the card that made it, however long that card is left being
+  carried out, after it expires and after its key is revoked. And a card's
+  rules land together or not at all, checked as the change is committed: the
+  rule that lets go never lands without the brake you signed beside it.
+- **Only under a card that still stands.** For making a rule and for
+  switching one off alike: your own card, from the console or the command
+  line, with nothing untrusted in it, marked for your own touch, signed under
+  a key that is still live, being carried out now, not expired, and expiring
+  no later than 7 days after your approval does. Its stored words are the
+  words you signed (the database computes their digest again).
+- **A rule that holds something back, or carries a limit, goes off only on
+  your signed card.** The card names the rule by its id, what it covers and
+  what it does. A card for one rule switches off no other.
+- **The runtime may itself switch off only a rule that lets Flint act on its
+  own and carries no limit.** That takes power away and nothing else: the
+  action goes back to asking you, or another rule still decides.
+- **No rule covers a policy change.** A rule that forbade policy changes
+  could never be signed away, since the card that switches it off is a policy
+  change. The runtime says so when such a card is filed ("A rule can't cover
+  policy changes. Those always take your signature."), and the database
+  refuses the row. One from before can still be signed away: the card that
+  switches rules off is judged by the code alone, never by your rules.
+- **A rule's history names your approval.** When a card switches a rule off,
+  the rule's history says which approval did it, whatever the runtime says of
+  itself. No switch-off without a card is recorded under an approval's name.
 
-Why that rule and no other: this is how the tier engine reads the rows
-(`@flint/policy`, `resolveTier`). Of the rules that match an action, the
-strictest wins. An action runs on its own only when every rule that matches
-it lets it, and then under the lowest daily limit among them and the code's
-own. So switching off a rule that lets go either sends the action back to
-asking or changes nothing, unless that rule carried the lowest limit.
+Why the runtime's own rule is that narrow: this is how the tier engine reads
+the rows (`@flint/policy`, `resolveTier`). Of the rules that match an action,
+the strictest wins. An action runs on its own only when every rule that
+matches it lets it, and then under the lowest daily limit among them and the
+code's own. So switching off a rule that lets go with no limit either sends
+the action back to asking or changes nothing. A rule with a limit is
+different. Its limit may be the lowest in force, now or once a wider rule you
+have signed is carried out, and the runtime chooses the order. An earlier
+version of this guard let a limited rule go while no wider rule was on. The
+review showed the runtime could switch it off first and carry out the wider
+rule after, so the limit never applied. Hence: no limit, or your card.
 
 A test proves it against the engine itself
 (`test/policy-off-guard-db.test.ts`). Over every table of up to three rules
 about one action and its family (for three such families), 4,000 random
-tables, and 150 more put to the database row by row as the runtime's own
-role: no rule the runtime may switch off makes any action less restricted, in
-any context, whatever the clock says. The same test shows that two simpler
-rules fail: "any rule" loosens a tier, and "any rule that lets go" loosens a
-limit.
+tables, 3,000 runs of switch-offs with signed rules carried out in between,
+and 150 more tables put to the database row by row as the runtime's own
+role: no rule the runtime may switch off makes any action less restricted,
+in any context, whatever the clock says and whatever is signed afterwards.
+The same test shows three weaker rules fail: "any rule" loosens a tier, "any
+rule that lets go" loosens a limit, and the earlier version is beaten by a
+rule carried out later.
 
 What the next parts must know:
 
-- **The guard reads wider than the engine.** It counts another rule whether
-  or not that rule has ended, and whatever its scope. It doesn't read the
-  rule's own end either: a brake that has ended still goes off only on your
-  card. So it sometimes asks for your card where none was needed. It never
-  lets through a switch-off that loosens.
-- **A switch-off runs at READ COMMITTED**, which every writer in the runtime
-  uses. Above it a transaction reads the database as it was when it began: a
-  rule signed since, a card that has since ended, a key since revoked. So the
-  database refuses any switch-off there, as the goal and task guards refuse
-  their writes.
-- **`policy.change` takes `rows` or `off`, never both.** `off` is a list of
-  `{ id, pattern, tier }`. A switch-off is filed only as your own untainted
-  policy card (the `rules` command files it), and only for rules that are
-  there, on, and as written.
+- **Nothing in the runtime switches a rule off on its own today.** If an
+  automatic step-down of a rule with a limit is ever built (taking a
+  promotion back after a failure, say), it needs its own tighten-only
+  mechanism: the switch-off path here is closed to it on purpose. For a rule
+  that lets go with no limit, the runtime may switch it off with no card. It
+  must run at READ COMMITTED and treat SQLSTATE 42501 as "this one needs a
+  card", never as something to retry.
+- **Only at READ COMMITTED**, which every writer in the runtime uses, for a
+  rule made and a rule switched off alike. Above it a transaction reads the
+  database as it was when it began: a card that has since ended, a key since
+  revoked, a rule the card has since made. So the database refuses there, as
+  the goal and task guards refuse their writes.
+- **`policy.change` takes `rows` or `off`, never both, and nothing else.**
+  `off` is a list of `{ id, pattern, tier }`. A switch-off is filed only as
+  your own untainted policy card (the `rules` command files it), and only for
+  rules that are there, on, and as written. A card holds whole numbers and
+  plain names only, a few levels deep: the database must be able to compute
+  its digest again.
+- **Write a table's rules in one transaction.** One at a time, the first is
+  refused when it commits. A rule's id is letters, digits, `_` and `-`, at
+  most 64.
 - **A refusal is one sentence, once.** If the database refuses a signed
   switch-off (the key was revoked or the card expired while it ran), the card
   fails with "The database refused to switch it off, so it's still on. File
   it again and sign it." The failure is in the audit trail, every rule the
   card named is as it was, and nothing tries again.
-- **Nothing in the runtime switches a rule off on its own today.** A later
-  part that takes a promotion back after a failure can, for a rule that lets
-  go, with no card. It must run at READ COMMITTED and treat SQLSTATE 42501 as
-  "this one needs a card", never as something to retry.
-- **Errors name the rule's id only**, and only one shaped as an id.
+- **The guard doesn't read a rule's own end.** A brake that has ended still
+  goes off only on your card, so the rule holds whatever the clock says.
+- **Errors name a rule's or a card's id only**, and only one shaped as an id.
+  The `rules` command prints an id only when it is shaped as one too.
 
 ### What changed on deploy
 
-- One database update, `20261015000200_policy_off_guard`: one trigger and its
-  function on the policy table. No table, no column, no grant, and no row is
-  touched. Rules that are on stay on, rules that were switched off stay off,
-  and every rule is held to the guard from then on, whenever it was signed.
-- The `rules` command, and the console's card for a switch-off.
+- One database update, `20261015000200_policy_off_guard`: four triggers and
+  three functions on the policy table and the card table, and P1's check on
+  how a rule is made, replaced by a stricter one. No table, no column, no
+  grant, and no row is touched. Rules that are on stay on, rules that were
+  switched off stay off, and every rule and card is held to the guards from
+  then on, whenever it was signed.
+- The `rules` command, and the console's cards for a switch-off and for a
+  rule card that says more than one thing.
 - A restore that one of your rules forbids now names the `rules` command.
   It used to point at a control the console never had.
 
 ### Known limits
 
-- **A restore switches rules off without a card.** `restore-production` runs
-  as the migration owner, which the guard doesn't hold. It switches off a rule
-  you had switched off after the backup, and any rule your signature no
-  longer covers (a revoked key, a card that doesn't verify). For a rule that
-  holds something back, that takes a brake away. Its summary says how many
-  stayed off, and names each rule your signature no longer covers so you can
-  sign it again.
-- **A limit holds against the rules that are there.** While a rule with a
-  limit is the only one for its action, the runtime may switch it off. A wider
-  rule you sign afterwards then runs under its own limit. Put the limit you
-  want on the rule you sign.
-- **Stricter than it has to be.** With three rules that let go over one
-  action, the middle limit could go safely and is still refused.
+- **A restore is not held to any of this yet.** `restore-production` runs as
+  the migration owner, which the switch-off guard doesn't hold, and it loads
+  rows before any guard exists. Today it does these things to your rules:
+  - A rule that is switched off in the database in use is switched off in
+    the restored copy as well, a rule that held something back included. An
+    "off" the runtime made by itself before this update is carried forward
+    with the rest.
+  - Every rule still on in the restored copy must carry your signature under
+    a key that is still live. One that doesn't is switched off, a rule that
+    held something back included: the brake goes, and what it held is free
+    of it. The summary names each one, and words it as something "running on
+    its own" even when it was a brake.
+  - A rule you signed after the backup is not in the restored copy. A brake
+    or a lower limit signed since is gone, while a wider rule from before
+    the backup is back.
+  The summary ends with what Flint may do on its own after the restore and
+  which limits are in force. Read it, and sign again what is missing. A
+  restore that never switches a brake off, and carries a newer brake into
+  the copy, is the next change.
 - **Ended rules stay listed** until you switch them off. They hold nothing.
-- **The migration owner isn't held to it**, as with the other guards: a
-  repair by hand can switch any rule off.
+- **A rule from before with no usable id** is listed without one, and the
+  command can't name it on a card. Claude can switch it off as the migration
+  owner, with your OK.
+- **The migration owner isn't held to the switch-off rule**, as with the
+  other guards: a repair by hand can switch any rule off. It is held to how a
+  rule is made, as it always was.
 
 ### Rolling it back
 
-The migration's `down.sql` takes the trigger and its function away and loses
+The migration's `down.sql` takes the four triggers and three functions away,
+puts P1's own check on how a rule is made back to the letter, and loses
 nothing: no table, no row. It needs no older runtime, and a switch-off card
-still works. After it the runtime can again switch off any rule by itself, so
-a brake is only as good as the runtime, as before. Any later deploy applies
-the migration again. Claude runs `down.sql` only with your OK, after the
-dump.
+still works. After it the runtime can again switch off any rule by itself,
+make a card's rules more than once and in part, and file a card that says
+two things, so a brake is only as good as the runtime, as before. Any later
+deploy applies the migration again. Claude runs `down.sql` only with your
+OK, after the dump.
 
 ## Health sees the whole machine (P7)
 
