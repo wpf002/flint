@@ -47,7 +47,11 @@ export interface OllamaProviderOptions {
    * (`/api/show`): it wins over the built-in table, field by field. Return
    * undefined for a model it knows nothing about. A model it marks
    * `toolCalling: 'unsupported'` is not offered tools (Ollama answers every
-   * such call with a 400). Unset, requests are exactly what they were.
+   * such call with a 400). A model it marks `vision: true` is sent a user
+   * turn's pictures (./mapping `images`); any other gets a note saying a
+   * picture was attached and cannot be seen, as every model did before, because
+   * Ollama drops a picture sent to a model that cannot see, without a word.
+   * Unset, requests are exactly what they were.
    */
   capabilities?: (model: string) => Partial<ModelCapabilities> | undefined;
   /*
@@ -625,7 +629,9 @@ export class OllamaProvider implements ProviderAdapter {
 
     const body: Record<string, unknown> = {
       model: args.model,
-      messages: mapMessages(args.messages, args.system),
+      // A picture is sent only to a model the caller says can see (`capabilities`, the server's own report).
+      // Unset, as by default, no message carries one and the body is what it always was.
+      messages: mapMessages(args.messages, args.system, this.known?.(args.model)?.vision === true ? { images: true } : {}),
       stream,
       ...(Object.keys(options).length > 0 ? { options } : {}),
     };

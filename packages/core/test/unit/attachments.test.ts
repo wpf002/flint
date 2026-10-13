@@ -158,5 +158,66 @@ describe('ollama mapping', () => {
 
   it('leaves a plain user message unchanged', () => {
     expect(mapOllama([user('hi')])).toEqual([{ role: 'user', content: 'hi' }]);
+    expect(mapOllama([user('hi')], undefined, { images: true })).toEqual([{ role: 'user', content: 'hi' }]);
+  });
+
+  // Local vision. A model that can see is sent the picture itself, as Ollama's /api/chat takes it.
+  describe('for a model that can see (`images`)', () => {
+    const JPG: Attachment = { kind: 'image', mediaType: 'image/jpeg', name: 'photo.jpg', data: '/9j/4AAQSkZJRg==', bytes: 12 };
+    const GIF: Attachment = { kind: 'image', mediaType: 'image/gif', name: 'anim.gif', data: 'R0lGODlh', bytes: 6 };
+    const WEBP: Attachment = { kind: 'image', mediaType: 'image/webp', name: 'pic.webp', data: 'UklGRg==', bytes: 4 };
+
+    it('a PNG or a JPEG goes in the message’s `images`, base64 as it came, and no note says it cannot be seen', () => {
+      const [m] = mapOllama([user('what is this?', [PNG, JPG])], undefined, { images: true });
+      expect(m).toEqual({ role: 'user', content: 'what is this?', images: ['iVBORw0KGgo=', '/9j/4AAQSkZJRg=='] });
+    });
+
+    it('a picture with no words is still a message: the text is empty and the picture is there', () => {
+      expect(mapOllama([user('', [PNG])], undefined, { images: true })).toEqual([{ role: 'user', content: '', images: ['iVBORw0KGgo='] }]);
+    });
+
+    it('a text file is still inlined, and a PDF is still said to be unreadable: only pictures are sent', () => {
+      const [m] = mapOllama([user('q', [TXT, PNG, PDF])], undefined, { images: true });
+      expect(m!.images).toEqual(['iVBORw0KGgo=']);
+      expect(m!.content).toContain('<attached_file name="notes.md"');
+      expect(m!.content).toMatch(/plan\.pdf.*cannot read this file type/);
+      expect(m!.content).not.toContain('shot.png');
+      expect(m!.content.endsWith('q')).toBe(true);
+    });
+
+    it('a kind of picture Ollama does not decode is not sent, and the model is told it is there', () => {
+      const [m] = mapOllama([user('q', [GIF, WEBP, PNG])], undefined, { images: true });
+      expect(m!.images).toEqual(['iVBORw0KGgo=']);
+      expect(m!.content).toMatch(/anim\.gif.*cannot read images/);
+      expect(m!.content).toMatch(/pic\.webp.*cannot read images/);
+    });
+
+    it('a picture whose body was shed from history is a note, never an empty picture', () => {
+      const [m] = mapOllama([user('and now?', [shedPayload(PNG)])], undefined, { images: true });
+      expect(m!.images).toBeUndefined();
+      expect(m!.content).toMatch(/attached earlier: shot\.png/);
+    });
+
+    it('every user turn carries its own pictures, in order; no other message carries any', () => {
+      const out = mapOllama(
+        [user('first', [PNG]), { id: 'a1', role: 'assistant', content: 'a cat', timestamp: 0 }, user('second', [JPG, PNG])],
+        'be brief',
+        { images: true },
+      );
+      expect(out.map((m) => [m.role, m.images])).toEqual([
+        ['system', undefined],
+        ['user', ['iVBORw0KGgo=']],
+        ['assistant', undefined],
+        ['user', ['/9j/4AAQSkZJRg==', 'iVBORw0KGgo=']],
+      ]);
+    });
+
+    it('without it, as by default, nothing is sent: the note it has always been', () => {
+      for (const media of [undefined, {}, { images: false }]) {
+        const [m] = mapOllama([user('q', [PNG])], undefined, media);
+        expect(m).toEqual({ role: 'user', content: expect.stringMatching(/shot\.png.*cannot read images[\s\S]*q$/) });
+        expect(m).not.toHaveProperty('images');
+      }
+    });
   });
 });
