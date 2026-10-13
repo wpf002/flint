@@ -13,7 +13,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, generateKeyPairSync, sign as signRaw } from 'node:crypto';
-import { POLICY_CHANGE_SHAPE, digestOf, type TierDecision } from '@flint/policy';
+import { ACTION_DONE, POLICY_CHANGE_SHAPE, digestOf, type TierDecision } from '@flint/policy';
 import type { Tool, Turn } from '@flint/core';
 import type { GateRequest } from '@flint/mcp';
 import { ActionQueue, keyOf, outcomeOf } from '../src/actions';
@@ -25,7 +25,7 @@ import { AuditSink, AuditUnavailable, type AuditRecord } from '../src/audit-sink
 import { RuntimeProposals } from '../src/runtime-proposals';
 import { RuntimePolicies, capClaimer, parsePolicies } from '../src/runtime-link';
 import { Approvals, type ApproverStore, type Credential } from '../src/approvals';
-import { DOES_NOT_MATCH, approvalRoutes, doneNote, drillRunsAt, executeApproved, nightlyRun, type ApprovalDeps } from '../src/approval-routes';
+import { DOES_NOT_MATCH, approvalRoutes, doneNote, drillRunsAt, executeApproved, nightlyRun, notedName, type ApprovalDeps } from '../src/approval-routes';
 import { KnowledgeStore } from '../src/knowledge';
 import { MemoryExtractor } from '../src/memory-extract';
 import { SpendGuard, SpendLedger } from '../src/spend';
@@ -713,6 +713,14 @@ describe('approval routes', () => {
     await serve(d);
     expect((await post('/proposals/approve', { id })).body.action).toMatchObject({ status: 'done' });
     expect(pushed).toEqual([['Action Done', 'An approved action is done.', 'action', `act:${id}`, { channels: ['inapp'] }]]);
+    server?.close();
+    // A tool that carries the name of one of Flint's own actions gets none of that action's words either.
+    pushed.length = 0;
+    const named = baseDeps({ tools: [tool('task.check_bar', () => 'ok')], notes: { push: (...a: unknown[]) => (pushed.push(a), undefined) } as unknown as ApprovalDeps['notes'] });
+    const look = named.actions.capture({ server: 'task', tool: 'check_bar', fullName: 'task.check_bar', args: { t: 1 }, destructive: false });
+    await serve(named);
+    expect((await post('/proposals/approve', { id: look })).body.action).toMatchObject({ status: 'done' });
+    expect(pushed).toEqual([['Action Done', 'An approved action is done.', 'action', `act:${look}`, { channels: ['inapp'] }]]);
   });
 
   it('a runtime proposal: wired tools are claimed, run in a scope as tainted as the proposal, and how they ended is reported (spooled if need be)', async () => {
@@ -852,6 +860,35 @@ describe('second review of #41', () => {
     expect(out.status).toBe('done');
     // In the app only: Will just approved it, so no banner and no ping.
     expect(notes).toEqual([['Action Done', 'Flint checked what’s happening now.', { channels: ['inapp'] }]]);
+  });
+
+  it('a connected server\'s tool that carries the name of one of Flint\'s own actions is not said to have done what that action does', async () => {
+    // Every name the note has words for: the runtime's own chat tools (a connected server's), and Flint's own actions.
+    const own = Object.keys(ACTION_DONE).filter((n) => !n.startsWith('runtime.'));
+    expect(own).toEqual(expect.arrayContaining(['task.check_bar', 'task.cancel', 'asset.enable', 'goal.propose', 'forecast.series.enable']));
+    for (const name of own) {
+      // As a tool's name it has no words; as Flint's own action it keeps them.
+      expect(notedName(name, true), name).toBe('');
+      expect(notedName(name, false), name).toBe(name);
+    }
+    for (const name of Object.keys(ACTION_DONE).filter((n) => n.startsWith('runtime.'))) {
+      expect(notedName(name, true), name).toBe(name);
+      expect(notedName(name, false), name).toBe('');
+    }
+    // Through a runtime proposal: the tool `check_bar` on a server called `task`, approved and run.
+    for (const [server, toolName] of [['task', 'check_bar'], ['asset', 'enable'], ['goal', 'propose']] as const) {
+      const proposal = { id: 'pr10', origin: 'chat:t', action: `mcp:${server}.${toolName}`, args: {}, tainted: false, status: 'approved' };
+      const rt = fakeRuntime(proposal);
+      const proposals = new RuntimeProposals({ runtime: () => RT, spoolDir: tmp(), fetchImpl: rt.fetchImpl });
+      const notes: Array<[string, string]> = [];
+      const out = await executeApproved({
+        actions: new ActionQueue(isSafeTool), tools: [tool(`${server}.${toolName}`, () => 'ok')], audit: { record: () => ({}) } as unknown as ApprovalDeps['audit'],
+        notes: { push: (title: string, body: string) => (notes.push([title, body]), undefined) } as unknown as ApprovalDeps['notes'], approvals: undefined, proposals, errorRef: () => 'r',
+      }, 'pr10');
+      expect(out.status, server).toBe('done');
+      expect(notes, server).toEqual([['Action Done', 'An approved action is done.']]);
+      expect(notes[0]![1]).not.toBe(ACTION_DONE[`${server}.${toolName}`]);
+    }
   });
 
   it('the runtime gets the failure\'s class, never the tool\'s words; a result is stored clean and bounded', async () => {

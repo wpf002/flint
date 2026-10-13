@@ -66,6 +66,13 @@ const NOT_WAITING = 'It’s no longer waiting.';
 export const doneNote = (fullName: string): string => ACTION_DONE[fullName] ?? 'An approved action is done.';
 /** The note for an approved action that ran: its title, and what Flint did. */
 export const actionDoneNote = (fullName: string): { title: string; body: string } => ({ title: 'Action Done', body: doneNote(fullName) });
+/**
+ * The name a call that ran here is worded by, or none. Whoever runs a connected server chooses its tools' names, so a
+ * tool can be called "task.check_bar": its note must not say Flint did what its own task.check_bar does. The words
+ * kept under `runtime.…` are for the runtime's own chat tools, which are a connected server's tools; every other name
+ * with words is an action of Flint's own, and never a tool's. A name on the wrong side of that gets no words.
+ */
+export const notedName = (fullName: string, tool: boolean): string => (fullName.startsWith('runtime.') === tool ? fullName : '');
 
 /** The most a task's estimate can be, in millionths of a dollar (the dispatch card's own limit: $1,000). */
 const COST_MAX_MICROS = 1_000_000_000;
@@ -345,7 +352,7 @@ export async function runRamApproval(
   });
   // In the app only: Will just approved it, so a banner or a ping would tell him nothing new.
   if (ok) {
-    const done = actionDoneNote(result.fullName);
+    const done = actionDoneNote(notedName(result.fullName, true));
     ctx.notes.push(done.title, done.body, 'action', `act:${result.id}`, { channels: ['inapp'] });
   }
   return { action: result };
@@ -427,7 +434,7 @@ export async function executeApproved(ctx: Ctx, id: string): Promise<Executed> {
   const where = await p.completeDurably(id, outcome);
   // In the app only: Will just approved it, so a banner or a ping would tell him nothing new.
   if (outcome.ok) {
-    const done = actionDoneNote(fullName);
+    const done = actionDoneNote(notedName(fullName, !!m));
     ctx.notes.push(done.title, done.body, 'action', `act:${id}`, { channels: ['inapp'] });
   }
   const note =
