@@ -1066,6 +1066,9 @@ describe('the console Approvals panel', () => {
         const p = { ...P5.dispatch, cost: server, args: watch({ estCostMicros: signed }) };
         expect(cost(p), JSON.stringify(server)).toBe(UNREAD);
         expect(alone(p), JSON.stringify(server)).toBe(true);
+        // Behind Show Details it is the signed number that is said, as it always is: that is what he signs.
+        const says = JSON.parse(run(`JSON.stringify(apprDetails(${JSON.stringify(p)}).says)`) as string) as string[];
+        expect(says, JSON.stringify(server)).toContain(signed === 0 ? 'It costs nothing.' : `It costs about $${(signed / 1_000_000).toFixed(4).replace(/0{1,2}$/, '')}.`);
       }
       // A card with no estimate at all (its args were cleared, or never held one) is not one that costs nothing.
       for (const args of [null, {}, watch({ estCostMicros: undefined })]) {
@@ -1436,6 +1439,11 @@ describe('the console Approvals panel', () => {
       expect(second.button('Show Details').getAttribute('aria-expanded')).toBe('false');
       // The line is only ever on its own card.
       expect(second.shown()).not.toContain(DISMISSED);
+      ids.apprlist!.children[0]!.children[0]!.onclick!();
+      const back = ids.apprlist!.children[0]!.children[0]!;
+      expect(back.all().find((e) => e.className === 'details')!.hidden).toBe(true);
+      expect(back.button('Show Details').getAttribute('aria-expanded')).toBe('false');
+      expect(back.shown()).toContain(DISMISSED);
       // Approving the card again takes its old line away; a card that no longer waits takes its line with it.
       run("apprSaid('x1','It failed.','bad')");
       answer = () => ({ status: 200, body: { proposals: [P5.cancel, P5.accept], signed: true } });
@@ -1574,6 +1582,8 @@ describe('the console Approvals panel', () => {
           const marked = { fullName: name, kind, mcp: true, args };
           expect(words(marked).slice(0, 2), `${name} marked`).toEqual(['Approve a Tool Call', SUB]);
           expect(alone(marked), `${name} marked`).toBe(true);
+          // Its icon is a tool's too: never the switch, the target, the checklist or the database of the card it is named like.
+          expect(run(`apprIcon(${JSON.stringify(marked)})`), `${name} marked`).toBe('bolt');
         }
         // So is any other kind, a kind that is no kind, or none at all (a card from a server with no runtime).
         for (const kind of [...KINDS.filter((k) => !kinds.includes(k)), 'constructor', '__proto__', '', 7, null, undefined]) {

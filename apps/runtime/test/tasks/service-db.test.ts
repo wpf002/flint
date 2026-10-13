@@ -350,6 +350,9 @@ describe.skipIf(NO_DB)('the Tasks panel’s writes and views on flint_test', () 
     const spec = { template: 'watch_ci' as const, params: { item: 'no-such-item', sha: null } };
     expect(await offerProblem(db, spec, null)).toBe(TASK_SAYS.itemGone);
     expect(await offerProblem(db, { template: 'draft_note', params: { about: 'A note', items: [], titles: false } }, null)).toBe(TASK_SAYS.cantRun);
+    // A kind of task the form has no field for is not offered, whatever asset says it could run one.
+    const reach = { registry: [{ ...CI_WATCHER, capabilities: [...CI_WATCHER.capabilities, 'draft_note' as const] }] };
+    expect(await offerProblem(db, { template: 'draft_note', params: { about: 'A note', items: [], titles: false } }, null, reach)).toBe(TASK_SAYS.cantRun);
     expect(await offerProblem(db, { ...spec, params: { item: await fx.entity('pull_request', { number: 4, state: 'open' }), sha: null } }, null)).toBe(TASK_SAYS.itemEnded);
   });
 
