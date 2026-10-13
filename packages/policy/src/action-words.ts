@@ -81,6 +81,9 @@ export const JOB_WORDS: Readonly<Record<string, string>> = {
   'restore.drill': 'Restore Test',
   'maintenance.retention': 'Cleanup',
   'backup.prune': 'Backup Cleanup',
+  'backup.nexus': 'Nexus Backup',
+  'backup.nexus.offsite': 'Nexus Offsite Backup',
+  'restore.drill.nexus': 'Nexus Restore Test',
 };
 
 /**
@@ -100,8 +103,10 @@ export function ruleWords(pattern: string): string {
   return family ? `Everything Under ${words}` : words;
 }
 
-/** The nightly jobs that tell Will when they fail (apps/runtime/src/cli.ts). */
-export type NightlyJob = 'backup.local' | 'backup.offsite' | 'restore.drill';
+/** The nightly jobs that tell Will when they fail (apps/runtime/src/cli.ts): Flint's own backup, and Nexus's (P7). */
+export type NightlyJob = 'backup.local' | 'backup.offsite' | 'restore.drill' | 'backup.nexus' | 'backup.nexus.offsite' | 'restore.drill.nexus';
+/** The ones that run on Sundays only: their next run, and their next card, are a week away. */
+export const WEEKLY_JOBS: ReadonlySet<string> = new Set(['restore.drill', 'restore.drill.nexus']);
 
 export interface JobFailure {
   /**
@@ -115,9 +120,9 @@ export interface JobFailure {
    *    answer), so nothing is known about its next run: the note points at Health.
    */
   next: 'retry' | 'card' | 'card_later' | 'setup' | 'stopped';
-  /** backup.offsite: the copy goes to iCloud Drive (the default folder), not a folder Will set. */
+  /** An offsite copy: it goes to iCloud Drive (the default folder), not a folder Will set. */
   icloud?: boolean;
-  /** restore.drill: it finished and the restored copy differed from the backup. */
+  /** A restore test: it finished and the restored copy differed from the backup. */
   mismatch?: boolean;
 }
 
@@ -129,9 +134,12 @@ export function jobFailedNote(job: NightlyJob, f: JobFailure): { title: string; 
   const what =
     job === 'backup.local' ? 'Last night’s database backup didn’t finish.'
     : job === 'backup.offsite' ? `Last night’s encrypted ${f.icloud ? 'copy to iCloud' : 'offsite copy'} didn’t finish.`
+    : job === 'backup.nexus' ? 'Last night’s Nexus backup didn’t finish.'
+    : job === 'backup.nexus.offsite' ? `Last night’s encrypted ${f.icloud ? 'copy of the Nexus backup to iCloud' : 'offsite copy of the Nexus backup'} didn’t finish.`
+    : job === 'restore.drill.nexus' ? (f.mismatch ? 'This week’s practice restore of Nexus found a problem.' : 'This week’s practice restore of Nexus didn’t finish.')
     : f.mismatch ? 'This week’s practice restore found a problem.'
     : 'This week’s practice restore didn’t finish.';
-  const weekly = job === 'restore.drill';
+  const weekly = WEEKLY_JOBS.has(job);
   const next =
     f.next === 'setup' ? 'It won’t work until its setup is fixed.'
     : f.next === 'stopped' ? 'Flint couldn’t reach its database. Check Health in Settings.'

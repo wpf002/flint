@@ -9,6 +9,7 @@ import type { TemplateId } from '../../src/templates/escalations';
 export const EDGES: Record<TemplateId, unknown[]> = {
   service_down: [{ service: 'service#abc123', downMinutes: 30 }, { service: null, downMinutes: 1_000_000 }],
   backup_stale: [{ hoursSince: 36 }, { hoursSince: 1_000_000 }],
+  nexus_backup_stale: [{ hoursSince: 36 }, { hoursSince: 1_000_000 }],
   drill_failed: [{ mismatches: 0 }, { mismatches: 1_000_000 }],
   vendor_cap: ['anthropic', 'openai', 'perplexity', 'tavily'].map((vendor) => ({ vendor })),
   deploy_failed: ['gate', 'restart', 'health'].flatMap((stage) => [{ component: 'server', stage, sha: 'a'.repeat(40) }, { component: 'runtime', stage, sha: null }]),

@@ -31,6 +31,8 @@ export const HEALTH_NAMES: Readonly<Record<string, string>> = {
   offsite_drill: 'Offsite Restore Test',
   disk: 'Disk Space',
   remote_access: 'Remote Access',
+  // P7: Nexus's own backup (off until its address is set).
+  nexus_backup: 'Nexus Backup',
 };
 
 /**
@@ -42,7 +44,7 @@ export const HEALTH_NAMES: Readonly<Record<string, string>> = {
  */
 export const HEALTH_GROUPS: ReadonlyArray<{ header: string; components: readonly string[] }> = [
   { header: 'MODELS', components: ['ollama', 'standby_model'] },
-  { header: 'BACKUPS', components: ['backup', 'files_backup', 'offsite_backup', 'restore_drill', 'offsite_drill', 'rebuild_rehearsal'] },
+  { header: 'BACKUPS', components: ['backup', 'files_backup', 'nexus_backup', 'offsite_backup', 'restore_drill', 'offsite_drill', 'rebuild_rehearsal'] },
   { header: 'THIS MAC', components: ['disk', 'deploy_hold', 'migrate_failed', 'postgres', 'server', 'runtime', 'bus', 'audit_intents', 'retention', 'triage', 'goals', 'ledger', 'forecasts', 'tasks'] },
   { header: 'REMOTE ACCESS', components: ['remote_access'] },
 ];

@@ -48,7 +48,8 @@ type Rule = (f: EventFacts) => Template | undefined;
 
 const CRITICAL: Record<string, Rule> = {
   'runtime:service.down_30m': (f) => ({ id: 'service_down', fields: { service: refOf(f), downMinutes: num(f.payload.downMinutes, 30, 100_000, 30) } }),
-  'runtime:backup.stale': (f) => ({ id: 'backup_stale', fields: { hoursSince: num(f.payload.hoursSince, 36, 100_000, 36) } }),
+  // Flint's own database, or (when the watchdog says so) Nexus's: each has its own note.
+  'runtime:backup.stale': (f) => ({ id: f.payload.what === 'nexus' ? 'nexus_backup_stale' : 'backup_stale', fields: { hoursSince: num(f.payload.hoursSince, 36, 100_000, 36) } }),
   'runtime:drill.failed': (f) => ({ id: 'drill_failed', fields: { mismatches: num(f.payload.mismatches, 0, 1_000_000, 0) } }),
   'runtime:vendor.cap_100': (f) => {
     const vendor = pick(f.payload.vendor, VENDORS);
@@ -83,7 +84,7 @@ export function criticalVerdict(f: EventFacts): Verdict | undefined {
 }
 
 /** The ids of the critical templates (they bypass the push cap). */
-export const CRITICAL_TEMPLATES: ReadonlySet<string> = new Set(['service_down', 'backup_stale', 'drill_failed', 'vendor_cap', 'deploy_failed', 'migrate_failed', 'ci_failing', 'disk_low']);
+export const CRITICAL_TEMPLATES: ReadonlySet<string> = new Set(['service_down', 'backup_stale', 'nexus_backup_stale', 'drill_failed', 'vendor_cap', 'deploy_failed', 'migrate_failed', 'ci_failing', 'disk_low']);
 
 /** The watchdog's conditions about the Mac and the offsite copies that are worth a note and are not critical (P7). */
 const MACHINE: Record<string, Rule> = {

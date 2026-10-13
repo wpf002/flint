@@ -15,6 +15,12 @@
  *
  * Passwords go to pg_dump/pg_restore through PGPASSWORD, never argv (argv is
  * visible to every process on the Mac).
+ *
+ * The same three steps back up Nexus's database (P7; backup.nexus,
+ * backup.nexus.offsite, restore.drill.nexus). What differs is a BackupSet: how
+ * a dump's name begins, which schemas are counted, the scratch database a drill
+ * restores into, and that the login which reads Nexus must not be able to
+ * change it (readOnly, below).
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -119,19 +125,55 @@ export function run(bin: string, args: string[], password: string, opts: { stdou
   });
 }
 
+/**
+ * Which database a backup is of, in the names that keep one set's files apart
+ * from another's. Nothing here comes from a setting or a request: there are two
+ * sets, both written below.
+ */
+export interface BackupSet {
+  /** How a dump's file name begins: `flint` gives flint-<time>.dump. Small letters only. */
+  prefix: string;
+  /** The schemas whose tables are counted with the dump and compared by a drill. */
+  schemas: readonly string[];
+  /** The scratch database a drill restores into and drops. Its name ends `_restore_test`, so it is never a database anyone keeps. */
+  scratch: string;
+  /** What its records are filed under (BackupRun.kind). */
+  kind: 'pg_dump_flint' | 'nexus_dump';
+  /**
+   * The login that dumps it must not be able to change it: checked before each
+   * dump, in the dump's own connection, and a login that could write is
+   * refused (NotReadOnly). Nexus's database is not Flint's to change.
+   */
+  readOnly?: boolean;
+}
+export const FLINT_SET: BackupSet = { prefix: 'flint', schemas: ['public'], scratch: 'flint_restore_test', kind: 'pg_dump_flint' };
+/** Nexus keeps everything in `public` (its own migrations make no other schema). */
+export const NEXUS_SET: BackupSet = { prefix: 'nexus', schemas: ['public'], scratch: 'nexus_restore_test', kind: 'nexus_dump', readOnly: true };
+
+/** A set's names are built into file patterns and statements, so each is held to its shape first. */
+export function checkedSet(set: BackupSet): BackupSet {
+  if (!/^[a-z]{2,16}$/.test(set.prefix)) throw new Error('a backup set’s prefix is small letters only');
+  if (!set.schemas.length || set.schemas.some((n) => !/^[a-z_][a-z0-9_]{0,62}$/.test(n))) throw new Error('a backup set names at least one schema, each a plain name');
+  if (!/^[a-z]{2,16}_restore_test(_[a-z0-9]{1,24})?$/.test(set.scratch)) throw new Error('a backup set’s scratch database is named <something>_restore_test');
+  return set;
+}
+
+/** A dump's file name in a set: its prefix, its time, `.dump`. */
+const dumpName = (prefix: string): RegExp => new RegExp(`^${prefix}-.*\\.dump$`);
+
 export async function sha256File(path: string): Promise<string> {
   const h = createHash('sha256');
   for await (const chunk of createReadStream(path)) h.update(chunk as Buffer);
   return h.digest('hex');
 }
 
-/** Row counts of every table in public and flint_part (partitions counted through their parent). */
-export async function countRows(c: pg.Client): Promise<Record<string, number>> {
+/** Row counts of every table in the named schemas (`public` for Flint: its partitions are counted through their parent). */
+export async function countRows(c: pg.Client, schemas: readonly string[] = FLINT_SET.schemas): Promise<Record<string, number>> {
   const tables = await c.query<{ name: string }>(`
     SELECT format('%I.%I', n.nspname, c.relname) AS name
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relname <> '_prisma_migrations'
-    ORDER BY 1`);
+    WHERE n.nspname = ANY($1) AND c.relkind IN ('r', 'p') AND c.relname <> '_prisma_migrations'
+    ORDER BY 1`, [[...schemas]]);
   const out: Record<string, number> = {};
   for (const { name } of tables.rows) {
     out[name] = Number((await c.query<{ n: string }>(`SELECT count(*) AS n FROM ${name}`)).rows[0]!.n);
@@ -163,22 +205,60 @@ export interface DumpResult {
  */
 export const DUMP_FORMAT = ['-Fc', '--no-large-objects'] as const;
 
-/** The file a dump taken at `now` is written to (its name is its time). */
-export const dumpPathAt = (outDir: string, now: Date): string => join(outDir, `flint-${now.toISOString().replace(/[:.]/g, '-')}.dump`);
+/** The file a dump taken at `now` is written to (its name is its set's prefix and its time). */
+export const dumpPathAt = (outDir: string, now: Date, prefix: string = FLINT_SET.prefix): string => join(outDir, `${prefix}-${now.toISOString().replace(/[:.]/g, '-')}.dump`);
+
+/**
+ * The login may change the database it is asked to back up: it is a superuser,
+ * may ignore row security, owns the database or something in it, may make
+ * things in it, or may write to one of its tables. Never tried again as it is:
+ * its setup needs fixing (NeedsSetup, below).
+ */
+export class NotReadOnly extends Error {
+  constructor() {
+    super('the login that reads this database could also change it, so nothing was backed up');
+  }
+}
+
+/**
+ * Whether the login on `c` could change the database it is connected to.
+ * Asked of the server's own records of who may do what, in the connection the
+ * dump is counted on: no table is read for it.
+ */
+export async function canWrite(c: pg.Client): Promise<boolean> {
+  const { rows } = await c.query<{ able: boolean }>(`
+    SELECT (SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user)
+        OR pg_has_role(current_user, (SELECT datdba FROM pg_database WHERE datname = current_database()), 'USAGE')
+        OR has_database_privilege(current_user, current_database(), 'CREATE')
+        OR EXISTS (
+             SELECT 1 FROM pg_namespace n
+              WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+                AND (pg_has_role(current_user, n.nspowner, 'USAGE') OR has_schema_privilege(current_user, n.oid, 'CREATE')))
+        OR EXISTS (
+             SELECT 1 FROM pg_class r JOIN pg_namespace n ON n.oid = r.relnamespace
+              WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND r.relkind IN ('r', 'p', 'S', 'v', 'm', 'f')
+                AND (pg_has_role(current_user, r.relowner, 'USAGE')
+                  OR (r.relkind <> 'S' AND has_table_privilege(current_user, r.oid, 'INSERT, UPDATE, DELETE, TRUNCATE'))
+                  OR (r.relkind = 'S' AND has_sequence_privilege(current_user, r.oid, 'UPDATE'))))
+        AS able`);
+  return rows[0]?.able !== false;
+}
 
 /** One consistent dump plus its counts. The file appears only when complete. */
-export async function dumpDatabase(backupUrl: string, outDir: string, tools: Tools, now: Date): Promise<DumpResult> {
+export async function dumpDatabase(backupUrl: string, outDir: string, tools: Tools, now: Date, of: BackupSet = FLINT_SET): Promise<DumpResult> {
+  const set = checkedSet(of);
   mkdirSync(outDir, { recursive: true, mode: 0o700 });
   chmodSync(outDir, 0o700);
   const t = targetOf(backupUrl);
-  const final = dumpPathAt(outDir, now);
+  const final = dumpPathAt(outDir, now, set.prefix);
   const partial = `${final}.partial`;
   const c = client(t);
   await c.connect();
   try {
     await c.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    if (set.readOnly && (await canWrite(c))) throw new NotReadOnly();
     const snapshot = (await c.query<{ s: string }>('SELECT pg_export_snapshot() AS s')).rows[0]!.s;
-    const counts = await countRows(c);
+    const counts = await countRows(c, set.schemas);
     await run(tools.pgDump, [...DUMP_FORMAT, `--snapshot=${snapshot}`, '-h', t.host, '-p', String(t.port), '-U', t.user, '-d', t.database, '-f', partial], t.password);
     await c.query('COMMIT');
     chmodSync(partial, 0o600);
@@ -193,10 +273,11 @@ export async function dumpDatabase(backupUrl: string, outDir: string, tools: Too
   }
 }
 
-/** Keep the newest `keep` dumps (and their counts files). */
-export function pruneDumps(dir: string, keep: number): string[] {
+/** Keep the newest `keep` dumps of a set (and their counts and fingerprint files). Only that set's own names are ever removed. */
+export function pruneDumps(dir: string, keep: number, prefix: string = FLINT_SET.prefix): string[] {
   if (!existsSync(dir)) return [];
-  const dumps = readdirSync(dir).filter((f) => /^flint-.*\.dump$/.test(f)).sort();
+  const mine = dumpName(checkedSet({ ...FLINT_SET, prefix }).prefix);
+  const dumps = readdirSync(dir).filter((f) => mine.test(f)).sort();
   const gone = dumps.slice(0, Math.max(0, dumps.length - keep));
   for (const f of gone) {
     rmSync(join(dir, f), { force: true });
@@ -215,12 +296,12 @@ export class NeedsSetup extends Error {}
 
 /** Whether a nightly job failed for a reason that stays until someone fixes its setup. */
 export function needsSetup(err: unknown): boolean {
-  if (err instanceof NeedsSetup) return true;
+  if (err instanceof NeedsSetup || err instanceof NotReadOnly) return true;
   const e = err as { code?: unknown; message?: unknown } | null;
   const message = String(e?.message ?? '');
   // The restore drill's own scratch database missing is not Will's setup: the drill makes and drops it each
   // run (restoreDrill), and one that vanished mid-run is gone again next week.
-  if (/database "flint_restore_test" does not exist/i.test(message)) return false;
+  if (/database "[a-z]{2,16}_restore_test(_[a-z0-9]{1,24})?" does not exist/i.test(message)) return false;
   // The write refused (macOS, or a read-only or mistaken folder); a role that cannot sign in or lacks the
   // right; a database that is not there.
   if (typeof e?.code === 'string' && ['EPERM', 'EACCES', 'EROFS', 'ENOTDIR', '28P01', '28000', '3D000', '42501'].includes(e.code)) return true;
@@ -341,8 +422,8 @@ export async function encryptTo(path: string, recipient: string, tools: Tools, o
   }
 }
 
-/** An encrypted copy's name, as encryptTo writes it: the only kind of file pruneOffsite removes. */
-const OFFSITE_COPY = /^flint-[0-9A-Za-z-]+\.dump\.age$/;
+/** An encrypted copy's name in a set, as encryptTo writes it: the only kind of file pruneOffsite removes. */
+const offsiteCopy = (prefix: string): RegExp => new RegExp(`^${prefix}-[0-9A-Za-z-]+\\.dump\\.age$`);
 
 /** The name a copy's row counts are sent under: `flint-….dump.age` gives `flint-….dump.counts.json.age`. */
 const countsOf = (copy: string): string => copy.replace(/\.age$/, '.counts.json.age');
@@ -382,7 +463,11 @@ export const STALE_PARTIAL_MS = 3_600_000;
  *
  * Returns the names of the files it actually removed.
  */
-export function pruneOffsite(offsiteDir: string, manifest: string, name: string, keep: number, from: { recorded?: readonly string[]; dumpDir?: string; now?: number } = {}): string[] {
+export function pruneOffsite(offsiteDir: string, manifest: string, name: string, keep: number, from: { recorded?: readonly string[]; dumpDir?: string; now?: number; prefix?: string } = {}): string[] {
+  // One set's copies only: another set's names in the same folder, manifest or list are passed over, never removed.
+  const prefix = checkedSet({ ...FLINT_SET, prefix: from.prefix ?? FLINT_SET.prefix }).prefix;
+  const OFFSITE_COPY = offsiteCopy(prefix);
+  const localDump = dumpName(prefix);
   if (!OFFSITE_COPY.test(name)) throw new Error('not an encrypted copy’s name');
   if (!Number.isInteger(keep) || keep < 1) throw new Error('at least one encrypted copy is kept');
   const there = (file: string): boolean => existsSync(join(offsiteDir, file));
@@ -392,7 +477,7 @@ export function pruneOffsite(offsiteDir: string, manifest: string, name: string,
   } catch {
     // No manifest (a first run, or it was lost): what the database recorded stands in.
   }
-  const local = from.dumpDir && existsSync(from.dumpDir) ? readdirSync(from.dumpDir).filter((f) => /^flint-.*\.dump$/.test(f)).map((f) => `${f}.age`).filter((n) => OFFSITE_COPY.test(n)) : [];
+  const local = from.dumpDir && existsSync(from.dumpDir) ? readdirSync(from.dumpDir).filter((f) => localDump.test(f)).map((f) => `${f}.age`).filter((n) => OFFSITE_COPY.test(n)) : [];
   // Every name a copy may be under: on record, or a local dump's. Never tonight's own.
   const names = [...new Set([...listed, ...(from.recorded ?? []), ...local].filter((n) => OFFSITE_COPY.test(n) && n !== name))].sort();
   const others = names.filter(there);
@@ -443,19 +528,25 @@ export interface DrillResult {
 }
 
 /**
- * Restore `dump` into flint_restore_test as a role that may create databases
- * (flint_restore), compare counts with the counts taken at dump time, and drop
- * it. `adminUrl` names that role and any database it may connect to.
+ * Restore `dump` into its set's scratch database (flint_restore_test, or
+ * nexus_restore_test) as a role that may create databases (flint_restore),
+ * compare counts with the counts taken at dump time, and drop it. `adminUrl`
+ * names that role and any database it may connect to. Nothing but the scratch
+ * database is touched: the database the dump was taken from is never opened.
  */
-export async function restoreDrill(dump: string, adminUrl: string, tools: Tools): Promise<DrillResult> {
+export async function restoreDrill(dump: string, adminUrl: string, tools: Tools, of: BackupSet = FLINT_SET): Promise<DrillResult> {
+  const set = checkedSet(of);
   const expected = JSON.parse(readFileSync(`${dump}.counts.json`, 'utf8')) as Record<string, number>;
   const admin = targetOf(adminUrl);
-  const scratch: PgTarget = { ...admin, database: 'flint_restore_test' };
+  // Its shape is checked (checkedSet), and it is quoted all the same.
+  const name = `"${set.scratch}"`;
+  if (admin.database === set.scratch) throw new Error('the restore login’s own database is the scratch database');
+  const scratch: PgTarget = { ...admin, database: set.scratch };
   const c = client(admin);
   await c.connect();
   try {
-    await c.query('DROP DATABASE IF EXISTS flint_restore_test');
-    await c.query('CREATE DATABASE flint_restore_test');
+    await c.query(`DROP DATABASE IF EXISTS ${name}`);
+    await c.query(`CREATE DATABASE ${name}`);
   } finally {
     await c.end();
   }
@@ -465,7 +556,7 @@ export async function restoreDrill(dump: string, adminUrl: string, tools: Tools)
     await r.connect();
     let restored: Record<string, number>;
     try {
-      restored = await countRows(r);
+      restored = await countRows(r, set.schemas);
     } finally {
       await r.end();
     }
@@ -476,14 +567,15 @@ export async function restoreDrill(dump: string, adminUrl: string, tools: Tools)
   } finally {
     const d = client(admin);
     await d.connect();
-    await d.query('DROP DATABASE IF EXISTS flint_restore_test').catch(() => {});
+    await d.query(`DROP DATABASE IF EXISTS ${name}`).catch(() => {});
     await d.end();
   }
 }
 
-/** The newest dump in `dir`, or undefined. */
-export function newestDump(dir: string): string | undefined {
+/** The newest dump of a set in `dir`, or undefined. */
+export function newestDump(dir: string, prefix: string = FLINT_SET.prefix): string | undefined {
   if (!existsSync(dir)) return undefined;
-  const dumps = readdirSync(dir).filter((f) => /^flint-.*\.dump$/.test(f)).sort();
+  const mine = dumpName(checkedSet({ ...FLINT_SET, prefix }).prefix);
+  const dumps = readdirSync(dir).filter((f) => mine.test(f)).sort();
   return dumps.length ? join(dir, dumps[dumps.length - 1]!) : undefined;
 }

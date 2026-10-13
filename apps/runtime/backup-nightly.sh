@@ -6,6 +6,11 @@
 #     copy off the box (`offsite --auto`), into iCloud Drive's FlintBackups/pg
 #     unless FLINT_OFFSITE_DIR names another folder; the newest 7 are kept there;
 #   - on Sundays: the restore drill into a scratch database (`drill --auto`);
+#   - when Nexus's own backup is switched on (FLINT_NEXUS_BACKUP_URL is in
+#     ~/.flint/backup.env; `nexus-setup` puts it there): the same three steps for
+#     the Nexus database (`nexus-backup`, `nexus-offsite`, and on Sundays
+#     `nexus-drill`), each under its own action and its own card. Switched off,
+#     none of them is started at all;
 #   - every night, last: old copies taken before database updates are removed
 #     (`prune-backups --auto`; the newest 10 and the last 30 days stay). It asks for
 #     a card only on a night there is something to remove. (Never `pnpm prune`: that
@@ -25,8 +30,17 @@ run() {
   pnpm --silent --filter @flint/runtime "$1" --auto || echo "$(ts) $1 did not complete (see above)" >&2
 }
 
+# Whether Nexus's backup is switched on: backup.env has an address for it. Only whether the line is there is
+# looked at; its value is never read here (the runtime looks for the same line: config.ts, nexusBackupWanted).
+nexus_on() { [ -r "$DATA/backup.env" ] && grep -Eq "^(export[[:space:]]+)?FLINT_NEXUS_BACKUP_URL=[[:space:]]*[\"']?[^[:space:]\"']" "$DATA/backup.env"; }
+
 run backup
 [ -s "$DATA/backup-age-recipient" ] && run offsite
 [ "${FLINT_DOW:-$(date +%u)}" = 7 ] && run drill
+if nexus_on; then
+  run nexus-backup
+  [ -s "$DATA/backup-age-recipient" ] && run nexus-offsite
+  [ "${FLINT_DOW:-$(date +%u)}" = 7 ] && run nexus-drill
+fi
 run prune-backups
 exit 0
