@@ -172,6 +172,8 @@ describe.skipIf(NO_DB)('Health sees the whole machine (flint_test)', () => {
       expect((await checks(now)).deploy_hold).toEqual({ component: 'deploy_hold', status: 'ok', detail: 'Flint checked for updates less than a minute ago.' });
       aged(flint('deploy-tick'), now, 3 * MIN);
       expect((await checks(now)).deploy_hold!.detail).toBe('Flint checked for updates 3 minutes ago.');
+      // (From here the runtime has been up for days: the hour is counted from the last look.)
+      await owner(`UPDATE "RuntimeInstance" SET "startedAt" = $1 WHERE id = $2`, [new Date(now.getTime() - 5 * DAY), instance.id]);
       // A deploy's own checks can hold one look for a quarter of an hour: still normal.
       aged(flint('deploy-tick'), now, UPDATE_LATE_MS - MIN);
       expect((await checks(now)).deploy_hold!.status).toBe('ok');
@@ -181,14 +183,76 @@ describe.skipIf(NO_DB)('Health sees the whole machine (flint_test)', () => {
       expect((await checks(now)).deploy_hold!.detail).toBe('Flint hasn’t checked for updates in 3 days.');
       // Paused on purpose: that is what is said, with its own age (the job looks at nothing while it is paused).
       aged(flint('deploy-hold'), now, 5 * HOUR);
+      aged(flint('deploy-hold-seen'), now, 5 * HOUR);
       expect((await checks(now)).deploy_hold).toEqual({ component: 'deploy_hold', status: 'degraded', detail: 'Updates have been paused for 5 hours.' });
-      for (const said of [UPKEEP_HEALTH.neverChecked, UPKEEP_HEALTH.checked(0), UPKEEP_HEALTH.checked(MIN), UPKEEP_HEALTH.notChecked(HOUR), UPKEEP_HEALTH.notChecked(50 * HOUR)]) {
+      // The pause is lifted, and the job has not looked yet (it keeps its own mark until it has): the three days the
+      // look is old are days it was paused, never "hasn't checked in 3 days".
+      rmSync(flint('deploy-hold'));
+      expect((await checks(now)).deploy_hold).toEqual({ component: 'deploy_hold', status: 'degraded', detail: 'Updates were paused, and Flint hasn’t checked again yet.' });
+      expect((await watchdog(db, config, now)).filter((r) => r.type === 'auto_update.stalled')).toEqual([]);
+      // Its first look takes the mark away and leaves its time.
+      rmSync(flint('deploy-hold-seen'));
+      aged(flint('deploy-tick'), now, 20_000);
+      expect((await checks(now)).deploy_hold).toEqual({ component: 'deploy_hold', status: 'ok', detail: 'Flint checked for updates less than a minute ago.' });
+      for (const said of [UPKEEP_HEALTH.neverChecked, UPKEEP_HEALTH.resuming, UPKEEP_HEALTH.checked(0), UPKEEP_HEALTH.checked(MIN), UPKEEP_HEALTH.checked(9 * HOUR), UPKEEP_HEALTH.checked(3 * DAY), UPKEEP_HEALTH.notChecked(HOUR), UPKEEP_HEALTH.notChecked(50 * HOUR)]) {
         expect(noteProblems(HEALTH_NAMES.deploy_hold!, said), said).toEqual([]);
       }
     } finally {
       rmSync(flint('deploy-hold'), { force: true });
+      rmSync(flint('deploy-hold-seen'), { force: true });
       rmSync(flint('deploy-tick'), { force: true });
       await db.runtimeInstance.update({ where: { id: instance.id }, data: { stoppedAt: now } });
+    }
+  });
+
+  it('Automatic Updates after the Mac was off, or was rebuilt: the hour is counted from when the runtime started, not from an old look', async () => {
+    const boot = new Date();
+    const at = (ms: number) => new Date(boot.getTime() + ms);
+    // The last look is 9 hours old (the Mac was off overnight; or the mark came back from a backup with its old time).
+    aged(flint('deploy-tick'), boot, 9 * HOUR);
+    const instance = await db.runtimeInstance.create({ data: { id: `ri${Date.now().toString(36)}b`, gitSha: 'dev', startedAt: boot, lastBeatAt: boot } });
+    const stalled = async (now: Date) => (await watchdog(db, config, now)).filter((r) => r.type === 'auto_update.stalled');
+    try {
+      // Twenty seconds after it started: no issue and no note. What it says is true: when the last look was.
+      expect((await checks(at(20_000))).deploy_hold).toEqual({ component: 'deploy_hold', status: 'ok', detail: 'Flint checked for updates 9 hours ago.' });
+      expect(await stalled(at(20_000))).toEqual([]);
+      expect((await checks(at(59 * MIN))).deploy_hold!.status).toBe('ok');
+      // A real hour of this runtime with no look: an issue, with how long it has really been.
+      expect((await checks(at(61 * MIN))).deploy_hold).toEqual({ component: 'deploy_hold', status: 'degraded', detail: 'Flint hasn’t checked for updates in 10 hours.' });
+      // The note waits for three real hours of it.
+      expect(await stalled(at(2 * HOUR + 59 * MIN))).toEqual([]);
+      expect(await stalled(at(3 * HOUR + MIN))).toMatchObject([{ payload: { hours: 12 } }]);
+      // A look, even a minute after the start, and all is normal again.
+      aged(flint('deploy-tick'), at(HOUR), 0);
+      expect((await checks(at(61 * MIN))).deploy_hold!.status).toBe('ok');
+    } finally {
+      rmSync(flint('deploy-tick'), { force: true });
+      await db.runtimeInstance.update({ where: { id: instance.id }, data: { stoppedAt: at(4 * HOUR) } });
+    }
+  });
+
+  it('Standby Model: when the setting that named one goes away, the next check says Off once, so an old "isn’t installed" does not stand', async () => {
+    const now = new Date();
+    const { standbyModel: _named, ...unnamed } = config;
+    const missing: MachineReading = { ...healthy, models: { installed: new Set(['qwen2.5:14b']), loaded: new Set() } };
+    const standbyOf = async (cfg: typeof unnamed, at: Date, machine?: MachineReading) => (await checkComponents({ db, config: cfg, now: at, sources: [], ...(machine ? { machine } : {}) })).filter((c) => c.component === 'standby_model');
+    const latest = async () => (await healthReport(db, config, new Date())).components.find((c) => c.component === 'standby_model');
+    try {
+      // Never named: no line, and none is made up.
+      expect(await standbyOf(unnamed, now, missing)).toEqual([]);
+      // Named, and not installed: an issue, on record.
+      await recordChecks(db, await checkComponents({ db, config, now, sources: [], machine: missing }), now);
+      expect(await latest()).toMatchObject({ status: 'degraded', detail: 'The standby model isn’t installed.' });
+      // The setting goes away. The next check writes Off, with or without a reading of the Mac...
+      const next = await standbyOf(unnamed, new Date(now.getTime() + 5 * MIN), missing);
+      expect(next).toEqual([{ component: 'standby_model', status: 'disabled' }]);
+      expect(await standbyOf(unnamed, new Date(now.getTime() + 5 * MIN))).toEqual([{ component: 'standby_model', status: 'disabled' }]);
+      await recordChecks(db, next, new Date(now.getTime() + 5 * MIN));
+      expect(await latest()).toMatchObject({ status: 'disabled' });
+      // ...once: after that there is nothing more to say about it.
+      expect(await standbyOf(unnamed, new Date(now.getTime() + 10 * MIN), missing)).toEqual([]);
+    } finally {
+      await owner(`DELETE FROM "HealthCheck"`);
     }
   });
 
@@ -298,6 +362,20 @@ describe.skipIf(NO_DB)('Health sees the whole machine (flint_test)', () => {
       await seen(new Date(t0.getTime() + 4 * HOUR + 5 * MIN), 'down');
       expect(await only(new Date(t0.getTime() + 4 * HOUR + 20 * MIN), 'remote_access.down', down)).toEqual([]);
       expect(await raise(db, await only(new Date(t0.getTime() + 4 * HOUR + 40 * MIN), 'remote_access.down', down), new Date())).toHaveLength(1);
+      // A check that could not tell, between two that said down, does not start the half hour again (something in
+      // trouble answers slowly); only one that saw it working, or off, does.
+      await owner(`DELETE FROM "HealthCheck" WHERE component = 'remote_access'`);
+      const t1 = new Date(Date.now() - 3 * HOUR);
+      await seen(new Date(t1.getTime() - 5 * MIN), 'degraded');
+      for (let i = 0; i < 12; i++) await seen(new Date(t1.getTime() + i * 5 * MIN), i % 3 === 2 ? 'unknown' : 'down');
+      const flapping = await only(new Date(t1.getTime() + 56 * MIN), 'remote_access.down', down);
+      expect(flapping).toMatchObject([{ ref: `down:${t1.toISOString()}`, payload: { downMinutes: 56 } }]);
+      for (const working of ['ok', 'degraded', 'disabled']) {
+        await seen(new Date(t1.getTime() + 60 * MIN), working);
+        await seen(new Date(t1.getTime() + 65 * MIN), 'down');
+        expect(await only(new Date(t1.getTime() + 80 * MIN), 'remote_access.down', down), working).toEqual([]);
+        await owner(`DELETE FROM "HealthCheck" WHERE component = 'remote_access' AND at >= $1`, [new Date(t1.getTime() + 60 * MIN)]);
+      }
       // Unknown, or never set up, raises nothing: "could not be read" is not "down".
       expect(await only(new Date(), 'remote_access.down', { remote: { state: 'unknown' } })).toEqual([]);
       expect(await only(new Date(), 'remote_access.down', { remote: { state: 'off' } })).toEqual([]);
@@ -358,11 +436,17 @@ describe.skipIf(NO_DB)('Health sees the whole machine (flint_test)', () => {
         expect(await raise(db, await only(new Date(now.getTime() + HOUR), 'auto_update.stalled'), now)).toHaveLength(0);
         expect(await note('auto_update.stalled', { hours: 3 })).toMatchObject({ title: 'Flint Stopped Checking for Updates', body: 'The last check was 3 hours ago.', critical: false });
         expect((await note('auto_update.stalled', { hours: 72 })).body).toBe('The last check was 3 days ago.');
-        // Paused by Will: that has its own line and its own note.
+        // Paused by Will: that has its own line and its own note. So has a pause that was lifted a moment ago.
         aged(flint('deploy-hold'), now, HOUR);
         expect(await only(now, 'auto_update.stalled')).toEqual([]);
+        rmSync(flint('deploy-hold'));
+        aged(flint('deploy-hold-seen'), now, HOUR);
+        expect(await only(now, 'auto_update.stalled')).toEqual([]);
+        rmSync(flint('deploy-hold-seen'));
+        expect(await only(now, 'auto_update.stalled')).toHaveLength(1);
       } finally {
         rmSync(flint('deploy-hold'), { force: true });
+        rmSync(flint('deploy-hold-seen'), { force: true });
         rmSync(flint('deploy-tick'), { force: true });
       }
     });

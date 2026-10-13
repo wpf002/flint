@@ -116,8 +116,9 @@ const Env = z.object({
   FLINT_TRIAGE_MODEL: z.string().regex(/^[A-Za-z0-9._:/-]{1,80}$/).optional(),
   /**
    * The standby model chat falls back to while the main one is not answering
-   * (the server's own setting, by the same name; install-runtime.sh copies it
-   * here when the server's settings name one). With a model's name, Settings >
+   * (the server's setting of the same name, which comes with local inference;
+   * install-runtime.sh copies it here when the server's settings name one, and
+   * until they do there is no line). With a model's name, Settings >
    * Health says whether it is installed; with "off" or "none" it says the
    * standby is off; unset, the server chooses one for this Mac and Health has
    * no line for it. The runtime never asks that model anything.

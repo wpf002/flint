@@ -49,6 +49,19 @@ describe('Automatic Updates: a pause on updates is never silent', () => {
     expect(pausedFor(9.5 * DAY)).toEqual({ component: 'deploy_hold', status: 'degraded', detail: 'Updates have been paused for 9 days.' });
   });
 
+  it('a pause that was lifted is still said until the deploy job has looked again: its own mark stands in for the pause', () => {
+    // The job leaves this mark at the first tick that finds the pause, and takes it away at its first look after it.
+    writeFileSync(join(home, '.flint', 'deploy-hold-seen'), '');
+    expect(deployHold(home, NOW)).toEqual({ component: 'deploy_hold', status: 'degraded', detail: 'Updates were paused, and Flint hasn’t checked again yet.' });
+    // With the pause itself still there, the pause is what is said.
+    expect(pausedFor(2 * HOUR).detail).toBe('Updates have been paused for 2 hours.');
+    rmSync(join(home, '.flint', 'deploy-hold'));
+    rmSync(join(home, '.flint', 'deploy-hold-seen'));
+    expect(deployHold(home, NOW)).toEqual({ component: 'deploy_hold', status: 'ok' });
+    // The mark is the script's own name for it.
+    expect(readFileSync(join(__dirname, '..', '..', 'server', 'auto_deploy.sh'), 'utf8')).toContain('HOLD_SEEN="$STATE/deploy-hold-seen"');
+  });
+
   it('a hold made by hand, empty, or dated ahead of the clock is a hold all the same', () => {
     writeFileSync(join(home, '.flint', 'deploy-hold'), '');
     const ahead = (NOW.getTime() + HOUR) / 1000;
@@ -125,8 +138,8 @@ describe('what the two say is fit for Settings > Health and the morning digest',
     expect(run).toContain('out.push(await updates(d));');
     expect(run).toContain('out.push(rebuildRehearsal(d.config.home, d.config.tz, now));');
     const own = checks.slice(checks.indexOf('export function deployHold('), checks.indexOf('/** How bad a status is, to say the worse of two. */'));
-    expect(own.match(/\bdetail: /g)).toHaveLength(4);
-    expect(own.match(/detail: UPKEEP_HEALTH\.(paused|passed|failed|never)\b/g)).toHaveLength(4);
+    expect(own.match(/\bdetail: /g)).toHaveLength(5);
+    expect(own.match(/detail: UPKEEP_HEALTH\.(paused|resuming|passed|failed|never)\b/g)).toHaveLength(5);
     const updates = checks.slice(checks.indexOf('async function updates('), checks.indexOf('export async function checkComponents('));
     expect(updates).toContain('const hold = deployHold(d.config.home, d.now);\n  if (hold.status !== \'ok\') return hold;');
     expect(updates.match(/\bdetail: /g)).toHaveLength(3);

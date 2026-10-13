@@ -119,10 +119,13 @@ export const UPKEEP_HEALTH = {
     const h = Math.floor(ms / 3_600_000);
     return `Updates have been paused for ${h < 1 ? 'less than an hour' : h < 48 ? count(h, 'hour') : count(Math.floor(h / 24), 'day')}.`;
   },
+  /** The pause was lifted and the deploy job has not looked since. */
+  resuming: 'Updates were paused, and Flint hasn’t checked again yet.',
   /** How long ago the deploy job last looked for an update (it looks every two minutes). */
   checked: (ms: number) => {
     const m = Math.floor(ms / 60_000);
-    return `Flint checked for updates ${m < 1 ? 'less than a minute' : count(m, 'minute')} ago.`;
+    const h = Math.floor(m / 60);
+    return `Flint checked for updates ${m < 1 ? 'less than a minute' : m < 120 ? count(m, 'minute') : h < 48 ? count(h, 'hour') : count(Math.floor(h / 24), 'day')} ago.`;
   },
   notChecked: (ms: number) => {
     const h = Math.floor(ms / 3_600_000);
@@ -145,12 +148,25 @@ export const REHEARSAL_STALE_DAYS = 8;
  */
 export function deployHold(home: string, now: Date): ComponentCheck {
   const component = 'deploy_hold';
-  try {
-    const since = statSync(join(home, '.flint', 'deploy-hold')).mtimeMs;
-    return { component, status: 'degraded', detail: UPKEEP_HEALTH.paused(Math.max(0, now.getTime() - since)) };
-  } catch {
-    return { component, status: 'ok' };
-  }
+  const age = (file: string): number | undefined => {
+    try {
+      return Math.max(0, now.getTime() - statSync(join(home, '.flint', file)).mtimeMs);
+    } catch {
+      return undefined;
+    }
+  };
+  const held = age('deploy-hold');
+  if (held !== undefined) return { component, status: 'degraded', detail: UPKEEP_HEALTH.paused(held) };
+  // The pause was lifted and the deploy job has not looked since: it keeps this mark from the first tick that found
+  // the pause until its first look after it. Said as that, so the time it was paused is never read as time it
+  // failed to look. (Minutes, normally. If the job has died it stays, as an issue, which it is.)
+  if (pausedMarkThere(home)) return { component, status: 'degraded', detail: UPKEEP_HEALTH.resuming };
+  return { component, status: 'ok' };
+}
+
+/** The deploy job's own mark that updates were paused and it has not looked since (apps/server/auto_deploy.sh, HOLD_SEEN). */
+export function pausedMarkThere(home: string): boolean {
+  return existsSync(join(home, '.flint', 'deploy-hold-seen'));
 }
 
 /**
@@ -280,20 +296,26 @@ export function lastUpdateCheck(home: string): number | undefined {
  * Automatic updates, whole: paused (deployHold), or not looking. The deploy job
  * looks for an update every two minutes and leaves the time of each look; an
  * hour without one means the job has stopped, and nothing else would say so.
- * With no look on record at all, a runtime that just started says nothing yet.
+ *
+ * The hour is counted from the last look or from when this runtime started,
+ * whichever is later. So the hours the Mac was off are not hours of not
+ * looking, and neither is the age of a mark that came back from a backup with
+ * its old time (a rebuild): each is given its hour first. With no look on
+ * record at all, a runtime that just started says nothing yet.
  */
 async function updates(d: CheckDeps): Promise<ComponentCheck> {
   const hold = deployHold(d.config.home, d.now);
   if (hold.status !== 'ok') return hold;
   const component = hold.component;
   const at = lastUpdateCheck(d.config.home);
+  const instance = await d.db.runtimeInstance.findFirst({ where: { stoppedAt: null }, orderBy: { startedAt: 'desc' }, select: { startedAt: true } });
   if (at === undefined) {
-    const instance = await d.db.runtimeInstance.findFirst({ where: { stoppedAt: null }, orderBy: { startedAt: 'desc' }, select: { startedAt: true } });
     if (!instance || d.now.getTime() - instance.startedAt.getTime() <= UPDATE_GRACE_MS) return hold;
     return { component, status: 'unknown', detail: UPKEEP_HEALTH.neverChecked };
   }
   const age = Math.max(0, d.now.getTime() - at);
-  return age > UPDATE_LATE_MS ? { component, status: 'degraded', detail: UPKEEP_HEALTH.notChecked(age) } : { component, status: 'ok', detail: UPKEEP_HEALTH.checked(age) };
+  const quiet = d.now.getTime() - Math.max(at, instance?.startedAt.getTime() ?? 0);
+  return quiet > UPDATE_LATE_MS ? { component, status: 'degraded', detail: UPKEEP_HEALTH.notChecked(age) } : { component, status: 'ok', detail: UPKEEP_HEALTH.checked(age) };
 }
 
 export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
@@ -331,6 +353,12 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
   }
   const standby = d.machine ? standbyModelCheck(d.config.standbyModel, d.machine.models) : undefined;
   if (standby) out.push(standby);
+  else if (d.config.standbyModel === undefined) {
+    // No standby is named any more. A line about one that was (that it isn't installed, say) would stand as the
+    // latest word on it until it is cleaned up a month later: it is said to be off, once.
+    const last = await db.healthCheck.findFirst({ where: { component: 'standby_model' }, orderBy: { at: 'desc' }, select: { status: true } });
+    if (last && last.status !== 'disabled') out.push({ component: 'standby_model', status: 'disabled' });
+  }
 
   const cursors = new Map((await db.sourceCursor.findMany()).map((c) => [c.source, c]));
   for (const s of d.sources) {

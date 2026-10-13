@@ -17,8 +17,8 @@
  *    current, the files'); once per last good copy.
  *  - Remote access: its sign-in runs out within 14 days (once, and once more
  *    within 3); or it has been down 30 minutes (once per outage).
- *  - The deploy job has not looked for an update in 3 hours, while updates are
- *    not paused; once per stall.
+ *  - The deploy job has not looked for an update in 3 hours of this runtime
+ *    being up, while updates are not paused; once per stall.
  *  - The MacBook has not tested an offsite copy in 5 weeks; once per last test.
  *
  * CI failing on flint needs no watchdog: the github source's own event is the
@@ -31,7 +31,7 @@ import type { Config } from '../config.js';
 import type { Db, Tx } from '../db.js';
 import { markProcessed, recordEvent, refreshUndecided, type Enqueue } from '../events/record.js';
 import { faultAt, offsiteFolder, runtimeEnv } from '../config.js';
-import { lastUpdateCheck, offsiteWanted } from './checks.js';
+import { lastUpdateCheck, offsiteWanted, pausedMarkThere } from './checks.js';
 import { DISK_FULL_BYTES, EXPIRY_WARN_DAYS, daysUntil, type MachineReading } from './machine.js';
 
 export interface Raised {
@@ -74,9 +74,13 @@ function offsiteIsICloud(home: string): boolean {
   }
 }
 
-/** Since when this component's checks have all been down (the first of the run of them); undefined when the last was not. */
+/**
+ * Since when this component has been down: its first down check since it was last seen working (normal, degraded)
+ * or off. A check that could not tell (unknown) between two downs does not start the count again: something in
+ * trouble answers slowly, and "could not be read" is not "it is back".
+ */
 async function downSince(db: Db, component: string): Promise<Date | undefined> {
-  const up = await db.healthCheck.findFirst({ where: { component, status: { not: 'down' } }, orderBy: { at: 'desc' }, select: { at: true } });
+  const up = await db.healthCheck.findFirst({ where: { component, status: { in: ['ok', 'degraded', 'disabled'] } }, orderBy: { at: 'desc' }, select: { at: true } });
   return (await db.healthCheck.findFirst({ where: { component, status: 'down', ...(up ? { at: { gt: up.at } } : {}) }, orderBy: { at: 'asc' }, select: { at: true } }))?.at;
 }
 
@@ -117,10 +121,16 @@ async function machineConditions(db: Db, config: Pick<Config, 'home' | 'tz'>, no
     }
   }
 
-  // The deploy job stopped looking for updates, and nobody paused them (a pause has its own line in Health and its own note).
+  // The deploy job stopped looking for updates, and nobody paused them (a pause has its own line in Health and its
+  // own note; so has a pause that was lifted and not yet picked up). Three hours are counted from the last look or
+  // from when this runtime started, whichever is later: the Mac being off, and a mark that came back from a backup
+  // with its old time, are not three hours of not looking.
   const looked = lastUpdateCheck(config.home);
-  if (looked !== undefined && t - looked > UPDATES_STALLED_MS && !existsSync(join(config.home, '.flint', 'deploy-hold'))) {
-    out.push({ type: 'auto_update.stalled', ref: `since:${new Date(looked).toISOString()}`, occurredAt: now, payload: { hours: Math.floor((t - looked) / 3_600_000) } });
+  if (looked !== undefined && !existsSync(join(config.home, '.flint', 'deploy-hold')) && !pausedMarkThere(config.home)) {
+    const instance = await db.runtimeInstance.findFirst({ where: { stoppedAt: null }, orderBy: { startedAt: 'desc' }, select: { startedAt: true } });
+    if (t - Math.max(looked, instance?.startedAt.getTime() ?? 0) > UPDATES_STALLED_MS) {
+      out.push({ type: 'auto_update.stalled', ref: `since:${new Date(looked).toISOString()}`, occurredAt: now, payload: { hours: Math.floor((t - looked) / 3_600_000) } });
+    }
   }
 
   // The MacBook's test of the offsite copies: only once it has reported one (it has its own line in Health from then on).
