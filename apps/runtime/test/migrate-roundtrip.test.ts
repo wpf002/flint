@@ -80,12 +80,21 @@ describe.skipIf(NO_DB)('migration round trip (flint_test)', () => {
   it('the newest migration\'s down.sql, then deploy, re-applies it (the documented rollback)', async () => {
     const newest = migrationDirs().at(-1)!;
     // Something true only while the newest migration is applied, to see it go and come back. A new migration names its own here.
-    const applied: Record<string, string> = { '20261013000150_public_schema_floor': `NOT has_schema_privilege('public', 'public', 'USAGE')` };
+    // (P4 part 3's: its two columns, how many of a forecast's steps were filled in and where each number was read to.)
+    const applied: Record<string, string> = {
+      '20261014000000_p4_forecast_inputs': `(SELECT count(*) = 2 FROM information_schema.columns WHERE table_schema = 'public'
+        AND ((table_name = 'ForecastRun' AND column_name = 'filled') OR (table_name = 'MetricSeries' AND column_name = 'readTo')))`,
+    };
     expect(applied[newest], `say what ${newest} makes true`).toBeTruthy();
     const there = async () => withClient(owner, async (c) => (await c.query<{ t: boolean }>(`SELECT ${applied[newest]} AS t`)).rows[0]!.t);
     expect(await there()).toBe(true);
     await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, newest, 'down.sql'), 'utf8')));
     expect(await there()).toBe(false);
+    // Nothing else of the schema went with it.
+    if (newest === '20261014000000_p4_forecast_inputs') {
+      expect((await objects(owner)).tables).toEqual(expect.arrayContaining(['public.ForecastRun', 'public.MetricSeries']));
+      expect(await withClient(owner, async (c) => (await c.query<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.columns WHERE table_schema = 'public' AND column_name IN ('filled', 'readTo')`)).rows[0]!.n)).toBe(0);
+    }
     // Run again on what it left (the state a rollback half done would be in): it tolerates that, as its header says.
     await withClient(owner, (c) => c.query(readFileSync(join(MIGRATIONS, newest, 'down.sql'), 'utf8')));
     const status = await prisma(['migrate', 'status'], owner);

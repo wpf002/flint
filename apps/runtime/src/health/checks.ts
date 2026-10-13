@@ -26,7 +26,10 @@
  *    not run in 3 hours, when the database refused one of its writes, when a
  *    prediction's rule is one no resolver knows, when the night's scores are
  *    over two days old, or when a rule forbids the checks; down when no check
- *    ran in 26 hours.
+ *    ran in 26 hours;
+ *  - forecasts (P4): disabled while predictions are off or no number is on;
+ *    degraded when last night's forecasts or numbers did not run, when one
+ *    failed, or when a rule forbids forecasting; down after two nights.
  *
  * A detail is redacted and clipped to 300 characters: names and counts, never
  * a stranger's words. One audit entry per run carries the counts.
@@ -46,6 +49,7 @@ import { reviewStanding } from '../goals/review.js';
 import { activePolicies } from '../governance/proposals.js';
 import { SNAPSHOT_ACTION } from '../ledger/calibration.js';
 import { LEDGER_ACTOR, SWEEP_ACTION } from '../ledger/sweep.js';
+import { FORECAST_ACTOR, RUN_ACTION, SERIES_ACTION } from '../predict/run.js';
 
 export type Status = (typeof HEALTH_STATUS)[number];
 export interface ComponentCheck {
@@ -271,7 +275,103 @@ export async function checkComponents(d: CheckDeps): Promise<ComponentCheck[]> {
 
   out.push(await goalReviews(d));
   out.push(await predictionChecks(d));
+  out.push(await forecasts(d));
   return out;
+}
+
+/** Last night's run is this old: it was missed (the jobs run once a night). */
+export const FORECASTS_LATE_MS = 26 * 3_600_000;
+/** Two nights were missed: down. */
+export const FORECASTS_DOWN_MS = 50 * 3_600_000;
+/** How long a runtime that just started is given to catch up on a night it missed (the jobs run once at start when one was). */
+export const FORECASTS_RESTART_GRACE_MS = 70 * 60_000;
+
+/** What Forecasts says in Settings > Health: sentences from counts, never a number a series took or a series' key. */
+export const FORECAST_HEALTH = {
+  stopped: 'A rule stops Flint from forecasting.',
+  starting: 'Forecasts start tonight.',
+  /** Last night's run, inside the last 26 hours: how many numbers have their forecast, and how many are waiting for yesterday's number. Never said of none. */
+  ran: (n: number, late = 0) =>
+    late === 0 ? `Last night’s forecasts ran for ${count(n, 'number')}.` : `Last night’s forecasts ran for ${count(n, 'number')}, and ${late} ${late === 1 ? 'is' : 'are'} waiting for yesterday’s number.`,
+  waiting: (n: number) => (n === 1 ? 'Flint needs more history before it forecasts its number.' : `Flint needs more history before it forecasts its ${n} numbers.`),
+  late: (n: number) => (n === 1 ? 'Yesterday’s number isn’t in, so Flint didn’t forecast it.' : `Yesterday’s numbers aren’t in for ${n} numbers, so Flint didn’t forecast them.`),
+  missed: 'Forecasts didn’t run last night.',
+  down: (days: number) => `Forecasts haven’t run in ${count(days, 'day')}.`,
+  failed: (n: number) => `${count(n, 'forecast')} failed last night.`,
+  refused: (n: number) => `The database refused ${count(n, 'forecast')} last night.`,
+  capped: (n: number) => `The daily limit on forecasts was reached, so ${n === 1 ? '1 number waits' : `${n} numbers wait`} until tomorrow.`,
+  noNumbers: 'Flint didn’t record yesterday’s numbers.',
+  numbersFailed: (n: number) => `Flint couldn’t record ${count(n, 'number')} last night.`,
+} as const;
+
+/**
+ * Forecasts (P4): did last night's numbers and forecasts run? Counts only, read
+ * from the two jobs' own audit entries (one per run, the forecast writer's
+ * alone).
+ *  - Off while FLINT_PREDICT is off, and while no number is on.
+ *  - How long since the last run is counted from that run, or from the first
+ *    turn-on when there has been none: the days before predictions were on
+ *    never read as a missed night.
+ *  - A runtime that just started is given 70 minutes to catch up (the jobs run
+ *    once at start when a night was missed): inside it, the quiet time counts
+ *    from the start. After it a restart excuses nothing, so a runtime that
+ *    restarts every day and never forecasts reads missed, then down. (Before,
+ *    a restart 20 hours earlier made a forecaster dead for 40 days read
+ *    Normal.)
+ *  - "Ran" is said only of a run inside the last 26 hours, and never of none.
+ *    A run that had a write refused, or stopped at its daily limit, or had a
+ *    forecast fail, needs a look and says which.
+ *  - A number without enough history yet, or waiting for yesterday's number,
+ *    is not a fault: it is said, as ok.
+ */
+async function forecasts(d: CheckDeps): Promise<ComponentCheck> {
+  const { db, now } = d;
+  const component = 'forecasts';
+  if (!d.config.predict) return { component, status: 'disabled' };
+  const first = await db.forecastSeries.findFirst({ where: { on: true }, orderBy: { enabledAt: 'asc' }, select: { enabledAt: true } });
+  if (!first) return { component, status: 'disabled' };
+  const policies = await activePolicies(db, now);
+  const may = (action: string) => {
+    const t = resolveTier(action, { context: 'autonomous', tainted: false, policies, now });
+    return t.tier === 'alone' || (t.tier === 'approval' && runsInShadow(action));
+  };
+  if (!may(RUN_ACTION) || !may('ledger.prediction.record')) return { component, status: 'degraded', detail: FORECAST_HEALTH.stopped };
+  // The latest run each job itself recorded as done (a run a rule forbade is `skipped`, and is not a run).
+  const latest = (action: string) => db.auditEntry.findFirst({ where: { kind: 'action', action, actor: FORECAST_ACTOR, outcome: 'ok', at: { lte: now } }, orderBy: { at: 'desc' }, select: { at: true, inputs: true } });
+  const n = (inputs: unknown, key: string): number => {
+    const v = inputs && typeof inputs === 'object' ? (inputs as Record<string, unknown>)[key] : undefined;
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+  };
+  const instance = await db.runtimeInstance.findFirst({ where: { stoppedAt: null }, orderBy: { startedAt: 'desc' }, select: { startedAt: true } });
+  const started = instance?.startedAt.getTime() ?? 0;
+  const fresh = started > 0 && now.getTime() - started <= FORECASTS_RESTART_GRACE_MS;
+  /** How long it has been quiet: since the last run (or the first turn-on), or, for a runtime that only just started, since it did. */
+  const quietSince = (ran: Date | undefined): number => {
+    const last = Math.max(ran?.getTime() ?? 0, first.enabledAt.getTime());
+    return now.getTime() - (fresh ? Math.max(last, started) : last);
+  };
+  const run = await latest(RUN_ACTION);
+  const quiet = quietSince(run?.at);
+  if (quiet > FORECASTS_DOWN_MS) return { component, status: 'down', detail: FORECAST_HEALTH.down(Math.floor(quiet / 86_400_000)) };
+  if (quiet > FORECASTS_LATE_MS) return { component, status: 'degraded', detail: FORECAST_HEALTH.missed };
+  // No run inside the last 26 hours, and not yet late (just turned on, or just started): nothing is said to have run.
+  if (!run || now.getTime() - run.at.getTime() > FORECASTS_LATE_MS) return { component, status: 'ok', detail: FORECAST_HEALTH.starting };
+  if (n(run.inputs, 'failed')) return { component, status: 'degraded', detail: FORECAST_HEALTH.failed(n(run.inputs, 'failed')) };
+  if (n(run.inputs, 'refused')) return { component, status: 'degraded', detail: FORECAST_HEALTH.refused(n(run.inputs, 'refused')) };
+  if (n(run.inputs, 'capped')) return { component, status: 'degraded', detail: FORECAST_HEALTH.capped(n(run.inputs, 'capped')) };
+  // Yesterday's numbers, unless a rule forbids keeping them.
+  if (may(SERIES_ACTION)) {
+    const kept = await latest(SERIES_ACTION);
+    if (quietSince(kept?.at) > FORECASTS_LATE_MS) return { component, status: 'degraded', detail: FORECAST_HEALTH.noNumbers };
+    if (kept && n(kept.inputs, 'failed')) return { component, status: 'degraded', detail: FORECAST_HEALTH.numbersFailed(n(kept.inputs, 'failed')) };
+  }
+  const made = n(run.inputs, 'ran') + n(run.inputs, 'steady') + n(run.inputs, 'same');
+  const late = n(run.inputs, 'late');
+  if (made) return { component, status: 'ok', detail: FORECAST_HEALTH.ran(made, late) };
+  // None has its forecast: said as what they wait for, never as "ran for 0 numbers".
+  if (late) return { component, status: 'ok', detail: FORECAST_HEALTH.late(late) };
+  if (n(run.inputs, 'waiting')) return { component, status: 'ok', detail: FORECAST_HEALTH.waiting(n(run.inputs, 'waiting')) };
+  return { component, status: 'ok', detail: FORECAST_HEALTH.starting };
 }
 
 /** The hourly check has not run in this long: degraded. */

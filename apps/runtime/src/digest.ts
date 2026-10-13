@@ -63,7 +63,8 @@ export async function buildDigest(db: Db, tz: string, now = new Date()): Promise
     didOnItsOwn(db, start, end),
     db.proposal.count({ where: { status: 'pending', expiresAt: { gt: now } } }),
     db.escalation.count({ where: { status: 'open' } }),
-    db.prediction.count({ where: { status: 'open', resolveBy: { gte: today.start, lt: today.end } } }),
+    // Not a forecast's own (P4): each night's forecasts settle themselves the next morning, and are not Will's to watch for.
+    db.prediction.count({ where: { status: 'open', resolveBy: { gte: today.start, lt: today.end }, seriesKey: null, forecastRunId: null } }),
     db.$queryRaw<Array<{ component: string; status: string }>>`SELECT DISTINCT ON (component) component, status FROM "HealthCheck" ORDER BY component, at DESC`,
     // The goals Flint reviewed that day, and those whose scheduled review ran late: due for over an hour while
     // Flint was reviewing (goals/late.ts), as the review's own audit entry recorded when it ran. A review that

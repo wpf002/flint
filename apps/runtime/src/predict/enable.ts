@@ -27,11 +27,11 @@ import { Prisma } from '@prisma/client';
 import { FORECAST_REASONS, ForecastEnableArgs, digestOf, isForecastSignedAction, mostSensitive, type WebAuthnRelyingParty } from '@flint/policy';
 import type { z } from 'zod';
 import type { Db, Tx } from '../db.js';
-import { Refused, claimIn, completeIn, contextOf, type CreateProposal } from '../governance/proposals.js';
+import { Refused, claimIn, completeIn, contextOf, createProposal, type CreateProposal } from '../governance/proposals.js';
 import { dbRefused, failureOf, failureReport, schemaSkew, sqlState } from '../dbcodes.js';
 import { GoalFailure, sanitize } from '../goals/errors.js';
 import { failApproved } from '../goals/apply.js';
-import { forecastSeries, freqOf, type ForecastSeriesDef } from './series.js';
+import { FORECAST_SERIES_KEYS, forecastSeries, freqOf, type ForecastSeriesDef } from './series.js';
 
 /** What Will reads under a forecast card: fixed sentences, never a number. */
 export const SAY = {
@@ -162,6 +162,44 @@ export async function applyEnable(tx: Tx, raw: unknown, ctx: ApplyContext): Prom
   }
   return { result: { on: args.series.length, reason: args.reason.length } };
 }
+
+/**
+ * File the Turn On Predictions card from the command line, for Will to sign in
+ * the console (until the console's own panel can file it). Every registered
+ * number unless some are named. The same checks as any filing: a key outside
+ * the registry is refused, and a card that would change nothing is never filed.
+ * A card already waiting with the same numbers is the one returned.
+ */
+export async function proposeForecasts(db: Db, keys: readonly string[] = FORECAST_SERIES_KEYS, now = new Date()) {
+  const series = [...new Set(keys)].sort();
+  return createProposal(db, {
+    kind: 'tool_call', origin: 'cli', action: 'forecast.series.enable', args: { series, reason: [] },
+    argsProvenance: { series: { source: 'will', tainted: false }, reason: { source: 'will', tainted: false } },
+    tainted: false, sensitivity: 'ops', destructive: false, consequential: true, ttlMinutes: 7 * 24 * 60,
+  }, 'will:cli', now);
+}
+
+/**
+ * What the command prints once the card is filed: what it is, and how Will approves it. Held to the notes' rules, as
+ * everything Flint says to him is: no key, no id (the card's or a number's), nothing in parentheses.
+ */
+export function cardFiledSays(p: { deduped: boolean }, numbers: number): string {
+  return [
+    `${p.deduped ? 'Already filed' : 'Filed'}: the Turn On Predictions card, for ${numbers} ${numbers === 1 ? 'number' : 'numbers'}.`,
+    'To approve it: open Flint, click Approvals in the top bar, open Turn On Predictions, and approve it with Touch ID.',
+    'It asks on its own, never in Approve All. It expires in 7 days. Nothing is forecast until it is approved.',
+  ].join('\n');
+}
+
+/**
+ * What the command prints when predictions are switched off on this Mac. A card filed and signed then would turn
+ * numbers on that nothing forecasts, and say "nothing is forecast until it is approved" of something approval would
+ * not start either. So nothing is filed, and it says why and where the how-to is.
+ */
+export const PREDICTIONS_OFF_SAYS = [
+  'Not filed: predictions are switched off on this Mac.',
+  'Switch them on first, then run this again. The runtime’s README says how, under The Two Switches.',
+].join('\n');
 
 /** Test seams: a fault injected after the writes, before the card completes. */
 export interface ForecastHooks {

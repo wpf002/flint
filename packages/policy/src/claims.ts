@@ -30,17 +30,21 @@ export const CLAIM_TEMPLATE_PARAMS = {
     .object({ series: SeriesRef, lo: z.number().finite(), hi: z.number().finite(), on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) })
     .strict()
     .refine((p) => p.lo <= p.hi, 'the range is upside down'),
+  // The forecaster's yes/no question about the same step: is the series' number for that day (or the week starting
+  // then) above a value? Its own template because chat's `threshold` says "at the resolve time", and this is about
+  // a whole step.
+  series_above: z.object({ series: SeriesRef, value: z.number().finite(), on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).strict(),
 } as const;
 
 export type ClaimTemplateId = keyof typeof CLAIM_TEMPLATE_PARAMS;
 export const CLAIM_TEMPLATE_IDS = Object.keys(CLAIM_TEMPLATE_PARAMS) as ClaimTemplateId[];
 /**
  * Templates only the runtime's own writers fill (a goal review's forecast, the
- * forecaster's range). Chat is never offered them: they are not in ClaimTemplate
+ * forecaster's range and its question). Chat is never offered them: they are not in ClaimTemplate
  * below, which is what the connector shows the model and the chat gate checks,
  * and the ledger's route takes chat's templates only.
  */
-export const RUNTIME_CLAIM_TEMPLATE_IDS = ['goal_on_track', 'series_range'] as const satisfies readonly ClaimTemplateId[];
+export const RUNTIME_CLAIM_TEMPLATE_IDS = ['goal_on_track', 'series_range', 'series_above'] as const satisfies readonly ClaimTemplateId[];
 /** The templates chat may fill. */
 export const CHAT_CLAIM_TEMPLATE_IDS = CLAIM_TEMPLATE_IDS.filter((id) => !(RUNTIME_CLAIM_TEMPLATE_IDS as readonly string[]).includes(id)) as Array<
   Exclude<ClaimTemplateId, (typeof RUNTIME_CLAIM_TEMPLATE_IDS)[number]>

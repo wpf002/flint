@@ -37,6 +37,9 @@ import { PlanJob, ReviewJob, runReview } from './goals/review.js';
 import { runPlan } from './goals/batch.js';
 import { predictionsStarted, sweep } from './ledger/sweep.js';
 import { SNAPSHOT_ACTION, runSnapshot } from './ledger/calibration.js';
+import { runForecasts, runSeries } from './predict/run.js';
+import { makeRun } from './sources/exec.js';
+import { clones } from './sources/registry.js';
 
 const DeliverJob = z.object({ escalationId: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/) }).strict();
 
@@ -265,10 +268,13 @@ export function goalJobs(ctx: JobContext): JobSpec[] {
   ];
 }
 
+/** The night, in order (Flint's zone): yesterday's numbers, the sweep that settles what they decide, the scores, today's forecasts. */
+export const SERIES_CRON = '30 3 * * *';
 /** When the sweep runs: hourly at :40, so the 03:40 run settles the night's numbers before the 03:45 snapshot scores them. */
 export const SWEEP_CRON = '40 * * * *';
 /** When the snapshot runs: 03:45 local, after the sweep. */
 export const SNAPSHOT_CRON = '45 3 * * *';
+export const FORECAST_CRON = '50 3 * * *';
 
 /**
  * Predictions (P4), only while FLINT_PREDICT is on. Off, this is empty:
@@ -277,13 +283,35 @@ export const SNAPSHOT_CRON = '45 3 * * *';
  * Predictions card (predictionsStarted), so "ships off" does not depend on a
  * setting being remembered.
  *
+ *  - forecast.series: yesterday's value of each number that is on (predict/metrics.ts).
  *  - ledger.sweep: Flint checks its own predictions (ledger/sweep.ts).
  *  - ledger.snapshot: the night's scores (ledger/calibration.ts).
- * Neither has job data. Log lines carry counts and ids.
+ *  - forecast.run: today's forecast of each number that is on (predict/run.ts).
+ * None has job data. Log lines carry counts, ids and series keys, never a value.
  */
 export function predictJobs(ctx: JobContext): JobSpec[] {
   if (!ctx.config.predict) return [];
   return [
+    {
+      queue: 'forecast.series',
+      cron: SERIES_CRON,
+      missed: 'once',
+      handler: async () => {
+        if (!(await predictionsStarted(ctx.db))) return;
+        const c = await runSeries({ db: ctx.db, tz: ctx.config.tz, run: makeRun(ctx.config.home), repos: clones(ctx.config.home), log: ctx.log });
+        if (c.ran) ctx.log(`forecast: ${c.written} number(s) kept for ${c.on} series; ${c.down} day(s) left missing, ${c.failed} series failed`);
+      },
+    },
+    {
+      queue: 'forecast.run',
+      cron: FORECAST_CRON,
+      missed: 'once',
+      handler: async () => {
+        if (!(await predictionsStarted(ctx.db))) return;
+        const c = await runForecasts({ db: ctx.db, tz: ctx.config.tz, log: ctx.log });
+        if (c.allowed) ctx.log(`forecast: ${c.ran} forecast(s) and ${c.steady} steady of ${c.on} on; ${c.waiting} waiting for history, ${c.late} waiting for the latest number, ${c.same} already made, ${c.capped} capped, ${c.refused} refused, ${c.failed} failed`);
+      },
+    },
     {
       queue: 'ledger.sweep',
       cron: SWEEP_CRON,

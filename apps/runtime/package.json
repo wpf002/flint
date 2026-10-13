@@ -20,6 +20,7 @@
     "p25-report": "tsx src/cli.ts p25-report",
     "p3-report": "tsx src/cli.ts p3-report",
     "promotion-table": "tsx src/cli.ts promotion-table",
+    "predictions-on": "tsx src/cli.ts predictions-on",
     "restore-production": "tsx src/cli.ts restore-production",
     "restore-empty": "tsx src/cli.ts restore-empty",
     "bootstrap-db": "tsx scripts/bootstrap-db.ts"

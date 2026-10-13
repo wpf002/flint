@@ -32,7 +32,7 @@ import { ACTION, nextAfterFailure } from '../src/backup/nightly';
 import { digestBody, digestTitle, goalsSentence } from '../src/digest';
 import { DEFERRAL_SAYS } from '../src/goals/batch';
 import { REVIEWS_STOPPED } from '../src/goals/late';
-import { GOAL_HEALTH, LEDGER_HEALTH } from '../src/health/checks';
+import { FORECAST_HEALTH, GOAL_HEALTH, LEDGER_HEALTH } from '../src/health/checks';
 import { noteOf } from '../src/surface/deliver';
 import { TEMPLATES, TEMPLATE_IDS, fieldFreeBody, fieldFreeTitle, phrase, render } from '../src/templates/escalations';
 import { EDGES } from './surface/template-edges';
@@ -102,7 +102,7 @@ describe('the runtime’s notes to Will', () => {
   it('digest.ts: the morning digest, for any counts and any component that needs a look', () => {
     const zero = { relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 };
     const counts = [zero, { relevant: 1, quiet: 1, escalated: 1, did: 1, queued: 1, open: 1, due: 1 }, { relevant: 12, quiet: 340, escalated: 3, did: 25, queued: 4, open: 2, due: 7 }];
-    const degraded = [[], ['backup'], ['ledger'], ['restore_drill', 'source:github'], ['audit_intents', 'backup', 'bus', 'ledger', 'migrate_failed', 'ollama', 'restore_drill', 'retention', 'server'], ['source:google_calendar', 'source:nexus_inbox', 'health_overdue', 'source:imessage']];
+    const degraded = [[], ['backup'], ['ledger'], ['forecasts', 'ledger'], ['restore_drill', 'source:github'], ['audit_intents', 'backup', 'bus', 'forecasts', 'ledger', 'migrate_failed', 'ollama', 'restore_drill', 'retention', 'server'], ['source:google_calendar', 'source:nexus_inbox', 'health_overdue', 'source:imessage']];
     for (const day of ['2026-10-11', '2026-01-01', '2028-02-29']) {
       expect(digestTitle(day)).toMatch(/^Daily Summary for (Sun|Mon|Tue|Wed|Thu|Fri|Sat) [A-Z][a-z]{2} \d{1,2}$/);
       for (const c of counts) for (const d of degraded) plain('digest.ts', digestTitle(day), digestBody(c, d));
@@ -253,6 +253,45 @@ describe('the runtime’s notes to Will', () => {
     expect(fn.match(/detail: LEDGER_HEALTH\.\w+(\([^)]*\)+)?/g)).toHaveLength(10);
     // The digest names the component as Health does when it needs a look.
     expect(digestBody({ relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 }, ['ledger'])).toContain('Prediction Checks');
+  });
+
+  it('forecasts (P4): what Forecasts says in Settings > Health is plain sentences, from counts, and nothing else', () => {
+    const said = (line: string) => {
+      expect(noteProblems(HEALTH_NAMES.forecasts!, line), line).toEqual([]);
+      for (const re of NEVER) expect(`${HEALTH_NAMES.forecasts}\n${line}`, line).not.toMatch(re);
+      expect(line, line).toMatch(/^[A-Z0-9].*\.$/);
+      // Counts and fixed words: never a series' key, a method's name, or a value with its unit.
+      expect(line, line).not.toMatch(/daily\.|weekly\.|fc\.v1|statistical|base rate|naive|\$|usd/i);
+      expect(line.length, line).toBeLessThanOrEqual(120);
+    };
+    const health = [
+      FORECAST_HEALTH.stopped, FORECAST_HEALTH.starting, FORECAST_HEALTH.missed, FORECAST_HEALTH.noNumbers,
+      ...[1, 2, 11].map((n) => FORECAST_HEALTH.ran(n)),
+      // Some have their forecast and some are waiting for yesterday's number.
+      ...[[1, 1], [2, 1], [9, 3]].map(([n, late]) => FORECAST_HEALTH.ran(n!, late)),
+      ...[1, 2, 12].flatMap((n) => [FORECAST_HEALTH.waiting(n), FORECAST_HEALTH.late(n), FORECAST_HEALTH.failed(n), FORECAST_HEALTH.refused(n), FORECAST_HEALTH.capped(n), FORECAST_HEALTH.numbersFailed(n)]),
+      ...[2, 3, 30].map((n) => FORECAST_HEALTH.down(n)),
+    ];
+    expect(health).toHaveLength(31);
+    for (const line of health) said(line);
+    expect(HEALTH_NAMES.forecasts).toBe('Forecasts');
+    expect([FORECAST_HEALTH.ran(11), FORECAST_HEALTH.ran(1), FORECAST_HEALTH.failed(1), FORECAST_HEALTH.waiting(1), FORECAST_HEALTH.down(2)]).toEqual([
+      'Last night’s forecasts ran for 11 numbers.', 'Last night’s forecasts ran for 1 number.', '1 forecast failed last night.',
+      'Flint needs more history before it forecasts its number.', 'Forecasts haven’t run in 2 days.',
+    ]);
+    expect([FORECAST_HEALTH.ran(9, 3), FORECAST_HEALTH.ran(2, 1), FORECAST_HEALTH.late(1), FORECAST_HEALTH.late(3), FORECAST_HEALTH.refused(12), FORECAST_HEALTH.capped(1), FORECAST_HEALTH.capped(12)]).toEqual([
+      'Last night’s forecasts ran for 9 numbers, and 3 are waiting for yesterday’s number.', 'Last night’s forecasts ran for 2 numbers, and 1 is waiting for yesterday’s number.',
+      'Yesterday’s number isn’t in, so Flint didn’t forecast it.', 'Yesterday’s numbers aren’t in for 3 numbers, so Flint didn’t forecast them.',
+      'The database refused 12 forecasts last night.',
+      'The daily limit on forecasts was reached, so 1 number waits until tomorrow.', 'The daily limit on forecasts was reached, so 12 numbers wait until tomorrow.',
+    ]);
+    // Every sentence checks.ts can give for the component is one of these.
+    const checks = readFileSync(join(SRC, 'health', 'checks.ts'), 'utf8');
+    const fn = checks.slice(checks.indexOf('async function forecasts('), checks.indexOf('/** The hourly check has not run in this long: degraded. */'));
+    expect(fn.length).toBeGreaterThan(500);
+    expect(fn.match(/\bdetail: /g)).toHaveLength(13);
+    expect(fn.match(/detail: FORECAST_HEALTH\.\w+(\([^)]*\)+)?/g)).toHaveLength(13);
+    expect(digestBody({ relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 }, ['forecasts'])).toContain('Forecasts');
   });
 
   it('the inventory is not empty by accident', () => {

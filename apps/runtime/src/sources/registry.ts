@@ -41,6 +41,10 @@ export interface RegistryExtra {
   calendarInbox?: CalendarInbox;
 }
 
+/** Will's clones, by name: what the git source reads the heads of, and what the weekly commit counts are counted in. */
+export const CLONES = ['flint', 'nexus', 'trident', 'helm'] as const;
+export const clones = (home: string): Array<{ name: string; path: string }> => CLONES.map((name) => ({ name, path: join(home, 'Documents', 'GitHub', name) }));
+
 export function registry(config: Config, db: Db, extra: RegistryExtra = {}): Registered[] {
   const run = makeRun(config.home);
   const health: HealthTarget[] = [...LOCAL_HEALTH, ...config.healthExtra];
@@ -48,7 +52,6 @@ export function registry(config: Config, db: Db, extra: RegistryExtra = {}): Reg
     const u = new URL(t.url);
     return { origin: u.origin, pathPrefix: u.pathname, methods: ['GET'] };
   };
-  const gh = join(config.home, 'Documents', 'GitHub');
   return [
     {
       source: launchdSource({ run, agentsDir: join(config.home, 'Library', 'LaunchAgents'), prefixes: ['com.flint.', 'com.nexus.', 'sh.brew.', 'homebrew.mxcl.'] }),
@@ -61,7 +64,7 @@ export function registry(config: Config, db: Db, extra: RegistryExtra = {}): Reg
     {
       source: gitSource({
         run,
-        repos: ['flint', 'nexus', 'trident', 'helm'].map((name) => ({ name, path: join(gh, name) })),
+        repos: clones(config.home),
         deploy: { path: join(config.home, 'flint'), log: join(config.home, '.flint', 'deploy.out.log') },
       }),
       endpoints: [],

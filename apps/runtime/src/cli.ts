@@ -12,6 +12,10 @@
  *                                                    file a phase's promotion table for Will to sign
  *   pnpm --filter @flint/runtime enable-source <name> file the card that turns a source on, for Will
  *                                                    to sign in the console
+ *   pnpm --filter @flint/runtime predictions-on [key]...
+ *                                                    file the Turn On Predictions card (P4), for Will to
+ *                                                    sign in the console: every number Flint can
+ *                                                    forecast, or the ones named
  *   pnpm --filter @flint/runtime google-login         sign in to Google once (calendar, read-only;
  *                                                    P2.5); needs no database
  *   pnpm --filter @flint/runtime apple-calendar       one line on Apple Calendar reading (P2.6):
@@ -50,6 +54,9 @@ import { appleCalendarStatus } from './report/apple-calendar.js';
 import { PHASES_LIST, promotionTable, type Phase } from './governance/promotion.js';
 import { isCalendarSource } from './world/people.js';
 import { proposeEnable } from './governance/internal.js';
+import { PREDICTIONS_OFF_SAYS, cardFiledSays, proposeForecasts } from './predict/enable.js';
+import { FORECAST_SERIES_KEYS } from './predict/series.js';
+import { Refused } from './governance/proposals.js';
 import { SOURCES } from '@flint/policy';
 import { createDb } from './db.js';
 import { appendAudit } from './governance/audit.js';
@@ -117,6 +124,30 @@ async function main(): Promise<void> {
     try {
       const p = await proposeEnable(db, source);
       console.log(`${p.deduped ? 'already filed' : 'filed'}: proposal ${p.id}, to turn on ${source}. Sign it in the console (Approvals) with your key; it runs once signed.`);
+    } finally {
+      await db.$disconnect();
+    }
+    return;
+  }
+  if (process.argv[2] === 'predictions-on') {
+    const keys = process.argv.slice(3);
+    const config = loadRuntimeConfig();
+    // Switched off on this Mac: said, nothing is filed, and the command fails (as enable-source does for a bad name).
+    if (!config.predict) {
+      console.log(PREDICTIONS_OFF_SAYS);
+      process.exitCode = 1;
+      return;
+    }
+    const db = createDb(config.databaseUrl);
+    try {
+      const p = await proposeForecasts(db, keys.length ? keys : FORECAST_SERIES_KEYS);
+      console.log(cardFiledSays(p, keys.length ? new Set(keys).size : FORECAST_SERIES_KEYS.length));
+    } catch (err) {
+      // A refusal is Flint's own sentence ("That number can’t be forecast."): said as it is, with nothing filed, and
+      // the command fails.
+      if (!(err instanceof Refused)) throw err;
+      console.log(`Not filed: ${err.message}`);
+      process.exitCode = 1;
     } finally {
       await db.$disconnect();
     }
@@ -210,7 +241,7 @@ async function main(): Promise<void> {
     return;
   }
   const cmd = process.argv[2] as Command;
-  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | p3-report | promotion-table [--phase p1|p2|p25|p26|p3|p3c] [--drop <pattern>] | backup|offsite|drill [--auto] | restore-production [--dump <file>] [--without-copy] [--without-fingerprint] [--check] | restore-production --compare | restore-production --repair | restore-empty --from-rebuild --dump <file>');
+  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | predictions-on [key]... | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | p3-report | promotion-table [--phase p1|p2|p25|p26|p3|p3c] [--drop <pattern>] | backup|offsite|drill [--auto] | restore-production [--dump <file>] [--without-copy] [--without-fingerprint] [--check] | restore-production --compare | restore-production --repair | restore-empty --from-rebuild --dump <file>');
   const auto = process.argv.includes('--auto');
   const b = loadBackupConfig();
   const db = createDb(b.config.databaseUrl);

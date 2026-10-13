@@ -77,8 +77,13 @@ describe('P4: the forecaster\'s claim template', () => {
   });
 
   it('chat is never offered it: the connector and the chat gate check ClaimTemplate, which refuses it', () => {
-    // The runtime's own: a goal review's forecast (P3) and the forecaster's range. Neither is chat's.
-    expect([...RUNTIME_CLAIM_TEMPLATE_IDS]).toEqual(['goal_on_track', 'series_range']);
+    // The runtime's own: a goal review's forecast (P3), and the forecaster's range and its question. None is chat's.
+    expect([...RUNTIME_CLAIM_TEMPLATE_IDS]).toEqual(['goal_on_track', 'series_range', 'series_above']);
+    expect(ClaimTemplate.safeParse({ id: 'series_above', params: { series: 'daily.deploys.count', value: 4, on: '2026-10-13' } }).success).toBe(false);
+    expect(CLAIM_TEMPLATE_PARAMS.series_above.safeParse({ series: 'daily.deploys.count', value: 4, on: '2026-10-13' }).success).toBe(true);
+    for (const bad of [{ series: 'Deploys today', value: 4, on: '2026-10-13' }, { series: 'daily.deploys.count', value: 4, on: 'soon' }, { series: 'daily.deploys.count', value: Infinity, on: '2026-10-13' }, { series: 'daily.deploys.count', value: 4, on: '2026-10-13', op: 'below' }]) {
+      expect(CLAIM_TEMPLATE_PARAMS.series_above.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
     expect([...CHAT_CLAIM_TEMPLATE_IDS].sort()).toEqual(['closed_by', 'deploy_succeeds', 'service_healthy', 'threshold']);
     for (const id of RUNTIME_CLAIM_TEMPLATE_IDS) expect(CLAIM_TEMPLATE_IDS).toContain(id);
     expect(ClaimTemplate.safeParse({ id: 'series_range', params: { series: 'daily.deploys.count', lo: 2, hi: 6, on: '2026-10-13' } }).success).toBe(false);

@@ -34,7 +34,8 @@ import { CANARY, DAY, HOUR, MIN, TZ, dayStart, ledgerKit, type LedgerKit } from 
 import { goalFixture, type GoalFixture } from '../goals/fixture';
 import { recordOnTrack } from '../../src/goals/ontrack';
 import { sweep } from '../../src/ledger/sweep';
-import { NEXT_OBSERVED_CRITERIA, ResolverSpec, decisionOf, healthyState, ruleOwner, stepEnd, verdictFor, type DuePrediction } from '../../src/predict/resolvers';
+import { addLocalDays, localDay, localDayBounds } from '@flint/policy';
+import { NEXT_OBSERVED_CRITERIA, ResolverSpec, decisionOf, fitsStep, healthyState, ruleOwner, stepEnd, verdictFor, type DuePrediction } from '../../src/predict/resolvers';
 
 describe.skipIf(NO_DB)('resolvers on flint_test', () => {
   let urls: TestUrls;
@@ -262,6 +263,34 @@ describe.skipIf(NO_DB)('resolvers on flint_test', () => {
       expect((await k.resolution(week))!.eventAt.toISOString()).toBe(dayStart(1).toISOString());
       expect(stepEnd('America/Chicago', new Date('2026-03-08T06:00:00.000Z'), 'D')!.toISOString()).toBe('2026-03-09T05:00:00.000Z'); // a 23-hour day
       expect(stepEnd(TZ, yesterday, 'raw')).toBeUndefined();
+    });
+
+    it('a rule that carries its step\'s own end is settled at that end, whatever the zone is now; an end that is no end of its step fits no row', async () => {
+      // A day in Chicago, written into the rule when the forecast was made there.
+      const zone = 'America/Chicago';
+      const { start, end } = localDayBounds(zone, addLocalDays(localDay(zone, new Date()), -2));
+      const series = await k.onSeries();
+      await k.point(series, start, 5);
+      const made = { madeAgo: Date.now() - start.getTime() + HOUR, dueAgo: MIN };
+      const own = await k.range(series, start, { resolverSpec: { seriesKey: series, at: start.toISOString(), end: end.toISOString(), op: 'range' } }, made);
+      const bare = await k.range(series, start, {}, made);
+      // The sweep now runs in UTC. With its own end, the step is still the Chicago day; without one, the end is worked
+      // out in today's zone, and lands 19 hours after the start (the UTC midnight after it).
+      expect(await verdict(own)).toMatchObject({ verdict: 'resolve', outcomeValue: 5, eventAt: end });
+      const moved = await verdict(bare);
+      expect(moved).toMatchObject({ verdict: 'resolve', outcomeValue: 5 });
+      expect((moved as { eventAt: Date }).eventAt.getTime()).not.toBe(end.getTime());
+      // An end that is not a day after the start of a daily step (give or take a clock change) is not that step's end.
+      for (const off of [2 * HOUR, 12 * HOUR, 26 * HOUR, 3 * DAY, -HOUR]) {
+        const odd = await k.range(series, start, { resolverSpec: { seriesKey: series, at: start.toISOString(), end: new Date(start.getTime() + off).toISOString(), op: 'range' } }, made);
+        expect(ruleOwner(await k.due(odd)), String(off)).toBe('sweep');
+        expect(await verdict(odd), String(off)).toEqual({ verdict: 'unknown' });
+      }
+      expect([fitsStep(start, end, 'D'), fitsStep(start, new Date(start.getTime() + 23 * HOUR), 'D'), fitsStep(start, new Date(start.getTime() + 25 * HOUR), 'D')]).toEqual([true, true, true]);
+      expect([fitsStep(start, new Date(start.getTime() + 7 * DAY), 'W'), fitsStep(start, end, 'W'), fitsStep(start, new Date(start.getTime() + 7 * DAY), 'D'), fitsStep(start, end, 'M')]).toEqual([true, false, false, false]);
+      expect(ResolverSpec.safeParse({ seriesKey: series, at: start.toISOString(), end: 'tomorrow', op: 'range' }).success).toBe(false);
+      await run();
+      expect((await k.resolution(own))!.eventAt.getTime()).toBe(end.getTime());
     });
 
     it('a forgotten series settles nothing, and its number is not copied anywhere', async () => {

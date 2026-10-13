@@ -327,6 +327,7 @@ model MetricSeries {
   offBoxAllowed  Boolean         @default(false)
   description    String
   createdAt      DateTime        @default(now()) @db.Timestamptz(3)
+  readTo         DateTime?       @db.Timestamptz(3) // a daily or weekly number: the first instant its builder has not read yet
   points         MetricPoint[]
   forecastRuns   ForecastRun[]
   forecastSeries ForecastSeries?
@@ -779,6 +780,7 @@ model ForecastRun {
   modelMase     Float?
   scale         Float? // the MASE scale; lets pinball loss be compared across units
   points        Json // [{at, mean, lo, hi}], <= 64 KB
+  filled        Int          @default(0) // how many of the steps it was made from were filled in
   latencyMs     Int
   ok            Boolean
   error         String? // a short code, one word, <= 80

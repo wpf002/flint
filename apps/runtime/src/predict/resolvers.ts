@@ -6,8 +6,8 @@
  * no resolution at all.
  *
  *   spec (Prediction.resolverSpec)                      settled as
- *   {seriesKey, at, op: 'range'}                        the series' value for the step that starts at `at` (auto_metric)
- *   {seriesKey, at, op: 'above' | 'below', value}       whether that value is above or below (auto_metric)
+ *   {seriesKey, at, end, op: 'range'}                   the series' value for the step that starts at `at` (auto_metric)
+ *   {seriesKey, at, end, op: 'above' | 'below', value}  whether that value is above or below (auto_metric)
  *   {entityId, check: 'healthy', at: 'resolveBy'}       triage's: the item's state at the resolve time (auto_world)
  *   {goalId, rule: 'goal_done_by'}                      a goal review's forecast, at its date (auto_world)
  *   resolver `conditional` (no spec)                    by its recommendation, then as its own claim (auto_world)
@@ -52,8 +52,13 @@ import type { Tx } from '../db.js';
 const Id = z.string().regex(/^[A-Za-z0-9_-]{1,40}$/);
 const Instant = z.string().datetime({ offset: true });
 
-export const MetricRangeSpec = z.object({ seriesKey: SeriesKey, at: Instant, op: z.literal('range') }).strict();
-export const MetricThresholdSpec = z.object({ seriesKey: SeriesKey, at: Instant, op: z.enum(['above', 'below']), value: z.number().finite() }).strict();
+/**
+ * A forecast's rule carries its step's own end (`end`), written when the forecast was made: the forecaster always
+ * writes it (predict/run.ts). The step is then the one the forecast was about whatever Flint's zone is when it is
+ * settled; without it the end is worked out in the zone of the day, and a zone changed in between would move it.
+ */
+export const MetricRangeSpec = z.object({ seriesKey: SeriesKey, at: Instant, end: Instant.optional(), op: z.literal('range') }).strict();
+export const MetricThresholdSpec = z.object({ seriesKey: SeriesKey, at: Instant, end: Instant.optional(), op: z.enum(['above', 'below']), value: z.number().finite() }).strict();
 export const HealthySpec = z.object({ entityId: Id, check: z.literal('healthy'), at: z.literal('resolveBy') }).strict();
 export const GoalDoneBySpec = z.object({ goalId: Id, rule: z.literal('goal_done_by') }).strict();
 /** Every shape a resolver knows. Anything else is left alone and counted, never guessed at. */
@@ -141,6 +146,14 @@ export function stepEnd(tz: string, at: Date, freq: string): Date | undefined {
   return localDayBounds(tz, freq === 'D' ? day : addLocalDays(day, 6)).end;
 }
 
+const HOUR_MS = 3_600_000;
+/** Is `end` the end of a step of this length that starts at `at`? A day or a week, give or take the hour a clock change moves a local midnight. */
+export function fitsStep(at: Date, end: Date, freq: string): boolean {
+  const span = end.getTime() - at.getTime();
+  const whole = freq === 'D' ? 24 * HOUR_MS : freq === 'W' ? 7 * 24 * HOUR_MS : NaN;
+  return Math.abs(span - whole) <= HOUR_MS;
+}
+
 /** A forecast's range or question: the series' own number for that step, once the step is over and the number is there. */
 async function metric(tx: Tx, p: DuePrediction, spec: z.infer<typeof MetricRangeSpec> | z.infer<typeof MetricThresholdSpec>, tz: string, now: Date): Promise<Verdict> {
   if (p.resolver !== 'auto_metric') return UNKNOWN;
@@ -150,7 +163,10 @@ async function metric(tx: Tx, p: DuePrediction, spec: z.infer<typeof MetricRange
   const series = await tx.metricSeries.findUnique({ where: { key: spec.seriesKey }, select: { freq: true, description: true } });
   if (!series) return UNKNOWN;
   const at = new Date(spec.at);
-  const end = stepEnd(tz, at, series.freq);
+  // The step's end is the rule's own when it carries one, and this zone's otherwise. One that is not a day or a week
+  // after its start (as the series' step is) is no end of that step: the rule does not fit its row.
+  const end = spec.end ? new Date(spec.end) : stepEnd(tz, at, series.freq);
+  if (spec.end && !fitsStep(at, end!, series.freq)) return UNKNOWN;
   // A claim about a step that ended before the claim was made is no forecast (the database would refuse it as a leak).
   if (!end || end.getTime() < p.createdAt.getTime()) return UNKNOWN;
   if (series.description === '[forgotten]') return wait('unknowable');
