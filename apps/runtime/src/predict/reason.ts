@@ -3,8 +3,11 @@
  * opinion on the yes/no question the forecaster has already answered for a
  * number ("is today's value above its usual one?"). Same claim, same rule, same
  * resolve time; its probability is recorded beside the forecaster's as
- * `model_reasoning`, settled by the same sweep and scored the same way, so the
- * ledger can say whether the local model adds anything over the arithmetic.
+ * `model_reasoning`, settled by the same sweep and scored by the same sum, so
+ * the ledger can say whether the local model adds anything over the
+ * arithmetic. It is compared with the forecaster's answer question by question
+ * (predict/view.ts) and left out of an area's pooled scores, where the same
+ * question would otherwise count twice (ledger/calibration.ts).
  * Nothing about it is announced, and it ships off: only a number whose Second
  * Opinion switch Will signed gets one (the database refuses any other).
  *
@@ -24,9 +27,10 @@
  *    attempt), so a series' values go only on a word at most two seconds old.
  *  - The reply is constrained (a JSON schema) to a probability and a reason
  *    code. There is NO free-text field: the model never writes a word that is
- *    stored or shown. It must end on its own, parse, and pass the strict zod
- *    mirror. A probability outside 0.05 to 0.95 is a failed attempt: it is
- *    never clamped into range.
+ *    stored or shown. It must be whole (a reply cut off before its JSON is
+ *    complete is a failed attempt), parse, and pass the strict zod mirror. A
+ *    probability outside 0.05 to 0.95 is a failed attempt: it is never clamped
+ *    into range.
  *  - Before EVERY request, in order: the process's model slot (one local
  *    request at a time, shared with triage and goal reviews); at most 2
  *    requests; chat's load (a chat turn running means wait); the estimate's
@@ -60,9 +64,10 @@
  *    step is still under way AT THAT TIME: the model can take minutes, and an
  *    answer that lands after the step is over is no forecast, so it is not
  *    written.
- *  - One audit entry per estimate that ends: the series' key, the run's id and
- *    counts. Never a value, a probability or a prompt. Job data is the run's id
- *    (and how many times it has yielded to chat): nothing else.
+ *  - One audit entry per estimate that ends, whenever the model was asked and
+ *    for every refusal before it: the series' key, the run's id and counts.
+ *    Never a value, a probability or a prompt. Job data is the run's id (and
+ *    how many times it has yielded to chat): nothing else.
  */
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
