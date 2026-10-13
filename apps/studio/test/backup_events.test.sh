@@ -16,8 +16,10 @@ home="$fx/home"; data="$home/.flint"; events="$data/backup-events.jsonl"
 mkdir -p "$data/memory" "$fx/icloud" "$fx/bin" "$fx/tools"
 print -r -- '{"facts":[]}' > "$data/memory/knowledge.json"
 print -r -- 'KEY=1' > "$data/secrets.env"
-# A stand-in for age: -r <recipient> -o <out>, the archive on stdin. FAKE_AGE_FAILS makes it stop part way.
+# A stand-in for age: -r <recipient>, the archive on stdin, the encrypted bytes on stdout (or -o <out>).
+# FAKE_AGE_FAILS makes it stop part way.
 print -r -- '#!/bin/sh
+out=/dev/stdout
 while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift;; esac; shift; done
 if [ -n "${FAKE_AGE_FAILS:-}" ]; then head -c 10 > "$out"; exit 1; fi
 { echo "age-encryption.org/v1 (stand-in)"; cat; } > "$out"' > "$fx/tools/age"; chmod +x "$fx/tools/age"
@@ -62,6 +64,60 @@ check "a failed encryption does not fail the run" '[ $? = 0 ]'
 check "it is recorded as failed, with why" '[[ "$(last)" =~ $FAILED_LINE ]] && [ "$(field "$(last)" location)" = icloud ] && [ "$(field "$(last)" reason)" = encrypt ]'
 check "nothing part written is left offsite" '[ ! -e "$fx/icloud/FlintBackups/flint-20261001-0002.tar.gz.age" ]'
 check "and the archive here was recorded before it" '[ "$(field "$(last 2 | head -1)" outcome)" = ok ] && [ "$(field "$(last 2 | head -1)" name)" = flint-20261001-0002.tar.gz ]'
+
+# ---- 3b. the copy offsite cannot be read back: it is still recorded, by what was written --------------
+# Under launchd, macOS lets zsh write into iCloud Drive by path and then refuses it the file's contents
+# ("Operation not permitted"). A fingerprint read back from the file came out empty, and the copy was never
+# recorded: Health said there was no offsite copy on a night one had been written. The stand-in shasum
+# refuses any file offsite, as macOS does; what comes down a pipe it fingerprints as usual.
+print -r -- '#!/bin/sh
+for a in "$@"; do case "$a" in */icloud/*) echo "shasum: $a: Operation not permitted" >&2; exit 1;; esac; done
+exec /usr/bin/shasum "$@"' > "$fx/bin/shasum"; chmod +x "$fx/bin/shasum"
+before=$(lines)
+run FLINT_BACKUP_TS=20261001-0020
+check "a copy that cannot be read back: the run succeeds" '[ $? = 0 ]'
+check "it is recorded all the same, after the archive here" '[ "$(lines)" = $(( before + 2 )) ] && [[ "$(last)" =~ $OK_LINE ]] && [ "$(field "$(last)" location)" = icloud ] && [ "$(field "$(last)" name)" = flint-20261001-0020.tar.gz.age ]'
+check "with the fingerprint and size of the bytes that were written" '[ "$(field "$(last)" sha256)" = "$(/usr/bin/shasum -a 256 "$fx/icloud/FlintBackups/flint-20261001-0020.tar.gz.age" | cut -d" " -f1)" ] && [ "$(field "$(last)" bytes)" = "$(stat -f %z "$fx/icloud/FlintBackups/flint-20261001-0020.tar.gz.age")" ]'
+check "and it is in the list of copies offsite" 'grep -qxF flint-20261001-0020.tar.gz.age "$fx/manifest.txt"'
+# No fingerprint at all (the tool says nothing): the copy is said to be unreadable, never left unsaid.
+print -r -- '#!/bin/sh
+case "$*" in *.tar.gz) exec /usr/bin/shasum "$@";; esac
+cat > /dev/null' > "$fx/bin/shasum"
+before=$(lines)
+run FLINT_BACKUP_TS=20261001-0021
+check "no fingerprint: the run still succeeds" '[ $? = 0 ]'
+check "the copy is recorded as unreadable" '[ "$(lines)" = $(( before + 2 )) ] && [[ "$(last)" =~ $FAILED_LINE ]] && [ "$(field "$(last)" location)" = icloud ] && [ "$(field "$(last)" reason)" = unreadable ] && [ "$(field "$(last)" name)" = flint-20261001-0021.tar.gz.age ]'
+check "and the log says so" 'grep -q "offsite written, but its size or fingerprint could not be taken" "$fx/err.log"'
+rm -f "$fx/bin/shasum"
+# No size (the copy cannot be sized): said the same way, and the run goes on to its end.
+print -r -- '#!/bin/sh
+for a in "$@"; do case "$a" in *.tar.gz.age) exit 1;; esac; done
+exec /usr/bin/stat "$@"' > "$fx/bin/stat"; chmod +x "$fx/bin/stat"
+before=$(lines)
+run FLINT_BACKUP_TS=20261001-0022
+check "no size: the run still succeeds" '[ $? = 0 ]'
+check "the copy is recorded as unreadable" '[ "$(lines)" = $(( before + 2 )) ] && [[ "$(last)" =~ $FAILED_LINE ]] && [ "$(field "$(last)" location)" = icloud ] && [ "$(field "$(last)" reason)" = unreadable ]'
+rm -f "$fx/bin/stat"
+check "the fingerprint's own file is never left beside the archives" '[ ! -e "$fx/local/.offsite-sha256" ]'
+
+# ---- 3c. Ctrl-C while the copy offsite is being written: the whole group is signalled, as a terminal does ----
+# The cleanup must still finish: the part-written copy goes, the record says interrupted, and the lock is
+# given back (left behind, it made every run for six hours stop at once, the night's included).
+print -r -- '#!/bin/sh
+{ echo "age-encryption.org/v1 (stand-in)"; head -c 5000; : > "$STARTED"; sleep 1; cat; }' > "$fx/tools/age-slow"; chmod +x "$fx/tools/age-slow"
+head -c 300000 /dev/urandom > "$data/memory/blob.bin"
+before=$(lines); rm -f "$fx/started-offsite"
+/usr/bin/perl -e 'setpgrp(0,0); $SIG{$_}="DEFAULT" for qw(INT HUP TERM PIPE); exec @ARGV' /usr/bin/env -i HOME="$home" PATH="$fx/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  FLINT_BACKUP_DIR="$fx/local" FLINT_BACKUP_OFFSITE="$fx/icloud/FlintBackups" FLINT_BACKUP_MANIFEST="$fx/manifest.txt" FLINT_AGE_BIN="$fx/tools/age-slow" \
+  FLINT_BACKUP_TS=20261001-0023 STARTED="$fx/started-offsite" /bin/zsh "$script" >/dev/null 2>&1 </dev/null &
+pid=$!
+for i in {1..100}; do [[ -e $fx/started-offsite ]] && break; sleep 0.05; done; sleep 0.2
+kill -INT -- -$pid 2>/dev/null; wait $pid 2>/dev/null; st=$?; sleep 1.3
+check "Ctrl-C during the copy offsite: the run ends as stopped" '[ $st = 130 ]'
+check "the copy is recorded as interrupted, after the archive here" '[ "$(lines)" = $(( before + 2 )) ] && [ "$(field "$(last)" location)" = icloud ] && [ "$(field "$(last)" reason)" = interrupted ] && [ "$(field "$(last)" name)" = flint-20261001-0023.tar.gz.age ]'
+check "nothing part written is left offsite or beside the archives" '[ ! -e "$fx/icloud/FlintBackups/flint-20261001-0023.tar.gz.age" ] && [ ! -e "$fx/local/.offsite-sha256" ]'
+check "and the lock is given back" '[ ! -e "$data/backup.lock" ]'
+rm -f "$data/memory/blob.bin"
 
 # ---- 4. a key but no age, and a key but no offsite folder: each a copy that was not made ------------
 run FLINT_BACKUP_TS=20261001-0003 FLINT_AGE_BIN=/nonexistent/age

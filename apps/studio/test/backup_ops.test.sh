@@ -18,7 +18,8 @@ mkdir -p "$fx/home/.flint/memory" "$fx/icloud" "$fx/bin" "$fx/brew"
 print -r -- '{}' > "$fx/home/.flint/memory/knowledge.json"
 print -r -- 'KEY=1' > "$fx/home/.flint/secrets.env"
 print -r -- '#!/bin/sh
-# fake age: -r <recipient> -o <out>, reads stdin
+# fake age: -r <recipient>, reads stdin, writes stdout (or -o <out>)
+out=/dev/stdout
 while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift;; esac; shift; done
 { echo "age-encryption.org/v1 (fake)"; cat; } > "$out"' > "$fx/brew/age"; chmod +x "$fx/brew/age"
 
