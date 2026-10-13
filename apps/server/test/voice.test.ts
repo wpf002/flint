@@ -26,8 +26,10 @@ import {
   runFile,
   sayLine,
   speechPaths,
+  transcriptionMissing,
   voiceLine,
   whisperCppStt,
+  whisperMissing,
   whisperPaths,
   type Run,
 } from '../src/voice';
@@ -297,6 +299,23 @@ describe('whisper.cpp or its model is not on this Mac: a recording is answered w
     const { run, ran } = runner({ whisperSays: 'x' });
     await expect(whisperCppStt({ bin: '/nonexistent/bin/whisper-cli', model: '/nonexistent/ggml.bin', run }).transcribe(Buffer.from('a'))).rejects.toBeInstanceOf(CannotTranscribe);
     expect(ran).toEqual([]);
+  });
+
+  it('one question, for the recording and for the status: the program first, then the model; and a speech server that hears is asked nothing of either', () => {
+    const at = { bin: '/w/whisper-cli', model: '/m/ggml-base.en.bin' };
+    expect(whisperMissing(at, () => true)).toBeUndefined();
+    expect(whisperMissing(at, (p) => p === at.bin)).toBe('model');
+    expect(whisperMissing(at, (p) => p === at.model)).toBe('program');
+    expect(whisperMissing(at, () => false)).toBe('program');
+    const plan = (env: Record<string, string>) => planVoice(readInferenceConfig(env, undefined, { home: '/h' }), env, { platform: 'darwin', home: '/h' }).stt;
+    const asked: string[] = [];
+    expect(transcriptionMissing(plan({}), (p) => (asked.push(p), false))).toBe('program');
+    expect(asked).toEqual(['/opt/homebrew/bin/whisper-cli']);
+    expect(transcriptionMissing(plan({}), (p) => p.endsWith('whisper-cli'))).toBe('model');
+    // A speech server on this Mac hears: no file of whisper.cpp's is looked for, and nothing is said to be missing.
+    asked.length = 0;
+    expect(transcriptionMissing(plan({ FLINT_STT_PROVIDER: 'local', FLINT_LOCAL_STT_BASE_URL: 'http://127.0.0.1:8178/v1' }), (p) => (asked.push(p), false))).toBeUndefined();
+    expect(asked).toEqual([]);
   });
 
   it('buildVoice hands the check on, to the provider the plan names', async () => {
