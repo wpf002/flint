@@ -197,6 +197,7 @@
   .row{position:relative;display:flex;align-items:center;gap:10px;min-height:44px;padding:0 16px;}
   .row+.row::before{content:"";position:absolute;top:0;left:16px;right:0;height:1px;background:var(--s4);}
   .row.two{min-height:56px;}
+  .group .ghd{font-size:11px;line-height:14px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--t3);padding:14px 16px 6px;}
   .row .lbl{flex:1;min-width:0;display:flex;flex-direction:column;}
   .row .lbl b{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .row .lbl span{font-size:12px;line-height:16px;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
@@ -1313,6 +1314,13 @@ function laneEscalation(id,what,acts,es,btn){var bs=acts.querySelectorAll?acts.q
 
 /* ---------- Settings: Health ---------- */
 var HEALTH_NAMES={postgres:'Database',bus:'Job Queue',server:'Server',ollama:'Local Model',backup:'Backups',offsite_backup:'Offsite Backup',restore_drill:'Restore Test',audit_intents:'Action Log',retention:'Cleanup',migrate_failed:'Updates',deploy_hold:'Automatic Updates',rebuild_rehearsal:'Rebuild Rehearsal',triage:'Triage',goals:'Goal Reviews',ledger:'Prediction Checks',forecasts:'Forecasts',runtime:'Runtime',standby_model:'Standby Model',files_backup:'Files Backup',offsite_drill:'Offsite Restore Test',disk:'Disk Space',remote_access:'Remote Access'};
+/* Settings > Health in four groups, in this order, each with its components in theirs (@flint/policy HEALTH_GROUPS;
+   a test keeps the two the same). A component named in none of them (each source, and any new one until it is
+   placed) is shown under THIS MAC, so a row this page has not heard of is still shown. */
+var HEALTH_GROUPS=[['MODELS',['ollama','standby_model']],['BACKUPS',['backup','files_backup','offsite_backup','restore_drill','offsite_drill','rebuild_rehearsal']],
+  ['THIS MAC',['disk','deploy_hold','migrate_failed','postgres','server','runtime','bus','audit_intents','retention','triage','goals','ledger','forecasts']],['REMOTE ACCESS',['remote_access']]];
+var HEALTH_GROUP_OTHER='THIS MAC';
+function healthGroup(c){for(var i=0;i<HEALTH_GROUPS.length;i++)if(HEALTH_GROUPS[i][1].indexOf(c)>=0)return HEALTH_GROUPS[i][0];return HEALTH_GROUP_OTHER;}
 var HEALTH_WORDS={ok:'Normal',degraded:'Degraded',down:'Down',unknown:'Unknown',disabled:'Off'};
 var HEALTH_RANK={down:0,unknown:1,degraded:2,ok:3,disabled:4};
 /* An issue with no note of its own says what its status means (its dot and its place in the list show how bad). */
@@ -1345,7 +1353,13 @@ function loadHealth(){var top=document.getElementById('sethealth'),last=document
     var rest=comps.filter(function(c){return issues.indexOf(c)<0;});
     if(rest.length){var all=laneEl('div','row click');var al=laneEl('span','lbl');al.appendChild(laneEl('b',null,'All Components'));all.appendChild(al);all.appendChild(laneEl('span','val',String(rest.length)));
       all.appendChild(svgi('chev'));g.appendChild(all);
-      var box=laneEl('div');box.hidden=!HEALTH_ALL;rest.forEach(function(c){var r=laneEl('div','row');var l=laneEl('span','lbl');l.appendChild(laneEl('b',null,healthName(c.component)));r.appendChild(l);r.appendChild(healthDot(c.status,HEALTH_WORDS[c.status]));box.appendChild(r);});
+      /* Under their four headers, each group in its own order; what a normal component says about itself is its second line. */
+      var box=laneEl('div');box.hidden=!HEALTH_ALL;
+      HEALTH_GROUPS.forEach(function(gr){var at=function(c){var i=gr[1].indexOf(c.component);return i<0?gr[1].length:i;};
+        var rows=rest.filter(function(c){return healthGroup(c.component)===gr[0];}).sort(function(a,b){return (at(a)-at(b))||healthName(a.component).localeCompare(healthName(b.component));});
+        if(!rows.length)return;box.appendChild(laneEl('div','ghd',gr[0]));
+        rows.forEach(function(c){var d=c.status==='ok'&&c.detail?healthDetail(c.detail):'';var r=laneEl('div',d?'row two':'row');var l=laneEl('span','lbl');l.appendChild(laneEl('b',null,healthName(c.component)));
+          if(d)l.appendChild(laneEl('span',null,d));r.appendChild(l);r.appendChild(healthDot(c.status,HEALTH_WORDS[c.status]));box.appendChild(r);});});
       g.appendChild(box);all.onclick=function(){HEALTH_ALL=!HEALTH_ALL;box.hidden=!HEALTH_ALL;};}
   }).catch(function(e){top.textContent='';last.textContent='';top.appendChild(laneEl('div','gsh','Health'));var g=laneEl('div','group');var row=laneEl('div','row');var l=laneEl('span','lbl');
     l.appendChild(laneEl('b',null,"Couldn't Load Health"));l.appendChild(laneEl('span',null,"The runtime isn't answering."));row.appendChild(l);var again=laneEl('button','ghost','Try Again');again.onclick=loadHealth;row.appendChild(again);g.appendChild(row);top.appendChild(g);});}
@@ -1486,7 +1500,9 @@ var APPR={pending:[],approved:[],open:null,tab:'waiting',busy:false,signed:false
 /* The nightly jobs' cards: the title, the icon, and when the job runs one Will approved (the LaunchAgent runs
    backups at 02:15 and the restore test on Sundays only, backup-nightly.sh; cleanup runs at 03:10, jobs.ts).
    The restore test's day is apprWhen's: its card is filed by a Sunday run, so on a Sunday past 2:15 it is a week away. */
-var APPR_NIGHTLY={'backup.local':["Run Tonight's Backup",'db','tonight at 2:15 AM'],'backup.offsite':["Run Tonight's Offsite Copy",'db','tonight at 2:15 AM'],'restore.drill':["Run This Week's Restore Test",'db','Sunday at 2:15 AM'],'maintenance.retention':["Run Tonight's Cleanup",'db','tonight at 3:10 AM']};
+var APPR_NIGHTLY={'backup.local':["Run Tonight's Backup",'db','tonight at 2:15 AM'],'backup.offsite':["Run Tonight's Offsite Copy",'db','tonight at 2:15 AM'],'restore.drill':["Run This Week's Restore Test",'db','Sunday at 2:15 AM'],'maintenance.retention':["Run Tonight's Cleanup",'db','tonight at 3:10 AM'],
+  /* Removing old backups is the last step of the 02:15 job. It deletes, so the runtime files its card as one that cannot be undone. */
+  'backup.prune':['Remove Old Backups','db','tonight at 2:15 AM']};
 /* What each source reads, and how often (its cadenceMs), as a sentence. */
 var APPR_SOURCES={launchd:'Your Mac’s background services are checked every 2 minutes.',health:'Flint’s services are checked every 5 minutes.',git:'Your repos are read every 5 minutes.',spend:'Spend is checked against your caps every minute.',deploy:'Deploy results are read every minute.',knowledge:'New facts in Flint’s memory are read every 10 minutes.',nexus_inbox:'Nexus handoffs to Flint are checked every 10 minutes.',nexus:'Your Nexus threads are read every 5 minutes.',github:'Your GitHub repos are read every 5 minutes.',railway:'Your Railway services are checked every 5 minutes.',google_calendar:'Your Google Calendar is read every 5 minutes.',apple_calendar:'Your Apple Calendar is read every 5 minutes and when it changes.'};
 /* Chat's runtime tools in words (the same titles as @flint/policy's ACTION_WORDS, which the notes use), and what each does, as a sentence. */
@@ -1515,7 +1531,9 @@ var APPR_GOAL_WORDS={'goal.criteria_change':['Change a Goal','This changes what 
    Flint then does, as a sentence. Signing the first ends the reviews' trial week; the second is for suggestions from chat. */
 var APPR_PROMOTES={'goal.review.local':['Let Goal Reviews Run on Their Own','Flint files its plan suggestions as cards you sign'],
   'goal.propose':['Let Flint Suggest Goals from Chat','Flint adds goals it hears in chat to Suggested'],
-  'world.commitment.from_chat':['Let Flint Add Commitments from Chat','Flint adds the things you say you’ll do in chat, unconfirmed']};
+  'world.commitment.from_chat':['Let Flint Add Commitments from Chat','Flint adds the things you say you’ll do in chat, unconfirmed'],
+  /* Removing old backups deletes files: its own card says so by name, never as one of "the backups". */
+  'backup.prune':['Let Flint Remove Old Backups on Its Own','Flint deletes update backups past the newest 10 and the last 30 days']};
 /* The table for suggestions from chat signs both rows at once (part 5): goals to Suggested, and commitments. */
 var APPR_PROMOTES_CHAT=['Let Flint Take Goals and Commitments from Chat','Flint adds goals it hears in chat to Suggested, and the things you say you’ll do as unconfirmed commitments'];
 function apprPromotes(rows){
@@ -1538,7 +1556,8 @@ var APPR_RULES={'goal.review.local':['Goal Reviews','run',2],'goal.propose':['Go
   'triage.rule':['Triage Rules','run',2],'triage.local_model':['Local Model Triage','run',0],
   'notify.inapp':['In-App Notes','be posted',2],'notify.banner':['Banners','be shown',2],'notify.push':['Phone Pings','be sent',2],
   'health.check':['Health Checks','run',2],'health.report':['Health Reports','be sent',2],'digest.daily':['Daily Summary','be sent',1],'maintenance.retention':['Nightly Cleanup','run',1],
-  'backup.local':['Backup','run',1,['1 a Day','once a day']],'backup.offsite':['Offsite Copy','be sent',1,['1 a Day','once a day']],'restore.drill':['Restore Test','run',1,['1 a Week','once a week']]};
+  'backup.local':['Backup','run',1,['1 a Day','once a day']],'backup.offsite':['Offsite Copy','be sent',1,['1 a Day','once a day']],'restore.drill':['Restore Test','run',1,['1 a Week','once a week']],
+  'backup.prune':['Backup Cleanup','run',1,['1 a Day','once a day']]};
 function apprRule(pat){return apprGet(APPR_RULES,pat)||null;}
 /* Names that are written their own way. ONE map for every place this panel makes words out of a stored name (a
    title, a label, a value, a sentence): GitHub is never "Github". It holds every name the lanes and the health
@@ -1785,6 +1804,13 @@ function apprDetails(p){p=p||{};var a=p.args&&typeof p.args==='object'&&!Array.i
       else if(nm){took(at+'.name');says.push('Flint adds '+nm+'.');}
       else says.push('Flint adds a person, listed below.');});
     var cal=apprGet(APPR_CALENDARS,a.source||'google_calendar');if(cal){if(typeof a.source==='string')took('source');says.push('They come from '+cal+'.');}}
+  else if(f==='backup.prune'){
+    /* How much would go tonight, as the runtime counted it when it filed the card: a run on this card removes no more copies than that. */
+    if(typeof a.copies==='number'&&a.copies>=0&&a.copies%1===0&&typeof a.megabytes==='number'&&a.megabytes>=0&&a.megabytes%1===0){took('copies','megabytes');
+      says.push('It deletes '+apprCount(a.copies,'old update backup')+', which frees '+a.megabytes+' MB.');}
+    says.push('An update backup is the copy of the database Flint takes before an update changes it.');
+    says.push('The one taken before the version that is running is always kept.');
+    says.push('It runs '+apprWhen(f)+' if you approve it.');}
   else if(typeof APPR_PREDICT==='string'&&f===APPR_PREDICT){says.push(APPR_PREDICT_ALSO);
     /* Its numbers are listed by name under this sentence (apprPredictDetails), each with its second opinion. A number
        this page cannot name is counted there, and given here exactly as the card holds it: nothing signed is unseen. */
@@ -1923,7 +1949,7 @@ function apprTitle(p){var a=p.args||{};var n=function(x){return Array.isArray(x)
     if(kind==='approval')return 'Ask Before '+many.text;
     if(kind==='forbidden')return 'Stop '+many.text;
     if(kind!=='alone')return c===1?'Change 1 Rule':'Change '+c+' Rules';
-    if(rows.every(function(r){return /^(backup\.|restore\.)/.test(String(r.pattern||''));}))return 'Run Backups on Their Own';
+    if(rows.every(function(r){return /^(backup\.(local|offsite)$|restore\.)/.test(String(r.pattern||''));}))return 'Run Backups on Their Own';
     var pr=apprPromotes(rows);if(pr)return pr[0];
     return 'Let '+many.text+' Run on '+(many.one?'Its':'Their')+' Own';}
   if(p.fullName==='world.person.create')return 'Add '+n(a.people)+' '+(n(a.people)===1?'Person':'People')+' from Calendar';
@@ -1945,6 +1971,7 @@ function apprSub(p){var a=p.args||{};
     return exp?'It lasts until '+apprDate(exp)+'.':'It changes what Flint may do on its own.';}
   if(p.fullName==='world.person.create'){var cal=apprGet(APPR_CALENDARS,a.source||'google_calendar');return 'They’re from '+(cal?cal+' ':'')+'events you accepted or organized.';}
   if(p.fullName==='triage.rule.create')return a.rule&&apprInline(a.rule.name,80)?apprEnds('This adds the rule '+apprQ(a.rule.name)):'This adds a new rule.';
+  if(p.fullName==='backup.prune')return 'Flint deletes update backups past the newest 10 and the last 30 days.';
   if(apprGet(APPR_NIGHTLY,p.fullName))return 'It runs '+apprWhen(p.fullName)+' if you approve it.';
   if(p.fullName==='world.relation.write')return 'Flint’s memory suggests this link.';
   var tool=apprGet(APPR_TOOLS,p.fullName);if(tool)return tool[1];
