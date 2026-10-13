@@ -463,6 +463,62 @@ describe('the console Approvals panel', () => {
     expect(calls.at(-1)).toEqual({ url: '/proposals/run', method: 'POST', body: { id: 'tool' } });
   });
 
+  it('removing old backups is a card of its own: it says how much would go, that it cannot be undone, and it asks on its own', async () => {
+    const prune = (over: Record<string, unknown> = {}) => card({
+      id: 'prune', fullName: 'backup.prune', origin: 'runtime:prune', destructive: true, args: { day: '2026-10-06', copies: 4, megabytes: 812, digest: '3f'.repeat(32) },
+      reason: 'It waits for your approval each night there are old backups to remove, until you let it run on its own.', ...over,
+    });
+    answer = () => ({ status: 200, body: { signed: true, proposals: [prune(), card({ id: 'b', fullName: 'backup.local', origin: 'runtime:backup', args: { day: '2026-10-06' } })] } });
+    await open();
+    const row = ids.apprlist!.children[0]!.children[0]!;
+    const shown = row.shown();
+    expect(shown).toContain('Remove Old BackupsFlint deletes update backups past the newest 10 and the last 30 days.');
+    expect(shown).toContain('Can’t Be Undone');
+    expect(shown).not.toMatch(/backup\.prune|Backup Prune|pre-migrate/);
+    // It deletes, so Approve All leaves it out, and its own approval is a fresh touch.
+    expect(run(`apprAlone(${JSON.stringify(prune())})`)).toBe(true);
+    expect(ids.apprnote!.shown()).toContain('Approve\u00a0All\u00a0skips\u00a01.');
+    // Show Details: how much, what an update backup is, what always stays, and when it runs. Its numbers are in the sentence, so they are not listed again.
+    const d = run(`apprDetails(${JSON.stringify(prune())})`) as { says: string[]; facts: string[][]; refs: string[][] };
+    expect(d.says).toEqual([
+      'It deletes 4 old update backups, which frees 812 MB.',
+      'It deletes only the ones counted for this card, even if more grow old before it runs.',
+      'An update backup is the copy of the database Flint takes before an update changes it.',
+      'The one taken before the version that is running is always kept.',
+      'It runs tonight at 2:15 AM if you approve it.',
+    ]);
+    expect(JSON.stringify(d.facts)).not.toMatch(/Copies|Megabytes/);
+    // Which ones is signed too: the digest of their list is under REFERENCES, exactly, and in no sentence.
+    expect(d.refs).toEqual([['Digest', '3f'.repeat(32)]]);
+    expect(d.says.join(' ')).not.toContain('3f3f');
+    for (const line of d.says) expect(noteProblems('Remove Old Backups', line), line).toEqual([]);
+    // A card from before the digest (or with one that is not a digest) promises nothing about which.
+    const older = run(`apprDetails(${JSON.stringify(prune({ args: { day: '2026-10-06', copies: 1, megabytes: 3 } }))})`) as { says: string[] };
+    expect(older.says.slice(0, 2)).toEqual(['It deletes 1 old update backup, which frees 3 MB.', 'An update backup is the copy of the database Flint takes before an update changes it.']);
+    expect((run(`apprDetails(${JSON.stringify(prune({ args: { day: '2026-10-06', copies: 1, megabytes: 3, digest: 'all of them' } }))})`) as { says: string[] }).says.join(' ')).not.toMatch(/only the ones/);
+    // A card with no count (an older Flint's) says the rest, and nothing it does not know; odd values are listed as they are, never put in a sentence.
+    const bare = run(`apprDetails(${JSON.stringify(prune({ args: { day: '2026-10-06' } }))})`) as { says: string[] };
+    expect(bare.says[0]).toBe('An update backup is the copy of the database Flint takes before an update changes it.');
+    const odd = run(`apprDetails(${JSON.stringify(prune({ args: { day: '2026-10-06', copies: '4; rm -rf', megabytes: -1 } }))})`) as { says: string[]; facts: string[][] };
+    expect(odd.says.join(' ')).not.toMatch(/rm -rf|-1/);
+    expect(JSON.stringify(odd.facts)).toContain('4; rm -rf');
+    // Approved, it says when the nightly job runs it, with no Run Now (the server cannot run it).
+    answer = () => ({ status: 200, body: { signed: true, proposals: [prune({ status: 'approved' })] } });
+    await open();
+    run("apprShow('approved')");
+    const done = ids.apprlist!.children[0]!.children[0]!;
+    expect(done.shown()).toBe('Remove Old BackupsApproved. It runs tonight at 2:15 AM.');
+    expect(() => done.button('Run Now')).toThrow();
+    // A rule that lets it run on its own is named for what it is, never as one of the backups.
+    const rule = (rows: Array<Record<string, unknown>>) => run(`apprTitle(${JSON.stringify(card({ fullName: 'policy.change', kind: 'policy', consequential: true, args: { rows } }))})`);
+    const until = '2027-01-10T00:00:00.000Z';
+    expect(rule([{ pattern: 'backup.prune', tier: 'alone', dailyCap: 1, expiresAt: until }])).toBe('Let Flint Remove Old Backups on Its Own');
+    expect(run(`apprSub(${JSON.stringify(card({ fullName: 'policy.change', kind: 'policy', consequential: true, args: { rows: [{ pattern: 'backup.prune', tier: 'alone', dailyCap: 1, expiresAt: until }] } }))})`))
+      .toMatch(/^Until [A-Z][a-z]+ \d+(, \d{4})?, Flint deletes update backups past the newest 10 and the last 30 days\.$/);
+    expect(rule([{ pattern: 'backup.local', tier: 'alone', expiresAt: until }, { pattern: 'backup.offsite', tier: 'alone', expiresAt: until }])).toBe('Run Backups on Their Own');
+    expect(rule([{ pattern: 'backup.local', tier: 'alone', expiresAt: until }, { pattern: 'backup.prune', tier: 'alone', expiresAt: until }])).not.toBe('Run Backups on Their Own');
+  });
+
   it('the restore test’s card never names a time already past: on the Sunday it was filed, it runs next Sunday', async () => {
     const drill = (status: string) => card({ id: 'drill', fullName: 'restore.drill', origin: 'runtime:drill', status, args: {} });
     const lines = async (now: Date) => {

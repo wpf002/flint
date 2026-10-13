@@ -24,6 +24,8 @@ com.flint.server          template   apps/studio/templates/com.flint.server.plis
 com.flint.runtime         installer  apps/runtime/install-runtime.sh                        installer
 com.flint.runtime-backup  installer  apps/runtime/install-runtime.sh                        installer
 com.flint.backup          file       apps/studio/com.flint.backup.plist                     load
+# The same script once at login, for a night that was missed. It does nothing unless the catch-up is switched on.
+com.flint.backup-catchup  file       apps/studio/com.flint.backup-catchup.plist             load
 com.flint.evolve          file       apps/evolve/com.flint.evolve.plist                     load
 com.flint.deploy          file       apps/server/com.flint.deploy.plist                     last
 com.flint.searxng         installer  apps/studio/install_searxng.sh                         installer

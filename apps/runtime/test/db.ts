@@ -198,18 +198,38 @@ export async function dropLeftovers(owner: string): Promise<string[]> {
 }
 
 /**
+ * Remove the large objects a stopped test left in flint_test, and say how many.
+ * Two tests make one each (a backup never includes them, and Health says so),
+ * and each removes its own when it ends; one killed in between left it, and
+ * every later run then read "the database holds a large object". Only its
+ * maker may remove one, so each role removes its own.
+ */
+export async function unlinkLargeObjects(urls: TestUrls): Promise<number> {
+  let gone = 0;
+  for (const url of [urls.owner, urls.app, urls.approver, urls.backup]) {
+    if (!url) continue;
+    gone += await withClient(url, async (c) => (await c.query('SELECT lo_unlink(oid) FROM pg_largeobject_metadata WHERE lomowner = current_user::regrole')).rowCount ?? 0);
+  }
+  return gone;
+}
+
+/**
  * An empty, fully migrated flint_test, whoever used it last. The round-trip
  * test calls migrateDown alone, so a down.sql that misses its own objects
- * still fails there; here anything left over is dropped and named.
+ * still fails there; here anything left over is dropped and named, and so is
+ * a large object a stopped test left (unlinkLargeObjects).
  */
 export async function freshDb(): Promise<TestUrls> {
   if (!URLS) throw new Error('no test database');
   await migrateDown(URLS.owner);
   const left = await dropLeftovers(URLS.owner);
-  if (left.length) console.warn(`[freshDb] dropped what down.sql left behind (another branch's migrations?): ${left.join(', ')}`);
+  const large = await unlinkLargeObjects(URLS);
+  if (large) left.push(counted(large, 'large object'));
+  if (left.length) console.warn(`[freshDb] dropped what an earlier run left behind (another branch's migrations, a stopped test?): ${left.join(', ')}`);
   await migrateUp(URLS.owner);
   return URLS;
 }
+const counted = (n: number, what: string): string => `${n} ${what}${n === 1 ? '' : 's'}`;
 
 /**
  * Health checks dated as a test needs them (hours ago, a day last August). The

@@ -146,13 +146,32 @@ export interface DumpResult {
   counts: Record<string, number>;
 }
 
+/**
+ * ---- Large objects ------------------------------------------------------------
+ * How every dump of Flint's database is taken: the custom format, without large
+ * objects. Flint keeps nothing in them. Any role that can connect can make one,
+ * though, and pg_dump stops at the first one its own role may not read: one
+ * stray object made by the runtime's role would fail every later backup, and
+ * the restore test with it (the backup role reads tables, not another role's
+ * large objects). Leaving them out is what a role without superuser can do
+ * about it: taking away the functions that make them (lo_creat and the rest)
+ * needs a superuser, in every database, and a restore into a new database
+ * would quietly lose it again. The deploy's own dump before a migration passes
+ * the same flag (apps/runtime/install-runtime.sh; a test keeps them in step).
+ * A restored database therefore never holds one, which the restore's own
+ * comparison expects (catalog.ts counts them).
+ */
+export const DUMP_FORMAT = ['-Fc', '--no-large-objects'] as const;
+
+/** The file a dump taken at `now` is written to (its name is its time). */
+export const dumpPathAt = (outDir: string, now: Date): string => join(outDir, `flint-${now.toISOString().replace(/[:.]/g, '-')}.dump`);
+
 /** One consistent dump plus its counts. The file appears only when complete. */
 export async function dumpDatabase(backupUrl: string, outDir: string, tools: Tools, now: Date): Promise<DumpResult> {
   mkdirSync(outDir, { recursive: true, mode: 0o700 });
   chmodSync(outDir, 0o700);
   const t = targetOf(backupUrl);
-  const stamp = now.toISOString().replace(/[:.]/g, '-');
-  const final = join(outDir, `flint-${stamp}.dump`);
+  const final = dumpPathAt(outDir, now);
   const partial = `${final}.partial`;
   const c = client(t);
   await c.connect();
@@ -160,7 +179,7 @@ export async function dumpDatabase(backupUrl: string, outDir: string, tools: Too
     await c.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     const snapshot = (await c.query<{ s: string }>('SELECT pg_export_snapshot() AS s')).rows[0]!.s;
     const counts = await countRows(c);
-    await run(tools.pgDump, ['-Fc', `--snapshot=${snapshot}`, '-h', t.host, '-p', String(t.port), '-U', t.user, '-d', t.database, '-f', partial], t.password);
+    await run(tools.pgDump, [...DUMP_FORMAT, `--snapshot=${snapshot}`, '-h', t.host, '-p', String(t.port), '-U', t.user, '-d', t.database, '-f', partial], t.password);
     await c.query('COMMIT');
     chmodSync(partial, 0o600);
     renameSync(partial, final);

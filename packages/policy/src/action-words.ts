@@ -59,6 +59,7 @@ export const JOB_WORDS: Readonly<Record<string, string>> = {
   'backup.offsite': 'Offsite Backup',
   'restore.drill': 'Restore Test',
   'maintenance.retention': 'Cleanup',
+  'backup.prune': 'Backup Cleanup',
 };
 
 /**
@@ -88,9 +89,11 @@ export interface JobFailure {
    *  - `card`: it ran on a card he approved, and its next card is in Approvals now;
    *  - `card_later`: the same, but the next card could not be filed: the next run files it;
    *  - `setup`: it failed for a reason another try cannot change (no key, no folder, a
-   *    write macOS refuses): it says so, never "tries again".
+   *    write macOS refuses): it says so, never "tries again";
+   *  - `stopped`: it stopped before it could tell what it may do (the database did not
+   *    answer), so nothing is known about its next run: the note points at Health.
    */
-  next: 'retry' | 'card' | 'card_later' | 'setup';
+  next: 'retry' | 'card' | 'card_later' | 'setup' | 'stopped';
   /** backup.offsite: the copy goes to iCloud Drive (the default folder), not a folder Will set. */
   icloud?: boolean;
   /** restore.drill: it finished and the restored copy differed from the backup. */
@@ -110,6 +113,7 @@ export function jobFailedNote(job: NightlyJob, f: JobFailure): { title: string; 
   const weekly = job === 'restore.drill';
   const next =
     f.next === 'setup' ? 'It won’t work until its setup is fixed.'
+    : f.next === 'stopped' ? 'Flint couldn’t reach its database. Check Health in Settings.'
     : f.next === 'retry' ? `Flint tries again ${weekly ? 'next Sunday' : 'tonight'}.`
     : f.next === 'card' ? 'It runs again once you approve its next card in Approvals.'
     : `Its next card will be in Approvals ${weekly ? 'next Sunday' : 'tomorrow morning'}.`;

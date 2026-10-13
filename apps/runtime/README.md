@@ -1832,6 +1832,183 @@ approved. Any later deploy of P5 code applies the migration again. Claude runs
 - The runtime can create a large object, and one it owns makes the backup's
   dump fail. That predates P5 and needs its own fix.
 
+## Health sees the whole machine (P7)
+
+Settings > Health used to cover the runtime's own parts. It now covers the Mac
+Flint runs on too. Nothing here changes anything on the Mac: the checks only
+read. They run inside the existing health job, every 5 minutes.
+
+Health lists its rows under four headers, MODELS, BACKUPS, THIS MAC and REMOTE
+ACCESS. What needs a look is still listed first.
+
+| Row | What it reads | Needs a look when |
+|---|---|---|
+| **Disk Space** | Free space on the volume your home folder is on. | Under 20 GB free is low. Under 5 GB is nearly full, and you get a note. |
+| **Remote Access** | Flint's own Tailscale service on this Mac, asked over its socket. | It is stopped, signed out, offline, or not pointed at Flint. Its sign-in running out is said 14 days ahead. |
+| **Local Model** | Ollama's own list of installed and loaded models, on this Mac's address only. | Ollama answers and the model Flint asks is not installed, or the list says it runs somewhere else ("isn't on this Mac": a cloud model, whatever it is named). |
+| **Standby Model** | The same list. | The server's settings name a standby model and it is not installed, or the list says it runs somewhere else. There is no row when they name none. |
+| **Files Backup** | The record the nightly files backup writes for each archive. | The last run failed, or the last good archive is over 26 hours old. |
+| **Offsite Backup** | The same record, beside the database's own. | Either copy, the database's or the files', did not go offsite. |
+| **Offsite Restore Test** | The MacBook's own test of an offsite copy. | Off until the MacBook reports a first result. Then a failure, or over 8 days without one. |
+| **Automatic Updates** | When the deploy job last looked for an update. | No look in an hour, or updates are paused. |
+| **Database** | Whether it holds a large object. | It holds one. Flint keeps nothing in them, and no backup includes one. |
+| **Backups** | The database's nightly backup, as before. | Now also as soon as a run fails, not only once the last good one is old. |
+
+A reading that is missing, cut short or not the shape expected is **Unknown**,
+never Normal.
+
+**What it runs and asks.** Remote Access runs one program, `tailscale`, by its
+full path from a fixed list, with fixed arguments, nothing of the runtime's
+environment and a five-second limit. Nothing it prints is passed on: only a
+state, a reason from a fixed list, and the day the sign-in runs out. The models
+are asked of Ollama on this Mac's own address, and only for its two lists. No
+call leaves the Mac.
+
+**Notes.** One note each, once per occurrence, through the existing triage
+rules:
+
+- This Mac Is Nearly Full: under 5 GB free. Critical, once a day while it lasts.
+- No Backup Has Reached iCloud in 3 Days: once per last good copy, and only
+  once your backup key is on this Mac.
+- Remote Access Expires in 12 Days: at 14 days, and once more in the last 3.
+- Remote Access Is Down: after 30 minutes down, once per outage.
+- Flint Stopped Checking for Updates: after 3 hours with no look, unless
+  updates are paused.
+- Your MacBook Hasn't Tested a Backup in 5 Weeks: once per last test.
+
+A nightly job that stops before its first question to the database is answered
+(the database is down) now tells you, once a night. Before, it ended in a log
+line.
+
+### The files backup's record
+
+The nightly archive of Flint's files is made by a shell script with no database
+(`apps/studio/backup_flint.sh`). It now writes one line for each archive it
+made or could not make, here and offsite, in `~/.flint/backup-events.jsonl`. A
+line holds ids, enums, numbers and hashes, never a path. The health job reads
+those lines into the list of backups. Reading the same lines again writes
+nothing: there is one record for each backup file, and a failure never takes
+the place of a good record.
+
+That script also checks for room before it writes, and records a run that was
+stopped. It can catch up a night that was missed, when you log in. That is
+off. To turn it on:
+
+1. Add this line to `~/.flint/backup.env`:
+
+   ```
+   FLINT_BACKUP_CATCHUP=on
+   ```
+
+2. Load its LaunchAgent, once. A deploy does not load it. A rebuild does.
+
+   ```
+   cp ~/flint/apps/studio/com.flint.backup-catchup.plist ~/Library/LaunchAgents/
+   ```
+
+   ```
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.flint.backup-catchup.plist
+   ```
+
+It runs once when it is loaded and at each login. It makes a backup only when
+the newest one is over 26 hours old.
+
+### Removing old backups
+
+Before a deploy changes the database it takes a copy of it, in
+`~/FlintBackups/pre-migrate`. Nothing ever removed those. `prune-backups` does:
+
+```
+pnpm --filter @flint/runtime prune-backups
+```
+
+It lists what would go, by count and size, and removes nothing. Add `--remove`
+to remove them (nothing else means "remove": any other word after the command
+is refused). It keeps the newest 10, anything under 30 days old, and always the
+copy taken before the version that is running. When it cannot tell which
+version is running, it removes nothing. A rule of yours that forbids
+`backup.prune` forbids `--remove` too.
+
+The nightly job runs it last, as the action `backup.prune`, which ships at
+APPROVAL. On a night there is something to remove it files one card, Remove Old
+Backups. The card says how many copies would go and how much room that frees,
+and that it can't be undone, so it asks on its own and Approve All skips it.
+
+The card signs those copies and no others. It carries their count, their
+megabytes and a digest of their names, sizes and times; the list itself is kept
+in `~/.flint/prune-plans`, and is believed only when it gives that digest. A
+run on the card removes the copies on its list that are still the same files
+and that the rule still lets go: never one that was not on it, and never more
+room than the card said. If the folder changed so that none of them may go, or
+the list cannot be believed, it removes nothing, and the next night's run files
+a new card.
+
+A promotion signed for the backups as a group does not cover it. To let it run
+on its own, sign a rule that names it. Nothing said in chat can ask for it.
+
+Every run looks again just before it removes each copy: the folder must be the
+folder it listed, and the copy the file it saw, with the same size and time, or
+it is left. The audit trail says a run is starting before anything goes, and
+what it did after; if the first cannot be written, nothing is removed.
+
+The encrypted copies offsite and the nightly dumps are kept to their own limits
+by their own jobs, as before.
+
+To see what takes room on the Mac, and to remove old logs and old runtime
+versions, see entry 6 of [docs/RECOVERY.md](../../docs/RECOVERY.md).
+
+### What changed on deploy
+
+- One database update, `20261015000000_p7_resilience`: one record for each
+  backup file (a unique index), and a backup kind named for a host Nexus has
+  left is renamed. No new table, column or queue. If a file was recorded more
+  than once (the offsite step used to write a new record each time the same
+  dump was sent again), the update keeps one record of it, a good one before a
+  failed one and then the newest, and removes the others. It cannot stop on
+  them. No backup file is touched.
+- The nightly jobs record a backup the same way whether or not that update has
+  been applied yet. They run from the checkout as soon as it is updated, which
+  can be before the runtime's own deploy.
+- Every dump of the database is taken without large objects. Flint keeps
+  nothing in them, and one that the backup role could not read would have
+  stopped every later backup.
+- The deploy job leaves the time of each look for an update in
+  `~/.flint/deploy-tick`.
+- A LaunchAgent file, `com.flint.backup-catchup`, comes with the code. A deploy
+  does not load it (the steps are above). Loaded, it does nothing unless the
+  catch-up is on.
+- The nightly job gains its last step, `prune-backups --auto`. It files no card on a
+  night there is nothing to remove. The list of copies a card signs is kept in
+  `~/.flint/prune-plans`, a folder it makes for you alone, and is removed once
+  no card that could still run names it.
+
+### Known limits
+
+- Offsite Restore Test stays off: nothing on the MacBook reports a result yet.
+- Standby Model has a row only when the server's settings name one. When they
+  name none, the server picks a standby for this Mac by itself and Health does
+  not say which.
+- Remote Access reads Flint's own Tailscale service. It cannot tell whether
+  your phone itself is signed in.
+- The files backup's record names the default folders. A folder set by hand
+  for one run of the script is not known to the runtime.
+- A failed `prune-backups` is in its log and the audit trail. It posts no note, and
+  tries again the next night.
+
+### Rolling P7 back
+
+The migration's `down.sql` (`20261015000000_p7_resilience`) belongs to a
+rollback:
+
+1. First deploy a runtime from before P7. P7's nightly jobs write one record
+   for each backup file and rely on the index that `down.sql` drops.
+2. Then take a dump and run `down.sql` by hand. Every record stays, and the
+   renamed kind gets its earlier name back. A second record of one file that
+   the update removed is not brought back.
+
+Any later deploy of P7 code applies the migration again. Claude runs `down.sql`
+only with your OK, after the dump.
+
 ## When a database update fails
 
 A runtime deploy whose migration fails installs nothing. You get a note ("A

@@ -7,6 +7,7 @@
 # settings name a database address nothing listens on, and every case below ends before a
 # connection would matter. (The restore itself is tested against a throwaway Postgres in
 # apps/runtime/test/restore-production-db.test.ts.)
+source "${0:A:h}/temp_root.zsh"   # one temp folder for this run, removed when the test ends
 set -u
 here=${0:A:h}
 studio=${here:h}

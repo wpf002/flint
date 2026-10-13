@@ -11,6 +11,7 @@
 #  - a failure is said in sentences, and the rehearsal's own output is kept for
 #    the log;
 #  - on a Mac with no Flint it writes nothing.
+source "${0:A:h}/temp_root.zsh"   # one temp folder for this run, removed when the test ends
 set -u
 here=${0:A:h}
 fx="$(mktemp -d "${${TMPDIR:-/tmp}%/}/flint-run-rehearsal.XXXXXX")" || exit 1; fx=${fx:A}; trap 'rm -rf "${fx:?}"' EXIT

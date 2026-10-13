@@ -9,8 +9,13 @@
  *  - a vendor at 100% of its cap on the unified view (the server's spend
  *    threshold `exhausted`, or the watchdog's own reading);
  *  - a deploy gate failure, a failed migration (the deploy events);
- *  - CI failing on flint's default branch.
+ *  - CI failing on flint's default branch;
+ *  - the Mac nearly full (the watchdog's reading: the database stops when the
+ *    disk fills, and backups with it).
  * Not critical:
+ *  - no offsite copy in three days, remote access running out or down for half
+ *    an hour, the deploy job no longer looking for updates, the MacBook no
+ *    longer testing the offsite copies (all the watchdog's, P7): escalate;
  *  - a failed restart or health check after a deploy (it rolled back): escalate;
  *  - more than 5 server route errors in 10 minutes: escalate once per outage;
  *  - a Nexus handoff to Flint unaccepted for 24 h: escalate, once per sender a day;
@@ -57,6 +62,8 @@ const CRITICAL: Record<string, Rule> = {
   'deploy:migrate.failed': (f) => ({ id: 'migrate_failed', fields: { component: f.payload.component === 'runtime' ? 'runtime' : 'server', sha: sha(f.payload.sha) } }),
   // The watchdog's own reading of ~/.flint/runtime/migrate-failed.
   'runtime:migrate.failed': (f) => ({ id: 'migrate_failed', fields: { component: 'runtime', sha: sha(f.payload.sha) } }),
+  // Under 5 GB free (health/machine.ts): whole gigabytes, never more than 4.
+  'runtime:disk.low': (f) => ({ id: 'disk_low', fields: { gb: num(f.payload.gb, 0, 4, 0) } }),
   'github:ci_run.state': (f) => {
     const e = f.entity;
     if (!e || !FLINT_CI.test(e.key) || e.state.status !== 'completed' || e.state.conclusion !== 'failure') return undefined;
@@ -76,7 +83,16 @@ export function criticalVerdict(f: EventFacts): Verdict | undefined {
 }
 
 /** The ids of the critical templates (they bypass the push cap). */
-export const CRITICAL_TEMPLATES: ReadonlySet<string> = new Set(['service_down', 'backup_stale', 'drill_failed', 'vendor_cap', 'deploy_failed', 'migrate_failed', 'ci_failing']);
+export const CRITICAL_TEMPLATES: ReadonlySet<string> = new Set(['service_down', 'backup_stale', 'drill_failed', 'vendor_cap', 'deploy_failed', 'migrate_failed', 'ci_failing', 'disk_low']);
+
+/** The watchdog's conditions about the Mac and the offsite copies that are worth a note and are not critical (P7). */
+const MACHINE: Record<string, Rule> = {
+  'runtime:offsite.stale': (f) => ({ id: 'offsite_stale', fields: { days: num(f.payload.days, 3, 10_000, 3), what: f.payload.what === 'files' ? 'files' : 'database', icloud: f.payload.icloud === 1, local: f.payload.local === 1 } }),
+  'runtime:remote_access.expiring': (f) => ({ id: 'remote_access_expiring', fields: { days: num(f.payload.days, 0, 14, 14) } }),
+  'runtime:remote_access.down': () => ({ id: 'remote_access_down', fields: {} }),
+  'runtime:auto_update.stalled': (f) => ({ id: 'updates_stalled', fields: { hours: num(f.payload.hours, 3, 100_000, 3) } }),
+  'runtime:offsite_drill.stale': (f) => ({ id: 'offsite_drill_stale', fields: { weeks: num(f.payload.weeks, 5, 10_000, 5) } }),
+};
 
 /** What the non-critical code rules need from the database. */
 export interface CodeRuleContext {
@@ -185,6 +201,8 @@ export async function codeVerdict(f: EventFacts, ctx: CodeRuleContext): Promise<
       perDay: { key: `notify.handoff:${ns ?? 'unknown'}`, limit: 1 },
     };
   }
+  const machine = MACHINE[name]?.(f);
+  if (machine) return { action: 'escalate', lane: 'relevant', decidedBy: `code:${f.type}`, ruleName: f.type, template: machine, critical: false };
   // A source failing 5 times in a row: in the relevant lane, no ping; its recovery quietly.
   if (name === 'runtime:source.circuit_open') return { action: 'log', lane: 'relevant', decidedBy: 'code:source.circuit_open', ruleName: 'source.circuit_open', critical: false };
   if (name === 'runtime:source.circuit_closed') return { action: 'log', lane: 'quiet', decidedBy: 'code:source.circuit_closed', ruleName: 'source.circuit_closed', critical: false };

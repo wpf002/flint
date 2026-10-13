@@ -277,3 +277,31 @@ export const DeployEvent = z
   })
   .strict();
 export type DeployEvent = z.infer<typeof DeployEvent>;
+
+/**
+ * One line of ~/.flint/backup-events.jsonl (0600), appended by the nightly
+ * archive of Flint's files (apps/studio/backup_flint.sh) and read by the
+ * runtime into BackupRun: an archive that was written, here or offsite, or one
+ * that was not and why. Ids, enums, numbers and hashes only: never a path
+ * (the name is the script's own, a time and nothing else) and never log text.
+ * Ids make a line read twice the same event.
+ */
+export const BACKUP_EVENT_REASONS = ['space', 'archive', 'unreadable', 'encrypt', 'no_tool', 'no_folder', 'interrupted'] as const;
+export const BackupEvent = z
+  .object({
+    id: Id,
+    at: At,
+    kind: z.literal('flint_tar'),
+    location: z.enum(['local', 'icloud']),
+    outcome: z.enum(['ok', 'failed']),
+    /** The archive's own name: flint-<date>-<time>.tar.gz, with .age offsite. */
+    name: z.string().regex(/^flint-[0-9]{8}-[0-9]{4}\.tar\.gz(\.age)?$/),
+    bytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    /** Why it was not written (a failed line only). */
+    reason: z.enum(BACKUP_EVENT_REASONS).optional(),
+  })
+  .strict()
+  .refine((e) => (e.location === 'icloud') === e.name.endsWith('.age'), 'an offsite archive is the encrypted one, and only that')
+  .refine((e) => (e.outcome === 'failed') === (e.reason !== undefined), 'a failed line says why, and only a failed one');
+export type BackupEvent = z.infer<typeof BackupEvent>;

@@ -2,6 +2,7 @@
 # The nightly backup end to end on a fake ~/.flint: offsite pruning (macOS head
 # rejected -n 0, so every prune aborted), log rotation, and the optional age
 # encryption of the offsite copy. Run: zsh apps/studio/test/backup_ops.test.sh
+source "${0:A:h}/temp_root.zsh"   # one temp folder for this run, removed when the test ends
 set -eu
 here=${0:A:h}
 script="$here/../backup_flint.sh"

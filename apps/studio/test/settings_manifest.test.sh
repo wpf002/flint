@@ -9,6 +9,7 @@
 #  - a setting the manifest does not list is named and never saved;
 #  - settings files are read as text: nothing in one is ever run;
 #  - the snapshot is 0600, and no secret value reaches it or the screen.
+source "${0:A:h}/temp_root.zsh"   # one temp folder for this run, removed when the test ends
 set -u
 here=${0:A:h}
 source "$here/../recovery_lib.sh"

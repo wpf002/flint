@@ -36,6 +36,7 @@ describe('JOB_WORDS', () => {
     expect(JOB_WORDS['backup.offsite']).toBe('Offsite Backup');
     expect(JOB_WORDS['restore.drill']).toBe(HEALTH_NAMES.restore_drill);
     expect(JOB_WORDS['maintenance.retention']).toBe(HEALTH_NAMES.retention);
+    expect(JOB_WORDS['backup.prune']).toBe('Backup Cleanup');
     for (const [name, words] of Object.entries(JOB_WORDS)) {
       expect(words).not.toMatch(/[_.]/);
       expect(words).not.toContain(name.split('.')[1]!);

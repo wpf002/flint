@@ -28,6 +28,7 @@
 # the command line) is named in `not_settings` below, one by one, with why.
 # There are no patterns: a new name is a line in settings.manifest or a line
 # here, and a line here that the code no longer reads fails the test too.
+source "${0:A:h}/temp_root.zsh"   # one temp folder for this run, removed when the test ends
 set -u
 here=${0:A:h}
 repo=${here:h:h:h}
@@ -70,6 +71,7 @@ not_settings=(
   FLINT_BACKUP_KEEP_OFFSITE # how many offsite ones
   FLINT_BACKUP_MANIFEST     # the list of offsite snapshots
   FLINT_BACKUP_TS           # the snapshot's timestamp; the tests set it rather than wait a minute
+  FLINT_BACKUP_FREE_KB      # a test's stand-in for a full disk: how much room the backup is told there is
   FLINT_BACKUP_DEFINE_ONLY  # sourcing backup_flint.sh for its lists alone
   FLINT_AGE_BIN             # the age program; the tests use it to take age away
   FLINT_DOW                 # the day of the week, for the weekly restore drill; the tests set it
@@ -89,6 +91,17 @@ check "no name is given twice in the list of names that are not settings" '(( ${
 
 # ---- the manifest ------------------------------------------------------------------------------------
 check "the manifest loads" 'manifest_load'
+
+# ---- what the runtime's installer writes into runtime.env is listed for that file -------------------
+# By name alone is not enough there: the nightly snapshot and the live check (settings_manifest.sh) look a setting
+# up under the file it was found in, so one the installer copies from the server's settings (the standby model's
+# name) needs its own runtime.env line beside the server's.
+written=("${(@f)$(sed -n '/^ENVF="\$DATA\/runtime\.env"$/,/^} > "\$ENVF\.new"$/p' "$repo/apps/runtime/install-runtime.sh" | grep -oE 'echo "[A-Z][A-Z0-9_]*=' | sed -E 's/^echo "//; s/=$//' | sort -u)}")
+unlisted=()
+for n in $written; do [[ -n ${MF_CLASS[runtime.env/$n]:-} ]] || unlisted+=("$n"); done
+check "the installer's own block was read: it writes ten settings or more into runtime.env" '(( ${#written} >= 10 ))'
+check "the standby model's name is one of them" '(( ${written[(Ie)FLINT_LOCAL_FALLBACK_MODEL]} ))'
+check "every setting the installer writes into runtime.env is listed for runtime.env (not listed: ${unlisted[*]:-none})" '(( ${#unlisted} == 0 ))'
 typeset -A listed
 for key in ${(k)MF_CLASS}; do [[ $key == file/* ]] || listed[${key#*/}]=1; done
 check "the manifest lists a real number of setting names" '(( ${#listed} > 100 ))'

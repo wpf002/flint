@@ -1,0 +1,88 @@
+# The names Flint's own tests gave their scratch folders in the system temp
+# folder, before every test run had one folder of its own to clean up
+# (test-support/temp-root.ts for vitest, apps/studio/test/temp_root.zsh for the
+# studio's script tests). One prefix on a line.
+#
+# apps/studio/free_space.sh reads this list to find what those tests left
+# behind. A folder is one of them only when its whole name is a prefix here
+# followed by exactly the six characters mkdtemp or mktemp adds, at least one
+# of them a digit or a capital; it sits directly in the temp folder; it is this
+# user's; nothing in it has changed for a day; and it holds no socket.
+#
+# Every prefix here starts with flint-. The tests also used short, plain names
+# (ws-, tok-, export-, install- and some forty more): another program may use
+# those too, so they are not listed, and a folder with such a name is never
+# removed. What they left is the system's to clear.
+#
+# A new test needs no line here: what it makes now lands inside its run's own
+# folder, which is removed when the run ends. The two lines that matter from
+# here on are the run folders themselves (a run that was killed leaves its one):
+flint-t-
+flint-t.
+#
+# No prefix here is one Flint's own programs use for a working folder (a
+# restore's, a rebuild's): apps/studio/test/free_space.test.sh checks that.
+flint-agent-
+flint-ap-
+flint-bk-
+flint-brain-
+flint-cfg-
+flint-cli-
+flint-compare-tmp-
+flint-complete-
+flint-copy-
+flint-corpus-
+flint-dburls-
+flint-dump-
+flint-dumps-
+flint-env-
+flint-events-
+flint-extract-
+flint-extract-local-
+flint-gh-
+flint-goal-facts-
+flint-goals-
+flint-goals-carry-
+flint-goals-hist-
+flint-google-
+flint-hist-
+flint-hold-
+flint-home-
+flint-ingest-
+flint-ingest-home-
+flint-int-
+flint-key-
+flint-kn-
+flint-know-
+flint-know2-
+flint-logs-
+flint-machine-
+flint-machine-home-
+flint-migrations-
+flint-notes-
+flint-off-
+flint-pg-
+flint-pre-
+flint-prisma-
+flint-prune-
+flint-prune-job-
+flint-r41-
+flint-rd.
+flint-recall-
+flint-restore-
+flint-ro.
+flint-rollback.
+flint-rp-
+flint-rr.
+flint-rt-
+flint-run-rehearsal.
+flint-spend-
+flint-spend-obs-
+flint-spool-
+flint-stopped-
+flint-store-
+flint-threads-
+flint-thresh-
+flint-tool-
+flint-train-
+flint-voice-

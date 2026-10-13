@@ -62,6 +62,13 @@ export interface CodeEntry {
    * recorded, nothing is delivered"). Promoted, it runs for real.
    */
   shadow?: boolean;
+  /**
+   * A policy row promotes it only by naming it. A `prefix.*` row signed for its
+   * neighbours (the backups, say) never covers it: an action that deletes is
+   * promoted when Will signs for that action, not because a wider row was
+   * already there the day it shipped. Any row still tightens it.
+   */
+  byName?: boolean;
   note?: string;
 }
 
@@ -122,6 +129,11 @@ export const CODE_TABLE: Readonly<Record<string, CodeEntry>> = {
   'backup.local': approval({ cap: { limit: 1, period: 'day' } }),
   'restore.drill': approval({ cap: { limit: 1, period: 'week' }, note: 'into a scratch database' }),
   'backup.offsite': approval({ cap: { limit: 1, period: 'day' }, egress: true, note: 'age-encrypted, to iCloud' }),
+  // Removing old backups (P7): only the copies of the database a deploy takes before a migration, past the
+  // newest 10 and 30 days, and never the one of the release that is running. It deletes files, so it waits
+  // for a card each time there is something to remove, until Will promotes it. Only its own nightly job files
+  // that card, and by hand it is Will's own command: never from chat (NEVER_FROM_CHAT below).
+  'backup.prune': approval({ cap: { limit: 1, period: 'day' }, byName: true, note: 'deletes update backups past the newest 10 and 30 days; never the running release\'s' }),
   // Replacing the production database with a backup (P7). Never promoted, never
   // autonomous, and never from chat (CONSOLE_ONLY below): Will runs the command
   // himself and types the confirmation. It cannot wait on an approval card, because
@@ -214,6 +226,7 @@ export const AUTONOMOUS_ACTIONS: ReadonlySet<string> = new Set([
   'backup.local',
   'restore.drill',
   'backup.offsite',
+  'backup.prune',
   'maintenance.retention',
   'maintenance.partitions',
   'triage.rule',
@@ -449,7 +462,7 @@ export function touchesMoney(name: string): boolean {
 const live = (p: PolicyRow, now: Date): boolean => p.active && new Date(p.expiresAt).getTime() > now.getTime();
 
 /** Steps 4 to 6: the tier before policies and context floors. */
-function baseTier(action: string, ctx: TierContext): Omit<TierDecision, 'key'> & { promotable: boolean } {
+function baseTier(action: string, ctx: TierContext): Omit<TierDecision, 'key'> & { promotable: boolean; byName?: boolean } {
   if (ctx.mcp) {
     const { server, tool, readOnlyHint, destructiveHint } = ctx.mcp;
     const money = touchesMoney(`${server}.${tool}`);
@@ -470,6 +483,7 @@ function baseTier(action: string, ctx: TierContext): Omit<TierDecision, 'key'> &
       rule: 'code',
       reason: entry.note ?? `${action} is ${entry.tier.toUpperCase()} in code`,
       promotable: entry.promotable,
+      ...(entry.byName ? { byName: true } : {}),
       ...(entry.cap ? { cap: entry.cap } : {}),
     };
   }
@@ -493,6 +507,14 @@ export const RUNTIME_CHAT_TOOLS: ReadonlySet<string> = new Set([
  */
 export const CONSOLE_ONLY: ReadonlySet<string> = new Set(['restore.production']);
 
+/**
+ * Actions a chat turn can never ask for, whatever is said in it and whatever a
+ * rule says: FORBIDDEN in chat, not merely waiting for approval. Removing old
+ * backups deletes files; its card comes from its own nightly job, which counts
+ * what would go, and from nowhere else.
+ */
+export const NEVER_FROM_CHAT: ReadonlySet<string> = new Set(['backup.prune']);
+
 /** Decide the tier of one action. Pure: same inputs, same answer. */
 export function resolveTier(action: string, ctx: TierContext): TierDecision {
   const key = actionKey(action, ctx.mcp);
@@ -505,6 +527,11 @@ export function resolveTier(action: string, ctx: TierContext): TierDecision {
   // 1b. For Will at the keyboard only.
   if (!ctx.mcp && CONSOLE_ONLY.has(action) && ctx.context !== 'console') {
     return { tier: 'forbidden', rule: 'forbidden', reason: `${action} is run by Will at the keyboard, and from nowhere else`, key };
+  }
+
+  // 1c. Never from chat.
+  if (!ctx.mcp && NEVER_FROM_CHAT.has(action) && ctx.context === 'chat') {
+    return { tier: 'forbidden', rule: 'forbidden', reason: `${action} is never asked for from chat`, key };
   }
 
   // 2a. Autonomous: the closed list, and never an MCP tool. Any context that is
@@ -547,7 +574,8 @@ export function resolveTier(action: string, ctx: TierContext): TierDecision {
   const tightest = rows.reduce<PolicyRow | undefined>((t, p) => (!t || RANK[p.tier] > RANK[t.tier] ? p : t), undefined);
   // A scoped row promotes only inside its scope, and only when the caller can tell.
   const inScope = (p: PolicyRow): boolean => p.scope == null || ctx.scopeAllows?.(p.scope) === true;
-  const promoters = rows.filter((p) => p.tier === 'alone' && inScope(p));
+  // An entry promoted by name only is not promoted by a row that covers it with `prefix.*`.
+  const promoters = rows.filter((p) => p.tier === 'alone' && inScope(p) && (!base.byName || p.pattern === key));
   if (tightest && RANK[tightest.tier] > RANK[decision.tier]) {
     decision = { ...decision, tier: tightest.tier, rule: 'policy', reason: `ActionPolicy ${tightest.pattern}`, policyPattern: tightest.pattern };
   } else if (tightest?.tier === 'alone' && promoters.length > 0 && decision.tier === 'approval' && base.promotable && !floored) {

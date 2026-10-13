@@ -220,9 +220,16 @@ export async function createProposal(db: Db, given: CreateProposal, actor: strin
     // A filer that asked for it takes its own lock first (always in this order, so two filings never wait on each other).
     if (steps.serial) await tx.$queryRaw`SELECT 1 FROM (SELECT pg_advisory_xact_lock(hashtext(${`filing:${steps.serial}`}))) AS l`;
     await tx.$queryRaw`SELECT 1 FROM (SELECT pg_advisory_xact_lock(hashtext(${`proposal:${input.action}:${argsDigest}`}))) AS l`;
+    // A job's card is the job's own: one filed from anywhere else with the same action and args is another card,
+    // and never takes its place (the job claims only a card of its own origin, so a look-alike that stood in for
+    // it would be approved and never run). Neither is the job's card ever handed back for a filing from elsewhere.
+    const fromJob = input.origin.startsWith('runtime:');
     const same = await tx.proposal.findFirst({
       // A goal card from Will and the same one from a review are two cards: their reasons and their marks differ.
-      where: { action: input.action, argsDigest, tainted: input.tainted, status: 'pending', expiresAt: { gt: now }, ...(goalCard ? { origin: input.origin } : {}) },
+      where: {
+        action: input.action, argsDigest, tainted: input.tainted, status: 'pending', expiresAt: { gt: now },
+        ...(goalCard || fromJob ? { origin: input.origin } : { NOT: { origin: { startsWith: 'runtime:' } } }),
+      },
       orderBy: { createdAt: 'asc' },
       select: { id: true, expiresAt: true },
     });

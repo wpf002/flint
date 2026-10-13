@@ -17,6 +17,7 @@
 #  - updates are paused only when something was rolled back, and a pause that was
 #    already there is left as it was;
 #  - it never acts while an update is installing.
+source "${0:A:h}/temp_root.zsh"   # one temp folder for this run, removed when the test ends
 set -u
 here=${0:A:h}
 script="$here/../rollback.sh"

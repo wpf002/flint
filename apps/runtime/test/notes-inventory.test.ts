@@ -32,7 +32,9 @@ import { ACTION, nextAfterFailure } from '../src/backup/nightly';
 import { digestBody, digestTitle, goalsSentence, questionsSentence } from '../src/digest';
 import { DEFERRAL_SAYS } from '../src/goals/batch';
 import { REVIEWS_STOPPED } from '../src/goals/late';
-import { FORECAST_HEALTH, GOAL_HEALTH, LEDGER_HEALTH } from '../src/health/checks';
+import { BACKUP_HEALTH, DATABASE_HEALTH, FORECAST_HEALTH, GOAL_HEALTH, LEDGER_HEALTH, UPKEEP_HEALTH } from '../src/health/checks';
+import { MODEL_HEALTH, REMOTE_HEALTH, diskCheck, remoteAccessCheck } from '../src/health/machine';
+import { pruneLines } from '../src/backup/prune-job';
 import { noteOf } from '../src/surface/deliver';
 import { TEMPLATES, TEMPLATE_IDS, fieldFreeBody, fieldFreeTitle, phrase, render } from '../src/templates/escalations';
 import { EDGES } from './surface/template-edges';
@@ -81,7 +83,7 @@ describe('the runtime’s notes to Will', () => {
     const jobs = Object.values(ACTION) as NightlyJob[];
     expect(jobs.sort()).toEqual(['backup.local', 'backup.offsite', 'restore.drill']);
     for (const job of jobs) {
-      for (const next of ['retry', 'card', 'card_later', 'setup'] as const) {
+      for (const next of ['retry', 'card', 'card_later', 'setup', 'stopped'] as const) {
         for (const icloud of [true, false]) {
           for (const mismatch of [true, false]) {
             const note = jobFailedNote(job, { next, icloud, mismatch });
@@ -297,6 +299,59 @@ describe('the runtime’s notes to Will', () => {
     expect(fn.match(/\bdetail: /g)).toHaveLength(13);
     expect(fn.match(/detail: FORECAST_HEALTH\.\w+(\([^)]*\)+)?/g)).toHaveLength(13);
     expect(digestBody({ relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 }, ['forecasts'])).toContain('Forecasts');
+  });
+
+  it('the Mac itself (P7): what the new Health rows say, and what a job says when it removes old backups, are plain sentences too', () => {
+    const said = (component: string, line: string) => {
+      expect(HEALTH_NAMES[component], component).toBeTruthy();
+      expect(noteProblems(HEALTH_NAMES[component]!, line), `${component}: ${line}`).toEqual([]);
+      for (const re of NEVER) expect(`${HEALTH_NAMES[component]}\n${line}`, line).not.toMatch(re);
+      expect(line, line).toMatch(/^[A-Z].*\.$/);
+      // Numbers and fixed words: no percent sign, no aside, and nothing a program or a file said.
+      expect(line, line).not.toMatch(/[%()]|tailscale|ollama|statfs|\.jsonl|\.sock/i);
+      expect(line.length, line).toBeLessThanOrEqual(120);
+    };
+    const GB = 1e9;
+    const now = new Date('2026-10-12T18:00:00Z');
+    const lines: Array<[string, string | undefined]> = [
+      ...[undefined, 0, 0.4 * GB, 4 * GB, 14 * GB, 212 * GB, 4000 * GB].map((free): [string, string | undefined] => ['disk', diskCheck(free).detail]),
+      ['remote_access', REMOTE_HEALTH.ok], ['remote_access', REMOTE_HEALTH.unknown], ...Object.values(REMOTE_HEALTH.down).map((l): [string, string] => ['remote_access', l]),
+      ...[0, 1, 2, 14].map((d): [string, string] => ['remote_access', REMOTE_HEALTH.expiring(d)]),
+      ...Object.values(MODEL_HEALTH).flatMap((l): Array<[string, string]> => [['ollama', l], ['standby_model', l]]),
+      ...[1, 2, 40].map((n): [string, string] => ['postgres', DATABASE_HEALTH.largeObjects(n)]),
+      ['backup', BACKUP_HEALTH.failed], ['files_backup', BACKUP_HEALTH.filesNone], ['files_backup', BACKUP_HEALTH.filesFailed], ['offsite_backup', BACKUP_HEALTH.filesOffsiteNone], ['offsite_backup', BACKUP_HEALTH.filesOffsiteFailed],
+      ...[0, 1, 30].flatMap((h): Array<[string, string]> => [['files_backup', BACKUP_HEALTH.filesAge(h)], ['offsite_backup', BACKUP_HEALTH.filesOffsiteAge(h)]]),
+      ...['today', 'yesterday', '6 days ago'].flatMap((w): Array<[string, string]> => [['offsite_drill', BACKUP_HEALTH.drillPassed(w)], ['offsite_drill', BACKUP_HEALTH.drillFailed(w)]]),
+      ...[9, 13, 14, 400].map((d): [string, string] => ['offsite_drill', BACKUP_HEALTH.drillLate(d)]),
+      ['deploy_hold', UPKEEP_HEALTH.neverChecked],
+      ...[0, 59_000, 60_000, 45 * 60_000].map((ms): [string, string] => ['deploy_hold', UPKEEP_HEALTH.checked(ms)]),
+      ...[61 * 60_000, 5 * 3_600_000, 47 * 3_600_000, 9 * 86_400_000].map((ms): [string, string] => ['deploy_hold', UPKEEP_HEALTH.notChecked(ms)]),
+    ];
+    expect(lines.length).toBeGreaterThan(55);
+    for (const [component, line] of lines) said(component, line!);
+    // What each of the checks from a reading can say is one of the lines above: none is put together where it is returned.
+    for (const r of [{ state: 'unknown' }, { state: 'ok' }, { state: 'ok', expiresAt: new Date(now.getTime() + 86_400_000) }, { state: 'down', why: 'offline' }] as const) said('remote_access', remoteAccessCheck(r, now).detail!);
+    const machine = readFileSync(join(SRC, 'health', 'machine.ts'), 'utf8');
+    expect(machine.match(/\bdetail: /g)).toHaveLength(16);
+    // (One of them chooses between two of the fixed sentences: loaded, or installed.)
+    expect(machine.match(/detail: models\.loaded\.has\(name\) \? MODEL_HEALTH\.loaded : MODEL_HEALTH\.installed/g)).toHaveLength(1);
+    expect(machine.match(/detail: (REMOTE_HEALTH|MODEL_HEALTH)\.[\w.[\]]+(\([\w.]*\))?/g)).toHaveLength(11);
+    // (The other four are free space's own: a whole number of gigabytes in one of three fixed sentences, or that it could not be read.)
+    expect(machine.match(/detail: (`This Mac [^`]*\$\{gigabytes\(free\)\} free\.`|'Flint couldn’t read how much space is free\.')/g)).toHaveLength(4);
+    // The names are the ones Settings > Health and the digest show.
+    expect([HEALTH_NAMES.disk, HEALTH_NAMES.remote_access, HEALTH_NAMES.standby_model, HEALTH_NAMES.files_backup, HEALTH_NAMES.offsite_drill]).toEqual(['Disk Space', 'Remote Access', 'Standby Model', 'Files Backup', 'Offsite Restore Test']);
+    expect(digestBody({ relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 }, ['disk', 'offsite_drill'])).toContain('Disk Space and Offsite Restore Test');
+    // Removing old backups by hand: sentences, counts and sizes.
+    for (const o of [
+      { did: 'nothing', would: 0, megabytes: 0, kept: 0, removed: 0, failed: 0 }, { did: 'nothing', would: 0, megabytes: 0, kept: 7, removed: 0, failed: 0 }, { did: 'held', would: 0, megabytes: 0, kept: 12, removed: 0, failed: 0 },
+      { did: 'waiting', would: 3, megabytes: 9, kept: 10, removed: 0, failed: 0 }, { did: 'removed', would: 3, megabytes: 9, kept: 10, removed: 3, failed: 0 }, { did: 'failed', would: 3, megabytes: 9, kept: 11, removed: 2, failed: 1 },
+    ] as const) {
+      for (const line of pruneLines(o)) {
+        expect(noteProblems(JOB_WORDS['backup.prune']!, line), line).toEqual([]);
+        for (const re of NEVER) expect(line, line).not.toMatch(re);
+      }
+    }
+    expect(JOB_WORDS['backup.prune']).toBe('Backup Cleanup');
   });
 
   it('the inventory is not empty by accident', () => {

@@ -12,6 +12,14 @@
  *  - A vendor at 100% of its cap; once per vendor a day, and not when the
  *    server already said so today.
  *  - A migration marked failed (~/.flint/runtime/migrate-failed); once per sha.
+ *  - The Mac nearly full (under 5 GB free): critical; once a day while it lasts.
+ *  - No offsite copy written in 72 hours (the database's; or, when that one is
+ *    current, the files'); once per last good copy.
+ *  - Remote access: its sign-in runs out within 14 days (once, and once more
+ *    within 3); or it has been down 30 minutes (once per outage).
+ *  - The deploy job has not looked for an update in 3 hours of this runtime
+ *    being up, while updates are not paused; once per stall.
+ *  - The MacBook has not tested an offsite copy in 5 weeks; once per last test.
  *
  * CI failing on flint needs no watchdog: the github source's own event is the
  * critical rule's input.
@@ -22,7 +30,9 @@ import { localDay, localDayBounds } from '@flint/policy';
 import type { Config } from '../config.js';
 import type { Db, Tx } from '../db.js';
 import { markProcessed, recordEvent, refreshUndecided, type Enqueue } from '../events/record.js';
-import { faultAt } from '../config.js';
+import { faultAt, offsiteFolder, runtimeEnv } from '../config.js';
+import { lastUpdateCheck, offsiteWanted, pausedMarkThere } from './checks.js';
+import { DISK_FULL_BYTES, EXPIRY_WARN_DAYS, daysUntil, type MachineReading } from './machine.js';
 
 export interface Raised {
   type: string;
@@ -35,6 +45,12 @@ export interface Raised {
 
 export const DOWN_AFTER_MS = 30 * 60_000;
 export const BACKUP_STALE_MS = 36 * 3_600_000;
+/** No copy written offsite in this long is said once (Health has shown it as late since 26 hours). */
+export const OFFSITE_STALE_MS = 72 * 3_600_000;
+/** The deploy job looks every two minutes: this long without a look, it has stopped. */
+export const UPDATES_STALLED_MS = 3 * 3_600_000;
+/** A weekly test: five weeks without one, the MacBook has stopped testing. */
+export const OFFSITE_DRILL_STALE_MS = 35 * 86_400_000;
 /** Whose services are watched: Flint's own, and Nexus's. */
 const WATCHED = /^service:(launchd:com\.(flint|nexus)\.[A-Za-z0-9._-]+|endpoint:[A-Za-z0-9._-]+)$/;
 
@@ -49,7 +65,83 @@ export function isDown(key: string, state: unknown): boolean | undefined {
   return typeof s.running === 'boolean' ? !s.running : undefined;
 }
 
-export async function watchdog(db: Db, config: Pick<Config, 'home' | 'tz'>, now: Date): Promise<Raised[]> {
+/** Is the offsite folder iCloud Drive (the default)? Read from the backup settings by name; unreadable, it is not said to be. */
+function offsiteIsICloud(home: string): boolean {
+  try {
+    return offsiteFolder(home, runtimeEnv(join(home, '.flint', 'backup.env'), {}).FLINT_OFFSITE_DIR).icloud;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Since when this component has been down: its first down check since it was last seen working (normal, degraded)
+ * or off. A check that could not tell (unknown) between two downs does not start the count again: something in
+ * trouble answers slowly, and "could not be read" is not "it is back".
+ */
+async function downSince(db: Db, component: string): Promise<Date | undefined> {
+  const up = await db.healthCheck.findFirst({ where: { component, status: { in: ['ok', 'degraded', 'disabled'] } }, orderBy: { at: 'desc' }, select: { at: true } });
+  return (await db.healthCheck.findFirst({ where: { component, status: 'down', ...(up ? { at: { gt: up.at } } : {}) }, orderBy: { at: 'asc' }, select: { at: true } }))?.at;
+}
+
+/** The conditions that come from the Mac itself and from the offsite copies (P7). `machine`: this run's reading, when there is one. */
+async function machineConditions(db: Db, config: Pick<Config, 'home' | 'tz'>, now: Date, machine: MachineReading | undefined): Promise<Raised[]> {
+  const out: Raised[] = [];
+  const t = now.getTime();
+
+  if (machine?.freeBytes !== undefined && machine.freeBytes < DISK_FULL_BYTES) {
+    out.push({ type: 'disk.low', ref: `low:${localDay(config.tz, now)}`, occurredAt: now, payload: { gb: Math.floor(machine.freeBytes / 1e9) } });
+  }
+
+  if (machine?.remote.state === 'ok' && machine.remote.expiresAt) {
+    const days = daysUntil(machine.remote.expiresAt, now);
+    // Said once at two weeks, and once more in the last three days.
+    if (days <= EXPIRY_WARN_DAYS) out.push({ type: 'remote_access.expiring', ref: `${machine.remote.expiresAt.toISOString().slice(0, 10)}:${days <= 3 ? 3 : EXPIRY_WARN_DAYS}`, occurredAt: now, payload: { days } });
+  }
+  if (machine?.remote.state === 'down') {
+    const since = await downSince(db, 'remote_access');
+    if (since && t - since.getTime() >= DOWN_AFTER_MS) out.push({ type: 'remote_access.down', ref: `down:${since.toISOString()}`, occurredAt: now, payload: { downMinutes: Math.floor((t - since.getTime()) / 60_000) } });
+  }
+
+  // Offsite copies: only once Will's key is here (before that none is sent, on purpose).
+  if (offsiteWanted(config.home)) {
+    const newest = (kind: string, location: string) => db.backupRun.findFirst({ where: { kind, location, status: 'ok' }, orderBy: { startedAt: 'desc' }, select: { id: true, startedAt: true } });
+    const local = await newest('pg_dump_flint', 'local');
+    const facts = { icloud: offsiteIsICloud(config.home) ? 1 : 0, local: local && t - local.startedAt.getTime() <= 26 * 3_600_000 ? 1 : 0 };
+    const database = await newest('pg_dump_flint', 'icloud');
+    // With no copy ever written there is no last good one to count from: the first is what the nightly job's own note is for.
+    if (database && t - database.startedAt.getTime() > OFFSITE_STALE_MS) {
+      out.push({ type: 'offsite.stale', ref: `database:after:${database.id}`, occurredAt: now, payload: { days: Math.floor((t - database.startedAt.getTime()) / 86_400_000), what: 'database', ...facts } });
+    } else {
+      // The database's copy is current: the files' copy is looked at on its own (one note for one outage, never two).
+      const files = await newest('flint_tar', 'icloud');
+      if (files && t - files.startedAt.getTime() > OFFSITE_STALE_MS) {
+        out.push({ type: 'offsite.stale', ref: `files:after:${files.id}`, occurredAt: now, payload: { days: Math.floor((t - files.startedAt.getTime()) / 86_400_000), what: 'files', ...facts } });
+      }
+    }
+  }
+
+  // The deploy job stopped looking for updates, and nobody paused them (a pause has its own line in Health and its
+  // own note; so has a pause that was lifted and not yet picked up). Three hours are counted from the last look or
+  // from when this runtime started, whichever is later: the Mac being off, and a mark that came back from a backup
+  // with its old time, are not three hours of not looking.
+  const looked = lastUpdateCheck(config.home);
+  if (looked !== undefined && !existsSync(join(config.home, '.flint', 'deploy-hold')) && !pausedMarkThere(config.home)) {
+    const instance = await db.runtimeInstance.findFirst({ where: { stoppedAt: null }, orderBy: { startedAt: 'desc' }, select: { startedAt: true } });
+    if (t - Math.max(looked, instance?.startedAt.getTime() ?? 0) > UPDATES_STALLED_MS) {
+      out.push({ type: 'auto_update.stalled', ref: `since:${new Date(looked).toISOString()}`, occurredAt: now, payload: { hours: Math.floor((t - looked) / 3_600_000) } });
+    }
+  }
+
+  // The MacBook's test of the offsite copies: only once it has reported one (it has its own line in Health from then on).
+  const tested = await db.backupRun.findFirst({ where: { location: 'icloud', restoreTestedAt: { not: null } }, orderBy: { restoreTestedAt: 'desc' }, select: { id: true, restoreTestedAt: true } });
+  if (tested?.restoreTestedAt && t - tested.restoreTestedAt.getTime() > OFFSITE_DRILL_STALE_MS) {
+    out.push({ type: 'offsite_drill.stale', ref: `after:${tested.id}`, occurredAt: now, payload: { weeks: Math.floor((t - tested.restoreTestedAt.getTime()) / (7 * 86_400_000)) } });
+  }
+  return out;
+}
+
+export async function watchdog(db: Db, config: Pick<Config, 'home' | 'tz'>, now: Date, machine?: MachineReading): Promise<Raised[]> {
   const out: Raised[] = [];
 
   const services = await db.entity.findMany({ where: { kind: 'service', status: 'active' }, select: { id: true, key: true, state: true } });
@@ -73,7 +165,8 @@ export async function watchdog(db: Db, config: Pick<Config, 'home' | 'tz'>, now:
     out.push({ type: 'backup.stale', ref: `after:${backup.id}`, occurredAt: now, payload: { hoursSince: Math.floor((now.getTime() - backup.startedAt.getTime()) / 3_600_000) } });
   }
 
-  const drill = await db.backupRun.findFirst({ where: { restoreTestedAt: { not: null } }, orderBy: { restoreTestedAt: 'desc' }, select: { id: true, restoreOk: true, restoreTestedAt: true, restoreDetail: true } });
+  // (The copies on this Mac: a test of an offsite copy is the MacBook's, and is not this one.)
+  const drill = await db.backupRun.findFirst({ where: { location: 'local', restoreTestedAt: { not: null } }, orderBy: { restoreTestedAt: 'desc' }, select: { id: true, restoreOk: true, restoreTestedAt: true, restoreDetail: true } });
   if (drill?.restoreOk === false) {
     const mismatches = (drill.restoreDetail as { mismatches?: unknown } | null)?.mismatches;
     out.push({ type: 'drill.failed', ref: drill.id, occurredAt: now, payload: { mismatches: Array.isArray(mismatches) ? mismatches.length : 0 } });
@@ -95,6 +188,7 @@ export async function watchdog(db: Db, config: Pick<Config, 'home' | 'tz'>, now:
       out.push({ type: 'migrate.failed', ref: sha, occurredAt: now, payload: { sha } });
     }
   }
+  out.push(...(await machineConditions(db, config, now, machine)));
   return out;
 }
 

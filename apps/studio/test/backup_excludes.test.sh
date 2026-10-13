@@ -5,6 +5,7 @@
 # On 2026-09-30 every offsite (iCloud) archive held secrets.env.bak*, plist
 # backups carrying FLINT_TOKEN, mcp.json with the search key and the Nexus
 # bearer token, nexus-responder.json and legion/*.sh with inline credentials.
+source "${0:A:h}/temp_root.zsh"   # one temp folder for this run, removed when the test ends
 set -eu
 here=${0:A:h}
 FLINT_BACKUP_DEFINE_ONLY=1 source "$here/../backup_flint.sh"

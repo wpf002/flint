@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.flint.backup-catchup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/willfoti/flint/apps/studio/backup_flint.sh</string>
+    <string>--catch-up</string>
+  </array>
+  <!-- Once, when you log in: a night's files backup that was missed (the Mac was off at 02:30) is made
+       then. It does nothing at all unless FLINT_BACKUP_CATCHUP=on is in ~/.flint/backup.env, and nothing
+       when the newest archive is under 26 hours old. No schedule of its own: com.flint.backup has that. -->
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/willfoti/.flint/backup.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/willfoti/.flint/backup.err.log</string>
+</dict>
+</plist>

@@ -410,6 +410,7 @@ describe('every rule the panel has words for', () => {
     'backup.local': 'The backup may run on its own, once a day',
     'backup.offsite': 'The offsite copy may be sent on its own, once a day',
     'restore.drill': 'The restore test may run on its own, once a week',
+    'backup.prune': 'The backup cleanup may run on its own, once a day',
   };
 
   it('has its sentence, word for word: all of them, not only the ones a promotion table holds', () => {

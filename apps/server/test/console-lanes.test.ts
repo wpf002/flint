@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
-import { HEALTH_NAMES, JOB_WORDS, SERVICE_SHORT, SERVICE_WORDS, SOURCE_NAMES, jobFailedNote, noteProblems, serviceWords, titleCase } from '@flint/policy';
+import { HEALTH_GROUPS, HEALTH_GROUP_OTHER, HEALTH_NAMES, JOB_WORDS, SERVICE_SHORT, SERVICE_WORDS, SOURCE_NAMES, healthGroup, jobFailedNote, noteProblems, serviceWords, titleCase } from '@flint/policy';
 
 const html = readFileSync(join(__dirname, '..', '..', 'console', 'index.html'), 'utf8');
 const lanesJs = /<script id="lanes-js">([\s\S]*?)<\/script>/.exec(html)![1]!;
@@ -757,6 +757,70 @@ describe('Settings: Health', () => {
   it('names the components as @flint/policy does, so the morning digest says the same names', () => {
     expect(JSON.parse(JSON.stringify(run('HEALTH_NAMES')))).toEqual(HEALTH_NAMES);
     expect(JSON.parse(JSON.stringify(run('SOURCE_NAMES')))).toEqual(SOURCE_NAMES);
+  });
+
+  it('lists the components under four headers, in @flint/policy’s own groups and order; one it has never heard of is still shown', async () => {
+    expect(JSON.parse(JSON.stringify(run('HEALTH_GROUPS')))).toEqual(HEALTH_GROUPS.map((g) => [g.header, [...g.components]]));
+    expect(run('HEALTH_GROUP_OTHER')).toBe(HEALTH_GROUP_OTHER);
+    for (const c of ['disk', 'remote_access', 'ollama', 'offsite_backup', 'forecasts', 'source:github', 'something_new']) expect(run(`healthGroup(${JSON.stringify(c)})`), c).toBe(healthGroup(c));
+    const ok = (component: string, detail: string | null = null) => ({ component, status: 'ok', detail, at: AT });
+    routes['/runtime/health'] = report([
+      // In no order at all, as the runtime may send them.
+      ok('remote_access', 'Your phone and MacBook can reach Flint.'), ok('ledger'), ok('disk', 'This Mac has 212 GB free.'), ok('restore_drill', 'The last restore test was today.'),
+      ok('ollama', 'The local model is loaded.'), ok('postgres'), ok('backup', 'The last backup is 7 hours old.'), ok('source:github'), ok('forecasts', 'Last night’s forecasts ran for 11 numbers.'),
+      { component: 'standby_model', status: 'disabled', detail: null, at: AT }, ok('files_backup', 'The last files backup is 7 hours old.'), ok('offsite_backup', 'The last offsite copy is 6 hours old.'),
+      ok('a_row_from_a_later_flint', 'It says something new.'), { component: 'source:railway', status: 'disabled', detail: null, at: AT },
+    ]);
+    run('HEALTH_ALL=true');
+    run('loadHealth()');
+    await settle();
+    const last = ids['sethealth-last']!;
+    expect(last.shown()).toContain('All Systems Normal');
+    expect(last.shown()).toContain('All Components14');
+    // The headers, in order, each followed by its rows in the group's own order; a row nobody placed is under THIS MAC, by its name.
+    const box = last.all().find((e) => e.children.some((c) => c.className === 'ghd'))!;
+    const lines = box.children.map((c) => (c.className === 'ghd' ? `# ${c.textContent}` : c.shown()));
+    expect(lines).toEqual([
+      '# MODELS', 'Local ModelThe local model is loaded.Normal', 'Standby ModelOff',
+      '# BACKUPS', 'BackupsThe last backup is 7 hours old.Normal', 'Files BackupThe last files backup is 7 hours old.Normal', 'Offsite BackupThe last offsite copy is 6 hours old.Normal', 'Restore TestThe last restore test was today.Normal',
+      '# THIS MAC', 'Disk SpaceThis Mac has 212 GB free.Normal', 'DatabaseNormal', 'Prediction ChecksNormal', 'ForecastsLast night’s forecasts ran for 11 numbers.Normal',
+      'A Row from a Later FlintIt says something new.Normal', 'GitHubNormal', 'RailwayOff',
+      '# REMOTE ACCESS', 'Remote AccessYour phone and MacBook can reach Flint.Normal',
+    ]);
+    for (const header of lines.filter((l) => l.startsWith('# '))) expect(header).toBe(header.toUpperCase());
+    // A group with nothing in it has no header.
+    routes['/runtime/health'] = report([ok('postgres'), ok('backup')]);
+    run('loadHealth()');
+    await settle();
+    const two = ids['sethealth-last']!.all().find((e) => e.children.some((c) => c.className === 'ghd'))!;
+    expect(two.children.map((c) => (c.className === 'ghd' ? `# ${c.textContent}` : c.shown()))).toEqual(['# BACKUPS', 'BackupsNormal', '# THIS MAC', 'DatabaseNormal']);
+    run('HEALTH_ALL=false');
+  });
+
+  it('what needs a look stays first, in its own words, whatever group it is in: a nearly full Mac, a sign-in running out, a copy that did not go', async () => {
+    routes['/runtime/health'] = report([
+      { component: 'postgres', status: 'ok', detail: null, at: AT },
+      { component: 'disk', status: 'down', detail: 'This Mac is nearly full, with 3 GB free.', at: AT },
+      { component: 'remote_access', status: 'degraded', detail: 'Remote access needs a new sign-in in 12 days.', at: AT },
+      { component: 'offsite_backup', status: 'down', detail: 'The last offsite copy is 80 hours old.', at: AT },
+      { component: 'files_backup', status: 'degraded', detail: 'The last files backup failed.', at: AT },
+      { component: 'offsite_drill', status: 'degraded', detail: 'Your MacBook hasn’t tested an offsite copy in 5 weeks.', at: AT },
+      { component: 'standby_model', status: 'degraded', detail: 'The standby model isn’t installed.', at: AT },
+    ]);
+    run('loadHealth()');
+    await settle();
+    const top = ids.sethealth!.shown();
+    expect(top).toContain('6 Issues');
+    // Worst first, then by name.
+    const order = ['Disk SpaceThis Mac is nearly full, with 3 GB free.', 'Offsite BackupThe last offsite copy is 80 hours old.', 'Files BackupThe last files backup failed.',
+      'Offsite Restore TestYour MacBook hasn’t tested an offsite copy in 5 weeks.', 'Remote AccessRemote access needs a new sign-in in 12 days.', 'Standby ModelThe standby model isn’t installed.'];
+    let at = -1;
+    for (const line of order) {
+      const i = top.indexOf(line);
+      expect(i, line).toBeGreaterThan(at);
+      at = i;
+    }
+    expect(top).not.toMatch(/disk\b|remote_access|offsite_|standby_model|files_backup/);
   });
 
   it('sits last, quietly, when all is normal; says when checks stopped', async () => {

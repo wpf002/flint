@@ -22,6 +22,8 @@ studio=${here:h}
 repo=${studio:h:h}
 source "$studio/recovery_lib.sh"
 rebuild="$studio/rebuild.sh"
+# (This test keeps its own folders, not a run folder from temp_root.zsh: it sweeps what an earlier run that was
+# killed left in the temp folder, databases still running included, and could not find them inside another's.)
 TMP="${${TMPDIR:-/tmp}%/}"
 
 skip() {
@@ -297,11 +299,11 @@ check "a member whose owner has a space in its name is restored like any other" 
 check "the planted connector list was never read: nothing it names was run" '[ ! -e "$fx/the-planted-connector-ran" ] && ! grep -rq "the-planted-connector-ran" "$ndata" 2>/dev/null'
 check "the planted settings file was not unpacked: the database settings are this rebuild own" '! grep -rq "db.example.com" "$ndata" && ! grep -rq "PLANTED_SETTING" "$ndata"'
 check "future backups are encrypted to your key, worked out from the key itself, not the one in the archive" '[ "$(<"$ndata/backup-age-recipient")" = "$recipient" ] && ! grep -rqF -- "$FORGED_RECIPIENT" "$nhome" && [ "$(stat -f %Lp "$ndata/backup-age-recipient")" = 600 ]'
-check "it names what else the backup held and was not put back" '[[ "$out" == *"The backup also held "*" other thing(s) that a rebuild does not put back: "*"MCP.JSON"* && "$out" == *"that a rebuild does not put back: "*"autonomy.json"* ]]'
+check "it names what else the backup held and was not put back" '[[ "$out" == *"The backup also held "*" other things that a rebuild does not put back: "*"MCP.JSON"* && "$out" == *"that a rebuild does not put back: "*"autonomy.json"* ]]'
 check "no link from the backup was kept" '[ ! -e "$ndata/runtime/current" ] || [[ "$(readlink "$ndata/runtime/current")" == "$ndata/runtime/releases/"* ]]'
 check "the old Mac's hardware key and tailnet name are gone" '[ ! -e "$ndata/approval-key.se" ] && [ ! -e "$ndata/tailscale-url.txt" ]'
 check "a connector with source in the repo is rebuilt from the repo" '[ -s "$ndata/connectors/web-server.mjs" ] && ! grep -q "restored-bundle" "$ndata/connectors/web-server.mjs"'
-check "a connector with no source is left out, and named" '[ ! -e "$ndata/connectors/ghost-server.mjs" ] && [[ "$out" == *"Flint left out 1 connector(s) it has no source for: ghost-server."* ]]'
+check "a connector with no source is left out, and named" '[ ! -e "$ndata/connectors/ghost-server.mjs" ] && [[ "$out" == *"Flint left out 1 connector it has no source for: ghost-server."* ]]'
 check "the rebuild is marked finished" '[ ! -e "$ndata/.rebuild-in-progress" ]'
 
 # Secrets: every one Flint can make is new, and nothing of the old Mac's came back.

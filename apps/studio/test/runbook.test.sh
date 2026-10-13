@@ -3,6 +3,7 @@
 # it tells the owner to type exists, every test it names as proof exists, no
 # entry asks for more than seven steps, and nothing in it names a real machine.
 # Run: zsh apps/studio/test/runbook.test.sh
+source "${0:A:h}/temp_root.zsh"   # one temp folder for this run, removed when the test ends
 set -u
 here=${0:A:h}
 repo=${here:h:h:h}

@@ -11,6 +11,7 @@ import { CAP_WORDS, jobFailedNote, localDay, resolveTier, type JobFailure, type 
 import type { Db } from '../db.js';
 import { activePolicies, claimProposal, createProposal, rejectProposal } from '../governance/proposals.js';
 import { claim } from '../governance/counters.js';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { needsSetup } from './backup.js';
 
 export type Command = 'backup' | 'offsite' | 'drill';
@@ -20,14 +21,28 @@ export async function gate(db: Db, cmd: Command, tz: string, rp: WebAuthnRelying
   return cardGate(db, { action: ACTION[cmd], job: cmd, templateId: `nightly.${cmd}` }, tz, rp, now);
 }
 
+/** A nightly job's card: the action it asks for, the job's own name, and the card's template. */
+export interface CardJob {
+  action: string;
+  job: string;
+  templateId: string;
+  /** What the card says beside its day: values the run itself worked out (how much a cleanup would remove, and a digest of which copies), never anyone's words. */
+  args?: Readonly<Record<string, number | string>>;
+  /** What it does cannot be undone (it deletes): the card says so, and asks on its own. */
+  destructive?: boolean;
+  /** Why it is asking, when the usual sentence does not fit. */
+  reason?: string;
+}
+
 /**
  * The nightly card for any job that runs at APPROVAL until promoted (backups,
- * the drill, retention): run under the cap once promoted; otherwise run on a
- * card Will approved, or offer tonight's card and wait.
+ * the drill, retention, removing old backups): run under the cap once
+ * promoted; otherwise run on a card Will approved, or offer tonight's card and
+ * wait.
  */
 export async function cardGate(
   db: Db,
-  job: { action: string; job: string; templateId: string },
+  job: CardJob,
   tz: string,
   rp: WebAuthnRelyingParty | undefined,
   now: Date,
@@ -67,7 +82,7 @@ export async function cardGate(
  * Also filed straight after a run on a card has failed (cli.ts), so the note
  * that says "approve its next card" points at a card that is there.
  */
-export async function offerCard(db: Db, job: { action: string; job: string; templateId: string }, tz: string, rp: WebAuthnRelyingParty | undefined, now: Date): Promise<void> {
+export async function offerCard(db: Db, job: CardJob, tz: string, rp: WebAuthnRelyingParty | undefined, now: Date): Promise<void> {
   const { action } = job;
   const cmd = job.job;
   // Flint's day, not UTC's: a card offered at 23:30 Chicago time is that night's.
@@ -75,11 +90,12 @@ export async function offerCard(db: Db, job: { action: string; job: string; temp
   const pending = await db.proposal.findMany({ where: { action, origin: `runtime:${cmd}`, status: 'pending', expiresAt: { gt: now } }, orderBy: { createdAt: 'desc' } });
   const tonight = pending.find((p) => (p.args as { day?: unknown } | null)?.day === day);
   if (!tonight) {
+    const from = { source: 'template' as const, ref: job.templateId, tainted: false };
     await createProposal(db, {
-      kind: 'tool_call', origin: `runtime:${cmd}`, templateId: job.templateId, action, args: { day },
-      argsProvenance: { day: { source: 'template', ref: job.templateId, tainted: false } },
-      tainted: false, sensitivity: 'ops', destructive: false, consequential: false, ttlMinutes: cmd === 'drill' ? 7 * 24 * 60 + 120 : 26 * 60,
-      reason: `It waits for your approval each ${cmd === 'drill' ? 'week' : 'night'} until you let it run on its own.`,
+      kind: 'tool_call', origin: `runtime:${cmd}`, templateId: job.templateId, action, args: { ...job.args, day },
+      argsProvenance: { ...Object.fromEntries(Object.keys(job.args ?? {}).map((k) => [k, from])), day: from },
+      tainted: false, sensitivity: 'ops', destructive: job.destructive === true, consequential: false, ttlMinutes: cmd === 'drill' ? 7 * 24 * 60 + 120 : 26 * 60,
+      reason: job.reason ?? `It waits for your approval each ${cmd === 'drill' ? 'week' : 'night'} until you let it run on its own.`,
     }, 'runtime');
   }
   for (const old of pending) {
@@ -157,3 +173,32 @@ export async function tellFailure(
   await env.notify(note.title, note.body);
   return { ...note, next };
 }
+
+/**
+ * A nightly job that stopped before it could tell what it may do (its first
+ * question to the database had no answer): until now it ended in a log line
+ * and told no one. The words promise nothing about its next run and point at
+ * Health (jobFailedNote, `stopped`). One note a night: the backup, the offsite
+ * copy and the restore test run one after another, and all three stop on the
+ * same trouble. `mark` is a file that remembers the day one was sent.
+ */
+export async function tellStopped(
+  cmd: Command,
+  env: { icloud: boolean; tz: string; now: Date; mark: string; notify: (title: string, body: string) => Promise<unknown> },
+): Promise<{ title: string; body: string } | undefined> {
+  const day = localDay(env.tz, env.now);
+  try {
+    if (existsSync(env.mark) && readFileSync(env.mark, 'utf8').trim() === day) return undefined;
+  } catch {
+    // Unreadable: said again rather than not at all.
+  }
+  const note = jobFailedNote(ACTION[cmd], { next: 'stopped', icloud: env.icloud });
+  await env.notify(note.title, note.body);
+  try {
+    writeFileSync(env.mark, `${day}\n`, { mode: 0o600 });
+  } catch {
+    // The note went; a mark that cannot be written only means the next step says it too.
+  }
+  return note;
+}
+

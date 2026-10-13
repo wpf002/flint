@@ -204,6 +204,7 @@ runtime.env  FLINT_RP_ORIGINS                     derive    install-runtime
 runtime.env  OLLAMA_URL                           derive    install-runtime
 runtime.env  OLLAMA_NUM_CTX                       derive    install-runtime
 runtime.env  FLINT_TRIAGE_MODEL                   derive    install-runtime
+runtime.env  FLINT_LOCAL_FALLBACK_MODEL           derive    install-runtime
 runtime.env  FLINT_BUDGET_ANTHROPIC_DAILY_USD     derive    install-runtime
 runtime.env  FLINT_BUDGET_ANTHROPIC_MONTHLY_USD   derive    install-runtime
 runtime.env  FLINT_BUDGET_OPENAI_DAILY_USD        derive    install-runtime
@@ -217,6 +218,7 @@ runtime.env  FLINT_BUDGET_TAVILY_MONTHLY_USD      derive    install-runtime
 backup.env  FLINT_DB_BACKUP_URL                   generate  bootstrap-db
 backup.env  FLINT_DB_RESTORE_URL                  generate  bootstrap-db
 backup.env  FLINT_OFFSITE_DIR                     restore   homepath
+backup.env  FLINT_BACKUP_CATCHUP                  restore   onoff
 backup.env  FLINT_BACKUP_AGE_RECIPIENT            reenter   Backup-Key
 
 # ---- the local model's LaunchAgent: com.flint.ollama ---------------------------------------
