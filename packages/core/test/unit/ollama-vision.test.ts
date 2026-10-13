@@ -56,6 +56,19 @@ describe('OllamaProvider and a model that can see', () => {
     expect(p.getCapabilities('eyes:30b').pdfInput).toBeUndefined();
   });
 
+  // What the adapter SAYS a model can see and what it SENDS a model are one answer: the caller's. The built-in
+  // table says of no model that it can see, whatever its name suggests, so a turn is never routed to a local model
+  // as one that sees and then sent to it without its picture.
+  it('with nothing said by the caller, no model is said to see, whatever it is called, and none is sent a picture', async () => {
+    const f = recordingFetch();
+    const p = new OllamaProvider({ fetch: f.impl });
+    for (const name of ['eyes:30b', 'looks-like-a-vision-model:7b', 'unknown']) {
+      expect(p.getCapabilities(name).vision, name).not.toBe(true);
+      await p.generate({ model: name, messages: [user('what is this?', [PNG])] });
+    }
+    for (const body of f.parsed()) expect(body.messages.at(-1)!.images).toBeUndefined();
+  });
+
   it('another model on the same client is sent no picture: the note, as before', async () => {
     const f = recordingFetch();
     const p = new OllamaProvider({ fetch: f.impl, capabilities: sees });
