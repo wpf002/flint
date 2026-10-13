@@ -1040,8 +1040,9 @@ row says one of these, and never a number Flint doesn't have:
 | It says | When |
 | --- | --- |
 | "Flint expects about 4, with an 80% range of 2 to 6." | The forecast beat a plain guess on this number's own past. |
-| "There's no reliable trend, and a plain guess gives an 80% range of 0 to 3." | It didn't. Only the range is given, never a middle. |
-| "This number hasn't changed in 28 days." | There's nothing to forecast. |
+| "There's no reliable trend, and a plain guess gives an 80% range of 0 to 3." | With enough history to judge (56 days, or 26 weeks), it didn't. Only the range is given, never a middle. |
+| "It's too early to tell a trend, and a plain guess gives an 80% range of 0 to 3." | There's less history than that, so nothing has been judged yet. |
+| "This number hasn't changed in 24 days." | There's nothing to forecast. The count is of the days it really has, up to 28. |
 | "Yesterday's number isn't in yet, so there's no forecast for today." | Flint never forecasts from a made-up latest value. It waits a night. |
 | "Flint needs 24 days of history. It has 9." | Not enough history yet (19 weeks for a weekly number). |
 | "This number has no data yet." | Nothing has been kept for it. |
@@ -1055,24 +1056,51 @@ ranges held, and **Turn Off**.
 
 **Questions** is where Flint asks you about the predictions only you can
 settle: the ones it made in a chat. Each morning at 07:20 it picks up to five
-that have come due, oldest first. Each row is the prediction, what Flint said
-and when, and three buttons:
+that have come due, oldest first. Each row is the prediction in plain words
+and one line under it: "Flint said likely, around 70%, on Oct 3. It was due
+Oct 5 at 3:00 PM." Your answer is recorded as of that due time, so the row
+says it. Then three buttons:
 
-- **Yes** or **No** records the result as yours, as of the prediction's own
-  date. It's scored like any other.
+- **Yes** or **No** records the result as yours, as of the prediction's due
+  time. It's scored like any other.
 - **Skip** records that you skipped it and no result. The prediction runs out
   14 days after it was asked, unscored.
 
-An answer needs no signature: it's what you saw, not something Flint does. It
-is recorded once, and it can't be changed yet (see Known limits), so a wrong
-tap stays. A question you don't answer in 14 days goes away with its
-prediction. A prediction Flint made from text someone else wrote is shown in
-fixed words around the item's own name, never in that text.
+Nothing is recorded on one tap. The first tap arms the row: the other choices
+go away, and the row shows **Cancel** and one button that says what it will
+record (**Record Yes**, **Record No** or **Skip for Good**). The second tap
+records it. A double tap doesn't count as the second.
 
-Until you let Flint ask on its own (the action is `ledger.resolve.ask_will`,
-five a day), questions wait in the panel and nothing announces them. After
-that, the Predictions button shows a dot while any wait, and the morning
-summary adds one line: "Flint has 2 questions for you in Predictions."
+An answer needs no signature: it's what you saw, not something Flint does. It
+is recorded once and can't be changed yet (see Known limits), which is why it
+takes two taps. Each answer is in the audit trail (who, when, which
+prediction, which answer), so a wrong one can be found.
+
+**What Flint can't put in plain words, you can only skip.** That's a
+prediction about an item that's gone or about a person, about a number that
+isn't one of Flint's own, or one whose words came from outside text. Its row
+says "Flint made this prediction in a chat." and "Flint can't show what this
+one was about, so it can only be skipped.", and offers only **Skip**. The
+runtime refuses Yes or No for it whoever asks. One odd prediction never takes
+the tab down: a row that wouldn't fit is shown that same way.
+
+**The 14 days start when you're told.** Until you let Flint ask on its own
+(the action is `ledger.resolve.ask_will`, five a day), questions are asked
+quietly: they wait in the panel and nothing announces them. A question nobody
+announced never runs out. It stays in the list, and stays answerable, for as
+long as it takes. Once you let Flint ask on its own, the Predictions button
+shows a dot while any wait, the morning summary adds one line ("Flint has 2
+questions for you in Predictions."), and the 14 days begin: from then for the
+questions already waiting, and from when each is asked for new ones. A
+question you skipped you have seen, so that one runs out 14 days after it was
+asked either way.
+
+**With predictions switched off on this Mac** (`FLINT_PREDICT` not on),
+nothing is forecast, asked or scored. The panel still opens and says so on
+each tab. Two things are refused with "Predictions are switched off on this
+Mac.": turning predictions on, and answering a question. One thing still
+works: turning a number off, which only narrows what Flint does. Reading is
+unaffected.
 
 **Accuracy** says how Flint has done, by area, from the night's scores:
 
@@ -1094,10 +1122,16 @@ declined, and ones set aside with your approval.
 how many hours are on your calendar. They go from the runtime to the console
 when you open the panel, and nowhere else: not into chat, a note, a log or
 the audit trail, and never to an outside service. Until you open it the
-console asks only whether questions are waiting, which holds no number. The chat connector's token
-can't read these routes or answer a question for you. The audit trail records
-that you turned a number off or answered a question, by id, and never a
-number's value or a prediction's words.
+console asks only whether questions are waiting, which holds no number. When
+you close it, the console drops what it was showing, and the server tells the
+browser not to keep any of it. The chat connector's token can't read these
+routes or answer a question for you. The audit trail records that you turned
+a number off or answered a question, by id, and never a number's value or a
+prediction's words.
+
+Chat has its own, older view of Flint's track record (see "The scores can
+reach chat, when chat asks" below). For the spend and calendar areas it no
+longer includes the range loss.
 
 ### Checking predictions
 
@@ -1141,9 +1175,11 @@ Details. Nothing is voided, and nothing is recorded as yours.
      "condition unmet". If you took the advice, it's checked like the others.
 3. What can't be settled runs out. A prediction Flint can check itself runs
    out 72 hours after its time. One only you can answer runs out 14 days
-   after Flint asked you about it, and never before it asked. Flint asks in
-   the Predictions panel's Questions tab, up to five new ones a morning (see
-   "The Predictions panel").
+   after you were told its question waits, and never before. Flint asks in
+   the Predictions panel's Questions tab, up to five new ones a morning. A
+   question asked quietly, before you've let Flint ask on its own, hasn't
+   been announced to anyone, so its 14 days haven't started (see "The
+   Predictions panel").
 
 It never answers for you. A prediction only you resolve is never given to a
 resolver, and the database refuses any attempt. It never voids a prediction,
@@ -1215,6 +1251,8 @@ prediction's words, and never a number a prediction was about. Those totals
 go wherever the chat model runs, so with an outside model they leave this
 Mac. A group with nothing scored yet is given with no score at all, since a
 stored 0 would read as a perfect Brier score, or as a range that never held.
+For the spend and calendar areas chat is not given the range loss either: it
+is worked out from those numbers' own values, and chat has no use for it.
 
 **Settings > Health** has a row, **Prediction Checks**. It's Off until both
 switches are on. It needs a look when no check has run in 3 hours, when the
@@ -1225,7 +1263,7 @@ check ran in 26 hours. A restart buys 70 minutes and no more: a runtime that
 restarts every few hours and never checks still reads late, then Down. What
 ran out is said beside what was checked, never as checked.
 
-**Rolling it back:** turn `FLINT_PREDICT` off. All four jobs are unscheduled
+**Rolling it back:** turn `FLINT_PREDICT` off. All five jobs are unscheduled
 at the next start. Resolutions, daily numbers and forecasts already written
 stay (none is ever deleted), and each resolution says in its evidence that the
 sweep wrote it. Parts 2 and 3 have no database update of their own.
@@ -1388,7 +1426,9 @@ action so named.
   and the database has a place for each. Nothing carries either out yet, and
   the scores don't read corrections. Until a later part does both, a result
   stays as it was recorded. That includes your own answer to a question: a
-  wrong tap on Yes or No can't be undone yet.
+  wrong one can't be undone yet. It takes two taps to record one, and the
+  audit trail says which answer was given to which prediction, so a wrong
+  one can be found and put right once corrections are carried out.
 - **What an automatic check records.** The outcome of an automatic check is
   the runtime's own reading of its rows. The database holds it to the rest:
   who may resolve what, that the event isn't before the prediction or after
