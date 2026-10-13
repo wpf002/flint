@@ -146,11 +146,12 @@ describe('the cards the console lists (P3)', () => {
       card('ci', 'task.dispatch.ci_runner', { taskId: 'tkabcdefgh12345678', estCostMicros: 0 }),
       card('paid', 'task.dispatch.nexus_participant', { taskId: 'tkabcdefgh12345679', estCostMicros: 250_000 }, { kind: 'spend', estCostUsd: '0.2500' }),
       card('most', 'task.dispatch.local_worker', { taskId: 'tkabcdefgh1234567a', estCostMicros: 1_000_000_000 }),
-      // Not an estimate: negative, a fraction, text, past the card's own limit, missing, or args that were cleared.
+      // Not an estimate: negative, a fraction, text, past the card's own limit, finer than a card keeps, missing, or args that were cleared.
       card('neg', 'task.dispatch.ci_runner', { estCostMicros: -100 }),
       card('part', 'task.dispatch.ci_runner', { estCostMicros: 0.5 }),
       card('text', 'task.dispatch.ci_runner', { estCostMicros: '0' }),
       card('over', 'task.dispatch.ci_runner', { estCostMicros: 1_000_000_100 }),
+      card('fine', 'task.dispatch.ci_runner', { estCostMicros: 250_050 }),
       card('none', 'task.dispatch.ci_runner', { taskId: 'tkabcdefgh1234567b' }),
       card('gone', 'task.dispatch.ci_runner', null),
       // Not a dispatch: whatever its args or its row say of money, it is given no Cost.
@@ -171,7 +172,7 @@ describe('the cards the console lists (P3)', () => {
       const r = (await (await fetch(`http://[::1]:${(server.address() as AddressInfo).port}/proposals`)).json()) as { proposals: Array<Record<string, unknown>> };
       expect(r.proposals.map((p) => [p.id, p.cost ?? null])).toEqual([
         ['ci', { micros: 0 }], ['paid', { micros: 250_000 }], ['most', { micros: 1_000_000_000 }],
-        ['neg', null], ['part', null], ['text', null], ['over', null], ['none', null], ['gone', null],
+        ['neg', null], ['part', null], ['text', null], ['over', null], ['fine', null], ['none', null], ['gone', null],
         ['accept', null], ['cancel', null], ['asset', null], ['tool', null],
       ]);
       // The card is otherwise as it was: its args whole (what he signs is what the console shows), and nothing of the row's own estimate.

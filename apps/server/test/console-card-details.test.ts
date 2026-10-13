@@ -296,6 +296,41 @@ Object.assign(CARDS, {
   }),
   'a source with a secret': base({ fullName: 'world.source.enable', kind: 'world', origin: 'cli', args: { source: 'github', repos: ['wpf002/flint'], token: 'ghp_SECRET0123456789abcdef' } }),
 });
+/** P5's cards, as the runtime files them: turning an asset on, a task's dispatch (the whole task), accepting its result, cancelling it, ending it against its checks. */
+const TASK = 'tkk7Hq2LmN9pQr3sTv';
+const WATCHER = 'as-ci-watcher-v1';
+const watchTask = (over: Record<string, unknown> = {}) => ({
+  taskId: TASK, assetId: WATCHER, assetKind: 'ci_runner', title: 'Watch a CI Run', spec: { template: 'watch_ci', params: { item: ITEM, sha: null } },
+  acceptance: [{ id: 'a1', text: 'CI Run Passed', check: { type: 'deterministic', op: 'ci', sha: null } }, { id: 'a2', text: 'Names Only Your Items', check: { type: 'deterministic', op: 'refs_known' } }],
+  goalId: null, stepKey: null, dueAt: null, sensitivity: 'ops', tainted: false, estCostMicros: 0, ...over,
+});
+Object.assign(CARDS, {
+  'an asset to turn on': base({
+    fullName: 'asset.enable', kind: 'policy', consequential: true, reason: 'Approving turns this asset on.',
+    args: { assetId: WATCHER, kind: 'ci_runner', externalRef: 'github:ci:v1', name: 'CI Watcher', capabilities: ['watch_ci'], dispatchAction: 'task.dispatch.ci_runner', spends: false, entityId: null },
+  }),
+  'a task to watch a CI run': base({ fullName: 'task.dispatch.ci_runner', kind: 'task', reason: 'Approving runs this task.', cost: { micros: 0 }, args: watchTask() }),
+  // The same card with everything a dispatch can hold: a goal and its step, a due time, a commit to match, a cost, outside text, and Will's own check.
+  'a task with a goal, a due time and a cost': base({
+    fullName: 'task.dispatch.local_worker', kind: 'spend', tainted: true, sensitivity: 'personal', consequential: true, reason: 'Approving runs this task, which costs money.', cost: { micros: 250_000 },
+    args: watchTask({
+      assetId: 'as-local-tasks-v1', assetKind: 'local_worker', title: 'Summarize Items', spec: { template: 'summarize_items', params: { items: [ITEM, OTHER], titles: true } },
+      acceptance: [
+        { id: 'a1', text: 'Has Every Part', check: { type: 'deterministic', op: 'shape' } }, { id: 'a2', text: 'Stays Within Length', check: { type: 'deterministic', op: 'max_chars', max: 1600 } },
+        { id: 'a3', text: 'Has the Right Number', check: { type: 'deterministic', op: 'count', of: 'points', min: 1, max: 6 } }, { id: 'a4', text: 'Item Is as Expected', check: { type: 'deterministic', op: 'item', entityId: ITEM, key: 'state', value: 'merged' } },
+        { id: 'a5', text: 'Your Own Check', check: { type: 'judge', rubric: 'It reads clearly, and names what needs me first.' } },
+      ],
+      goalId: GOAL, stepKey: 's3', dueAt: '2026-10-20T21:59:00.000Z', sensitivity: 'personal', tainted: true, estCostMicros: 250_000,
+    }),
+  }),
+  'a task’s result to accept': base({
+    fullName: 'task.check_bar', kind: 'task', origin: 'runtime:tasks', templateId: 'task.accept.v1', reason: 'Approving accepts this result.',
+    args: { taskId: TASK, outputRef: 'out:0123456789abcdef', metBar: true, checks: 2, met: 2, by: 'flint:rule' },
+  }),
+  'a task to cancel': base({ fullName: 'task.cancel', kind: 'task', reason: 'Approving stops this task.', args: { taskId: TASK } }),
+  'a result accepted against its checks': base({ fullName: 'task.bar_override', kind: 'task', consequential: true, reason: 'Approving accepts this result against its checks.', args: { taskId: TASK, to: 'accepted' } }),
+  'a result rejected against its checks': base({ fullName: 'task.bar_override', kind: 'task', consequential: true, reason: 'Approving rejects this result against its checks.', args: { taskId: TASK, to: 'rejected' } }),
+});
 const KINDS = Object.keys(CARDS);
 const ALL: Array<Record<string, unknown> & { id: string }> = KINDS.map((k, i) => ({ ...CARDS[k]!, id: `pr${i}` }));
 const cardOf = (kind: string) => ALL[KINDS.indexOf(kind)]!;
@@ -328,8 +363,8 @@ const CADENCE: Record<string, string> = { P1D: 'Day', P3D: '3 Days', P1W: 'Week'
 const squash = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, '');
 /** A key whose value is a secret, by this test's own short list. */
 const SECRET = /(^|[a-z0-9_.-])(token|secret|password|signature)$/i;
-/** Fields a sentence states by its form ("Add the step", "may run on its own", "You mark this one"), not by a word of the value. */
-const BY_FORM = /(^|\.)(tier|op|kind|status|pattern)$/;
+/** Fields a sentence states by its form ("Add the step", "may run on its own", "You mark this one", "Flint checks it by rule"), not by a word of the value. */
+const BY_FORM = /(^|\.)(tier|op|kind|status|pattern)$|(^|\.)check\.type$/;
 
 interface Leaf {
   path: Array<string | number>;

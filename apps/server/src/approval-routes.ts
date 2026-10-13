@@ -75,13 +75,14 @@ const COST_MAX_MICROS = 1_000_000_000;
  * dollar: the estimate in the card's own args, which is what Will signs and
  * what the database compares with the task's row. Zero is an estimate too (a
  * task that costs nothing), so the console can say so in words. Any other card,
- * and one whose estimate is not a whole amount in range, has none: the console
- * then says nothing about cost, never a guess.
+ * and one whose estimate is not an amount the card could hold (whole, in
+ * hundreds, in range), has none: the console then says nothing about cost,
+ * never a guess or a rounded number.
  */
 export function cardCost(p: Pick<RuntimeProposal, 'action' | 'args'>): { micros: number } | undefined {
   if (!isTaskDispatch(p.action)) return undefined;
   const micros = p.args?.estCostMicros;
-  return typeof micros === 'number' && Number.isSafeInteger(micros) && micros >= 0 && micros <= COST_MAX_MICROS ? { micros } : undefined;
+  return typeof micros === 'number' && Number.isSafeInteger(micros) && micros >= 0 && micros <= COST_MAX_MICROS && micros % 100 === 0 ? { micros } : undefined;
 }
 
 /** The card's `cost` field, when it has an estimate to show. */

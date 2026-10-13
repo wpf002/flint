@@ -405,6 +405,27 @@
     /* Every target in the panel is at least 44 points tall on a phone: its tabs too. */
     #predseg button{height:44px;padding:0 14px;}
   }
+
+  /* tasks and assets: the panel's rows, in the same components */
+  #tasks .mh{height:auto;min-height:56px;padding-top:6px;padding-bottom:6px;}
+  #tasksttl{min-width:0;overflow:hidden;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;}
+  #taskbody{font-variant-numeric:tabular-nums;}
+  #taskfoot{flex-wrap:wrap;}
+  #taskfoot #taskmsg{flex-basis:100%;margin:0;}
+  #tasklist>.gsh:first-child{margin-top:8px;}
+  /* A title, a sentence or a value with no place to break wraps anywhere rather than run off the row. */
+  #taskbody .lbl b,#taskbody .lbl span,#taskbody .plead,#taskbody .empty span{overflow-wrap:anywhere;}
+  #taskbody .row .val{white-space:normal;overflow-wrap:anywhere;text-align:right;max-width:60%;}
+  #taskbody .plead+.gsh{margin-top:16px;}
+  /* The card shown in the panel: its details start at the panel's own edge. */
+  .tdetails{margin-left:4px;margin-right:4px;}
+  #setassets .row .st{flex:none;}
+  @media (max-width:600px){
+    #taskfoot .btn{flex:1;justify-content:center;} #taskfoot .note:not(:empty){flex-basis:100%;} #taskfoot .gconfirm{flex-basis:100%;}
+    /* Every target in the panel is at least 44 points tall on a phone: its tabs too. */
+    #taskseg button{height:44px;padding:0 14px;}
+    #taskbody .row.gwrap>.val{flex:1 1 100%;max-width:none;text-align:left;}
+  }
 </style>
 </head>
 <body>
@@ -429,6 +450,7 @@
   <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></symbol>
   <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/></symbol>
   <symbol id="i-back" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+  <symbol id="i-tasks" viewBox="0 0 24 24"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></symbol>
 </defs></svg>
 
 <div id="app">
@@ -449,6 +471,7 @@
       <div class="trail">
         <button class="ib" id="goalsbtn" onclick="openGoals()" aria-label="Goals" data-tip="Goals" hidden><svg class="i"><use href="#i-target"/></svg><span class="udot" id="goalsdot" hidden></span></button>
         <button class="ib" id="predbtn" onclick="openPredictions()" aria-label="Predictions" data-tip="Predictions" hidden><svg class="i"><use href="#i-chart"/></svg><span class="udot" id="preddot" hidden></span></button>
+        <button class="ib" id="tasksbtn" onclick="openTasks()" aria-label="Tasks" data-tip="Tasks" hidden><svg class="i"><use href="#i-tasks"/></svg><span class="udot" id="tasksdot" hidden></span></button>
         <button class="ib" id="apprbtn" onclick="openApprovals()" aria-label="Approvals" data-tip="Approvals"><svg class="i"><use href="#i-shield"/></svg><span class="badge" id="apprbadge" hidden></span></button>
         <button class="ib" id="bellbtn" onclick="openNotifs()" aria-label="Activity" data-tip="Activity"><svg class="i"><use href="#i-bell"/></svg><span class="udot" id="nbadge" hidden></span></button>
       </div>
@@ -528,6 +551,7 @@
     </div>
     <div class="bnotes" id="brainnotes" hidden></div>
     <div class="err bmsg" id="brainmsg" role="status" aria-live="polite"></div>
+    <div id="setassets" hidden></div>
     <div class="gsh">Privacy</div>
     <div class="group"><div class="row"><span class="lbl"><b>Local Only</b><span id="losub">Answers stay on this Mac.</span></span><button class="toggle" id="lotoggle" role="switch" aria-checked="false" aria-label="Local Only" aria-describedby="losub" onclick="toggleLO()"></button></div></div>
     <div class="gsh">Access</div>
@@ -560,6 +584,12 @@
   <div class="mh"><button class="xb" id="predback" onclick="predBack()" aria-label="Back" hidden><svg class="i"><use href="#i-back"/></svg></button><h2 id="predttl">Predictions</h2><button class="xb" onclick="closePredictions()" aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button></div>
   <div class="mb" id="predbody"></div>
   <div class="mf" id="predfoot" hidden></div>
+</div></div>
+
+<div class="overlay" id="tasks" onclick="if(event.target===this)closeTasks()"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="tasksttl">
+  <div class="mh"><button class="xb" id="taskback" onclick="taskBack()" aria-label="Back" hidden><svg class="i"><use href="#i-back"/></svg></button><h2 id="tasksttl">Tasks</h2><button class="ghost" id="taskadd" onclick="taskNew()" hidden><svg class="i"><use href="#i-plus"/></svg>New Task</button><button class="xb" onclick="closeTasks()" aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button></div>
+  <div class="mb" id="taskbody"></div>
+  <div class="mf" id="taskfoot" hidden></div>
 </div></div>
 
 <script>
@@ -606,7 +636,7 @@ function newChat(){
 var PANELS=['approvals','settings','activity','goals'];
 function panelOpen(){return PANELS.some(function(id){return $(id).classList.contains('open');});}
 function showPanel(id,on){if(on)PANELS.forEach(function(p){if(p!==id)$(p).classList.remove('open');});$(id).classList.toggle('open',!!on);document.body.classList.toggle('panel-open',panelOpen());}
-function openSettings(){showPanel('settings',true);loadCreds();loadHealth();if(typeof loadBrain==='function')loadBrain();refresh();syncAccess();}
+function openSettings(){showPanel('settings',true);loadCreds();loadHealth();if(typeof loadBrain==='function')loadBrain();if(typeof loadAssets==='function')loadAssets();refresh();syncAccess();}
 function closeSettings(){showPanel('settings',false);}
 /* The app's menu bar and keyboard shortcuts land here. */
 function flintCommand(name){
@@ -1788,6 +1818,7 @@ function apprOpSays(o,at,took){o=o||{};at=at||'';took=took||function(){};
   if(o.op==='add'){var st=o.step||{},nm=named('.step.title',st.title),s=nm?'Add the step '+nm:'Add a step, listed below';took(at+'.op');
     if(st.dueAt){took(at+'.step.dueAt');s+=', due '+apprWhenSays(st.dueAt)+'.';}else s=apprEnds(s);
     if(st.kind==='flint_action'){took(at+'.step.kind');s+=' Flint would do this step.';}
+    if(st.kind==='asset_task'){took(at+'.step.kind');s+=' Flint would run this step as a task.';}
     return s;}
   var to=o.to||{},from=o.from||{},t=named('.from.title',from.title)||'a step',out=[];
   if(o.op==='set')took(at+'.op');
@@ -1884,6 +1915,7 @@ function apprDetails(p){p=p||{};var a=p.args&&typeof p.args==='object'&&!Array.i
     says.push('It runs '+apprWhen(f)+' if you approve it.');}
   /* (When it runs is the line under the card's title already.) */
   else if(apprGet(APPR_NEXUS,f)!==undefined)says.push(apprGet(APPR_NEXUS,f));
+  else if(apprTaskCard(p)){names=APPR_KEYS_TASK;apprTaskSays(p,a,says,took,extra);}
   else if(typeof APPR_PREDICT==='string'&&f===APPR_PREDICT){
     /* (A card that changes second opinions only turns nothing on: the checks it would start are running already.) */
     if(!apprPredictOnlyOpinion(p))says.push(APPR_PREDICT_ALSO);
@@ -1962,6 +1994,7 @@ function apprGoalFacts(p){var a=p.args||{},f=[];var when=function(t){return t?ap
 function apprReason(p){if(p.fullName==='goal.activate')return APPR_PROMPTS[p.reason===APPR_RESUMES?'resume':(p.args&&p.args.origin==='flint')?'start':'add'];
   if(p.fullName==='plan.change')return APPR_PROMPTS.plan;
   if(p.fullName===APPR_PREDICT)return apprPredictOnlyOpinion(p)?'change a second opinion':'turn on predictions';
+  if(apprTaskCard(p))return apprTaskReason(p);
   var gw=apprGet(APPR_GOAL_WORDS,p.fullName);return gw?APPR_PROMPTS[gw[2]]:'approve: '+apprTitle(p);}
 /* When a nightly card's job runs: the restore test is "next Sunday" on a Sunday past 2:15 AM, never a time already gone. */
 function apprWhen(name){var n=apprGet(APPR_NIGHTLY,name);if(!n)return '';if(apprGet(APPR_WEEKLY,name)!==1)return n[2];var d=apprNow();
@@ -1969,6 +2002,109 @@ function apprWhen(name){var n=apprGet(APPR_NIGHTLY,name);if(!n)return '';if(appr
 /* Each calendar by its name, for the person card's subtitle: the calendar its people came from, which Will signs
    (a card that names none is Google's, as every P2.5 card was). */
 var APPR_CALENDARS={google_calendar:'Google Calendar',apple_calendar:'Apple Calendar'};
+/* ---------- P5: the cards for assets and tasks ----------
+ * Turning an asset on, handing a task out, accepting its result, cancelling it, and ending it against its checks. Each
+ * has a title, a sentence and three facts or fewer, in words. Behind Show Details every field Will signs is said in a
+ * sentence, listed under a Title Case label, or (an id) listed under REFERENCES: never the args as they are stored.
+ * A task is named on a card's face by its title and what it is about. The Tasks panel looks those up for this page
+ * (APPR_TASKS, by the task's id): they are shown beside what is signed, never in place of it, and Show Details holds
+ * only what the card itself carries. */
+var APPR_TASK_DISPATCH='task.dispatch.';
+var APPR_TASK_CARDS={'asset.enable':1,'task.check_bar':1,'task.cancel':1,'task.bar_override':1};
+function apprTaskCard(p){var f=String((p&&p.fullName)||'');return apprGet(APPR_TASK_CARDS,f)===1||f.indexOf(APPR_TASK_DISPATCH)===0;}
+/* Each asset by its kind: its card's title, its sentence (the one under its row in Settings, which the runtime's
+   registry holds: a test keeps the two the same), and what the prompt says Flint is doing. An asset this page has no
+   words for is named by the name its card carries, under a plain title. */
+var APPR_ASSETS={ci_runner:['Turn On the CI Watcher','Flint reports how your CI runs end.','turn on the CI watcher']};
+var APPR_ASSET_OTHER=['Turn On an Asset','Flint can hand it work once it’s on.','turn on this asset'];
+/* What an asset can do, by the kind of task it runs. */
+var APPR_CAN_DO={watch_ci:'Watch CI Runs',summarize_items:'Summarize Items',sort_items:'Sort Items',draft_note:'Draft Notes',review:'Review Cards'};
+/* A task's dispatch card by the kind of asset it runs on: its title and its sentence. */
+var APPR_DISPATCH={ci_runner:['Watch a CI Run','Flint waits for the run and tells you how it ended.']};
+var APPR_DISPATCH_OTHER=['Run a Task','Flint runs it once you approve it.'];
+function apprAssetWords(p){return apprGet(APPR_ASSETS,p.args&&p.args.kind)||APPR_ASSET_OTHER;}
+function apprDispatchWords(p){return apprGet(APPR_DISPATCH,String(p.fullName||'').slice(APPR_TASK_DISPATCH.length))||APPR_DISPATCH_OTHER;}
+/* What this page knows of a task by its id: {title, about}, as the Tasks panel read them. */
+var APPR_TASKS={};
+function apprTaskId(p){var id=p&&p.args&&p.args.taskId;return typeof id==='string'&&/^tk[A-Za-z0-9]{16,32}$/.test(id)?id:'';}
+function apprTaskKnown(p){var id=apprTaskId(p);return (id&&apprGet(APPR_TASKS,id))||null;}
+/* A task as a fact names it: "Watch a CI Run · wpf002/flint CI". A dispatch card carries the title itself. */
+function apprTaskName(p){var t=apprTaskKnown(p),a=(p&&p.args)||{};var title=t&&typeof t.title==='string'&&t.title?t.title:typeof a.title==='string'?a.title:'';
+  return title&&t&&typeof t.about==='string'&&t.about?title+' · '+t.about:title;}
+/* A whole count a card carries, or -1 for anything else. */
+function apprWhole(v){return typeof v==='number'&&isFinite(v)&&v>=0&&v%1===0?v:-1;}
+/* An amount of money in millionths of a dollar that four decimal places say exactly (a task's estimate is kept to
+   those), up to the $1,000 a card may hold; or -1. Anything else is never put in words: it is listed as it is stored. */
+function apprMicros(v){v=apprWhole(v);return v>=0&&v%100===0&&v<=1000000000?v:-1;}
+/* Money a task costs, from millionths of a dollar: "$0.25", "$12.50", and "$0.0025" when it is under a cent. */
+function apprDollars(m){return '$'+(m/1000000).toFixed(4).replace(/0{1,2}$/,'');}
+function apprCostValue(m){return m===0?'No Cost':'About '+apprDollars(m);}
+function apprCostSays(m){return m===0?'It costs nothing.':'It costs about '+apprDollars(m)+'.';}
+/* A dispatch card's estimate: the server's reading of the number Will signs, or (from an older server) that number
+   as the card holds it. -1: there is none to show, and the card says nothing of cost. */
+function apprCost(p){var c=p&&p.cost&&typeof p.cost==='object'?apprMicros(p.cost.micros):-1;return c>=0?c:apprMicros(p&&p.args&&p.args.estCostMicros);}
+function apprChecksPassed(a){var n=apprWhole(a.checks),m=apprWhole(a.met);return n>0&&m===n?'It passed '+m+' of '+n+' '+(n===1?'check':'checks')+'.':'';}
+function apprTaskTitle(p){var a=p.args||{},f=p.fullName;
+  if(f==='asset.enable')return apprAssetWords(p)[0];
+  if(f==='task.check_bar')return 'Accept a Task Result';
+  if(f==='task.cancel')return 'Cancel a Task';
+  if(f==='task.bar_override')return a.to==='accepted'?'Accept a Result Anyway':a.to==='rejected'?'Reject a Result Anyway':'Overrule a Task’s Checks';
+  return apprDispatchWords(p)[0];}
+/* Ending a task against its checks, as a sentence: which way it ends, in the word the card holds. */
+function apprOverrideSays(to){return to==='accepted'||to==='rejected'?'It ends as '+to+', against Flint’s checks.':'';}
+function apprTaskSub(p){var a=p.args||{},f=p.fullName;
+  if(f==='asset.enable')return apprAssetWords(p)[1];
+  if(f==='task.check_bar')return apprChecksPassed(a)||'Flint checked its result.';
+  if(f==='task.cancel')return 'Flint stops working on it.';
+  if(f==='task.bar_override')return apprOverrideSays(a.to)||'It ends against Flint’s checks.';
+  return apprDispatchWords(p)[1];}
+function apprTaskFacts(p){var a=p.args||{},f=p.fullName,out,exp=['Expires',p.expiresAt?apprDate(p.expiresAt):''];
+  if(f==='asset.enable'){var caps=Array.isArray(a.capabilities)?a.capabilities.map(function(c){return apprGet(APPR_CAN_DO,c)||apprLabel(c);}).join(' · '):'';
+    out=[['Asset',typeof a.name==='string'?a.name:''],['Can Do',caps],['Cost',a.spends===true?'Costs Money':a.spends===false?'No Cost':'']];}
+  else if(f==='task.check_bar')out=[['Task',apprTaskName(p)],['Checked By',a.by==='flint:rule'?'Rules':/^ollama:/.test(String(a.by||''))?'Local Model':''],exp];
+  else if(f==='task.cancel'||f==='task.bar_override')out=[['Task',apprTaskName(p)],['Filed By',apprFrom(p.origin)],exp];
+  else{var t=apprTaskKnown(p),c=apprCost(p),ci=f===APPR_TASK_DISPATCH+'ci_runner';
+    out=[ci?['CI Run',t&&typeof t.about==='string'?t.about:'']:['Task',apprTaskName(p)],['Due',typeof a.dueAt==='string'&&a.dueAt?apprDate(a.dueAt):a.dueAt===null?'No Due Date':''],['Cost',c>=0?apprCostValue(c):'']];}
+  /* A card whose args were cleared, or a task this page has not looked up, keeps only what it still knows. */
+  return out.filter(function(x){return typeof x[1]==='string'&&x[1];}).slice(0,3);}
+function apprTaskReason(p){var a=p.args||{},f=p.fullName;
+  if(f==='asset.enable')return apprAssetWords(p)[2];
+  if(f==='task.check_bar')return 'accept this result';
+  if(f==='task.cancel')return 'cancel this task';
+  if(f==='task.bar_override')return a.to==='accepted'?'accept this result':a.to==='rejected'?'reject this result':'end this task';
+  return 'run this task';}
+/* "a", "a and b", "a, b and c". */
+function apprAnd(xs){return xs.length<2?xs.join(''):xs.slice(0,-1).join(', ')+' and '+xs[xs.length-1];}
+/* A task card's own words for its keys behind Show Details. A task's spec and each check's rule are named by what is
+   in them ("Template", "Check 1 Rule"), never by where they sit. */
+var APPR_KEYS_TASK={spec:'',params:'',template:'Template',acceptance:'Check',check:'',type:'Kind',op:'Rule',of:'Counts',min:'Minimum',max:'Maximum',rubric:'Your Words',sha:'Commit',key:'Field',value:'Is',
+  assetKind:'Runs On',estCostMicros:'Cost in Millionths of a Dollar',tainted:'Outside Text',dueAt:'Due',metBar:'Passed Its Checks',by:'Checked By',to:'Ends As',capabilities:'Can Do',spends:'Costs Money'};
+/* A task card's sentences behind Show Details, and (through `took`) which of its fields they state. An item a task is
+   about is an id: it is listed under REFERENCES (`refs`), exactly. */
+function apprTaskSays(p,a,says,took,refs){var f=p.fullName,t;
+  var q=function(at,text,max){if(!apprInline(text,max))return '';took(at);return apprQ(text);};
+  if(f==='asset.enable'){
+    if((t=q('name',a.name,80)))says.push(apprEnds('The asset is '+t));
+    var caps=Array.isArray(a.capabilities)?a.capabilities:[];
+    if(caps.length&&caps.every(function(c){return !!apprGet(APPR_CAN_DO,c);})){took('capabilities');says.push('It can '+apprAnd(caps.map(function(c){return apprPhrase(apprGet(APPR_CAN_DO,c));}))+'.');}
+    if(a.spends===true||a.spends===false){took('spends');says.push(a.spends?'Using it costs money.':'Using it costs nothing.');}
+    return;}
+  if(f==='task.check_bar'){var passed=apprChecksPassed(a);
+    if(passed){took('checks','met');if(a.metBar===true)took('metBar');says.push(passed);}
+    return;}
+  if(f==='task.cancel'){says.push('Flint stops working on this task.');return;}
+  if(f==='task.bar_override'){var way=apprOverrideSays(a.to);if(way){took('to');says.push(way);}return;}
+  /* A dispatch card holds the whole task. */
+  if((t=q('title',a.title)))says.push(apprEnds('The task is '+t));
+  var sp=a.spec&&typeof a.spec==='object'&&!Array.isArray(a.spec)?a.spec:{},pr=sp.params&&typeof sp.params==='object'&&!Array.isArray(sp.params)?sp.params:{};
+  if(typeof pr.item==='string'&&pr.item){took('spec.params.item');refs.push(['Item ID',apprExact(pr.item)]);}
+  if(Array.isArray(pr.items)&&pr.items.length&&pr.items.every(function(x){return typeof x==='string'&&!!x;})){took('spec.params.items');refs.push(['Item IDs',pr.items.map(apprExact).join(', ')]);}
+  (Array.isArray(a.acceptance)?a.acceptance:[]).forEach(function(c,i){c=c&&typeof c==='object'?c:{};var at='acceptance.'+i,k=c.check&&typeof c.check==='object'?c.check:{},nm=q(at+'.text',c.text);
+    var how=k.type==='deterministic'?'Flint checks it by rule.':k.type==='judge'?'The local model judges it.':'';if(how)took(at+'.check.type');
+    says.push((nm?apprEnds('Check '+(i+1)+' is '+nm):'Check '+(i+1)+' is listed below.')+(how?' '+how:''));});
+  if(a.dueAt===null){took('dueAt');says.push('It has no due time.');}
+  else if(typeof a.dueAt==='string'&&a.dueAt){took('dueAt');says.push('It’s due '+apprWhenSays(a.dueAt)+'.');}
+  var c=apprMicros(a.estCostMicros);if(c>=0){took('estCostMicros');says.push(apprCostSays(c));}}
 function apprEl(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=String(text);return e;}
 function apprWords(s){return String(s||'').replace(/[_.:]+/g,' ').trim().split(/\s+/).map(apprCap).join(' ');}
 /* A date-only time (a policy's midnight UTC expiry) is shown as that date, whatever the time zone. */
@@ -2021,6 +2157,7 @@ function apprPredictDetails(p){var l=apprPredictList(p),ul=apprEl('ul');
 /* What a card would do, in words: a Title Case fragment. */
 function apprTitle(p){var a=p.args||{};var n=function(x){return Array.isArray(x)?x.length:0;};
   if(apprGoalCard(p))return apprGoalTitle(p);
+  if(apprTaskCard(p))return apprTaskTitle(p);
   if(p.fullName===APPR_PREDICT)return 'Turn On Predictions';
   if(p.fullName==='world.source.enable')return 'Turn On the '+apprWords(a.source)+' Source';
   var off=apprOffRows(p);if(off)return off.length===1?'Switch Off 1 Rule':'Switch Off '+off.length+' Rules';
@@ -2047,6 +2184,7 @@ function apprTitle(p){var a=p.args||{};var n=function(x){return Array.isArray(x)
 /* One line under the title: a sentence (a rule's name is its own, and stays as it is). */
 function apprSub(p){var a=p.args||{};
   if(apprGoalCard(p))return apprGoalSub(p);
+  if(apprTaskCard(p))return apprTaskSub(p);
   if(apprPredictOnlyOpinion(p))return apprPredictCount(p)===1?'Flint already forecasts this number, so only its second opinion changes.':'Flint already forecasts these numbers, so only their second opinions change.';
   if(p.fullName===APPR_PREDICT){var k=apprPredictCount(p);return 'Flint forecasts '+(k?k+' of ':'')+'its own numbers each night, on this Mac.';}
   if(p.fullName==='world.source.enable')return apprGet(APPR_SOURCES,a.source)||'Flint starts reading this source.';
@@ -2066,11 +2204,12 @@ function apprSub(p){var a=p.args||{};
   var tool=apprGet(APPR_TOOLS,p.fullName);if(tool)return tool[1];
   var by=apprFrom(p.origin);
   return by==='You'?'You filed this.':by==='Flint'?'Flint filed this.':by==='A Chat'?'A chat filed this.':'Its source is unknown.';}
-function apprIcon(p){return apprGoalCard(p)?'target':p.fullName==='world.source.enable'?'power':(apprGet(APPR_NIGHTLY,p.fullName)||/^(backup|restore)/.test(String((p.args&&p.args.rows&&p.args.rows[0]&&p.args.rows[0].pattern)||'')))?'db':'bolt';}
+function apprIcon(p){return apprGoalCard(p)?'target':p.fullName==='world.source.enable'||p.fullName==='asset.enable'?'power':apprTaskCard(p)?'tasks':(apprGet(APPR_NIGHTLY,p.fullName)||/^(backup|restore)/.test(String((p.args&&p.args.rows&&p.args.rows[0]&&p.args.rows[0].pattern)||'')))?'db':'bolt';}
 function apprFrom(o){o=String(o||'');if(o==='cli'||o==='console')return 'You';if(o.indexOf('runtime:')===0)return 'Flint';if(o.indexOf('chat:')===0)return 'A Chat';return o||'Unknown';}
 /* Three facts or fewer. */
 function apprFacts(p){var a=p.args||{},f=[];
   if(apprGoalCard(p))return apprGoalFacts(p);
+  if(apprTaskCard(p))return apprTaskFacts(p);
   /* A switch-off names the rules that end, by their own names (never a limit: nothing here lets anything run). */
   if(apprOffRows(p))f.push(['Switches Off',apprOffNames(apprOffRows(p))]);
   /* A card that is neither one thing nor the other says each half under its own label. */
@@ -2093,10 +2232,12 @@ function apprFacts(p){var a=p.args||{},f=[];
    suggested, which the runtime files with the mark so that each one is read before it is signed), and every rule card that would let
    anything run on its own. That last one is read from the card's rows, whatever its mark says: a card that widens what
    Flint may do alone is never signed in a batch, even one a server sent without the mark. So are the cards that change
-   what Flint reads and how it sorts it (APPR_ASKS), by their names; and so is any card that does not show all of
-   itself (apprWithheld: a secret's value, or more than it can list): what cannot all be read is never signed in a batch. */
-var APPR_ASKS={'world.source.enable':1,'triage.rule.create':1};
-function apprAlone(p){return !!p.consequential||!!apprGet(APPR_GOAL,p.fullName)||!!apprGet(APPR_ASKS,p.fullName)||p.fullName===APPR_PREDICT||apprWithheld(p)||(p.fullName==='plan.change'&&!apprSmallPlan(p))||!!p.tainted||!!p.destructive||p.sensitivity==='financial'||/spend|pay|purchase|transfer|invoice|charge|money|send|delete|remove/i.test(String(p.fullName||''))||
+   what Flint reads and how it sorts it (APPR_ASKS), by their names, with P5's two that the runtime marks (turning an
+   asset on, and ending a task against its checks) and any task that costs money; and so is any card that does not
+   show all of itself (apprWithheld: a secret's value, or more than it can list): what cannot all be read is never
+   signed in a batch. */
+var APPR_ASKS={'world.source.enable':1,'triage.rule.create':1,'asset.enable':1,'task.bar_override':1};
+function apprAlone(p){return !!p.consequential||!!apprGet(APPR_GOAL,p.fullName)||!!apprGet(APPR_ASKS,p.fullName)||(apprTaskCard(p)&&apprCost(p)>0)||p.fullName===APPR_PREDICT||apprWithheld(p)||(p.fullName==='plan.change'&&!apprSmallPlan(p))||!!p.tainted||!!p.destructive||p.sensitivity==='financial'||/spend|pay|purchase|transfer|invoice|charge|money|send|delete|remove/i.test(String(p.fullName||''))||
   (p.fullName==='policy.change'&&((p.args&&Array.isArray(p.args.rows)&&p.args.rows)||[]).some(function(r){return !!r&&(r.tier==='alone'||r.pattern==='world.person.create');}))||
   /* ...and every rule card that is not purely rows: one that switches rules off (ending a rule that holds an action
      back widens what Flint may do alone), and one that is neither one thing nor the other. */
@@ -2162,7 +2303,9 @@ function loadApprovals(){
     APPR.down=d.runtime==='down';
     apprHelp(APPR.down?'The runtime isn’t answering, so approvals can’t load.':'');
     if(APPR.tab==='approved'&&!APPR.approved.length)APPR.tab='waiting';
-    apprRender();badge(APPR.pending.length);if(typeof goalsDot==='function')goalsDot(ps);
+    apprRender();badge(APPR.pending.length);if(typeof goalsDot==='function')goalsDot(ps);if(typeof tasksDot==='function')tasksDot(ps);
+    /* A task card names its task by its title and what it is about: the Tasks panel reads them, and the list is drawn again. */
+    if(typeof taskNames==='function')taskNames(ps,function(n){var a=document.getElementById('approvals');if(n&&a&&a.classList&&a.classList.contains('open'))apprRender();});
   }).catch(function(){document.getElementById('apprlist').textContent='';var e=apprEl('div','empty');e.appendChild(apprEl('b',null,"Couldn't Reach Flint"));document.getElementById('apprlist').appendChild(e);});}
 /* One prompt, then each card signed and finished in turn; the server verifies each. */
 function approveAll(){if(APPR.busy)return;var queue=APPR.pending.filter(function(p){return !apprAlone(p);});if(!queue.length)return;
@@ -2179,7 +2322,7 @@ function closeApprovals(){showPanel('approvals',false);pollApprovals();}
 /* The badge: how many cards wait for a signature. */
 function badge(n){var b=document.getElementById('apprbadge');b.textContent=n>9?'9+':String(n);b.hidden=!(n>0);if(typeof starters==='function'&&!document.getElementById('thread').children.length)starters(n);}
 function pollApprovals(){if(!TOKEN)return;fetch(BASE+'/proposals',{headers:auth()}).then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d)return;
-  badge((d.proposals||[]).filter(function(p){return p.status==='pending';}).length);if(typeof goalsDot==='function')goalsDot(d.proposals||[]);}).catch(function(){});}
+  badge((d.proposals||[]).filter(function(p){return p.status==='pending';}).length);if(typeof goalsDot==='function')goalsDot(d.proposals||[]);if(typeof tasksDot==='function')tasksDot(d.proposals||[]);}).catch(function(){});}
 pollApprovals();setInterval(pollApprovals,60000);
 </script>
 <script id="goals-js">
@@ -2485,6 +2628,8 @@ function goalStepLine(s){if(GOAL_STEP_LINES[s.status])return GOAL_STEP_LINES[s.s
 var GOAL_TICKABLE={will_task:1,wait:1,decision:1};
 function goalStepRow(g,s){var row=gEl('div','row two gwrap');var dot=gEl('span','st '+(s.status==='done'?'ok':s.status==='blocked'?'degraded':'off'));dot.appendChild(gEl('i'));row.appendChild(dot);
   var l=gEl('span','lbl');l.appendChild(gEl('b',null,s.title));l.appendChild(gEl('span',null,goalStepLine(s)));row.appendChild(l);
+  /* A step Flint carries out as a task says so: it is not Will's to tick. */
+  if(s.kind==='asset_task')row.appendChild(gTag('Flint Task'));
   if(goalLive(g)&&GOAL_TICKABLE[s.kind]&&s.status!=='skipped'){var done=s.status==='done';row.appendChild(gBtn('ghost',done?'Undo':'Mark Done',function(b){goalTick(g,s.key,done?'todo':'done',b);}));}
   return row;}
 
@@ -3009,6 +3154,331 @@ if(typeof PANELS!=='undefined'&&PANELS.indexOf('predictions')<0)PANELS.push('pre
 if(typeof document.addEventListener==='function')document.addEventListener('keydown',function(e){if(e&&e.key==='Escape'&&predIsOpen())closePredictions();});
 predProbe();
 if(typeof setInterval==='function')setInterval(predProbe,300000);
+</script>
+<script id="tasks-js">
+/* ---------- Tasks: what Flint does once Will approves it, and the assets that do it (P5) ----------
+ * The panel lists his tasks (Active, Finished), opens one (its result, its checks, its details) and makes a new one;
+ * Settings > Assets lists what Flint can hand work to, each with Turn On or Turn Off. Everything that hands work out,
+ * ends it, or turns an asset on is a card Will signs: the panel files it through the server (/tasks, /assets), reads
+ * the card back from the Approvals list, shows it in the Approvals panel's own words (apprTitle, apprSub, apprFacts,
+ * apprDetailsInto: every field he signs is behind Show Details), and he approves it here with a fresh touch, signing
+ * exactly the args shown (approveAction checks their digest). Turning an asset off, and cancelling a task that has not
+ * gone out, need no signature: the runtime allows exactly those, and the panel asks first.
+ * Every sentence about a task or an asset (where it stands, its result, why something was refused) is the runtime's,
+ * shown as it came, as text and never HTML: a result is outside text, and is marked. The panel's own words are its
+ * titles, tabs, buttons, labels and headers, and what it says when something fails. No id, key or path is shown,
+ * except behind an approval card's Show Details. Tasks switched off on this Mac: the panel says the runtime's one
+ * sentence and offers nothing. Chat can do none of this: no tool reaches these routes.
+ * The helpers are the Goals and Predictions panels' (goals-js, predictions-js): one of each for all three. ES5, no
+ * confirm(), alert() or prompt(): the Mac app's web view has none. */
+var TASKS={tab:'active',view:'list',on:false,assets:null,task:null,form:null,again:null,busy:false,seq:0,nav:0,back:null,aseq:0};
+var TASK_TABS=[['active','Active'],['finished','Finished']];
+/* The kinds of asset a task runs on (a reviewer runs none), and how a sentence names each. */
+var TASK_RUNS={ci_runner:1,local_worker:1,nexus_participant:1};
+var TASK_ASSET_NAMES={ci_runner:'the CI Watcher'};
+/* What New Task asks for, by the kind of task: the field's label, its first choice, its hint, and what it says when
+   Flint tracks nothing to choose from. A kind this page has no field for is not offered. */
+var TASK_FIELDS={watch_ci:['CI Run','Choose a CI Run','Pick a CI run Flint tracks.','Flint tracks no CI runs yet.','Choose a CI run to watch.']};
+var TASK_SAY={waiting:'Flint is waiting for your approval.',later:'It’s waiting in Approvals.',cancelled:'Cancelled. It’s waiting in Approvals.',approved:'Approved. It hasn’t run yet.',
+  key:'This device needs an approval key.',gone:'That card is no longer waiting.',card:'A card is waiting for your approval.',down:'The runtime isn’t answering, so the card can’t load.',
+  start:'Flint runs a task after you approve it.',finished:'Tasks that end show here.',more:'Flint shows the newest 100 tasks.',
+  noResult:'There is no result yet.',noResultEnded:'It has no result to show.',noChecks:'Its checks are no longer kept.',
+  rules:'Flint checked these by rule.',model:'The local model judged these.',you:'You decided it yourself, against its checks.',
+  withdrawn:'Nothing has run, and its card is withdrawn.',stops:'Flint files a card to stop it, for you to approve.',youCancelled:'You cancelled it.',
+  armOff:'Tasks that are running on it will fail.',noAssets:'Flint has no assets yet.',moreItems:'Flint lists the 50 it saw most recently.',started:'Flint started it.'};
+/* What the panel says once a card it showed has run, by the card. */
+var TASK_DONE={'asset.enable':'It’s on.','task.check_bar':'You accepted its result.','task.cancel':'You cancelled it.'};
+/* A second tap that lands within this long of the first (a double tap) is not taken for the second. */
+var TASK_ARM_MS=400;
+/* How many tasks one list of cards is asked to name. */
+var TASK_NAMES_MAX=20;
+function taskNow(){return Date.now();}
+/* A table's own entry for a name the runtime sent, or nothing. */
+function tGet(table,key){key=String(key===null||key===undefined?'':key);return Object.prototype.hasOwnProperty.call(table,key)?table[key]:undefined;}
+function taskDoneSays(p){var f=String((p&&p.fullName)||''),own=tGet(TASK_DONE,f);if(own)return own;
+  if(f==='task.bar_override')return p.args&&p.args.to==='rejected'?'You rejected it.':'You accepted it.';return TASK_SAY.started;}
+
+/* ---------- the panel ---------- */
+function tasksShown(on){var b=document.getElementById('tasksbtn');if(b)b.hidden=!on;}
+/* The header's gold dot is for what needs Will: a card about a task or an asset waits for him. */
+function tasksDot(proposals){var d=document.getElementById('tasksdot');if(!d)return;
+  var n=(proposals||[]).filter(function(p){return !!p&&p.status==='pending'&&typeof apprTaskCard==='function'&&apprTaskCard(p);}).length;d.hidden=!(n>0);}
+/* Tasks switched off on this Mac: the runtime's one refusal, by its code. */
+function taskOff(e){return !!e&&e.status===409&&e.code==='off';}
+/* An older runtime (or none) answers 501: no Tasks button at all. Switched off, the button is there and its panel says so. */
+function tasksProbe(){if(typeof TOKEN!=='undefined'&&!TOKEN)return;gCall('/assets').then(function(){tasksShown(true);},function(e){tasksShown(e.status!==501&&e.status!==401);});}
+function tasksOpen(){var p=document.getElementById('tasks');return !!(p&&p.classList&&p.classList.contains('open'));}
+/* Each view Will goes to takes a new number. An answer that comes back after he has gone elsewhere finds the number
+   changed (or the panel closed), and neither pulls him back nor writes into a view that is gone. */
+function taskNav(view){TASKS.view=view;return ++TASKS.nav;}
+function taskHere(){var n=TASKS.nav;return function(){return TASKS.nav===n&&tasksOpen();};}
+function openTasks(){if(typeof TOKEN!=='undefined'&&!TOKEN){if(typeof openSettings==='function')openSettings();return;}
+  if(typeof showPanel==='function')showPanel('tasks',true);if(typeof loadCreds==='function')loadCreds();taskTab(TASKS.tab);}
+/* Closing drops what the panel holds: a read still on its way is no longer wanted, and the tasks already drawn leave
+   the page and its memory. A New Task form goes with them. */
+function closeTasks(){if(typeof showPanel==='function')showPanel('tasks',false);taskNav('list');++TASKS.seq;
+  TASKS.task=null;TASKS.form=null;TASKS.again=null;TASKS.back=null;TASKS.busy=false;
+  var b=document.getElementById('taskbody');if(b)b.textContent='';if(document.getElementById('taskfoot'))taskFoot();
+  if(typeof pollApprovals==='function')pollApprovals();tasksProbe();}
+/* The keyboard's place follows what was drawn: a view that replaces the one the cursor was in takes the cursor with it. */
+function taskFocus(el){try{if(el&&typeof el.focus==='function'&&tasksOpen())el.focus();}catch(e){}}
+function taskHead(title,back,add){document.getElementById('tasksttl').textContent=title;document.getElementById('taskback').hidden=!back;document.getElementById('taskadd').hidden=!add;}
+/* The footer: what the panel has to say, on a line of its own that never scrolls away, then the view's buttons. */
+function taskFoot(){var f=document.getElementById('taskfoot');f.textContent='';f.hidden=true;var m=gEl('div','res');m.id='taskmsg';m.hidden=true;m.setAttribute('role','status');f.appendChild(m);return f;}
+/* kind: bad (an error, the default), ok (an outcome) or wait (in progress). An empty message leaves a footer with nothing else hidden. */
+function taskMsg(t,kind){var f=document.getElementById('taskfoot'),m=document.getElementById('taskmsg');if(!f||!m)return;
+  m.textContent=t||'';m.hidden=!t;m.className='res '+(kind||'bad');if(t)f.hidden=false;else if(f.children.length<2)f.hidden=true;}
+function taskBody(){var b=document.getElementById('taskbody');b.textContent='';return b;}
+/* Back goes where the view came from: a card to the task (or the list) it was filed from, anything else to the list. */
+function taskBack(){var b=TASKS.back;TASKS.back=null;if(typeof b==='function')b();else taskTab(TASKS.tab);}
+function taskToApprovals(){closeTasks();if(typeof openApprovals==='function')openApprovals();}
+function taskToSettings(){closeTasks();if(typeof openSettings==='function')openSettings();}
+/* What a failed read says, by what failed. Switched off is the runtime's one sentence, with nothing to press. */
+function taskFailed(e,again){
+  if(e&&e.status===401)return goalEmpty('You’re Signed Out','Enter your access token in Settings to see tasks.',gBtn('btn pri','Open Settings',taskToSettings));
+  if(taskOff(e))return goalEmpty('Tasks Are Off',gSay(e));
+  var line=e&&e.status===503?'The runtime isn’t answering, so tasks can’t load.':e&&e.status===501?'This needs a newer runtime.':gSay(e);
+  return goalEmpty('Couldn’t Load Tasks',line,gBtn('ghost','Try Again',again));}
+/* A view that could not be read: its failure in place of it, with the header's own buttons put away. */
+function taskFailedView(e,again){taskHead('Tasks',!taskOff(e)&&TASKS.view!=='list',false);taskFoot();taskBody().appendChild(taskFailed(e,again));}
+function taskOnOff(buttons,off){(buttons||[]).forEach(function(b){b.disabled=off;});}
+
+/* ---------- the tabs ---------- */
+function taskSeg(){var seg=gEl('div','seg');seg.id='taskseg';seg.setAttribute('role','tablist');
+  TASK_TABS.forEach(function(t){var b=gBtn(t[0]===TASKS.tab?'on':'',t[1],function(){taskTab(t[0]);});b.id='tasktab-'+t[0];b.setAttribute('role','tab');b.setAttribute('aria-selected',t[0]===TASKS.tab?'true':'false');seg.appendChild(b);});
+  return seg;}
+/* Can anything that is on run a task? And the asset a new task waits for, as a sentence names it. */
+function taskCanRun(){return (TASKS.assets||[]).some(function(a){return !!a&&a.on===true&&tGet(TASK_RUNS,a.kind)===1;});}
+function taskNeeds(){var as=(TASKS.assets||[]).filter(function(a){return !!a&&tGet(TASK_RUNS,a.kind)===1;});return as.length?(tGet(TASK_ASSET_NAMES,as[0].kind)||as[0].name):'an asset';}
+/* `say`: something to tell Will once the tab has been drawn (an outcome, or why a tap did nothing). The assets are read
+   first: whether tasks are on at all, and whether anything can run one, decides what the list offers. */
+function taskTab(tab,say,kind){taskNav('list');TASKS.tab=tab==='finished'?'finished':'active';TASKS.task=null;TASKS.form=null;TASKS.again=null;TASKS.back=null;var seq=++TASKS.seq;
+  taskHead('Tasks',false,false);taskFoot();var body=taskBody();
+  var top=gEl('div');top.id='tasktop';body.appendChild(top);var tabs=TASKS.on;if(tabs)top.appendChild(taskSeg());
+  var list=gEl('div');list.id='tasklist';list.appendChild(gEl('div','empty','Loading…'));body.appendChild(list);
+  if(tabs)taskFocus(document.getElementById('tasktab-'+TASKS.tab));
+  if(say)taskMsg(say,kind||'ok');
+  var failed=function(e){if(seq!==TASKS.seq)return;if(e.status===501)tasksShown(false);TASKS.on=false;top.textContent='';
+    taskHead('Tasks',false,false);list.textContent='';list.appendChild(taskFailed(e,function(){taskTab(TASKS.tab);}));};
+  gCall('/assets').then(function(a){if(seq!==TASKS.seq)return;TASKS.assets=(a&&a.assets)||[];
+    gCall('/tasks?tab='+TASKS.tab).then(function(d){if(seq!==TASKS.seq)return;tasksShown(true);TASKS.on=true;
+      if(!tabs){top.appendChild(taskSeg());taskFocus(document.getElementById('tasktab-'+TASKS.tab));}
+      taskRender(list,d||{});},failed);},failed);}
+function taskTags(t){var x=[];if(t.outside)x.push(gTag('Outside Text'));if(t.costs)x.push(gTag('Costs Money',true));return x;}
+/* A task's row: its title, one sentence for where it stands (the runtime's), and what it is about. */
+function taskRow(t){return predRow(t.title,[t.line],t.about||'',function(){taskOpen(t.id);},taskTags(t));}
+function taskRender(list,d){list.textContent='';var tasks=d.tasks||[],can=taskCanRun();
+  document.getElementById('taskadd').hidden=!can||(TASKS.tab==='active'&&!tasks.length);
+  if(!tasks.length){
+    if(TASKS.tab==='finished')list.appendChild(goalEmpty('Nothing Finished Yet',TASK_SAY.finished));
+    else if(!can)list.appendChild(goalEmpty('Tasks Are Off','Turn on '+taskNeeds()+' in Settings to start.',gBtn('btn pri','Open Settings',taskToSettings)));
+    else list.appendChild(goalEmpty('No Tasks Yet',TASK_SAY.start,gBtn('btn pri','New Task',function(){taskNew();})));
+    return;}
+  var g=gEl('div','group');tasks.forEach(function(t){g.appendChild(taskRow(t));});list.appendChild(g);
+  if(d.more)list.appendChild(gEl('p','gnote',TASK_SAY.more));
+  if(!can&&TASKS.tab==='active')list.appendChild(gEl('p','gnote','Turn on '+taskNeeds()+' in Settings to run a new task.'));}
+
+/* ---------- one task, open ---------- */
+function taskOpen(id,say,kind){taskNav('task');TASKS.form=null;TASKS.back=null;var seq=++TASKS.seq;
+  taskHead('Tasks',true,false);taskFoot();taskBody().appendChild(gEl('div','empty','Loading…'));
+  gCall('/tasks/'+encodeURIComponent(id)).then(function(d){if(seq!==TASKS.seq)return;var t=d.task;TASKS.task=t;
+    /* Run Again's key is made once for the task on screen: the button pressed twice is one new task. */
+    if(!TASKS.again||TASKS.again.id!==t.id)TASKS.again={id:t.id,key:gDraftKey()};
+    if(typeof APPR_TASKS!=='undefined')APPR_TASKS[t.id]={title:t.title,about:t.about};
+    taskShow(t,say,kind);},
+  function(e){if(seq!==TASKS.seq)return;if(e.code==='noTask'||taskOff(e)){taskTab(TASKS.tab,taskOff(e)?'':gSay(e),'bad');return;}taskFailedView(e,function(){taskOpen(id);});});}
+function taskFact(label,value){var row=gEl('div','row');var l=gEl('span','lbl');l.appendChild(gEl('b',null,label));row.appendChild(l);var v=gEl('span','val',value);row.appendChild(v);row.val=v;return row;}
+/* What a task cost: "No Cost", "$0.25", or "About $0.25" for an estimate. One that costs money and has not ended has no number yet. */
+function taskCost(t){var c=t.cost,money=typeof apprDollars==='function'?apprDollars:function(m){return '$'+(m/1000000).toFixed(2);};
+  if(!c)return t.costs?'Not Known Yet':'No Cost';return c.micros===0?'No Cost':(c.estimate?'About ':'')+money(c.micros);}
+var TASK_CHECK={passed:['Passed','ok'],failed:['Failed','down'],waiting:['Waiting','off']};
+function taskEnded(t){return t.status==='accepted'||t.status==='rejected'||t.status==='failed'||t.status==='cancelled';}
+function taskShow(t,say,kind){taskHead(t.title,true,false);var body=taskBody(),here=taskHere();
+  body.appendChild(gEl('p','plead',t.line));
+  /* Its result, in the template's own sentences: outside text, and marked. */
+  body.appendChild(gEl('div','gsh','Result'));var r=gEl('div','group');r.id='taskresult';
+  r.appendChild(t.result?predRow('',[t.result],'',null,[gTag('Outside Text')]):predLine(taskEnded(t)?TASK_SAY.noResultEnded:TASK_SAY.noResult));body.appendChild(r);
+  body.appendChild(gEl('div','gsh','Checks'));var c=gEl('div','group');c.id='taskchecks';var checks=t.checks||[];
+  if(!checks.length)c.appendChild(predLine(TASK_SAY.noChecks));
+  checks.forEach(function(k){var w=tGet(TASK_CHECK,k.state)||TASK_CHECK.waiting;var row=gEl('div','row');var l=gEl('span','lbl');l.appendChild(gEl('b',null,k.name));row.appendChild(l);
+    var st=gEl('span','st '+w[1]);st.appendChild(gEl('i'));st.appendChild(document.createTextNode(w[0]));row.appendChild(st);c.appendChild(row);});
+  body.appendChild(c);
+  var by=checks.length?(t.checkedBy==='rules'?TASK_SAY.rules:t.checkedBy==='model'?TASK_SAY.model:t.checkedBy==='you'?TASK_SAY.you:''):'';
+  if(by)body.appendChild(gEl('p','gnote',by));
+  body.appendChild(gEl('div','gsh','Details'));var d=gEl('div','group');d.id='taskfacts';
+  if(t.about)d.appendChild(taskFact('About',t.about));
+  d.appendChild(taskFact('Runs On',t.runsOn));
+  d.appendChild(taskFact('Asked By',t.askedBy==='flint'?'Flint':'You'));
+  /* Its goal by its title, read from his goals: shown once it is known, and never as an id. */
+  var goal=taskFact('Goal',t.goalId?'':'No Goal');goal.hidden=!!t.goalId;d.appendChild(goal);
+  if(t.goalId)gCall('/goals/'+encodeURIComponent(t.goalId)).then(function(x){if(!here()||!x||!x.goal||typeof x.goal.title!=='string'||!x.goal.title)return;goal.val.textContent=x.goal.title;goal.hidden=false;},function(){});
+  d.appendChild(taskFact('Due',t.dueAt?gDay(t.dueAt):'No Due Date'));
+  if(t.chance)d.appendChild(taskFact('Chance It Passes',(GOAL_LIKELY[t.chance.likelihood]||'About Even')+' · '+t.chance.percent+'%'));
+  d.appendChild(taskFact('Cost',taskCost(t)));
+  body.appendChild(d);
+  taskActions(t);taskFocus(document.getElementById('taskback'));
+  if(say)taskMsg(say,kind||'ok');}
+/* Where a card filed from an open task comes back to: that task, read again. */
+function taskFrom(id){return {back:function(say,kind){taskOpen(id,say,kind);},done:function(say){taskOpen(id,say);}};}
+/* The open task's buttons: each only when the runtime says it can be done now. A card of its own that waits is opened here. */
+function taskActions(t){var f=taskFoot(),can=t.can||{},all=[];var note=gEl('span','note');f.appendChild(note);
+  var add=function(b){f.appendChild(b);all.push(b);};
+  if(can.cancel===true)add(gBtn('btn','Cancel Task',function(){taskCancelAsk(t);}));
+  if(can.reject===true)add(gBtn('btn','Reject Anyway',function(){taskFile(t,'reject',all);}));
+  if(can.accept===true)add(gBtn('btn','Accept Anyway',function(){taskFile(t,'accept',all);}));
+  if(can.again===true)add(gBtn('btn','Run Again',function(){taskAgain(t,all);}));
+  if(t.card){note.textContent=TASK_SAY.card;add(gBtn('btn pri','Review Card',function(){if(!TASKS.busy)taskCard(t.card,taskFrom(t.id));}));}
+  f.hidden=!all.length;}
+/* Cancel Task asks in place first. One that has not gone out is cancelled there and then; one that has gets a card. */
+function taskCancelAsk(t){if(TASKS.busy)return;var f=taskFoot();f.hidden=false;var c=gEl('span','note gconfirm');c.appendChild(gEl('b',null,'Cancel This Task'));
+  c.appendChild(gEl('span',null,t.status==='proposed'?TASK_SAY.withdrawn:TASK_SAY.stops));f.appendChild(c);
+  var keep=gBtn('btn','Keep Task',function(){if(!TASKS.busy)taskActions(t);});var go=gBtn('btn pri','Cancel Task',function(){taskFile(t,'cancel',[keep,go]);});
+  f.appendChild(keep);f.appendChild(go);taskFocus(keep);}
+/* A refusal by its code means the task on screen is stale: it is read again, and the footer says why. Anything else
+   (the runtime did not answer) leaves the view as it is, with its buttons back. */
+function taskRefused(e,id,buttons){if(taskOff(e)){taskTab(TASKS.tab);return;}
+  if(e.code==='noTask'){taskTab(TASKS.tab,gSay(e),'bad');return;}
+  if(typeof e.code==='string'&&e.code){taskOpen(id,gSay(e),'bad');return;}
+  taskOnOff(buttons,false);taskMsg(gSay(e));}
+/* Cancel, Accept Anyway, Reject Anyway: the runtime does it (a cancel of a task that has not gone out) or files the card. */
+function taskFile(t,verb,buttons){if(TASKS.busy)return;TASKS.busy=true;taskOnOff(buttons,true);var here=taskHere();taskMsg('');
+  gCall('/tasks/'+encodeURIComponent(t.id)+'/'+verb,{}).then(function(d){TASKS.busy=false;if(!here())return;
+    if(d&&d.proposalId)taskCard(d.proposalId,taskFrom(t.id));else taskOpen(t.id,TASK_SAY.youCancelled);},
+  function(e){TASKS.busy=false;if(here())taskRefused(e,t.id,buttons);});}
+/* Run Again: a new task like this one, and its card. */
+function taskAgain(t,buttons){if(TASKS.busy||!TASKS.again||TASKS.again.id!==t.id)return;TASKS.busy=true;taskOnOff(buttons,true);var here=taskHere();taskMsg('');
+  gCall('/tasks/'+encodeURIComponent(t.id)+'/again',{draftKey:TASKS.again.key}).then(function(d){TASKS.busy=false;TASKS.again=null;if(!here())return;taskCard(d.proposalId,taskFrom(d.id));},
+  function(e){TASKS.busy=false;if(here())taskRefused(e,t.id,buttons);});}
+
+/* ---------- a card, shown and signed here ---------- */
+/* Each task its cards are about, by title and what it is about, for a card's face (APPR_TASKS): read once a task, a
+   few at a time. `done(n)` is told how many it learned, once every read is back. */
+function taskNames(ps,done){var ids=[];done=done||function(){};
+  (ps||[]).forEach(function(p){if(typeof apprTaskCard!=='function'||!apprTaskCard(p))return;var id=apprTaskId(p);if(id&&!tGet(APPR_TASKS,id)&&ids.indexOf(id)<0)ids.push(id);});
+  ids=ids.slice(0,TASK_NAMES_MAX);var left=ids.length,got=0;if(!left){done(0);return;}
+  ids.forEach(function(id){var end=function(){left--;if(!left)done(got);};
+    gCall('/tasks/'+encodeURIComponent(id)).then(function(d){if(d&&d.task&&d.task.id===id&&typeof d.task.title==='string'){APPR_TASKS[id]={title:d.task.title,about:d.task.about};got++;}end();},end);});}
+/* The card the runtime filed, read back from the Approvals list: what Will signs is what that list holds, never
+   something this panel made up. `o.back(say, kind)` is where Back and Not Now go; `o.done(say)` where an approved card goes. */
+function taskCard(id,o){taskNav('card');var seq=++TASKS.seq;TASKS.form=null;TASKS.back=function(){o.back();};
+  taskHead('Tasks',true,false);taskFoot();taskBody().appendChild(gEl('div','empty','Loading…'));
+  gCall('/proposals').then(function(d){if(seq!==TASKS.seq)return;var p=null;((d&&d.proposals)||[]).forEach(function(x){if(x&&x.id===id&&x.status==='pending')p=x;});
+    if(d&&d.runtime==='down'){taskBody().appendChild(goalEmpty('Couldn’t Load the Card',TASK_SAY.down,gBtn('ghost','Try Again',function(){taskCard(id,o);})));return;}
+    /* Only a card about a task or an asset is signed here; anything else, or one already decided, is not shown. */
+    if(!p||typeof apprTaskCard!=='function'||!apprTaskCard(p)){o.back(TASK_SAY.gone,'bad');return;}
+    taskNames([p],function(){if(seq===TASKS.seq)taskCardShow(p,o);});},
+  function(e){if(seq!==TASKS.seq)return;if(taskOff(e)){taskTab(TASKS.tab);return;}taskBody().appendChild(taskFailed(e,function(){taskCard(id,o);}));});}
+/* The card in the Approvals panel's own words: its title, its sentence, its facts, and everything it holds behind Show Details. */
+function taskCardShow(p,o){taskHead(apprTitle(p),true,false);var body=taskBody(),foot=taskFoot();
+  body.appendChild(gEl('p','plead',apprSub(p)));
+  var facts=apprFacts(p);if(facts.length){var g=gEl('div','group');g.id='taskcardfacts';facts.forEach(function(x){g.appendChild(taskFact(x[0],x[1]));});body.appendChild(g);}
+  var det=gEl('div','details tdetails');det.id='taskcarddetails';det.hidden=true;if(p.reason)det.appendChild(gEl('p',null,p.reason));apprDetailsInto(det,p);
+  var label=gEl('span',null,'Show Details');var show=gBtn('ghost','',function(){det.hidden=!det.hidden;label.textContent=det.hidden?'Show Details':'Hide Details';show.setAttribute('aria-expanded',det.hidden?'false':'true');});
+  show.appendChild(label);show.appendChild(gIcon('chev'));show.setAttribute('aria-expanded','false');
+  var w=gEl('div','gact');w.appendChild(show);body.appendChild(w);body.appendChild(det);
+  foot.hidden=false;
+  if(!gKeyed()||typeof approveAction!=='function'){foot.appendChild(gEl('span','note',TASK_SAY.key));foot.appendChild(gBtn('btn pri','Open Settings',taskToSettings));taskFocus(document.getElementById('taskback'));return;}
+  foot.appendChild(gEl('span','note'));
+  var later=gBtn('btn','Not Now',function(){if(!TASKS.busy)o.back(TASK_SAY.later);});
+  var ok=gBtn('btn pri',typeof approveLabel==='function'?approveLabel():'Approve',function(){taskApprove(p,[later,ok],o);});
+  foot.appendChild(later);foot.appendChild(ok);taskFocus(document.getElementById('taskback'));}
+/* Sign exactly the args the card showed, with a fresh touch. While the prompt is up the buttons are off and the
+   footer says it is waiting. A cancelled prompt leaves the card waiting in Approvals. */
+function taskApprove(p,buttons,o){if(TASKS.busy)return;TASKS.busy=true;taskOnOff(buttons,true);var here=taskHere();taskMsg(TASK_SAY.waiting,'wait');
+  var end=function(){TASKS.busy=false;taskOnOff(buttons,false);};
+  approveAction(p.id,goalHost(),{fresh:true,reason:apprReason(p),args:p.args}).then(function(r){end();var a=(r&&r.action)||{},ok=a.status==='done';
+    if(!here()){if(ok&&tasksOpen()&&TASKS.view==='list')taskTab(TASKS.tab);return;}
+    if(ok)o.done(taskDoneSays(p));else taskMsg(a.status==='approved'?TASK_SAY.approved:gSay(a.error||'It failed.'));
+  },function(e){end();if(here())taskMsg(goalCancelled(e)?TASK_SAY.cancelled:gSay(e));});}
+
+/* ---------- New Task ---------- */
+/* The form is told what it can offer by the runtime: the kinds of task an asset that is on can run, the items each
+   can be about (by label), and his active goals. What Will picks lives in TASKS.form, with the key that makes a form
+   sent twice one task. */
+function taskNew(){taskNav('form');TASKS.back=null;var seq=++TASKS.seq;taskHead('New Task',true,false);taskFoot();taskBody().appendChild(gEl('div','empty','Loading…'));
+  gCall('/tasks/form').then(function(d){if(seq!==TASKS.seq)return;taskForm(d||{});},
+    function(e){if(seq!==TASKS.seq)return;if(taskOff(e)){taskTab(TASKS.tab);return;}taskFailedView(e,taskNew);taskHead('New Task',true,false);});}
+function taskForm(d){var kinds=(d.templates||[]).filter(function(t){return !!t&&!!tGet(TASK_FIELDS,t.template);}),goals=d.goals||[];
+  taskHead('New Task',true,false);var body=taskBody(),foot=taskFoot();
+  if(!kinds.length){body.appendChild(goalEmpty('Tasks Are Off','Turn on '+taskNeeds()+' in Settings to start.',gBtn('btn pri','Open Settings',taskToSettings)));return;}
+  if(!TASKS.form)TASKS.form={draftKey:gDraftKey(),template:kinds[0].template,item:'',goal:'',due:''};
+  var f=TASKS.form,kind=kinds[0];kinds.forEach(function(t){if(t.template===f.template)kind=t;});f.template=kind.template;
+  var words=tGet(TASK_FIELDS,kind.template),items=kind.items||[];
+  if(!items.some(function(i){return i.entityId===f.item;}))f.item='';
+  if(!goals.some(function(g){return g.id===f.goal;}))f.goal='';
+  var box=gEl('div','gform');box.id='taskform';var g=gEl('div','group');
+  var r1=gEl('div','formrow');var what=goalSelect('What to Do',kinds.map(function(t){return [t.template,t.title];}),f.template);
+  what.input.onchange=function(){f.template=what.input.value;f.item='';taskForm(d);};r1.appendChild(what.wrap);g.appendChild(r1);
+  var r2=gEl('div','formrow');
+  if(items.length){var item=goalSelect(words[0],[['',words[1]]].concat(items.map(function(i){return [i.entityId,i.label];})),f.item);item.input.onchange=function(){f.item=item.input.value;taskMsg('');};r2.appendChild(item.wrap);g.appendChild(r2);}
+  else g.appendChild(predLine(words[3]));
+  var r3=gEl('div','formrow');var goal=goalSelect('Goal',[['','No Goal']].concat(goals.map(function(x){return [x.id,x.title];})),f.goal);goal.input.onchange=function(){f.goal=goal.input.value;};r3.appendChild(goal.wrap);
+  var due=goalField('Due','date',null,null,f.due);due.input.onchange=function(){f.due=due.input.value;};due.input.oninput=due.input.onchange;r3.appendChild(due.wrap);g.appendChild(r3);
+  box.appendChild(g);if(items.length)box.appendChild(gEl('p','gnote',words[2]+(kind.more?' '+TASK_SAY.moreItems:'')));body.appendChild(box);
+  foot.hidden=false;foot.appendChild(gEl('span','note'));
+  var cancel=gBtn('btn','Cancel',function(){if(!TASKS.busy)taskTab(TASKS.tab);});var go=gBtn('btn pri','Create Task',function(){taskCreate(d,[cancel,go]);});go.disabled=!items.length;
+  foot.appendChild(cancel);foot.appendChild(go);taskFocus(what.input);}
+/* Create Task: the task is made and its card filed in one request; the card is then shown here to approve. */
+function taskCreate(d,buttons){var f=TASKS.form;if(!f||TASKS.busy)return;var words=tGet(TASK_FIELDS,f.template);
+  if(!f.item){taskMsg(words?words[4]:'Choose what the task is about.');return;}
+  /* A due date is the end of that day. */
+  var body={draftKey:f.draftKey,template:f.template,params:{item:f.item},goalId:f.goal||null,dueAt:f.due?gAt(f.due,23,59):null};
+  TASKS.busy=true;taskOnOff(buttons,true);var here=taskHere();taskMsg('');
+  gCall('/tasks',body).then(function(x){TASKS.busy=false;if(!here())return;TASKS.form=null;taskCard(x.proposalId,taskFrom(x.id));},
+  function(e){TASKS.busy=false;if(!here())return;if(taskOff(e)){taskTab(TASKS.tab);return;}taskOnOff(buttons,false);
+    /* What it could offer has changed (an asset was turned off, an item is gone): the form is read again, and says why. */
+    if(e.code==='assetOff'||e.code==='cantRun'||e.code==='itemGone'||e.code==='noGoal'){var say=gSay(e);gCall('/tasks/form').then(function(n){if(here()){taskForm(n||{});taskMsg(say);}},function(){if(here())taskMsg(say);});return;}
+    taskMsg(gSay(e));});}
+
+/* ---------- Settings > Assets ---------- */
+function assetsMsg(t){var m=document.getElementById('assetsmsg');if(!m)return;m.textContent=t||'';m.hidden=!t;}
+/* On, Off or Waiting, with its dot. */
+function assetState(a){var s=gEl('span','st '+(a.on?'ok':a.waiting?'unknown':'off'));s.appendChild(gEl('i'));s.appendChild(document.createTextNode(a.on?'On':a.waiting?'Waiting':'Off'));return s;}
+/* An asset's control. On: Turn Off (asked in place first). Its card waiting: Open Approvals. Off, and it can be turned
+   on now: Turn On. Off, and it cannot (the row's sentence says what it needs first): nothing. */
+function assetActs(a,line,acts){acts.textContent='';line.textContent=a.line;
+  if(a.on)acts.appendChild(gBtn('btn','Turn Off',function(){assetArm(a,line,acts);}));
+  else if(a.waiting)acts.appendChild(gBtn('btn','Open Approvals',function(){if(typeof openApprovals==='function')openApprovals();}));
+  else if(a.canTurnOn)acts.appendChild(gBtn('btn pri','Turn On',function(b){assetOn(a,b);}));}
+function assetRow(a){var row=gEl('div','row two gwrap');var l=gEl('span','lbl');l.appendChild(gEl('b',null,a.name));var line=gEl('span',null,a.line);l.appendChild(line);row.appendChild(l);
+  if(a.costs)row.appendChild(gTag('Costs Money',true));
+  row.appendChild(assetState(a));var acts=gEl('span','pacts');row.appendChild(acts);assetActs(a,line,acts);return row;}
+/* Turn Off needs no signature, and what is running on the asset fails: so it asks in place, and a double tap is not a yes. */
+function assetArm(a,line,acts){if(TASKS.busy)return;acts.textContent='';line.textContent=TASK_SAY.armOff;assetsMsg('');var at=taskNow();
+  var cancel=gBtn('ghost','Cancel',function(){if(!TASKS.busy)assetActs(a,line,acts);});
+  var go=gBtn('btn pri','Turn Off',function(){if(taskNow()-at<TASK_ARM_MS)return;assetOff(a,[cancel,go]);});
+  acts.appendChild(cancel);acts.appendChild(go);try{cancel.focus();}catch(e){}}
+function assetOff(a,buttons){if(TASKS.busy)return;TASKS.busy=true;taskOnOff(buttons,true);
+  gCall('/assets/'+encodeURIComponent(a.id)+'/off',{}).then(function(){TASKS.busy=false;loadAssets();},
+    function(e){TASKS.busy=false;if(typeof e.code==='string'&&e.code){loadAssets(gSay(e));return;}taskOnOff(buttons,false);assetsMsg(gSay(e));});}
+function settingsOpen(){var p=document.getElementById('settings');return !!(p&&p.classList&&p.classList.contains('open'));}
+/* Turn On files the card that turns it on. The card is then shown in the Tasks panel, to read and approve there. If Will
+   has left Settings by the time it is filed, nothing opens: the card waits in Approvals. */
+function assetOn(a,b){if(TASKS.busy)return;TASKS.busy=true;if(b)b.disabled=true;assetsMsg('');
+  gCall('/assets/'+encodeURIComponent(a.id)+'/on',{}).then(function(d){TASKS.busy=false;if(!settingsOpen()){loadAssets();return;}
+    if(typeof showPanel==='function')showPanel('tasks',true);if(typeof loadCreds==='function')loadCreds();
+    taskCard(d.proposalId,{back:function(say,kind){taskTab('active',say,kind);},done:function(say){taskTab('active',say);}});},
+  function(e){TASKS.busy=false;if(typeof e.code==='string'&&e.code){loadAssets(gSay(e));return;}if(b)b.disabled=false;assetsMsg(gSay(e));});}
+/* `say`: why a tap did nothing, once the list is drawn again. With no runtime (or an older one) the section is not
+   there; with tasks switched off on this Mac it says the one sentence and offers nothing. */
+function loadAssets(say){var host=document.getElementById('setassets');if(!host)return;if(typeof TOKEN!=='undefined'&&!TOKEN){host.hidden=true;return;}var seq=++TASKS.aseq;
+  gCall('/assets').then(function(d){if(seq!==TASKS.aseq)return;TASKS.assets=(d&&d.assets)||[];assetsDraw(host,TASKS.assets,null);if(say)assetsMsg(say);},
+    function(e){if(seq!==TASKS.aseq)return;assetsDraw(host,null,e);});}
+function assetsDraw(host,assets,e){host.textContent='';
+  if(e&&(e.status===501||e.status===401)){host.hidden=true;return;}
+  host.hidden=false;host.appendChild(gEl('div','gsh','Assets'));var g=gEl('div','group');g.id='assets';host.appendChild(g);
+  if(e){if(taskOff(e)){g.appendChild(predLine(gSay(e)));return;}
+    var row=gEl('div','row two gwrap');var l=gEl('span','lbl');l.appendChild(gEl('b',null,'Couldn’t Load Assets'));
+    l.appendChild(gEl('span',null,e.status===503?'The runtime isn’t answering, so assets can’t load.':gSay(e)));row.appendChild(l);row.appendChild(gBtn('ghost','Try Again',function(){loadAssets();}));g.appendChild(row);return;}
+  if(!assets.length){g.appendChild(predLine(TASK_SAY.noAssets));return;}
+  assets.forEach(function(a){g.appendChild(assetRow(a));});
+  var m=gEl('div','err');m.id='assetsmsg';m.hidden=true;m.setAttribute('role','status');host.appendChild(m);}
+
+/* The panel is one of the page's panels (opening another closes it), and Escape closes it. */
+if(typeof PANELS!=='undefined'&&PANELS.indexOf('tasks')<0)PANELS.push('tasks');
+if(typeof document.addEventListener==='function')document.addEventListener('keydown',function(e){if(e&&e.key==='Escape'&&tasksOpen())closeTasks();});
+tasksProbe();
+if(typeof setInterval==='function')setInterval(tasksProbe,300000);
 </script>
 <script id="update-js">
 /* Flint updates itself. A deploy replaces this page (and the Mac app's build). The
