@@ -18,8 +18,9 @@
  *     hours without one.
  *  4. A result that passed waits for Will's accept card as long as the card
  *     does. One whose card is no longer waiting fails as `expired` when he
- *     turned a card down or let one lapse (his answer), and is otherwise sent
- *     to its check, which files a card (again, when the last one did not run).
+ *     turned a card down or let one lapse (his answer: check.ts's
+ *     acceptDeclined says the same), and is otherwise sent to its check,
+ *     which files a card (again, when the last one did not run).
  *
  * Each of these is read on its own, by what needs doing: tasks waiting on a
  * card of Will's are not in any answer, so however many wait they never hide
@@ -41,7 +42,6 @@ import type { Bus } from '../bus.js';
 import { appendAudit } from '../governance/audit.js';
 import { TASKS_ORIGIN } from '@flint/policy';
 import { RUN_QUEUE, WITHDRAW_ACTION } from './card.js';
-import { acceptDeclined } from './check.js';
 import { OVERRIDE_WINDOW_MS, TASK_FORECAST, expireCancelledForecast, mayExpire, mayScore, scoreTaskForecast } from './forecast.js';
 import { CHECK_QUEUE, failTask } from './run.js';
 import { taskLog } from './errors.js';
@@ -148,19 +148,21 @@ export async function taskTick(d: TaskTickDeps): Promise<TaskTickCounts> {
   }
 
   // 4. Passed, with no accept card waiting, approved or running. (One whose card waits is left to Will, and is not
-  // read here at all.) A card he turned down, or let lapse, is his answer: the wait ends. Otherwise its check
-  // is asked for a card.
-  const cardless = await db.$queryRaw<Array<{ id: string }>>`
+  // read here at all.) Two reads, each of what needs one thing done, so neither kind waits behind the other:
+  // a card he turned down, or let lapse, is his answer, and the wait ends; one with no such card is sent to its
+  // check, which files one (again, when the last one failed).
+  const passedWithout = (declined: boolean) => db.$queryRaw<Array<{ id: string }>>`
     SELECT t.id FROM "Task" t
     WHERE t.status = 'checking' AND t."metBar" = true
       AND NOT EXISTS (
         SELECT 1 FROM "Proposal" p
         WHERE p.action = 'task.check_bar' AND p.status IN ('pending', 'approved', 'executing') AND p.args->>'taskId' = t.id)
+      AND ${declined} = EXISTS (
+        SELECT 1 FROM "Proposal" p
+        WHERE p.action = 'task.check_bar' AND p.status IN ('rejected', 'expired') AND p.args->>'taskId' = t.id)
     ORDER BY t."updatedAt" ASC, t.id ASC LIMIT ${pageSize}`;
-  for (const t of cardless) {
-    if (await acceptDeclined(db, t.id)) await fail({ id: t.id, status: 'checking' }, 'expired');
-    else await send(CHECK_QUEUE, t.id);
-  }
+  for (const t of await passedWithout(true)) await fail({ id: t.id, status: 'checking' }, 'expired');
+  for (const t of await passedWithout(false)) await send(CHECK_QUEUE, t.id);
 
   // 5. Forecasts of tasks that ended a day ago or more.
   if (await mayScore(db, now)) {
