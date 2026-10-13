@@ -63,7 +63,8 @@ CREATE FUNCTION action_policy_off_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
   rid text := CASE WHEN OLD."id" ~ '^[A-Za-z0-9_-]{1,64}$' THEN OLD."id" ELSE '?' END;
-  -- How a card names this row: all three, so what Will read on the card is the row that goes off.
+  -- How a card names this row: all three, so what Will read on the card is the row that goes off. (Only a list
+  -- holds it: `@>` finds an object in a list of objects, never in an object, a text or a list inside a list.)
   named jsonb := jsonb_build_array(jsonb_build_object('id', OLD."id", 'pattern', OLD."pattern", 'tier', OLD."tier"));
   c record;
 BEGIN
@@ -93,7 +94,7 @@ BEGIN
     FROM "Proposal" p JOIN "Approval" a ON a."id" = p."approvalId"
     WHERE p."status" = 'executing' AND p."action" = 'policy.change' AND p."kind" = 'policy'
       AND a."decision" = 'approve' AND a."subjectType" = 'proposal' AND a."subjectId" = p."id"
-      AND jsonb_typeof(p."args"->'off') = 'array' AND p."args"->'off' @> named
+      AND p."args"->'off' @> named
   LOOP
     BEGIN
       IF coalesce(
