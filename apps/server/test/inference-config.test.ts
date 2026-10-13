@@ -353,13 +353,21 @@ describe("Node's env proxy: an address that goes through it is not this Mac", ()
     for (const host of ['127.0.0.1:11434', '[::1]:8080', 'localhost:11434', 'gpu-box.lan:11434', '127.0.0.1']) expect(viaProxy(host, on), host).toBe(true);
     // A host nobody can name is proxied too.
     expect(viaProxy(undefined, on)).toBe(true);
-    const listed = readEnvProxy({ ...PROXY, NO_PROXY: 'localhost,127.0.0.1,::1' }, []);
-    expect(listed.direct).toEqual(['localhost', '127.0.0.1', '::1']);
+    // An IPv6 address is named with its brackets, as Node needs it: `::1` alone names nothing (Node proxies it).
+    const listed = readEnvProxy({ ...PROXY, NO_PROXY: 'localhost,127.0.0.1,[::1]' }, []);
+    expect(listed.direct).toEqual(['localhost', '127.0.0.1', '[::1]']);
     for (const host of ['127.0.0.1:11434', '127.0.0.1', '[::1]:8080', '[::1]', 'localhost:1', 'LOCALHOST:1']) expect(viaProxy(host, listed), host).toBe(false);
     expect(viaProxy('gpu-box.lan:11434', listed)).toBe(true);
-    // Either spelling of the variable, either separator, brackets or not; `*` is every host.
-    expect(readEnvProxy({ ...PROXY, no_proxy: '[::1] 127.0.0.1' }, []).direct).toEqual(['::1', '127.0.0.1']);
+    const bare = readEnvProxy({ ...PROXY, NO_PROXY: 'localhost,127.0.0.1,::1' }, []);
+    for (const host of ['[::1]:8080', '[::1]']) expect(viaProxy(host, bare), host).toBe(true);
+    expect(viaProxy('127.0.0.1:11434', bare)).toBe(false);
+    // Either spelling of the variable (the lower-case one alone when both are set, as Node reads them), either
+    // separator; `*` is every host only as the whole value.
+    expect(readEnvProxy({ ...PROXY, no_proxy: '[::1] 127.0.0.1' }, []).direct).toEqual(['[::1]', '127.0.0.1']);
+    expect(viaProxy('127.0.0.1:11434', readEnvProxy({ ...PROXY, NO_PROXY: '127.0.0.1', no_proxy: 'x' }, []))).toBe(true);
+    expect(viaProxy('127.0.0.1:11434', readEnvProxy({ ...PROXY, NO_PROXY: 'x', no_proxy: '127.0.0.1' }, []))).toBe(false);
     expect(viaProxy('anything.example:1', readEnvProxy({ ...PROXY, NO_PROXY: '*' }, []))).toBe(false);
+    for (const star of ['*,foo', 'foo,*', ' * ']) expect(viaProxy('127.0.0.1:11434', readEnvProxy({ ...PROXY, NO_PROXY: star }, [])), star).toBe(true);
     // Naming `localhost` does not cover the address Flint really asks, which is 127.0.0.1.
     expect(viaProxy('127.0.0.1:11434', readEnvProxy({ ...PROXY, NO_PROXY: 'localhost' }, []))).toBe(true);
   });

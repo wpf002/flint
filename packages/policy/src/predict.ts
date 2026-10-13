@@ -133,7 +133,8 @@ export type ForecastRow = z.infer<typeof ForecastRow>;
  * wait for him; `announce`: whether the header may show a dot for them (only
  * once he has let Flint ask on its own). `secondOpinion`: the Turn On sheet
  * may offer the local model's own estimate (predictions run on this Mac and a
- * local model is set).
+ * local model is set). A runtime from before the second opinion does not say:
+ * absent is no, so the server reads an older runtime's page during a deploy.
  */
 export const PredictionsPage = z
   .object({
@@ -142,7 +143,7 @@ export const PredictionsPage = z
     waiting: z.array(z.object({ id: Ref, numbers: Count }).strict()).max(20),
     questions: Count,
     announce: z.boolean(),
-    secondOpinion: z.boolean(),
+    secondOpinion: z.boolean().optional(),
   })
   .strict();
 export type PredictionsPage = z.infer<typeof PredictionsPage>;
@@ -174,8 +175,11 @@ export const SeriesView = z
     number: ForecastRow,
     forecast: z.array(PanelFact).max(8),
     chance: PanelFact.nullable(),
-    /** Null while the number is off: there is nothing to give a second opinion on. */
-    opinion: SecondOpinion.nullable(),
+    /**
+     * Null while the number is off: there is nothing to give a second opinion on. Absent from a runtime that is
+     * older than the second opinion (read as null, so the server takes its answer during a deploy).
+     */
+    opinion: SecondOpinion.nullable().optional(),
     record: PanelSentence,
     /** A Turn On card that names it waits for Will. */
     waiting: z.boolean(),

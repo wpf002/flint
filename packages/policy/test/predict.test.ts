@@ -154,10 +154,12 @@ describe('P4 part 4: the Predictions panel\'s wire', () => {
   it('the page, one number, the questions and the scores are strict, and bounded', () => {
     const page = { state: 'on', numbers: [row], waiting: [{ id: 'prabc123', numbers: 12 }], questions: 2, announce: false, secondOpinion: true };
     expect(PredictionsPage.parse(page)).toEqual(page);
-    // Whether the sheet may offer the local model's second opinion is always said.
-    const { secondOpinion: _s, ...unsure } = page;
-    expect(PredictionsPage.safeParse(unsure).success).toBe(false);
-    expect(PredictionsPage.safeParse({ ...page, secondOpinion: 'yes' }).success).toBe(false);
+    // A runtime from before the second opinion does not say whether the sheet may offer it: its page is still a
+    // page (the server reads it during a deploy), and unsaid is no. Said, it is a plain yes or no.
+    const { secondOpinion: _s, ...older } = page;
+    expect(PredictionsPage.parse(older)).toEqual(older);
+    expect(PredictionsPage.parse(older).secondOpinion).toBeUndefined();
+    for (const bad of ['yes', 1, null]) expect(PredictionsPage.safeParse({ ...page, secondOpinion: bad }).success, String(bad)).toBe(false);
     expect(PredictionsPage.safeParse({ ...page, state: 'maybe' }).success).toBe(false);
     expect(PredictionsPage.safeParse({ ...page, extra: 1 }).success).toBe(false);
     expect(PredictionsPage.safeParse({ ...page, numbers: Array.from({ length: 61 }, () => row) }).success).toBe(false);
@@ -176,8 +178,9 @@ describe('P4 part 4: the Predictions panel\'s wire', () => {
     for (const bad of [{ ...opinion, probability: 0.6 }, { ...opinion, reasonCode: 'trend' }, { ...opinion, model: 'muse-glimmer:30b' }, { on: true, offer: false }, { ...opinion, says: 'about 60%' }, { ...opinion, says: '{"p":0.6}.' }]) {
       expect(SeriesAnswer.safeParse({ series: { ...series, opinion: bad } }).success, JSON.stringify(bad)).toBe(false);
     }
-    const { opinion: _o, ...unsaidOpinion } = series;
-    expect(SeriesAnswer.safeParse({ series: unsaidOpinion }).success).toBe(false);
+    // An older runtime's open number has no such key at all: still an answer, with nothing to show.
+    const { opinion: _o, ...olderSeries } = series;
+    expect(SeriesAnswer.parse({ series: olderSeries })).toEqual({ series: olderSeries });
     expect(SeriesAnswer.safeParse({ series: { ...series, chance: null } }).success).toBe(true);
     expect(SeriesAnswer.safeParse({ series: { ...series, forecast: Array.from({ length: 9 }, () => fact) } }).success).toBe(false);
     expect(SeriesAnswer.safeParse({ series: { ...series, points: [{ mean: 4 }] } }).success).toBe(false);

@@ -31,6 +31,16 @@ describe('an address that is this machine', () => {
   it('exactly 127.0.0.1, localhost or ::1', () => {
     for (const url of ['http://127.0.0.1:11434', 'http://localhost:11434', 'http://[::1]:11434', 'http://LOCALHOST:11434/', 'https://127.0.0.1:8443/v1']) expect(onThisMachine(url), url).toBe(true);
   });
+  it('a name under localhost is not taken for this machine, though it resolves here', () => {
+    // Node on this Mac does resolve `ollama.localhost` to loopback (measured). Where a name resolves is the
+    // resolver's to say, and a hosts file or a DNS answer can say otherwise: the rule takes the three exact
+    // spellings and no other name on trust. (The runtime's own setting allows only those three, and pins
+    // `localhost` to 127.0.0.1.)
+    for (const url of ['http://ollama.localhost:11434', 'http://a.b.localhost:11434', 'http://xlocalhost:11434', 'http://localhost.:11434', 'http://localhost.localdomain:11434', 'http://127.1:11435', 'http://[::ffff:10.0.0.5]:11434']) {
+      expect(onThisMachine(url), url).toBe(url === 'http://127.1:11435');
+    }
+  });
+
   it('anything else is someone else’s, and so is anything that is no address', () => {
     for (const url of ['http://127.0.0.1.example.com:11434', 'http://localhost.example.com', 'http://192.168.1.20:11434', 'http://10.0.0.5:11434', 'http://0.0.0.0:11434', 'https://ollama.com', 'http://studio.local:11434', 'ftp://127.0.0.1', 'file:///tmp/x', '127.0.0.1:11434', 'not a url', '', undefined]) {
       expect(onThisMachine(url), String(url)).toBe(false);
@@ -72,6 +82,10 @@ describe('Ollama’s own listing', () => {
     expect(listedHere(models, 'qwen3.6:35b')).toBe(false);
     expect(listedHere(models, '')).toBe(false);
     expect(listedHere([], 'muse-glimmer:30b')).toBe(false);
+    // A blank name is no model, even where a row would read as the same name once a tag is added.
+    const odd = listedModels([{ name: ':latest' }, { name: 'latest' }]);
+    for (const blank of ['', ' ', '\t']) expect(listedHere(odd, blank), JSON.stringify(blank)).toBe(false);
+    expect(new ModelPlaces().runsHere('http://127.0.0.1:11434', '')).toBe(false);
   });
 
   it('a row with no name falls back to its model field, and a row that is no row is dropped', () => {
@@ -190,16 +204,60 @@ describe('Node’s env proxy: an address that goes through it is not this Mac', 
     expect(readEnvProxy({ HTTP_PROXY: 'http://p:1', NODE_OPTIONS: '--use-env-proxy-not' }, []).on).toBe(false);
     for (const v of ['0', 'true', 'yes', '']) expect(readEnvProxy({ NODE_USE_ENV_PROXY: v, HTTP_PROXY: 'http://p:1' }, []).on, v).toBe(false);
   });
-  it('loopback goes through it too, unless NO_PROXY names the host exactly', () => {
+  it('loopback goes through it too, unless the no-proxy list names the host exactly', () => {
     const on = readEnvProxy(PROXY, []);
     for (const host of ['127.0.0.1:11434', '[::1]:8080', 'localhost:11434', '127.0.0.1', undefined]) expect(viaProxy(host, on), String(host)).toBe(true);
-    const listed = readEnvProxy({ ...PROXY, NO_PROXY: 'localhost,127.0.0.1,::1' }, []);
+    const listed = readEnvProxy({ ...PROXY, NO_PROXY: 'localhost,127.0.0.1,[::1]' }, []);
+    expect(listed.direct).toEqual(['localhost', '127.0.0.1', '[::1]']);
     for (const host of ['127.0.0.1:11434', '127.0.0.1', '[::1]:8080', '[::1]', 'localhost:1', 'LOCALHOST:1']) expect(viaProxy(host, listed), host).toBe(false);
     expect(viaProxy('gpu-box.lan:11434', listed)).toBe(true);
     expect(viaProxy('anything.example:1', readEnvProxy({ ...PROXY, NO_PROXY: '*' }, []))).toBe(false);
     // An entry Node would have to interpret is not taken as naming the host.
-    for (const entry of ['.0.0.1', '127.0.0.0/8', '127.0.0.1:11434', '*.local']) expect(viaProxy('127.0.0.1:11434', readEnvProxy({ ...PROXY, NO_PROXY: entry }, [])), entry).toBe(true);
+    for (const entry of ['.0.0.1', '0.0.1', '*.0.0.1', '127.*', '127.0.0.0/8', '127.0.0.1:11434', '127.0.0.1.', '127.0.0.1;foo']) expect(viaProxy('127.0.0.1:11434', readEnvProxy({ ...PROXY, NO_PROXY: entry }, [])), entry).toBe(true);
     const off = readEnvProxy({ HTTP_PROXY: PROXY.HTTP_PROXY }, []);
     for (const host of ['127.0.0.1:11434', 'gpu-box.lan:11434', undefined]) expect(viaProxy(host, off)).toBe(false);
+  });
+
+  // Each row is what Node v24.15 really did with that environment, measured against a proxy and two targets on
+  // loopback (an IPv4 one and an IPv6 one): `true` is "Node sent it through the proxy".
+  const NODE_V24: Array<[string, Record<string, string>, { v4: boolean; v6: boolean }]> = [
+    ['NO_PROXY=127.0.0.1', { NO_PROXY: '127.0.0.1' }, { v4: false, v6: true }],
+    ['NO_PROXY=[::1]', { NO_PROXY: '[::1]' }, { v4: true, v6: false }],
+    ['NO_PROXY=[::1],127.0.0.1', { NO_PROXY: '[::1],127.0.0.1' }, { v4: false, v6: false }],
+    ['NO_PROXY=127.0.0.1 with spaces around it', { NO_PROXY: ' 127.0.0.1 ' }, { v4: false, v6: true }],
+    ['NO_PROXY=foo<tab>127.0.0.1', { NO_PROXY: 'foo\t127.0.0.1' }, { v4: false, v6: true }],
+    ['NO_PROXY=*', { NO_PROXY: '*' }, { v4: false, v6: false }],
+    ['no_proxy=*', { no_proxy: '*' }, { v4: false, v6: false }],
+    ['no_proxy=127.0.0.1', { no_proxy: '127.0.0.1' }, { v4: false, v6: true }],
+    // The three forms that used to read as "this Mac" while Node proxied them.
+    // 1. An IPv6 address without its brackets names nothing: Node needs `[::1]`.
+    ['NO_PROXY=::1', { NO_PROXY: '::1' }, { v4: true, v6: true }],
+    ['no_proxy=::1', { no_proxy: '::1' }, { v4: true, v6: true }],
+    ['NO_PROXY=::1,127.0.0.1', { NO_PROXY: '::1,127.0.0.1' }, { v4: false, v6: true }],
+    ['NO_PROXY=0:0:0:0:0:0:0:1', { NO_PROXY: '0:0:0:0:0:0:0:1' }, { v4: true, v6: true }],
+    // 2. `*` is every host only as the whole value: beside another entry Node does not honour it.
+    ['NO_PROXY=*,foo', { NO_PROXY: '*,foo' }, { v4: true, v6: true }],
+    ['NO_PROXY=foo,*', { NO_PROXY: 'foo,*' }, { v4: true, v6: true }],
+    ['NO_PROXY=" * " (a star with spaces around it)', { NO_PROXY: ' * ' }, { v4: true, v6: true }],
+    ['NO_PROXY=*,127.0.0.1', { NO_PROXY: '*,127.0.0.1' }, { v4: false, v6: true }],
+    // 3. With both spellings set Node reads the lower-case one, and only it: even when it is empty.
+    ['NO_PROXY=127.0.0.1 and no_proxy=x', { NO_PROXY: '127.0.0.1', no_proxy: 'x' }, { v4: true, v6: true }],
+    ['NO_PROXY=x and no_proxy=127.0.0.1', { NO_PROXY: 'x', no_proxy: '127.0.0.1' }, { v4: false, v6: true }],
+    ['NO_PROXY=127.0.0.1 and no_proxy empty', { NO_PROXY: '127.0.0.1', no_proxy: '' }, { v4: true, v6: true }],
+  ];
+  it.each(NODE_V24)('says what Node does: %s', (_label, noProxy, node) => {
+    const proxy = readEnvProxy({ ...PROXY, ...noProxy }, []);
+    expect({ v4: viaProxy('127.0.0.1:11434', proxy), v6: viaProxy('[::1]:11434', proxy) }).toEqual(node);
+  });
+
+  it('where it is not sure it says proxied, never direct: every form Node keeps direct that the rule does not is the safe way round', () => {
+    // Node keeps these direct (a matching port, a suffix): the rule does not try to follow it, and refuses the address.
+    for (const entry of ['127.0.0.1:11434', '.0.0.1', '0.0.1', '*.0.0.1']) expect(viaProxy('127.0.0.1:11434', readEnvProxy({ ...PROXY, NO_PROXY: entry }, [])), entry).toBe(true);
+    expect(viaProxy('[::1]:11434', readEnvProxy({ ...PROXY, NO_PROXY: '[::1]:11434' }, []))).toBe(true);
+    // A star inside a list is no entry at all, and the entries beside it still count.
+    expect(readEnvProxy({ ...PROXY, NO_PROXY: '*,127.0.0.1' }, []).direct).toEqual(['127.0.0.1']);
+    expect(viaProxy('gpu-box.lan:1', readEnvProxy({ ...PROXY, NO_PROXY: '*,127.0.0.1' }, []))).toBe(true);
+    // A name under localhost is kept direct by Node when `localhost` is listed (a suffix): the rule does not follow it.
+    expect(viaProxy('ollama.localhost:11434', readEnvProxy({ ...PROXY, NO_PROXY: 'localhost' }, []))).toBe(true);
   });
 });

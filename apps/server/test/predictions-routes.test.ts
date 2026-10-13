@@ -187,6 +187,15 @@ describe('reads', () => {
       answer = () => ({ status: 200, body: bad });
       expect(await get('/predictions')).toEqual({ status: 502, body: { error: 'The runtime sent an answer Flint can’t read.', ref: 'ref123' } });
     }
+    // During a deploy the server is new and the runtime is not yet: its page says nothing of a second opinion, and
+    // its open number has no such key. Both are read as they are (no 502), with nothing added.
+    const olderPage = (({ secondOpinion: _s, ...rest }) => rest)(page());
+    const olderSeries = (({ opinion: _o, ...rest }) => rest)(seriesView());
+    expect(olderPage).not.toHaveProperty('secondOpinion');
+    answer = () => ({ status: 200, body: olderPage });
+    expect(await get('/predictions')).toEqual({ status: 200, body: olderPage });
+    answer = () => ({ status: 200, body: { series: olderSeries } });
+    expect(await get(`/predictions/series/${KEY}`)).toEqual({ status: 200, body: { series: olderSeries } });
     // The local model's second opinion passes as its one sentence, its switch and whether it can be turned on.
     for (const opinion of [{ on: true, says: 'The local model said about 60%.', offer: false }, { on: false, says: 'The local model doesn’t estimate this number.', offer: true }]) {
       answer = () => ({ status: 200, body: { series: seriesView({ opinion }) } });

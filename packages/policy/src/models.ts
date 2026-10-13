@@ -276,11 +276,19 @@ export class ModelPlaces {
  * then leaves the process for the proxy first: the model's prompt with it. So
  * an address that goes through the proxy is not "this Mac", whatever its host
  * is (`viaProxy`).
+ *
+ * The rule is held to what Node really does (v24, measured), and where the two
+ * could differ it errs toward "proxied": calling a direct address proxied
+ * costs a local model its turn; calling a proxied one direct would send Will's
+ * words to the proxy.
  */
 export interface EnvProxy {
   /** Node is sending `fetch` through a proxy the environment names. */
   on: boolean;
-  /** The hosts NO_PROXY names exactly, in lower case and without brackets; `*` is every host. */
+  /**
+   * The hosts the no-proxy list names exactly, in lower case and as written: an IPv6 address keeps its brackets,
+   * because Node matches `[::1]` and not `::1`. `['*']` alone: the list is `*` and nothing else, so every host is direct.
+   */
   direct: readonly string[];
 }
 
@@ -290,27 +298,29 @@ export function readEnvProxy(env: Readonly<Record<string, string | undefined>>, 
   const asked = env.NODE_USE_ENV_PROXY?.trim() === '1' || execArgv.includes('--use-env-proxy') || flagged(env.NODE_OPTIONS);
   // Whichever proxy is named: which scheme it would carry is Node's to decide, so any one counts.
   const named = [env.HTTP_PROXY, env.http_proxy, env.HTTPS_PROXY, env.https_proxy].some((v) => !!v && v.trim() !== '');
-  const direct = `${env.NO_PROXY ?? ''},${env.no_proxy ?? ''}`
-    .split(/[,\s]+/)
-    .map((e) => e.trim().toLowerCase().replace(/^\[|\]$/g, ''))
-    .filter((e) => e !== '');
+  // Node reads the lower-case name when it is set at all (even to nothing), and the upper-case one only otherwise: never both.
+  const list = env.no_proxy ?? env.NO_PROXY ?? '';
+  // `*` keeps every host direct only when it is the whole value, to the character. Beside another entry, or with a
+  // space around it, Node does not honour it, so here it names nothing.
+  const direct = list === '*' ? ['*'] : list.split(/[,\s]+/).map((e) => e.trim().toLowerCase()).filter((e) => e !== '' && e !== '*');
   return { on: asked && named, direct };
 }
 
 /**
  * Would a request to this host go through the proxy? Only an entry that names
- * the host exactly (or `*`) is taken as keeping it direct: a suffix, a
- * wildcard or a port on the entry is Node's to interpret, and a wrong guess
- * here would call a proxied address "this Mac". A host that is not known is
- * proxied.
+ * the host exactly is taken as keeping it direct (or a list that is `*` alone):
+ * a suffix, a wildcard or a port on the entry is Node's to interpret, and a
+ * wrong guess here would call a proxied address "this Mac". An IPv6 host is
+ * named with its brackets (`[::1]`), as Node needs it. A host that is not
+ * known is proxied.
  */
 export function viaProxy(host: string | undefined, proxy: EnvProxy): boolean {
   if (!proxy.on) return false;
-  if (proxy.direct.includes('*')) return false;
+  if (proxy.direct.length === 1 && proxy.direct[0] === '*') return false;
   if (!host) return true;
   let name = host.trim().toLowerCase();
-  // `host` may carry a port (`127.0.0.1:11434`, `[::1]:8080`): the name alone is what NO_PROXY lists.
-  const v6 = /^\[([^\]]+)\](?::\d+)?$/.exec(name);
+  // `host` may carry a port (`127.0.0.1:11434`, `[::1]:8080`): the name alone is what the list names, brackets and all.
+  const v6 = /^(\[[^\]]+\])(?::\d+)?$/.exec(name);
   if (v6) name = v6[1]!;
   else if (/^[^:]+:\d+$/.test(name)) name = name.slice(0, name.lastIndexOf(':'));
   return !proxy.direct.includes(name);
