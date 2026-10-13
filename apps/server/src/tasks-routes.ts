@@ -206,17 +206,17 @@ const FIELDS: ReadonlySet<string> = new Set([
   'assets', 'reviewsRequired', 'kind', 'on', 'waiting', 'canTurnOn', 'templates', 'goals', 'entityId', 'label', 'proposalId', 'deduped', 'ok',
 ]);
 /** Where a request or an answer broke its contract: up to 8 places, each at most 6 deep, in the contracts' own words. */
-const paths = (e: z.ZodError) =>
+export const fieldPaths = (e: z.ZodError): string =>
   [...new Set(e.issues.map((i) => i.path.slice(0, 6).map((k) => (typeof k === 'number' ? String(k) : FIELDS.has(k) ? k : '?')).join('.') || '(root)'))].slice(0, 8).join(', ').slice(0, 200);
 
 /** The runtime answered 2xx with something that is not the contract: logged by field paths, never values. */
 function malformed(res: ServerResponse, deps: TasksDeps, what: string, e: z.ZodError): true {
-  return reply(res, 502, { error: TASKS_SAY.unreadable, ref: deps.errorRef('tasks', `malformed ${what} answer (${paths(e)})`) });
+  return reply(res, 502, { error: TASKS_SAY.unreadable, ref: deps.errorRef('tasks', `malformed ${what} answer (${fieldPaths(e)})`) });
 }
 
 /** The console sent something no tasks route takes: refused here, before the runtime sees it, by field paths only. */
 function invalid(res: ServerResponse, deps: TasksDeps, what: string, e?: z.ZodError): true {
-  if (e) deps.errorRef('tasks', `refused ${a(what)} request (${paths(e)})`);
+  if (e) deps.errorRef('tasks', `refused ${a(what)} request (${fieldPaths(e)})`);
   return reply(res, 400, { error: TASKS_SAY.invalid });
 }
 

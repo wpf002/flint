@@ -18,7 +18,8 @@ import type { AddressInfo } from 'node:net';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { TASK_SAYS, TASK_STATUS_SAYS } from '@flint/policy';
-import { MAX_ANSWER, tasksRoutes, TASKS_BODY_BYTES, TASKS_SAY, type TasksDeps } from '../src/tasks-routes';
+import { z } from 'zod';
+import { MAX_ANSWER, fieldPaths, tasksRoutes, TASKS_BODY_BYTES, TASKS_SAY, type TasksDeps } from '../src/tasks-routes';
 import { routeOf } from '../src/runtime-events';
 import { scopeAllows } from '../src/access';
 
@@ -58,6 +59,8 @@ let deps: TasksDeps;
 let up: boolean;
 let delayMs: number;
 let drop: boolean;
+/** Set, the stand-in runtime hands its response to this and does nothing else with it (an answer that never ends). */
+let stream: ((res: ServerResponse) => void) | null;
 
 beforeAll(async () => {
   runtime = createServer((req, res) => {
@@ -66,6 +69,7 @@ beforeAll(async () => {
     req.on('end', () => {
       asked.push({ method: req.method!, url: req.url!, auth: req.headers.authorization, body });
       if (drop) return void req.socket.destroy();
+      if (stream) return void stream(res);
       const a = answer({ method: req.method!, url: req.url!, body });
       setTimeout(() => {
         res.writeHead(a.status, { 'content-type': 'application/json' });
@@ -101,6 +105,7 @@ beforeEach(() => {
   up = true;
   delayMs = 0;
   drop = false;
+  stream = null;
   answer = () => ({ status: 200, body: { ok: true } });
   deps = { runtime: () => (up ? { url: rtUrl, token: TOKEN } : { url: downUrl, token: TOKEN }), errorRef: (_t, err) => (given.push(err), logged.push(String(err)), 'ref123'), timeoutMs: 2000 };
 });
@@ -264,6 +269,22 @@ describe('reads', () => {
     answer = () => ({ status: 200, body: `${' '.repeat(room + 1)}${JSON.stringify(most)}` });
     expect((await get('/tasks')).status).toBe(502);
     expect(logged).toEqual(['an answer over 1 MB for a tab request']);
+    // The limit is applied while the answer is read: once it is passed the rest is not waited for. A runtime that
+    // sends more than 1 MB and never finishes is answered for at once, as unreadable, and its connection is let go.
+    logged = [];
+    let closed!: () => void;
+    const gone = new Promise<void>((r) => (closed = r));
+    stream = (res) => {
+      res.on('close', closed);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write(`{"pad":"${'x'.repeat(MAX_ANSWER + 4096)}`);
+    };
+    const began = Date.now();
+    expect(await get(`/tasks/${TID}`)).toEqual({ status: 502, body: { error: TASKS_SAY.unreadable, ref: 'ref123' } });
+    expect(Date.now() - began).toBeLessThan(1500);
+    await gone;
+    expect(logged).toEqual(['an answer over 1 MB for a task request']);
+    stream = null;
     // Not JSON at all, or nothing: the runtime did answer.
     logged = [];
     for (const body of ['<html>502 Bad Gateway</html>', '', 'undefined', `{"task":${CANARY}`]) {
@@ -355,6 +376,23 @@ describe('writes', () => {
     await post('/tasks', fresh({ params: { item: 'en1', sha: 'main' } }));
     expect(logged).toEqual(['refused a new task request (params)', 'refused a new task request (params.?)', 'refused a new task request ((root))', 'refused a new task request (params.sha)']);
     expect(asked).toEqual([]);
+    // And it is short, however much is wrong: 8 places, each 6 deep at most, 200 characters in all.
+    const issue = (path: Array<string | number>): z.ZodIssue => ({ code: 'custom', message: CANARY, path });
+    expect(fieldPaths(new z.ZodError(Array.from({ length: 30 }, (_, i) => issue(['tasks', i, 'id']))))).toBe('tasks.0.id, tasks.1.id, tasks.2.id, tasks.3.id, tasks.4.id, tasks.5.id, tasks.6.id, tasks.7.id');
+    expect(fieldPaths(new z.ZodError([issue(['templates', 0, 'items', 1, 'label', 'a', 'b', 'c'])]))).toBe('templates.0.items.1.label.?');
+    expect(fieldPaths(new z.ZodError([issue([CANARY, 'task', `${CANARY}.x`, 'title'])]))).toBe('?.task.?.title');
+    const long = fieldPaths(new z.ZodError(Array.from({ length: 8 }, (_, i) => issue(['templates', 100000 + i, 'items', 100000 + i, 'entityId']))));
+    expect(long).toHaveLength(200);
+    expect(long.startsWith('templates.100000.items.100000.entityId, templates.100001.')).toBe(true);
+    // The same place said once, and nothing at all as the root.
+    expect(fieldPaths(new z.ZodError([issue(['task', 'id']), issue(['task', 'id']), issue([])]))).toBe('task.id, (root)');
+    // Through a route: a tab whose every row is wrong is still eight places.
+    logged = [];
+    answer = () => ({ status: 200, body: { tasks: Array.from({ length: 30 }, () => row({ id: 7 })), more: false } });
+    expect((await get('/tasks')).status).toBe(502);
+    expect(logged).toEqual(['malformed tab answer (tasks.0.id, tasks.1.id, tasks.2.id, tasks.3.id, tasks.4.id, tasks.5.id, tasks.6.id, tasks.7.id)']);
+    logged = [];
+    answer = () => ({ status: 200, body: { ok: true } });
     // An answer that is not the contract's never reaches the console.
     for (const body of [{ id: TID, proposalId: 'pr1', deduped: false, args: { title: CANARY } }, { proposalId: 'pr1', deduped: false }, { id: 'tk1', proposalId: 'pr1', deduped: false }, { ok: true }]) {
       answer = () => ({ status: 200, body });
