@@ -170,7 +170,9 @@ export async function predictionsPage(db: Db, d: ViewDeps): Promise<PredictionsP
     const live = state === 'on' && on.has(def.key);
     numbers.push(rowOf(def, live, await standingOf(db, def, live, d.tz, now)));
   }
-  const [cards, questions, announce] = [await waitingCards(db, now), await questionsWaiting(db, now), await questionsAnnounced(db, now)];
+  const cards = await waitingCards(db, now);
+  // Switched off on this Mac, nothing can be answered here: nothing is said to wait (as the console's own check says).
+  const [questions, announce] = d.predict ? [await questionsWaiting(db, now), await questionsAnnounced(db, now)] : [0, false];
   return { state, numbers, waiting: cards.map((c) => ({ id: c.id, numbers: c.series.length })), questions, announce };
 }
 

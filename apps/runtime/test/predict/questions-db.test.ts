@@ -33,7 +33,7 @@ import { approveProposal, createProposal } from '../../src/governance/proposals'
 import { runInternal } from '../../src/governance/internal';
 import { ASK_CRON, predictJobs } from '../../src/jobs';
 import { WILL_GRACE_MS, announcedSince, questionLapsed, sweep } from '../../src/ledger/sweep';
-import { ANSWER_ACTION, ASK_ACTION, answerQuestion, askQuestions, questionsPage, questionsWaiting } from '../../src/predict/questions';
+import { ANSWER_ACTION, ASK_ACTION, MAX_SAID, answerQuestion, askQuestions, fitRow, questionsPage, questionsWaiting } from '../../src/predict/questions';
 import { questionsAnnounced } from '../../src/predict/view';
 
 const WORDS = 'CANARY-question-words';
@@ -75,6 +75,43 @@ describe('the questions sentence in the digest', () => {
     expect(questionLapsed({ askedAt: ago(40 * DAY), shadow: true }, ago(14 * DAY + MIN), now)).toBe(true);
     expect(questionLapsed({ askedAt: ago(3 * DAY), shadow: true }, ago(30 * DAY), now)).toBe(false);
     expect(questionLapsed({ askedAt: ago(15 * DAY), shadow: true }, ago(30 * DAY), now)).toBe(true);
+  });
+});
+
+describe('a question\'s row, whatever it holds', () => {
+  const plain = { id: 'pdabc123', title: 'Flint made this prediction in a chat.', says: 'Flint can’t show what this one was about, so it can only be skipped.', answer: null, answerable: false };
+  const good = { ...plain, title: 'The deploy lands by Friday', says: 'Flint said likely, around 70%, on Oct 3. It was due Oct 5 at 3:00 PM.', answerable: true };
+
+  it('a row that fits the panel\'s contract is passed on as it is', () => {
+    expect(fitRow(good, plain)).toEqual(good);
+    expect(fitRow(plain, plain)).toEqual(plain);
+  });
+
+  it('one that would break it is never passed on and never fails the page: the plain row stands in, Skip only', () => {
+    for (const bad of [
+      { ...good, title: 'x'.repeat(301) },
+      { ...good, title: '' },
+      { ...good, says: 'No stop' },
+      { ...good, says: 'Flint said likely (around 70%).' },
+      { ...good, says: `${'a'.repeat(400)}.` },
+      { ...good, answer: 'maybe' },
+      { ...good, answerable: 'yes' },
+      { ...good, probability: 0.7 },
+      { ...good, claim: 'the stored words' },
+      null,
+      'a row',
+    ]) {
+      const shown = fitRow(bad, plain);
+      expect(shown, JSON.stringify(bad)?.slice(0, 60)).toEqual(plain);
+      expect(shown!.answerable).toBe(false);
+    }
+    // A row whose own id is no id cannot be shown at all: it is left out, and the rest of the page stands.
+    expect(fitRow({ ...good, id: 'pd abc' }, { ...plain, id: 'pd abc' })).toBeUndefined();
+  });
+
+  it('a value past what any number of Flint\'s takes is not said: the bound is far above any real one, and far below what would overflow a title', () => {
+    expect(MAX_SAID).toBe(1e12);
+    expect((1e12).toLocaleString('en-US').length).toBeLessThan(20);
   });
 });
 

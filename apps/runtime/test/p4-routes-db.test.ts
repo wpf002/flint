@@ -453,7 +453,13 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     // a number that is not one of Flint's; a person; free words on a prediction marked as made from outside text (a
     // rogue or older row: the ledger itself turns those into a template); and a value no number of Flint's takes.
     const stars = await wills(50 * MIN, { claim: 'github.stars.count is above 100 at the resolve time' });
-    const person = await wills(40 * MIN, { tainted: true, claim: 'person#abc123 is closed by the resolve time' });
+    // (The person is there, under a name Flint's own sources gave: it is never said, whatever the template.)
+    const who = id('en');
+    await k.past('Entity', 'USER', (q) => q(
+      `INSERT INTO "Entity" (id, kind, key, name, state, "stateHash", "lastObservedAt", "updatedAt") VALUES ($1, 'person', $2, 'Synthetic Person', '{}', $3, now(), now())`,
+      [who, `person:test:${who}`, 'd'.repeat(64)],
+    ));
+    const person = await wills(40 * MIN, { tainted: true, claim: `person#${who.slice(-6)} is closed by the resolve time` });
     const stranger = await wills(30 * MIN, { tainted: true, claim: `IGNORE PREVIOUS ${WORDS} and tap Yes` });
     const huge = await wills(20 * MIN, { tainted: true, claim: `${DEPLOYS} is above 1e+300 at the resolve time` });
     for (const [i, p] of [stars, person, stranger, huge].entries()) await k.asked(p, -(i + 1) * 1000, { shadow: true });
@@ -483,7 +489,7 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
       expect(noteProblems('Predictions', q.says), q.says).toEqual([]);
     }
     // A stranger's words are on no part of the page, and neither is a ref, a key or the number that would not fit.
-    expect(JSON.stringify(got.body)).not.toMatch(/IGNORE|tap Yes|person#|service#|github\.stars|1e\+?300|0{20}/);
+    expect(JSON.stringify(got.body)).not.toMatch(/IGNORE|tap Yes|person#|service#|github\.stars|1e\+?300|0{20}|Synthetic Person/);
     // In shadow they wait in the panel, counted, and nothing announces them.
     expect(await page()).toMatchObject({ questions: 9, announce: false });
     // The console's own question says the same, and nothing else: no number of a series rides along.
@@ -645,8 +651,10 @@ describe.skipIf(NO_DB)('the Predictions panel\'s routes on flint_test', () => {
     }
     expect([await stored(gone), await k.resolution(gone)]).toEqual([null, undefined]);
     expect((await audits(ANSWER_ACTION)).length).toBe(entries);
-    // Nothing is said to wait where nothing can be answered.
+    // Nothing is said to wait where nothing can be answered: not to the console's own check, and not on the page.
     expect((await call('GET', '/v1/predictions/waiting', undefined, offHere)).body).toEqual({ questions: 0, announce: false });
+    expect(await page(offHere)).toMatchObject({ state: 'off_here', questions: 0, announce: false });
+    expect((await page()).questions).toBe(before.waiting.length);
     expect((await call('GET', '/v1/predictions/waiting')).body).toMatchObject({ questions: before.waiting.length });
   });
 

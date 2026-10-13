@@ -230,6 +230,16 @@ async function questionView(db: Db | Tx, q: AskedRow, tz: string, now: Date): Pr
       row = plain;
     }
   }
+  return fitRow(row, plain);
+}
+
+/**
+ * A row as the panel's contract takes it. One that would break the contract (a title too long, a sentence that is
+ * not one, a field too many) is never passed on as it is, and never fails the page: the plain row stands in for it,
+ * which says only that Flint made the prediction in a chat and offers Skip. A plain row that cannot be shown
+ * either (its id is no id) is left out.
+ */
+export function fitRow(row: unknown, plain: unknown): QuestionView | undefined {
   const fit = QuestionView.safeParse(row);
   if (fit.success) return fit.data;
   const fallback = QuestionView.safeParse(plain);
