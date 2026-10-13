@@ -43,14 +43,35 @@ export interface MediaFlags {
   pdf?: boolean;
 }
 
+/**
+ * Why a PDF on this turn could not be read on this Mac, when something here
+ * reads PDFs (FLINT_LOCAL_PDF, ./local-media) and this one did not come out as
+ * text: `no_text`, it carries none (a scan); `failed`, the read did not work
+ * this time.
+ */
+export type PdfUnread = 'no_text' | 'failed';
+
+/** That, as the clause a refusal is built on. */
+export function pdfUnreadClause(why: PdfUnread): string {
+  return why === 'no_text' ? 'this PDF has no text in it that Flint can read on this Mac' : "Flint couldn't read this PDF on this Mac just now";
+}
+
+/** The kinds of file among `needs` that `can` cannot read, in words; undefined when it can read them all. */
+export function unreadable(needs: MediaFlags, can: MediaFlags): 'images or PDFs' | 'images' | 'PDFs' | undefined {
+  const image = !!needs.image && !can.image;
+  const pdf = !!needs.pdf && !can.pdf;
+  return image && pdf ? 'images or PDFs' : image ? 'images' : pdf ? 'PDFs' : undefined;
+}
+
 export type TurnRoute =
   | {
       brain: Brain;
       /**
        * Whether a frontier failure may silently retry on the local brain. False
-       * when the turn carries an image/PDF: the local model would answer
-       * WITHOUT seeing the file, and a confident answer about a picture it never
-       * saw is worse than an error.
+       * when the turn carries an image/PDF and a frontier brain answers it: the
+       * local model would answer WITHOUT seeing the file, and a confident answer
+       * about a picture it never saw is worse than an error. (A turn the LOCAL
+       * brain answers because it can read the file has no frontier to fail.)
        */
       localFallback: boolean;
     }
@@ -64,6 +85,12 @@ export type TurnRoute =
  * Privacy still wins. If Local-only is on (or the message asks to stay
  * private), an image is NOT quietly shipped to the frontier — the turn is
  * refused with a message that says why, so the user decides.
+ *
+ * `localCan`: what the local model can read on THIS turn, when Will has turned
+ * that on (FLINT_LOCAL_VISION, FLINT_LOCAL_PDF: ./inference localReads). A turn
+ * that is the local brain's, with files it can read, is then answered by it,
+ * on this Mac. Left out, or with a file it cannot read, every answer here is
+ * what it was before those settings existed: the turn is refused.
  */
 export function routeTurn(opts: {
   message: string;
@@ -71,20 +98,29 @@ export function routeTurn(opts: {
   localOnly: boolean;
   needs: MediaFlags;
   frontierCan: MediaFlags;
+  localCan?: MediaFlags | undefined;
+  /** A PDF on the turn that something here tried to read, and could not (see PdfUnread). */
+  pdfUnread?: PdfUnread | undefined;
 }): TurnRoute {
   const brain = judgeBrain(opts.message, opts.hasFrontier, opts.localOnly);
   const visual = !!opts.needs.image || !!opts.needs.pdf;
   if (!visual) return { brain, localFallback: true };
 
-  const what = opts.needs.image && opts.needs.pdf ? 'images or PDFs' : opts.needs.image ? 'images' : 'PDFs';
   if (brain === 'local') {
+    // (With nothing said of the local brain, this names every kind the turn carries, as the words always did.)
+    const what = unreadable(opts.needs, opts.localCan ?? {});
+    if (!what) return { brain: 'local', localFallback: true };
+    const unread = what === 'PDFs' && opts.pdfUnread ? pdfUnreadClause(opts.pdfUnread) : undefined;
     if (!opts.hasFrontier) {
+      if (unread) return { error: `${unread[0]!.toUpperCase()}${unread.slice(1)}, and no frontier brain is configured. Send it as text instead.` };
       return { error: `The local brain can't read ${what}, and no frontier brain is configured. Send it as text instead.` };
     }
+    if (unread) return { error: `Local-only is on, and ${unread}. Turn Local-only off to send the file to the frontier brain, or remove the attachment.` };
     return {
       error: `Local-only is on, and the on-device brain can't read ${what}. Turn Local-only off to send the file to the frontier brain, or remove the attachment.`,
     };
   }
+  const what = opts.needs.image && opts.needs.pdf ? 'images or PDFs' : opts.needs.image ? 'images' : 'PDFs';
   if ((opts.needs.image && !opts.frontierCan.image) || (opts.needs.pdf && !opts.frontierCan.pdf)) {
     return { error: `The frontier brain configured here can't read ${what}.` };
   }

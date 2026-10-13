@@ -31,7 +31,7 @@
 import type { Tier } from '@flint/core';
 import { asksDeep, decideHybrid, type HybridRule, type RouteReason, type TurnFacts } from './hybrid-rules';
 import type { InferenceMode } from './inference-config';
-import { FORCE_LOCAL_RE, routeTurn, type Brain, type MediaFlags } from './policy';
+import { FORCE_LOCAL_RE, pdfUnreadClause, routeTurn, unreadable, type Brain, type MediaFlags, type PdfUnread } from './policy';
 
 /**
  * Is the turn that is running right now being answered by a LOCAL model?
@@ -99,20 +99,24 @@ export interface PreRouteInput {
   hasFrontier: boolean;
   needs: MediaFlags;
   frontierCan: MediaFlags;
-  /** What the local model can read (nothing, on the native Ollama wire). */
+  /** What the local model can read (nothing, on the native Ollama wire, until FLINT_LOCAL_VISION or FLINT_LOCAL_PDF is on). */
   localCan: MediaFlags;
+  /**
+   * What the local model can read on a turn the CLOUD mode keeps on this Mac
+   * (no cloud model, Local Only, or the message asked), and on an eval replay
+   * for a local model. Left out: nothing, as before FLINT_LOCAL_VISION and
+   * FLINT_LOCAL_PDF existed, when such a turn with a picture or a PDF was
+   * always refused (./policy routeTurn). ./inference gives it only when one of
+   * those settings is on.
+   */
+  keptCan?: MediaFlags | undefined;
+  /** A PDF on the turn that something here tried to read, and could not (./policy PdfUnread). */
+  pdfUnread?: PdfUnread | undefined;
 }
 
 /** Did Will ask for this turn to stay on this Mac? */
 export function isPrivate(message: string, localOnly: boolean): boolean {
   return localOnly || FORCE_LOCAL_RE.test(message);
-}
-
-/** The kinds of file on this turn that `can` cannot read, in words; undefined when it can read them all. */
-function unreadable(needs: MediaFlags, can: MediaFlags): string | undefined {
-  const image = !!needs.image && !can.image;
-  const pdf = !!needs.pdf && !can.pdf;
-  return image && pdf ? 'images or PDFs' : image ? 'images' : pdf ? 'PDFs' : undefined;
 }
 
 /**
@@ -122,7 +126,7 @@ function unreadable(needs: MediaFlags, can: MediaFlags): string | undefined {
 export function preRoute(i: PreRouteInput): PreRoute {
   const priv = isPrivate(i.message, i.localOnly);
   if (i.evalMode || i.mode === 'cloud') {
-    const r = routeTurn({ message: i.message, hasFrontier: i.hasFrontier, localOnly: i.localOnly, needs: i.needs, frontierCan: i.frontierCan });
+    const r = routeTurn({ message: i.message, hasFrontier: i.hasFrontier, localOnly: i.localOnly, needs: i.needs, frontierCan: i.frontierCan, localCan: i.keptCan, pdfUnread: i.pdfUnread });
     if ('error' in r) return { error: r.error, status: 422 };
     // Local mode never uses the cloud, an eval replay included: one a local model answers runs, any other is refused.
     if (i.mode === 'local' && r.brain !== 'local') return { error: EVAL_REFUSED_IN_LOCAL, status: 409 };
@@ -131,13 +135,18 @@ export function preRoute(i: PreRouteInput): PreRoute {
   }
   const cannot = unreadable(i.needs, i.localCan);
   if (i.mode === 'local') {
+    if (cannot === 'PDFs' && i.pdfUnread) {
+      const why = pdfUnreadClause(i.pdfUnread);
+      return { error: `${why[0]!.toUpperCase()}${why.slice(1)}, and Local mode never uses the cloud. Send it as text instead.`, status: 422 };
+    }
     if (cannot) return { error: `The local model can't read ${cannot}, and Local mode never uses the cloud. Send it as text instead.`, status: 422 };
     return { brain: 'local', localFallback: true, cloudFallback: false, reason: 'mode_local', mode: 'local', private: priv };
   }
   if (cannot) {
     // The same refusals as the cloud mode, in the same words: a private turn with a file the local
     // model cannot read, no cloud model at all, or a cloud model that cannot read it either.
-    const r = routeTurn({ message: i.message, hasFrontier: i.hasFrontier, localOnly: i.localOnly, needs: i.needs, frontierCan: i.frontierCan });
+    // (`localCan` is told so that the words name only what the local model cannot read: it cannot read something here.)
+    const r = routeTurn({ message: i.message, hasFrontier: i.hasFrontier, localOnly: i.localOnly, needs: i.needs, frontierCan: i.frontierCan, localCan: i.localCan, pdfUnread: i.pdfUnread });
     if ('error' in r) return { error: r.error, status: 422 };
   }
   return { open: true, mode: 'hybrid', private: priv, deep: i.deep || asksDeep(i.message), mediaLocalCannotRead: cannot !== undefined, hasFrontier: i.hasFrontier };

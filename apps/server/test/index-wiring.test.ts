@@ -513,7 +513,8 @@ describe('index.ts wiring', () => {
   it('both routes are routed by the mode: routeFirst before anything else, finishRoute once the tier is known, and no routeTurn left here', () => {
     expect(src).not.toMatch(/\brouteTurn\(/);
     for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
-      expect(route, name).toMatch(/const pre = await ctx\.inference\.routeFirst\(\{ message(: prompt)?, localOnly, deep: body\.deep === true, evalMode(: false)?, hasFrontier: !!ctx\.frontier, needs: mediaNeeds\(attachments\), frontierCan: ctx\.frontier\?\.media \?\? \{\} \}\);/);
+      expect(route, name).toMatch(/const pre = await ctx\.inference\.routeFirst\(\{ message(: prompt)?, localOnly, deep: body\.deep === true, evalMode(: false)?, hasFrontier: !!ctx\.frontier, needs: mediaNeeds\(attachments\), frontierCan: ctx\.frontier\?\.media \?\? \{\}, attachments \}\);/);
+      // (The turn's files go with it: a PDF is read on this Mac before the route is decided, when that is turned on.)
       expect(route, name).toContain("if ('error' in pre) return json(res, pre.status, { error: pre.error });");
       expect(route.indexOf('const tier = classifyMessage('), name).toBeLessThan(route.indexOf('const route = ctx.inference.finishRoute(pre, { tier, toolsLikely,'));
       // The spend plan and the breaker are handed the finished route, as before.
@@ -532,15 +533,16 @@ describe('index.ts wiring', () => {
 
   it('a turn that must be local with no local model to answer it gets a 503 with a sentence, before any call and before anything streams', () => {
     for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
-      expect(route, name).toMatch(/const localPlan = ctx\.inference\.planLocal\(route, \{ primary: [^;]+, standby: ctx\.standby(?:, evalOwnModel: lm\.model !== undefined)? \}\);\s*if \(route\.brain === 'local' && localPlan\.steps\.length === 0\) return json\(res, 503, \{ error: localPlan\.refusal \}\);/);
+      expect(route, name).toMatch(/const localPlan = ctx\.inference\.planLocal\(route, \{ primary: [^;]+, standby: ctx\.standby(?:, evalOwnModel: lm\.model !== undefined)?, needs: mediaNeeds\(attachments\) \}\);\s*if \(route\.brain === 'local' && localPlan\.steps\.length === 0\) return json\(res, 503, \{ error: localPlan\.refusal \}\);/);
       expect(route.indexOf('ctx.inference.planLocal(route'), name).toBeLessThan(route.indexOf('budgetTurn('));
       // The plan is made once per turn, before anything is asked: no mid-turn swaps.
       expect(route.match(/planLocal\(/g), name).toHaveLength(1);
     }
     expect(chat.indexOf('ctx.inference.planLocal(route')).toBeLessThan(chat.indexOf("res.writeHead(200, {"));
     // /generate plans with the turn's own local persona (a style variant, an eval candidate); /chat with the live one.
-    expect(generate).toContain('ctx.inference.planLocal(route, { primary: local, standby: ctx.standby, evalOwnModel: lm.model !== undefined });');
-    expect(chat).toContain('ctx.inference.planLocal(route, { primary: { persona: ctx.persona, model: ctx.model }, standby: ctx.standby });');
+    // (`needs`: a standby that cannot read the turn's picture or PDF is not planned.)
+    expect(generate).toContain('ctx.inference.planLocal(route, { primary: local, standby: ctx.standby, evalOwnModel: lm.model !== undefined, needs: mediaNeeds(attachments) });');
+    expect(chat).toContain('ctx.inference.planLocal(route, { primary: { persona: ctx.persona, model: ctx.model }, standby: ctx.standby, needs: mediaNeeds(attachments) });');
   });
 
   it('Local mode and a private turn reach no outside service: not offered, and switched off where the tool is called, whoever calls it', () => {
@@ -682,7 +684,7 @@ describe('index.ts wiring', () => {
     // The gate answers 503 no_local_model for a brain that is undefined (test/background-complete.test.ts).
     expect(src).toContain('brain: () => inference.helperBrain(backgroundBrain),');
     // An eval replay that names its own local model is that model's turn, not the stand-in's.
-    expect(generate).toContain('const localPlan = ctx.inference.planLocal(route, { primary: local, standby: ctx.standby, evalOwnModel: lm.model !== undefined });');
+    expect(generate).toContain('const localPlan = ctx.inference.planLocal(route, { primary: local, standby: ctx.standby, evalOwnModel: lm.model !== undefined, needs: mediaNeeds(attachments) });');
     // A local turn with nothing to answer it is a 503 with the plan's sentence, on both routes, before anything is asked.
     for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
       expect(route, name).toContain("if (route.brain === 'local' && localPlan.steps.length === 0) return json(res, 503, { error: localPlan.refusal });");

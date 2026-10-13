@@ -24,7 +24,7 @@
  */
 import { isTopTier, modelDisplayName, modelDownloadGb, usableMemoryGb, type Accelerator, type HardwareTier, type HardwareTierId } from '@flint/core';
 import type { Hardware } from './hardware';
-import type { ConfigKey, ConfigProblem, InferenceMode, UrlProblem } from './inference-config';
+import type { ConfigKey, ConfigProblem, InferenceMode, PdfReaderKind, UrlProblem } from './inference-config';
 import type { ModeSource } from './inference-mode';
 import type { LocalBrains, ModelSource, NotConfined, Wire } from './local-brains';
 import type { ServerKind } from './local-backend';
@@ -133,6 +133,13 @@ export interface InferenceStatus {
     contextLength: number;
     /** May the model be offered tools. */
     tools: boolean;
+    /**
+     * FLINT_LOCAL_VISION is on: is the local model sent a turn's pictures (its server says it can see)? Absent
+     * with the setting off, where nothing about pictures changed.
+     */
+    pictures?: boolean;
+    /** FLINT_LOCAL_PDF is on: what reads a PDF's text on this Mac for the local model. Absent with the setting off. */
+    pdfReader?: PdfReaderKind;
     primary: ModelStatus;
     /** The standby model, which answers while the main one loads. Absent when none is configured. */
     standby?: ModelStatus;
@@ -617,6 +624,12 @@ export function problemSentence(p: ConfigProblem, o: { inUse: boolean; modeSourc
         : "The embedding model named in Flint's setup isn't a valid model name, so Flint uses its usual one.";
     case 'FLINT_LOCAL_TOOLS':
       return "The tools setting in Flint's setup isn't valid, so the local model is offered no tools.";
+    case 'FLINT_LOCAL_VISION':
+      return "The pictures setting in Flint's setup isn't valid, so no picture is sent to the local model.";
+    case 'FLINT_LOCAL_PDF':
+      return p.kind === 'missing'
+        ? "The PDF reader named in Flint's setup isn't on this Mac, so no PDF is read here."
+        : "The PDF setting in Flint's setup isn't one it knows, so no PDF is read here.";
     case 'FLINT_HARDWARE_TIER':
       return "The model size named in Flint's setup isn't one it knows, so Flint checks this machine instead.";
     case 'OLLAMA_NUM_CTX':
@@ -649,6 +662,9 @@ export function problemSentence(p: ConfigProblem, o: { inUse: boolean; modeSourc
       return "A setting in Flint's setup isn't valid, so Flint ignored it.";
   }
 }
+
+/** Each PDF reader, as a status line names it. */
+const PDF_READER_NAMES: Readonly<Record<PdfReaderKind, string>> = { spotlight: "the Mac's own PDF importer", pdftotext: 'pdftotext' };
 
 /** A saved mode that cannot be read: what happened, and what to do. */
 export const INVALID_SAVED_SENTENCE = "The saved mode couldn't be read, so Flint is in Local mode, which never uses the cloud. Choose a mode to save it again.";
@@ -758,6 +774,17 @@ export function inferenceStatus(i: StatusInput): InferenceStatus {
     if (embedding.pull) lines.push(pullLine(embedding.pull, embedding.downloadGb));
   }
   if (i.voice) lines.push(...voiceLines(i.voice, i.mode, i.transcriptionMissing));
+  // Pictures and PDFs for the local model: said only when Will has turned one on. Off, nothing about them changed.
+  if (local.cfg.local.vision) {
+    lines.push(
+      !settled
+        ? 'Pictures for the local model are turned on. No local model is chosen yet.'
+        : caps.vision === true
+          ? 'Pictures are sent to the local model, which its server says can see.'
+          : 'Pictures for the local model are turned on, and its server does not say this model can see, so none is sent to it.',
+    );
+  }
+  if (local.cfg.local.pdf) lines.push(`A PDF's text is read on this Mac for the local model, by ${PDF_READER_NAMES[local.cfg.local.pdf.reader]}.`);
   if (i.cloud) lines.push(i.cloud.configured ? (i.cloud.paused ? 'A cloud model is configured, and it is paused right now.' : 'A cloud model is configured.') : 'No cloud model is configured.');
   lines.push(...warnings);
   for (const p of local.cfg.problems) lines.push(`A setting was refused: ${p.key} is ${p.reason}.`);
@@ -798,6 +825,8 @@ export function inferenceStatus(i: StatusInput): InferenceStatus {
       modelSource: local.primary.from,
       contextLength: caps.maxContextTokens,
       tools: caps.toolCalling !== 'unsupported',
+      ...(local.cfg.local.vision ? { pictures: settled && caps.vision === true } : {}),
+      ...(local.cfg.local.pdf ? { pdfReader: local.cfg.local.pdf.reader } : {}),
       primary,
       ...(standby ? { standby } : {}),
       ...(embedding ? { embedding } : {}),

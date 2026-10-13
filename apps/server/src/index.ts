@@ -1421,7 +1421,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // and a hybrid turn is finished below, once its tier and tools are known.
     // (A turn that stays here has the model server asked what runs on it NOW, before it is refused or a word of it
     // is sent anywhere, the embedder included: ./inference routeFirst.)
-    const pre = await ctx.inference.routeFirst({ message: prompt, localOnly, deep: body.deep === true, evalMode, hasFrontier: !!ctx.frontier, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
+    const pre = await ctx.inference.routeFirst({ message: prompt, localOnly, deep: body.deep === true, evalMode, hasFrontier: !!ctx.frontier, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {}, attachments });
     if ('error' in pre) return json(res, pre.status, { error: pre.error });
     const asText = [prompt, summarizeAttachments(attachments)].filter(Boolean).join(' ');
     const scored = await ctx.router.selectScored(asText);
@@ -1443,7 +1443,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // The plan is made from what the monitor last saw of the model server: when that is more than a moment old,
     // it looks again first (a model that left memory since is not planned as loaded). Never in the cloud mode.
     await ctx.inference.freshen(route);
-    const localPlan = ctx.inference.planLocal(route, { primary: local, standby: ctx.standby, evalOwnModel: lm.model !== undefined });
+    const localPlan = ctx.inference.planLocal(route, { primary: local, standby: ctx.standby, evalOwnModel: lm.model !== undefined, needs: mediaNeeds(attachments) });
     if (route.brain === 'local' && localPlan.steps.length === 0) return json(res, 503, { error: localPlan.refusal });
     // Everything the spend caps decide about this turn, before any call (./spend budgetTurn).
     // Eval replays are exempt (the eval harness budgets them) and their calls are tagged `eval`.
@@ -1684,7 +1684,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // (And the mode decides first, ./mode-route: cloud is routeTurn as before, local never leaves this Mac, hybrid is finished below.)
     // (A turn that stays here has the model server asked what runs on it NOW, before it is refused or a word of it
     // is sent anywhere, the embedder included: ./inference routeFirst.)
-    const pre = await ctx.inference.routeFirst({ message, localOnly, deep: body.deep === true, evalMode: false, hasFrontier: !!ctx.frontier, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {} });
+    const pre = await ctx.inference.routeFirst({ message, localOnly, deep: body.deep === true, evalMode: false, hasFrontier: !!ctx.frontier, needs: mediaNeeds(attachments), frontierCan: ctx.frontier?.media ?? {}, attachments });
     if ('error' in pre) return json(res, pre.status, { error: pre.error });
     // From here until the turn ends, however it ends, it is a chat turn in flight
     // (POST /internal/load): the runtime's triage leaves the local model to it.
@@ -1707,7 +1707,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       // The plan is made from what the monitor last saw of the model server: when that is more than a moment old,
       // it looks again first (a model that left memory since is not planned as loaded). Never in the cloud mode.
       await ctx.inference.freshen(route);
-      const localPlan = ctx.inference.planLocal(route, { primary: { persona: ctx.persona, model: ctx.model }, standby: ctx.standby });
+      const localPlan = ctx.inference.planLocal(route, { primary: { persona: ctx.persona, model: ctx.model }, standby: ctx.standby, needs: mediaNeeds(attachments) });
       if (route.brain === 'local' && localPlan.steps.length === 0) return json(res, 503, { error: localPlan.refusal });
       // Everything the spend caps decide about this turn, before anything streams (./spend budgetTurn);
       // the honest note once per conversation per day.
