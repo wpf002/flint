@@ -928,6 +928,39 @@ describe('a PDF whose read ran out of time is remembered, and not handed to the 
     expect(gates).toHaveLength(5); // refused at once: not handed over
   });
 
+  it('a read called off while it waits its turn is never handed over, and leaves the reader as it was', async () => {
+    const tmp = scratch();
+    const gates: Array<(v: 'ok') => void> = [];
+    let runs = 0;
+    const run: RunProgram = async () => {
+      runs++;
+      await new Promise<'ok'>((r) => gates.push(r));
+      return { stdout: RECORDED, truncated: false };
+    };
+    const reader = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp, atOnce: 1, later: () => {} });
+    const first = reader.read(OTHER);
+    await expect.poll(() => gates.length, WAIT).toBe(1);
+    const ac = new AbortController();
+    const queued = reader.read(HEAVY, ac.signal);
+    ac.abort();
+    gates[0]!('ok');
+    expect((await first).ok).toBe(true);
+    expect(await queued).toEqual({ ok: false, why: 'failed' });
+    expect(runs).toBe(1); // no program for the one called off
+    expect(reader.stuck!()).toBe(false);
+    // ...and the next read goes ahead.
+    const next = reader.read(OTHER);
+    await expect.poll(() => gates.length, WAIT).toBe(2);
+    gates[1]!('ok');
+    expect((await next).ok).toBe(true);
+  });
+
+  it('runProgram starts nothing for a read already called off', async () => {
+    const ac = new AbortController();
+    ac.abort();
+    await expect(runProgram('/bin/sleep', ['5'], { timeoutMs: 10_000, maxBytes: 100, signal: ac.signal })).rejects.toThrow('called off');
+  });
+
   it('a read called off once its PDF was handed over leaves the reader busy, as a time-out does: the next PDF is not read behind it and remembered', async () => {
     const { reader, gates, unstick } = gated();
     const ac = new AbortController();

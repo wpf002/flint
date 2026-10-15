@@ -156,6 +156,8 @@ const RUNNING = new Set<() => void>();
  */
 export const runProgram: RunProgram = (program, args, opts) =>
   new Promise((resolve, reject) => {
+    // Called off before it began: nothing is started.
+    if (opts.signal?.aborted) return reject(new Error('the read was called off'));
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(program, [...args], { cwd: opts.cwd, env: {}, stdio: ['ignore', 'pipe', 'ignore'], detached: true, windowsHide: true });
@@ -810,6 +812,7 @@ export function makePdfReader(which: { reader: PdfReaderKind; program: string },
     inFlight.add(me);
     let handedOver = false;
     try {
+      if (signal?.aborted) return { ok: false, why: 'failed' };
       const parent = ownReadsFolder(tmp);
       if (!parent) return { ok: false, why: 'failed' };
       await sweepLeftovers(tmp, now(), deps.running);
@@ -820,6 +823,8 @@ export function makePdfReader(which: { reader: PdfReaderKind; program: string },
       await mkdir(inner, { mode: 0o700 });
       const file = join(inner, 'doc.pdf');
       await writeFile(file, bytes, { mode: 0o600, flag: 'wx' });
+      // Called off while the file was written: nothing is handed over, and the Mac is not at work on it.
+      if (signal?.aborted) return { ok: false, why: 'failed' };
       handedOver = true;
       const out = await run(which.program, READER_ARGS[which.reader](file), { timeoutMs, maxBytes: deps.maxBytes ?? MAX_OUTPUT_BYTES, cwd: inner, signal });
       let raw: string;
@@ -891,6 +896,8 @@ export function makePdfReader(which: { reader: PdfReaderKind; program: string },
         // it was this same PDF that ran out of time, in a read ahead of this one, that is what is said of it.)
         if (tooSlow(bytes)) return { ok: false, why: 'too_slow' };
         if (stuck) return { ok: false, why: 'busy' };
+        // Called off while it waited its turn: never handed over (and so it leaves the reader as it was).
+        if (signal?.aborted) return { ok: false, why: 'failed' };
         return await once(bytes, signal, deps.timeoutMs ?? READ_TIMEOUT_MS, true);
       } finally {
         done();
