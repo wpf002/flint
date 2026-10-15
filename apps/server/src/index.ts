@@ -1477,9 +1477,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     // with the size sentence. (The message that carried it used to be dropped to fit, and the model sent none.)
     const tooBig = budget.brain === 'frontier' && plan && !toLocal ? pdfTooBigFor(attachments, plan.chain.map((b) => b.provider.getCapabilities(b.model))) : undefined;
     if (tooBig) {
-      const here = ctx.inference.pdfRefusedHere(attachments);
+      // Why this Mac could not read that PDF, when a Hybrid turn tried it here first.
+      const here = route.mode === 'hybrid' ? ctx.inference.pdfRefusedHere([tooBig.pdf]) : undefined;
       return json(res, 413, { error: tooBigSentence(tooBig, here && pdfUnreadClause(here)) });
     }
+    /** A cloud window too small for a turn the local model could not fit either (./brains outgrewTheCloud). */
+    const outgrew = (err: unknown): boolean =>
+      outgrewTheCloud(err, { media: attachments.some((a) => a.kind === 'image' || a.kind === 'document'), localWindow: ctx.inference.localFacts().contextTokens, windows: plan?.chain.map((b) => b.provider.getCapabilities(b.model).maxContextTokens) ?? [] });
     if (plan) logPlan(plan);
     // The breaker's say (./frontier-breaker gateTurn): brains whose provider is paused are left
     // out, and with none left the local model answers at once instead of after their failures.
@@ -1592,8 +1596,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           // An image/PDF turn has no honest fallback — the local brain can't see it. Nor does a
           // turn that already called a tool (the local brain would call it again), or one whose
           // failure is not the provider's (a tool's own error): ./brains mayAskAnother.
-          if (!route.localFallback || localPlan.steps.length === 0 || !mayAskAnother(err, { acted: turn.acted }) || outgrewTheCloud(err)) {
+          if (!route.localFallback || localPlan.steps.length === 0 || !mayAskAnother(err, { acted: turn.acted }) || outgrew(err)) {
             logRoute('error');
+            if (outgrew(err)) return json(res, 413, { error: TOO_LONG_FOR_THE_CLOUD, ...evalFields() });
             return json(res, 502, { error: 'frontier failed', ref: errorRef('generate', err), ...evalFields() });
           }
           // Nor does a turn whose local brain is a paid model with its budget spent.
@@ -1757,9 +1762,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       // with the size sentence. (The message that carried it used to be dropped to fit, and the model sent none.)
       const tooBig = budget.brain === 'frontier' && plan && !toLocal ? pdfTooBigFor(attachments, plan.chain.map((b) => b.provider.getCapabilities(b.model))) : undefined;
       if (tooBig) {
-        const here = ctx.inference.pdfRefusedHere(attachments);
+        // Why this Mac could not read that PDF, when a Hybrid turn tried it here first.
+        const here = route.mode === 'hybrid' ? ctx.inference.pdfRefusedHere([tooBig.pdf]) : undefined;
         return json(res, 413, { error: tooBigSentence(tooBig, here && pdfUnreadClause(here)) });
       }
+      /** A cloud window too small for a turn the local model could not fit either (./brains outgrewTheCloud). */
+      const outgrew = (err: unknown): boolean =>
+        outgrewTheCloud(err, { media: attachments.some((a) => a.kind === 'image' || a.kind === 'document'), localWindow: ctx.inference.localFacts().contextTokens, windows: plan?.chain.map((b) => b.provider.getCapabilities(b.model).maxContextTokens) ?? [] });
       // The breaker's say (./frontier-breaker gateTurn): brains whose provider is paused are left
       // out, and with none left the local model answers at once instead of after their failures.
       const gate = gateTurn({ brain: budget.brain, chain: plan?.chain, canLocal: toLocal, breaker: ctx.breaker });
@@ -1925,16 +1934,16 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
           } catch (err) {
             // Only safe to fall back if nothing was streamed yet and no tool was called, the failure is
             // the provider's, and (a paid local brain) its budget isn't spent.
-            if (answer.length === 0 && toLocal && mayAskAnother(err, { acted, signal: ac.signal }) && !outgrewTheCloud(err)) {
+            if (answer.length === 0 && toLocal && mayAskAnother(err, { acted, signal: ac.signal }) && !outgrew(err)) {
               logToLocal('frontier failed pre-output', err);
               if (err instanceof FrontierPaused) paused ??= pausedCode([err.brain]);
               brain = 'local';
               await askLocal({ ...(paused ? { frontierPaused: paused } : {}) });
-            } else if (answer.length === 0 && route.localFallback && budget.localRefusal && mayAskAnother(err, { acted, signal: ac.signal }) && !outgrewTheCloud(err)) {
+            } else if (answer.length === 0 && route.localFallback && budget.localRefusal && mayAskAnother(err, { acted, signal: ac.signal }) && !outgrew(err)) {
               stopWords = budget.localRefusal;
               throw new Error(`frontier failed: ${String(err)}. ${budget.localRefusal}`);
             } else {
-              if (answer.length === 0 && outgrewTheCloud(err)) stopWords = TOO_LONG_FOR_THE_CLOUD;
+              if (answer.length === 0 && outgrew(err)) stopWords = TOO_LONG_FOR_THE_CLOUD;
               throw err;
             }
           }

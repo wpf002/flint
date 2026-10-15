@@ -167,7 +167,7 @@ describe('index.ts wiring', () => {
     // The refusal the stream throws is the one Will reads: set just before that throw, and only there.
     expect(chat).toMatch(/stopWords = budget\.localRefusal;\s*throw new Error\(`frontier failed: \$\{String\(err\)\}\. \$\{budget\.localRefusal\}`\);/);
     // ...and a cloud window too small for the turn, which the local model is not asked after (./brains outgrewTheCloud).
-    expect(chat).toContain('if (answer.length === 0 && outgrewTheCloud(err)) stopWords = TOO_LONG_FOR_THE_CLOUD;');
+    expect(chat).toContain('if (answer.length === 0 && outgrew(err)) stopWords = TOO_LONG_FOR_THE_CLOUD;');
     expect(chat.match(/stopWords = /g)).toHaveLength(2);
     expect(chat).toContain("res.write(`data: ${JSON.stringify({ type: 'error', error: String(err), ...(stopWords ? { message: stopWords } : {}) })}\\n\\n`);");
   });
@@ -370,7 +370,7 @@ describe('index.ts wiring', () => {
 
   it('/chat: an error from the last frontier tier goes to the local model when it may answer, as /generate\'s does', () => {
     expect(chat).toContain("if ((recoverable || (tried !== undefined && toLocal)) && ev.type === 'error' && answer.length === 0 && !acted && providerFailure(ev.error) && !ac.signal.aborted) throw new FlintError(ev.error);");
-    expect(chat).toContain('if (answer.length === 0 && toLocal && mayAskAnother(err, { acted, signal: ac.signal }) && !outgrewTheCloud(err)) {');
+    expect(chat).toContain('if (answer.length === 0 && toLocal && mayAskAnother(err, { acted, signal: ac.signal }) && !outgrew(err)) {');
     // The console is told a local model is answering (and when it is the standby) before its text streams.
     expect(chat).toMatch(/brain = 'local';\s*await askLocal\(\{ \.\.\.\(paused \? \{ frontierPaused: paused \} : \{\}\) \}\);/);
     const askLocal = chat.slice(chat.indexOf('const askLocal = async (meta'), chat.indexOf("if (brain === 'frontier' && plan) {"));
@@ -385,7 +385,7 @@ describe('index.ts wiring', () => {
     expect(chat.match(/mayAskAnother\(err, \{ acted, signal: ac\.signal \}\)/g)).toHaveLength(2);
     // /generate: the turn's own action-log entries (TurnLog), not a concurrent turn's.
     expect(generate).toContain('{ signal: abort.signal, acted: () => turn.acted, onFallback: logFallback },');
-    expect(generate).toContain('if (!route.localFallback || localPlan.steps.length === 0 || !mayAskAnother(err, { acted: turn.acted }) || outgrewTheCloud(err)) {');
+    expect(generate).toContain('if (!route.localFallback || localPlan.steps.length === 0 || !mayAskAnother(err, { acted: turn.acted }) || outgrew(err)) {');
     // The local side follows the same rule (./local-serve runLocalPlan asks mayAskAnother): a step gives way to the
     // next only while nothing was shown and no tool was called.
     expect(chat).toContain('{ signal: ac.signal, progressed: () => answer.length > 0 || acted, onMove: logLocalMove, ...ctx.inference.keeping(route) },');
@@ -563,7 +563,7 @@ describe('index.ts wiring', () => {
       const check = route.indexOf("const tooBig = budget.brain === 'frontier' && plan && !toLocal ? pdfTooBigFor(attachments, plan.chain.map((b) => b.provider.getCapabilities(b.model))) : undefined;");
       expect(check, name).toBeGreaterThan(-1);
       // The cloud's size, and why this Mac could not read it when it tried first (a Hybrid turn).
-      expect(route.slice(check), name).toMatch(/^[^\n]*\n\s*if \(tooBig\) \{\n\s*const here = ctx\.inference\.pdfRefusedHere\(attachments\);\n\s*return json\(res, 413, \{ error: tooBigSentence\(tooBig, here && pdfUnreadClause\(here\)\) \}\);/);
+      expect(route.slice(check), name).toMatch(/^[^\n]*\n\s*if \(tooBig\) \{\n\s*\/\/ [^\n]*\n\s*const here = route\.mode === 'hybrid' \? ctx\.inference\.pdfRefusedHere\(\[tooBig\.pdf\]\) : undefined;\n\s*return json\(res, 413, \{ error: tooBigSentence\(tooBig, here && pdfUnreadClause\(here\)\) \}\);/);
       expect(check, name).toBeLessThan(route.indexOf('const gate = gateTurn('));
       expect(check, name).toBeGreaterThan(route.indexOf('const toLocal = '));
     }

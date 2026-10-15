@@ -198,10 +198,10 @@ describe('a PDF too large for the model that would answer', () => {
 
   it('a PDF is too large only when it fits NONE of the models that would be asked; the limit named is the most any of them takes', () => {
     const tenMb = pdfOf(10 * 1024 * 1024, 'NAMEQ1.pdf');
-    expect(pdfTooBigFor([tenMb], [SONNET])).toEqual({ name: 'NAMEQ1.pdf', limit: 3_400_000 });
-    expect(pdfTooBigFor([tenMb], [SONNET, OPUS])).toEqual({ name: 'NAMEQ1.pdf', limit: 4_200_000 });
+    expect(pdfTooBigFor([tenMb], [SONNET])).toEqual({ name: 'NAMEQ1.pdf', limit: 3_400_000, pdf: tenMb });
+    expect(pdfTooBigFor([pdfOf(1_000), tenMb], [SONNET, OPUS])).toEqual({ name: 'NAMEQ1.pdf', limit: 4_200_000, pdf: tenMb });
     const fourMb = pdfOf(4_000_000);
-    expect(pdfTooBigFor([fourMb], [SONNET])).toEqual({ name: 'report.pdf', limit: 3_400_000 });
+    expect(pdfTooBigFor([fourMb], [SONNET])).toEqual({ name: 'report.pdf', limit: 3_400_000, pdf: fourMb });
     expect(pdfTooBigFor([fourMb], [SONNET, OPUS])).toBeUndefined();
     expect(pdfTooBigFor([pdfOf(1_000_000)], [SONNET])).toBeUndefined();
     // Pictures and text files are not PDFs, and no models means nothing to be too large for.

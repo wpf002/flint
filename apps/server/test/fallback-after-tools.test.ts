@@ -142,16 +142,26 @@ describe('the rule (./brains)', () => {
     expect(providerFailure(makeAiError('internal', 'Tool loop exceeded 8 iterations without completing. The answer-only call came back empty.'))).toBe(false);
   });
 
-  it('outgrewTheCloud: only a cloud window too small for the turn, and then the local model is not asked after it', () => {
-    expect(outgrewTheCloud(new FlintError(makeAiError('context_overflow', 'The newest message does not fit this model\'s window', { retryable: false })))).toBe(true);
+  it('outgrewTheCloud: a cloud window too small for a turn the local model could not fit either; then the local model is not asked after it', () => {
+    const overflow = new FlintError(makeAiError('context_overflow', 'The newest message does not fit this model\'s window', { retryable: false }));
+    const plain = { media: false, localWindow: 16_384, windows: [200_000, 128_000] };
+    expect(outgrewTheCloud(overflow, plain)).toBe(true);
     for (const e of [overloaded(), makeAiError('rate_limit', '429'), makeAiError('timeout', 't', { retryable: true }), makeAiError('internal', '413 request too large', { providerCode: '413' })]) {
-      expect(outgrewTheCloud(new FlintError(e)), e.kind).toBe(false);
+      expect(outgrewTheCloud(new FlintError(e), plain), e.kind).toBe(false);
     }
-    expect(outgrewTheCloud(new Error('context_overflow'))).toBe(false);
-    // Both places a cloud failure can fall to the local model ask it first (index.ts: /generate and /chat).
+    expect(outgrewTheCloud(new Error('context_overflow'), plain)).toBe(false);
+    // A turn with a PDF or a picture: the local model is handed a PDF as text cut to its window, so a PDF too large
+    // for the cloud may be read here (Hybrid's planned fallback). It is asked.
+    expect(outgrewTheCloud(overflow, { ...plain, media: true })).toBe(false);
+    // A brain with a smaller window than the local model's (a tier on a local wire) says nothing about the local model.
+    expect(outgrewTheCloud(overflow, { ...plain, windows: [200_000, 8_192] })).toBe(false);
+    expect(outgrewTheCloud(overflow, { ...plain, windows: [] })).toBe(false);
+    // Every place a cloud failure can fall to the local model asks it first (index.ts: /generate and /chat).
     const index = readFileSync(join(__dirname, '../src/index.ts'), 'utf8');
-    expect(index.match(/mayAskAnother\(err, \{ acted[^)]*\}\) \|\| outgrewTheCloud\(err\)/g)).toHaveLength(1);
-    expect(index.match(/mayAskAnother\(err, \{ acted, signal: ac\.signal \}\) && !outgrewTheCloud\(err\)/g)).toHaveLength(2);
+    expect(index.match(/mayAskAnother\(err, \{ acted[^)]*\}\) \|\| outgrew\(err\)/g)).toHaveLength(1);
+    expect(index.match(/mayAskAnother\(err, \{ acted, signal: ac\.signal \}\) && !outgrew\(err\)/g)).toHaveLength(2);
+    expect(index.match(/const outgrew = \(err: unknown\): boolean =>\n\s*outgrewTheCloud\(err, \{ media: attachments\.some\(\(a\) => a\.kind === 'image' \|\| a\.kind === 'document'\), localWindow: ctx\.inference\.localFacts\(\)\.contextTokens, windows: plan\?\.chain\.map\(\(b\) => b\.provider\.getCapabilities\(b\.model\)\.maxContextTokens\) \?\? \[\] \}\);/g)).toHaveLength(2);
+    expect(index).toContain("if (outgrew(err)) return json(res, 413, { error: TOO_LONG_FOR_THE_CLOUD, ...evalFields() });");
     expect(TOO_LONG_FOR_THE_CLOUD).toBe('This message is longer than the cloud model can read. Send a shorter one, or split it up.');
   });
 

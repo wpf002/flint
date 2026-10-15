@@ -980,18 +980,20 @@ name and a first line that says what it is (`src/pdf-text.ts`, `src/local-media.
     not undo, or written in a way a reader accepts and the count does not), and it can count
     high (the words `/Type /Page` in a page's own text). What bounds a PDF that gets past it is
     the twenty seconds and what follows them, below. The count itself costs little, whatever
-    the bytes: it reads the file once, never holds the server for more than a few milliseconds
-    at a time, and stops after two seconds of work, 4,096 object streams or 32 MB unpacked, any
+    the bytes: it reads the file once, holds the server for a few milliseconds at a time (about
+    twenty at the most, while a large stream is unpacked), and stops after two seconds of work, 4,096 object streams or 32 MB unpacked, any
     of which is refused like too many pages.
   - *After a read runs out of time the reader is busy:* every read is refused at once
     ("Flint's PDF reader on this Mac is busy right now, ... Try again in a moment."), nothing is
     queued behind a service that is stuck, and one small PDF of Flint's own is tried every few
     seconds until it comes back. Then reads go on. A busy reader never tells Will to send the
     PDF as text: the PDF is fine.
-  - *A PDF that ran out of time is remembered:* by a digest of its bytes, for three hours (64 of
-    them at most). Sent again in that time it is refused at once ("Reading this PDF took longer
-    than Flint waits on this Mac, ..."), so the same file cannot keep the Mac's importer busy by
-    being sent again and again.
+  - *A PDF that ran out of time on its own is remembered:* by a digest of its bytes, for three
+    hours (64 of them at most). Sent again in that time it is refused at once ("Reading this PDF
+    took longer than Flint waits on this Mac, ..."), so the same file cannot keep the Mac's
+    importer busy by being sent again and again. A read that ran beside another is not
+    remembered, since it may only have waited behind that one, and one that ran out of time
+    after another already had is told the reader is busy.
   - A small PDF can still hold a great deal (a compressed page that unpacks to a hundred
     megabytes). That is not seen before the read, and costs the Mac one such episode for each
     different file.
@@ -1014,6 +1016,14 @@ name and a first line that says what it is (`src/pdf-text.ts`, `src/local-media.
   that word (`FLINT_LOCAL_FIRST_OUTPUT_TIMEOUT_MS`), and on this Mac 22,936 characters took about
   ten. A PDF that holds more is cut, and its first line tells the model how much it was given
   ("Only the first 22,936 of its 195,939 characters are below"), so the model can say so.
+- **Too large for the cloud.** A PDF larger than every cloud model that would be asked can read,
+  with no local model to fall back to, is refused before anything is sent: "report.pdf: larger
+  than the 3.3 MB the cloud model can read". In Hybrid, when this Mac tried it first and could
+  not read it, the sentence says why too. A PDF the local model can read is not refused for its
+  size: it falls back to the local model, which is handed its text.
+- **Too long for the cloud.** A message the cloud model cannot fit, with no picture or PDF on it,
+  is not handed to the local model after it (its window is smaller): "This message is longer
+  than the cloud model can read. Send a shorter one, or split it up."
 - **In Hybrid it counts toward the prompt's length.** The text a PDF comes to is part of what
   the long-context rule measures, so a long PDF on top of a long thread goes to the cloud like
   any other prompt that does not fit, unless the turn is private.

@@ -506,6 +506,11 @@ describe('what is refused before it is handed to a reader', () => {
     // Not deflate at all: never handed to the unpacker.
     expect(await countPdfPages(latin('%PDF-1.5\n<< /Type /ObjStm >>\nstream\nthis is not deflate\nendstream\n<< /Type /Page >>'), { tally })).toBe(1);
     expect(tally.opened).toBe(0);
+    // An object stream with no filter holds its objects as they are: they are read where they stand, and its pages
+    // count (a review found 300 such pages counted as none, where the old count had all 300).
+    const plainStream = `<< /Type /ObjStm /N 300 >>\nstream\n${'<< /Type /Page /Parent 2 0 R >>\n'.repeat(300)}endstream\n`;
+    expect(await countPdfPages(latin(`%PDF-1.5\n${plainStream}`), { tally })).toBe(300);
+    expect(tally.opened).toBe(0);
     // It begins like deflate, and is not: the unpacker says so, and the count goes on.
     expect(await countPdfPages(Buffer.concat([latin('%PDF-1.5\n<< /Type /ObjStm >>\nstream\n'), Buffer.from([0x78, 0x9c, 0xff, 0xff, 0xff, 0xff]), latin('\nendstream\n<< /Type /Page >>')]), { tally })).toBe(1);
     expect(tally.opened).toBe(1);
@@ -857,6 +862,46 @@ describe('a PDF whose read ran out of time is remembered, and not handed to the 
     clock.t += 1;
     expect((await reader.read(OTHER)).ok).toBe(true);
     expect(reader.slow!()).toBe(0);
+  });
+
+  // A review (2026-10-15): two reads run at once, and one that only waited behind a heavy PDF ran out of time too. It
+  // was remembered as too slow, and a PDF that is fine was refused for three hours with advice to send less of it.
+  it('only a read that ran alone is remembered: one that timed out beside another, or after it, is not', async () => {
+    const tmp = scratch();
+    const gates: Array<(v: 'timeout' | 'ok') => void> = [];
+    const waits: Array<() => void> = [];
+    let slow = true;
+    const run: RunProgram = async (_p, args) => {
+      const bytes = readFileSync(args.find((a) => a.endsWith('doc.pdf'))!);
+      // Flint's own small PDF: back at once, once the Mac has finished.
+      if (!bytes.includes('HEAVYQ') && !bytes.includes('another PDF')) return slow ? Promise.reject(new ReadTimedOut()) : { stdout: RECORDED, truncated: false };
+      const how = await new Promise<'timeout' | 'ok'>((r) => gates.push(r));
+      if (how === 'timeout') throw new ReadTimedOut();
+      return { stdout: RECORDED, truncated: false };
+    };
+    const reader = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp, atOnce: 2, later: (fn) => void waits.push(fn) });
+    const heavy = reader.read(HEAVY);
+    const fine = reader.read(OTHER);
+    await expect.poll(() => gates.length, WAIT).toBe(2);
+    gates[0]!('timeout'); // the heavy one first
+    expect(await heavy).toEqual({ ok: false, why: 'too_slow' });
+    gates[1]!('timeout'); // the one that waited behind it
+    expect(await fine).toEqual({ ok: false, why: 'busy' });
+    // Neither is remembered: the heavy one did not run alone, so it cannot be told from the other.
+    expect(reader.slow!()).toBe(0);
+    slow = false;
+    waits.shift()!();
+    await expect.poll(() => reader.stuck!(), WAIT).toBe(false);
+    const other = reader.read(OTHER);
+    await expect.poll(() => gates.length, WAIT).toBe(3);
+    gates[2]!('ok');
+    expect((await other).ok).toBe(true);
+    // Alone, the heavy one runs out of time again, and now it is remembered.
+    const again = reader.read(HEAVY);
+    await expect.poll(() => gates.length, WAIT).toBe(4);
+    gates[3]!('timeout');
+    expect(await again).toEqual({ ok: false, why: 'too_slow' });
+    expect(reader.slow!()).toBe(1);
   });
 
   it('a bounded list: with more of them than it holds, the oldest is forgotten first', async () => {

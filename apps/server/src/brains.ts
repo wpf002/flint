@@ -468,14 +468,18 @@ export function mayAskAnother(err: unknown, o: { acted: boolean; signal?: AbortS
 /** What Will reads when that happens. */
 export const TOO_LONG_FOR_THE_CLOUD = 'This message is longer than the cloud model can read. Send a shorter one, or split it up.';
 /**
- * Did the cloud brains fail because the turn is longer than their window? The
- * local model's window is far smaller, so it is not asked after them: it could
- * only fail the same way, and its sentence would name a window Will never
- * chose (a long message in Cloud mode was answered with the local model's).
- * The cloud brain's own sentence says what happened.
+ * Did the cloud brains fail because the turn is longer than their window, so
+ * that the local model, whose window is no larger, could only fail the same
+ * way? It is then not asked after them, and Will reads one plain sentence (a
+ * long message in Cloud mode was answered with the local model's window).
+ * Only for a turn with no picture or PDF on it: the local model is handed a
+ * PDF as text cut to its window, so a PDF too large for the cloud may well be
+ * read here (a Hybrid turn's planned fallback). And only when every brain that
+ * was asked has a window at least as large as the local model's: a tier with a
+ * smaller one says nothing about the local model.
  */
-export function outgrewTheCloud(err: unknown): boolean {
-  return isFlintError(err) && err.kind === 'context_overflow';
+export function outgrewTheCloud(err: unknown, turn: { media: boolean; localWindow: number; windows: readonly number[] }): boolean {
+  return isFlintError(err) && err.kind === 'context_overflow' && !turn.media && turn.windows.length > 0 && turn.windows.every((w) => w >= turn.localWindow);
 }
 
 /**

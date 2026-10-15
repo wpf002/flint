@@ -375,9 +375,11 @@ export async function countPdfPages(bytes: Uint8Array, limits: CountLimits = {})
       const from = buf[s + 6] === 0x0d && buf[s + 7] === 0x0a ? s + 8 : buf[s + 6] === 0x0a ? s + 7 : -1;
       const end = from === -1 ? -1 : endAt(from, Infinity);
       if (end === -1) continue;
-      at = end; // stepped over: nothing inside it is read as the file's own
       const packed = buf.subarray(from, end);
+      // One that is not deflated is read where it stands, as the file's own bytes (an uncompressed object stream's
+      // pages are counted that way); one that is, is unpacked and stepped over.
       if (!looksDeflated(packed)) continue;
+      at = end;
       let unpacked: Buffer;
       spent += now() - since;
       tally.opened++;
@@ -755,6 +757,8 @@ export function makePdfReader(which: { reader: PdfReaderKind; program: string },
 
   // ---- busy: a read ran out of time, and the Mac may still be at work on that PDF
   let stuck = false;
+  /** The reads running now, each noting whether another ran beside it. */
+  const inFlight = new Set<{ shared: boolean }>();
   let closed = false;
   let probing = false;
   let waitingToProbe = false;
@@ -784,6 +788,12 @@ export function makePdfReader(which: { reader: PdfReaderKind; program: string },
    */
   const once = async (bytes: Uint8Array, signal: AbortSignal | undefined, timeoutMs: number, asked: boolean): Promise<PdfText> => {
     let folder: string | undefined;
+    // Did any other read run beside this one, or was the reader already stuck when it began? Then a read that runs
+    // out of time may only have waited behind another PDF: it is not remembered as too slow (a PDF that is fine
+    // would be refused for hours).
+    const me = { shared: stuck || inFlight.size > 0 };
+    for (const other of inFlight) other.shared = true;
+    inFlight.add(me);
     try {
       const parent = ownReadsFolder(tmp);
       if (!parent) return { ok: false, why: 'failed' };
@@ -814,16 +824,20 @@ export function makePdfReader(which: { reader: PdfReaderKind; program: string },
       return { ok: true, text: text.slice(0, MAX_TEXT_CHARS), cut: !whole || text.length > MAX_TEXT_CHARS, ...(pages !== undefined ? { pages } : {}) };
     } catch (err) {
       if (!(err instanceof ReadTimedOut)) return { ok: false, why: 'failed' };
-      if (!stuck) {
+      const first = !stuck;
+      if (first) {
         // Flint has stopped waiting. The Mac may not have stopped working: nothing more is handed to it until
         // a small PDF of Flint's own comes back.
         stuck = true;
         probeLater(PROBE_AFTER_MS);
       }
       if (!asked) return { ok: false, why: 'failed' };
-      rememberSlow(bytes);
+      // One that timed out after another already had was waiting behind it: the reader is busy, the PDF may be fine.
+      if (!first) return { ok: false, why: 'busy' };
+      if (!me.shared) rememberSlow(bytes);
       return { ok: false, why: 'too_slow' };
     } finally {
+      inFlight.delete(me);
       if (folder) {
         await rm(folder, { recursive: true, force: true }).catch(() => {});
         LIVE.delete(folder);

@@ -255,11 +255,11 @@ export function pdfBytesThatFit(caps: { maxContextTokens: number; maxOutputToken
  * that carried it was dropped to make the prompt fit, and the model was sent
  * `"messages": []`. It is refused at the door instead, with the size sentence.
  */
-export function pdfTooBigFor(attachments: readonly Attachment[], models: ReadonlyArray<{ maxContextTokens: number; maxOutputTokens: number }>): { name: string; limit: number } | undefined {
+export function pdfTooBigFor(attachments: readonly Attachment[], models: ReadonlyArray<{ maxContextTokens: number; maxOutputTokens: number }>): { name: string; limit: number; pdf: Attachment } | undefined {
   if (models.length === 0) return undefined;
   const limit = Math.max(...models.map(pdfBytesThatFit));
   const big = attachments.find((a) => a.kind === 'document' && typeof a.data === 'string' && Math.floor((a.data.length * 3) / 4) > limit);
-  return big ? { name: big.name ?? 'attachment', limit } : undefined;
+  return big ? { name: big.name ?? 'attachment', limit, pdf: big } : undefined;
 }
 
 /** "20 MB", "3.4 MB", "512 KB": rounded down, so a file under the figure said is never refused. */
