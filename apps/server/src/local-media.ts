@@ -141,6 +141,8 @@ export interface LocalMedia {
   chars(attachments: readonly Attachment[], windowTokens: number): number;
   /** A local model's adapter that is handed a PDF as its text. */
   provider(inner: ProviderAdapter, o?: WrapOptions): ProviderAdapter;
+  /** Why the first of these PDFs that was read here could not be, from what is kept: nothing is read for this. */
+  refused(attachments: readonly Attachment[]): Exclude<PdfText, { ok: true }>['why'] | undefined;
 }
 
 /** What the wrapper asks of whoever knows where the adapter's server is (./inference). */
@@ -243,6 +245,13 @@ export function localMedia(reader: PdfReader, opts: { kept?: number; keptChars?:
       const pdfs = attachments.filter(isPdf);
       if (pdfs.length === 0) return true;
       return (await Promise.all(pdfs.map((a) => text(a, signal)))).every((r) => r.ok);
+    },
+    refused(attachments) {
+      for (const a of attachments) {
+        const r = known(a);
+        if (r && !r.ok) return r.why;
+      }
+      return undefined;
     },
     chars(attachments, windowTokens) {
       if (!attachments.some(isPdf)) return 0;

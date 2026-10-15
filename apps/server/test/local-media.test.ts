@@ -204,6 +204,20 @@ describe('reads are kept', () => {
     expect(r.reads).toEqual(['big', 'long', 'later', 'later']);
   });
 
+  it('why a PDF could not be read here is told from what is kept, and asking reads nothing', async () => {
+    const r = reader({ long: { ok: false, why: 'too_long' }, alpha: ok('Alpha.') });
+    const media = localMedia(r);
+    const long = pdf('long.pdf', ['long']);
+    const alpha = pdf('a.pdf', ['alpha']);
+    expect(media.refused([long, alpha])).toBeUndefined();
+    expect(r.reads).toEqual([]);
+    await media.text(alpha);
+    await media.text(long);
+    expect(media.refused([alpha, long])).toBe('too_long');
+    expect(media.refused([alpha])).toBeUndefined();
+    expect(r.reads).toEqual(['alpha', 'long']);
+  });
+
   it('a reader that throws is a failed read, never a rejection', async () => {
     const media = localMedia({ kind: 'spotlight', read: async () => Promise.reject(new Error('boom')) });
     expect(await media.text(pdf('a.pdf'))).toEqual({ ok: false, why: 'failed' });

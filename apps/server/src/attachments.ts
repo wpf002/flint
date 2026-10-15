@@ -222,6 +222,21 @@ export function sizeSentence(name: string, limit: number): string {
   return `${name}: larger than the ${mb(limit)} limit`;
 }
 
+/** The sentence for a PDF too large for every cloud model that would be asked (pdfTooBigFor): what they can read, not the door's limit. */
+export function cloudSizeSentence(name: string, limit: number): string {
+  return `${name}: larger than the ${mb(limit)} the cloud model can read`;
+}
+
+/**
+ * The refusal for such a PDF: the cloud's size, and, when this Mac tried it
+ * first and could not read it, why (a Hybrid turn: a PDF too long to read here
+ * was told only that it was too large for the cloud). `hereClause` is
+ * ./policy pdfUnreadClause's words for that.
+ */
+export function tooBigSentence(big: { name: string; limit: number }, hereClause?: string): string {
+  return hereClause ? `${cloudSizeSentence(big.name, big.limit)}, and ${hereClause}` : cloudSizeSentence(big.name, big.limit);
+}
+
 /**
  * The largest PDF, in bytes, that a model with this window can be handed, by
  * the count every prompt is sized with (@flint/core estimateAttachmentTokens:
@@ -247,8 +262,11 @@ export function pdfTooBigFor(attachments: readonly Attachment[], models: Readonl
   return big ? { name: big.name ?? 'attachment', limit } : undefined;
 }
 
+/** "20 MB", "3.4 MB", "512 KB": rounded down, so a file under the figure said is never refused. */
 function mb(n: number): string {
-  return n >= 1024 * 1024 ? `${Math.round(n / (1024 * 1024))} MB` : `${Math.round(n / 1024)} KB`;
+  if (n < 1024 * 1024) return `${Math.floor(n / 1024)} KB`;
+  const m = n / (1024 * 1024);
+  return m >= 10 ? `${Math.floor(m)} MB` : `${Math.floor(m * 10) / 10} MB`;
 }
 
 /** What a set of attachments demands of the model that reads it. */

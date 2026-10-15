@@ -465,6 +465,19 @@ export function mayAskAnother(err: unknown, o: { acted: boolean; signal?: AbortS
   return !o.acted && shouldFallBack(err, o.signal);
 }
 
+/** What Will reads when that happens. */
+export const TOO_LONG_FOR_THE_CLOUD = 'This message is longer than the cloud model can read. Send a shorter one, or split it up.';
+/**
+ * Did the cloud brains fail because the turn is longer than their window? The
+ * local model's window is far smaller, so it is not asked after them: it could
+ * only fail the same way, and its sentence would name a window Will never
+ * chose (a long message in Cloud mode was answered with the local model's).
+ * The cloud brain's own sentence says what happened.
+ */
+export function outgrewTheCloud(err: unknown): boolean {
+  return isFlintError(err) && err.kind === 'context_overflow';
+}
+
 /**
  * Run `attempt` on each brain of the chain in turn until one succeeds. Throws
  * the LAST error if all of them fail (the caller then falls back to local, as

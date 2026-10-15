@@ -15,7 +15,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import { ActionLogObserver, Flint, FlintError, InMemoryStore, makeAiError, type AiError, type ProviderAdapter, type StreamEvent, type Tool } from '@flint/core';
-import { NoFallback, mayAskAnother, providerFailure, runWithFallback, shouldFallBack, type BrainTier } from '../src/brains';
+import { NoFallback, TOO_LONG_FOR_THE_CLOUD, mayAskAnother, outgrewTheCloud, providerFailure, runWithFallback, shouldFallBack, type BrainTier } from '../src/brains';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { TurnLog, recordTurnEntry } from '../src/grounding';
 import { NoAnswer, answerWithFallback, guardAnswer, unansweredMessage, type Unanswered } from '../src/unanswered';
 
@@ -138,6 +140,19 @@ describe('the rule (./brains)', () => {
     expect(providerFailure(makeAiError('internal', 'Unexpected end of JSON input'))).toBe(true);
     expect(providerFailure(toolThrew())).toBe(false);
     expect(providerFailure(makeAiError('internal', 'Tool loop exceeded 8 iterations without completing. The answer-only call came back empty.'))).toBe(false);
+  });
+
+  it('outgrewTheCloud: only a cloud window too small for the turn, and then the local model is not asked after it', () => {
+    expect(outgrewTheCloud(new FlintError(makeAiError('context_overflow', 'The newest message does not fit this model\'s window', { retryable: false })))).toBe(true);
+    for (const e of [overloaded(), makeAiError('rate_limit', '429'), makeAiError('timeout', 't', { retryable: true }), makeAiError('internal', '413 request too large', { providerCode: '413' })]) {
+      expect(outgrewTheCloud(new FlintError(e)), e.kind).toBe(false);
+    }
+    expect(outgrewTheCloud(new Error('context_overflow'))).toBe(false);
+    // Both places a cloud failure can fall to the local model ask it first (index.ts: /generate and /chat).
+    const index = readFileSync(join(__dirname, '../src/index.ts'), 'utf8');
+    expect(index.match(/mayAskAnother\(err, \{ acted[^)]*\}\) \|\| outgrewTheCloud\(err\)/g)).toHaveLength(1);
+    expect(index.match(/mayAskAnother\(err, \{ acted, signal: ac\.signal \}\) && !outgrewTheCloud\(err\)/g)).toHaveLength(2);
+    expect(TOO_LONG_FOR_THE_CLOUD).toBe('This message is longer than the cloud model can read. Send a shorter one, or split it up.');
   });
 
   // The rule reads core's own wording, so this runs the real tool loop: if core rewords it, this fails.

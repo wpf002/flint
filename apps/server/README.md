@@ -969,21 +969,35 @@ name and a first line that says what it is (`src/pdf-text.ts`, `src/local-media.
   the PDF to a system service, and that service goes on with it after Flint has stopped waiting:
   a review measured a 50,000-page PDF keep it busy for three and a half minutes, during which
   every other read timed out. So:
-  - *What is plainly too much is refused before it is handed over:* a PDF over 10 MB, or with
-    more than 1,000 pages by a count of its own bytes (the pages inside compressed object
-    streams included). Each has its own sentence ("This PDF has more than the 1,000 pages Flint
-    reads on this Mac, ..."). The importer takes about five milliseconds a page, so a thousand
-    pages are about five seconds; and the local model is handed the first 32,000 characters at
-    most, which is ten or twenty pages.
+  - *What is plainly too much is refused before it is handed over:* a PDF over 10 MB, or one
+    that looks to have more than 1,000 pages by a count of its own bytes (the pages inside
+    compressed object streams included). Each has its own sentence ("This PDF looks like it has
+    more than the 1,000 pages Flint reads on this Mac, ..."). The importer takes about five
+    milliseconds a page, so a thousand pages are about five seconds; and the local model is
+    handed the first 32,000 characters at most, which is ten or twenty pages.
+  - *The page count is a courtesy, not a guard.* It spares the Mac a PDF that says plainly how
+    long it is. A PDF made to hide its pages gets past it (pages behind a filter the count does
+    not undo, or written in a way a reader accepts and the count does not), and it can count
+    high (the words `/Type /Page` in a page's own text). What bounds a PDF that gets past it is
+    the twenty seconds and what follows them, below. The count itself costs little, whatever
+    the bytes: it reads the file once, never holds the server for more than a few milliseconds
+    at a time, and stops after two seconds of work, 4,096 object streams or 32 MB unpacked, any
+    of which is refused like too many pages.
   - *After a read runs out of time the reader is busy:* every read is refused at once
     ("Flint's PDF reader on this Mac is busy right now, ... Try again in a moment."), nothing is
     queued behind a service that is stuck, and one small PDF of Flint's own is tried every few
     seconds until it comes back. Then reads go on. A busy reader never tells Will to send the
     PDF as text: the PDF is fine.
+  - *A PDF that ran out of time is remembered:* by a digest of its bytes, for three hours (64 of
+    them at most). Sent again in that time it is refused at once ("Reading this PDF took longer
+    than Flint waits on this Mac, ..."), so the same file cannot keep the Mac's importer busy by
+    being sent again and again.
   - A small PDF can still hold a great deal (a compressed page that unpacks to a hundred
-    megabytes). That is not seen before the read, and costs the Mac one such episode.
-- The PDF is written to a folder of its own under the temp folder, readable by this user alone
-  (0700, the file 0600), named so that Spotlight does not index it, and removed when the read
+    megabytes). That is not seen before the read, and costs the Mac one such episode for each
+    different file.
+- The PDF is written to a folder of its own inside Flint's folder for reads, `flint-pdf` under
+  the temp folder (0700, made by Flint and refused if it is anything else), readable by this
+  user alone (0700, the file 0600), named so that Spotlight does not index it, and removed when the read
   ends: when it answers, fails, runs out of time or is called off, and when Flint is stopped in
   the middle of it (the folders of the reads under way are removed, and their programs ended, as
   the process exits). The one case nothing in the process can cover is the process being killed

@@ -453,7 +453,7 @@ describe('at the door, with nothing set', () => {
     const [clouds, chats] = [cloud.requests.length, ollama.chats().length];
     const r = await srv.post('/chat', { conversationId: 'door-big', message: 'what is in this?', attachments: [{ name: 'NAMEQ1.pdf', type: 'application/pdf', data: big }] });
     expect(r.status).toBe(413);
-    expect(String(r.json?.error)).toMatch(/^NAMEQ1\.pdf: larger than the [34] MB limit$/);
+    expect(String(r.json?.error)).toMatch(/^NAMEQ1\.pdf: larger than the [34]\.\d MB the cloud model can read$/);
     const g = await srv.post('/generate', { prompt: 'what is in this?', attachments: [{ name: 'NAMEQ1.pdf', type: 'application/pdf', data: big }] });
     expect(g.status).toBe(413);
     expect(cloud.requests.length).toBe(clouds);

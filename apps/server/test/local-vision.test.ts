@@ -10,7 +10,7 @@ import type { ModeRoute, OpenRoute } from '../src/mode-route';
 import { LOCALITY } from '../src/ollama-locality';
 import type { PdfReader, PdfText } from '../src/pdf-text';
 import { setPlaceRules } from '../src/policy';
-import { asLocalTurn } from '../src/turn-taint';
+import { asLocalTurn, markTurnCarriesKept } from '../src/turn-taint';
 import { Sheet, textPdf } from '../src/synthetic-files';
 import { mediaNeeds } from '../src/attachments';
 import { startMockLocalServer, type MockLocalServer, type MockModel } from './mock-local-server';
@@ -595,6 +595,13 @@ describe('the look at the model server and the reads of a turn’s PDFs', () => 
     expect(isFlintError(kept) && kept.error).toEqual({ kind: 'provider_unavailable', message: 'Flint cannot confirm right now that its local model runs on this Mac, so nothing was sent to it.', retryable: false });
     // A turn of Local mode is held the same way.
     await expect(asLocalTurn(() => inference.lookAgain(provider, MAIN), { staysHere: true })).rejects.toThrow('nothing was sent');
+    // An ordinary local turn that is handed what stays here (a kept turn in its history, a fact, the goals) is held
+    // the same way: ./goals-chat marks it when the gate hands it that.
+    await expect(asLocalTurn(() => (markTurnCarriesKept(), inference.lookAgain(provider, MAIN)))).rejects.toThrow('nothing was sent');
+    // The mark is that turn's alone: the next local turn, handed nothing that stays here, is not held by it.
+    await expect(asLocalTurn(() => inference.lookAgain(provider, MAIN))).resolves.toBeUndefined();
+    // Outside a local model's turn the mark is nothing.
+    markTurnCarriesKept();
     // An ordinary turn is not refused by the look; it is simply handed no file from here on.
     await expect(inference.lookAgain(provider, MAIN)).resolves.toBeUndefined();
     expect(inference.confined.ok).toBe(false);

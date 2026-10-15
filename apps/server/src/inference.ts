@@ -43,7 +43,7 @@ import { makePdfReader, type PdfReader } from './pdf-text';
 import { brainIsLocal, brainOf, setPlaceRules, type MediaFlags, type PdfUnread } from './policy';
 import { turnStaysHere, type StayRoute } from './private-turns';
 import { paidToolSpecs, type BrainChooser, type BudgetView, type PaidToolSpec } from './spend';
-import { carriesKeptText, isEvalTurn, isPrivateRequest, isPrivateTurn, isStaysHereRequest, isStaysHereTurn, markPrivateRequest, markStaysHereRequest } from './turn-taint';
+import { carriesKeptText, isEvalTurn, isPrivateRequest, isPrivateTurn, isStaysHereRequest, isStaysHereTurn, markPrivateRequest, markStaysHereRequest, turnCarriesKept } from './turn-taint';
 import { isFile, planVoice, transcriptionMissing, type VoicePlan } from './voice';
 import type { TurnFacts } from './hybrid-rules';
 
@@ -355,8 +355,9 @@ export class Inference {
   /**
    * A request to a local model had to wait for a read for longer than the
    * model server's word is good for (./local-media WrapOptions.lookAgain):
-   * ask the server again now, and refuse if this turn stays here and the
-   * model is no longer known to run here. Nothing has been sent when this
+   * ask the server again now, and refuse if this turn stays here, or is
+   * handed what stays here (a kept turn in its history, a fact, the goals),
+   * and the model is no longer known to run here. Nothing has been sent when this
    * throws.
    */
   async lookAgain(provider: ProviderAdapter, model: string): Promise<void> {
@@ -364,7 +365,7 @@ export class Inference {
       () => undefined,
       () => undefined,
     );
-    const kept = isPrivateTurn() || isStaysHereTurn() || isPrivateRequest() || isStaysHereRequest();
+    const kept = isPrivateTurn() || isStaysHereTurn() || turnCarriesKept() || isPrivateRequest() || isStaysHereRequest();
     if (kept && !brainIsLocal(brainOf(provider, model))) {
       throw new FlintError(makeAiError('provider_unavailable', `Flint cannot confirm right now that its local model runs on ${staysOn(this.allowedRemote())}, so nothing was sent to it.`, { retryable: false }));
     }
@@ -471,6 +472,11 @@ export class Inference {
    * long its prompt is, for the hybrid rules' long-context test. Nothing when no PDF is read here, and nothing
    * for one that was not read for this turn (a turn a cloud model answers anyway).
    */
+  /** Why a PDF among these could not be read here, when one was tried: for a refusal that says so beside its own reason. */
+  pdfRefusedHere(attachments: readonly Attachment[]): PdfUnread | undefined {
+    return this.media?.refused(attachments);
+  }
+
   pdfTextChars(attachments: readonly Attachment[]): number {
     return this.media ? this.media.chars(attachments, this.primary.provider.getCapabilities(this.primary.model).maxContextTokens) : 0;
   }

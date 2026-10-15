@@ -53,7 +53,7 @@ import { brainIsLocal, brainOf, listedAt, placeUnknown, placedHere, type Answeri
 import { corpusMark, keptByModeAlone, privateByRequest, turnStaysHere, type StayRoute } from './private-turns';
 import type { PaidToolSpec } from './spend';
 import { isPartOf } from './spoken-text';
-import { asKeptText, asLocalTurn, isLocalTurn } from './turn-taint';
+import { asKeptText, asLocalTurn, isLocalTurn, markTurnCarriesKept } from './turn-taint';
 
 /** What the gate reads off a persona to size its prompt. */
 export interface Speaker {
@@ -524,6 +524,9 @@ export class ChatTurn<P extends Speaker> {
     });
     const staysHere = asked.mark.context !== undefined;
     this.#stays = staysHere;
+    // What stays here is handed only to a local model's turn: a long wait for a read before it is sent asks again
+    // that the model still runs here (./inference lookAgain).
+    if (staysHere) markTurnCarriesKept();
     // Measured from the context as it is sent, not from what the gate meant to add: a block that came out
     // larger than its limit shows in the number.
     const added = staysHere && asked.context.length > a.context.length && asked.context.startsWith(a.context) ? asked.context.slice(a.context.length).trim() : '';

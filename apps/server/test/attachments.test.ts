@@ -10,12 +10,13 @@ import {
   readJsonLimited,
   pdfBytesThatFit,
   pdfTooBigFor,
-  sizeSentence,
+  cloudSizeSentence, sizeSentence, tooBigSentence,
   startsAsPdf,
   LIMITS,
   MAX_BODY_BYTES,
 } from '../src/attachments';
 import { OllamaProvider, type Attachment } from '@flint/core';
+import { pdfUnreadClause } from '../src/policy';
 
 /** How @flint/core counts one file toward a prompt: what every adapter sizes a message with. */
 const estimateAttachmentTokens = (a: Attachment): number => new OllamaProvider().estimateTokens([{ id: 'u', role: 'user', content: '', timestamp: 0, attachments: [a] }], 'm');
@@ -209,8 +210,14 @@ describe('a PDF too large for the model that would answer', () => {
     expect(pdfTooBigFor([], [SONNET])).toBeUndefined();
   });
 
-  it('the size sentence is the one the door has always said', () => {
-    expect(sizeSentence('NAMEQ1.pdf', 3_400_000)).toBe('NAMEQ1.pdf: larger than the 3 MB limit');
+  it('the size sentence is the one the door has always said; a PDF too large for the cloud says what the cloud reads', () => {
+    expect(sizeSentence('NAMEQ1.pdf', 20 * 1024 * 1024)).toBe('NAMEQ1.pdf: larger than the 20 MB limit');
+    // Rounded down, to a tenth under 10 MB: a 3.3 MB PDF is never told it is larger than "3 MB" (it was).
+    expect(cloudSizeSentence('NAMEQ1.pdf', 3_550_000)).toBe('NAMEQ1.pdf: larger than the 3.3 MB the cloud model can read');
+    expect(cloudSizeSentence('a.pdf', 512 * 1024)).toBe('a.pdf: larger than the 512 KB the cloud model can read');
+    // Tried here first and not read (Hybrid): both reasons, in one sentence.
+    expect(tooBigSentence({ name: 'long.pdf', limit: 3_550_000 }, pdfUnreadClause('too_long'))).toBe('long.pdf: larger than the 3.3 MB the cloud model can read, and this PDF looks like it has more than the 1,000 pages Flint reads on this Mac');
+    expect(tooBigSentence({ name: 'a.pdf', limit: 3_550_000 })).toBe('a.pdf: larger than the 3.3 MB the cloud model can read');
     const r = parseAttachments([file('big.png', 'image/png', Buffer.concat([PNG, Buffer.alloc(LIMITS.imageBytes)]))]);
     expect(!r.ok && r.error).toBe(sizeSentence('big.png', LIMITS.imageBytes));
   });

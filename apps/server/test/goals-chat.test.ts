@@ -14,7 +14,7 @@ import { ChatTurn, GoalsChat, SPEECH_STAYS_HERE, recallForAnyBrain, speechStaysH
 import { GOALS_TURN, GoalsNow, HISTORY_GAP, STAY_MARKS, renderGoals, type TurnGoals } from '../src/goals-now';
 import { recallContext } from '../src/grounding';
 import { KnowledgeStore } from '../src/knowledge';
-import { asLocalTurn } from '../src/turn-taint';
+import { asLocalTurn, turnCarriesKept } from '../src/turn-taint';
 import { estimateTokens } from '../src/world-now';
 import { CANARY, HERE, RT, answer, cleanup, goal, listed, miniServer as server, recording, storedTurn, tmpDir, tmpStore, type Step } from './goals-mini';
 import { join } from 'node:path';
@@ -268,7 +268,15 @@ describe('the goals block’s size, for the [route] line and the chat.turn event
   it('is measured on the context as it was sent: exactly the block that was added to it', async () => {
     const s = server({ frontier: claude, goals: answer([goal(1), goal(2), goal(3)]) });
     const turn = await s.goalsChat.forTurn('c1', 'hello');
-    const asked = asLocalTurn(() => turn.ask(s.localPersona, { context: '[ctx]', whole: '[ctx]', outside: '[ctx]', tools: [] }));
+    let carried = false;
+    const asked = asLocalTurn(() => {
+      const a = turn.ask(s.localPersona, { context: '[ctx]', whole: '[ctx]', outside: '[ctx]', tools: [] });
+      carried = turnCarriesKept();
+      return a;
+    });
+    // Handed what stays here (the goals), the local model's turn is marked so: a long wait for a read before it is
+    // sent then asks again that the model runs here (./inference lookAgain).
+    expect(carried).toBe(true);
     const block = renderGoals(answer([goal(1), goal(2), goal(3)]));
     expect(asked.context).toBe(`[ctx]\n\n${block}`);
     expect(asked.tokens).toBe(estimateTokens(block));
