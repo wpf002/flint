@@ -4,14 +4,17 @@
  * 180 days. Built from the code table, filed as an ordinary policy.change
  * proposal Will signs with his key (or does not). P1, P2, P2.5, P2.6 and P3
  * each have one, with its own card and its own evidence; P3 has a second, later
- * one for suggestions from chat (p3c).
+ * one for suggestions from chat (p3c). Nexus's backup has one too (nexus): its
+ * three nightly jobs, each named, so they stop waiting on a card every night.
  *
  *  - Refused before 7 days of evidence: P1's chat reads (since chat first asked
  *    to read the world model or the ledger); P2's shadow decisions; P2.5's
  *    Google Calendar syncs, and P2.6's Apple Calendar syncs (each source
  *    running for a week); P3's goal reviews (on for each of the 7 days, none
  *    over a day late, the local model answering). p3c needs 14 days of chat's
- *    suggestion cards.
+ *    suggestion cards. Nexus's needs no week: the newest run of each of its
+ *    three steps (the dump, the encrypted copy to iCloud, the restore test)
+ *    must have worked.
  *  - Never runtime.frontier.complete or triage.rule.create (they stay at
  *    APPROVAL), never anything FORBIDDEN, never an action a pattern of Will's
  *    choosing was dropped for (`--drop`).
@@ -113,6 +116,17 @@ export const P3C_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number 
   { pattern: 'goal.propose', dailyCap: 3 },
   { pattern: 'world.commitment.from_chat', dailyCap: 10 },
 ];
+/**
+ * What Nexus's table asks Will to promote: its three nightly jobs, each by its
+ * own name (their code entries are byName: no wider rule covers them). Each
+ * keeps its cap from the code table (a dump and a copy a day, a test a week).
+ */
+export const NEXUS_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number }> = [
+  { pattern: 'backup.nexus' },
+  { pattern: 'backup.nexus.offsite' },
+  { pattern: 'restore.drill.nexus' },
+];
+
 /** The rows of that table the command offers: what the database has a floor under. */
 export const P3C_OFFERED: ReadonlySet<string> = new Set(['goal.propose']);
 /** p3c's evidence: two weeks of chat's goal suggestion cards. */
@@ -132,7 +146,7 @@ export const NEVER_PROMOTED: ReadonlySet<string> = new Set([
   'asset.enable', 'review.enforce', 'task.cancel', 'task.bar_override', PAID_DISPATCH, 'review.trident_panel', HIVE_DISPATCH,
 ]);
 
-export const PHASES_LIST = ['p1', 'p2', 'p25', 'p26', 'p3', 'p3c'] as const;
+export const PHASES_LIST = ['p1', 'p2', 'p25', 'p26', 'p3', 'p3c', 'nexus'] as const;
 export type Phase = (typeof PHASES_LIST)[number];
 
 export const SHADOW_DAYS = 7;
@@ -163,8 +177,12 @@ interface PhaseOf {
   /** What signing it lets happen without asking, for the card's first sentence: said for the rows it holds. */
   lets: string | ((patterns: readonly string[]) => string);
   evidence: string;
-  /** Days of evidence it needs (SHADOW_DAYS unless said). */
+  /** Days of evidence it needs (SHADOW_DAYS unless said). 0: none, only what `weighed` asks. */
   shadowDays?: number;
+  /** What a signed row's reason says it comes after, when that is not a shadow week (one with shadowDays 0). */
+  after?: string;
+  /** Why it is refused when there is no evidence at all, when that is not a shadow week that has not begun. */
+  none?: string;
   first: (db: Db) => Promise<Date | undefined>;
   /** Why the week does not count yet (it must have been lived, not only begun), or undefined. */
   covered?: (db: Db, now: Date, tz: string) => Promise<string | undefined>;
@@ -226,6 +244,33 @@ function calendarPhase(source: keyof typeof CALENDAR_NAMES, rows: PhaseOf['rows'
       return `${knows} ${decided}, and ${failed}.${inARow}`;
     },
   };
+}
+
+/** Nexus's three steps, as the gate names them when one has not worked. */
+const NEXUS_STEPS = [['backup.nexus', 'backup'], ['backup.nexus.offsite', 'encrypted copy to iCloud'], ['restore.drill.nexus', 'restore test']] as const;
+/**
+ * Each run of Nexus's three steps, oldest first, from the audit trail: one per run. The nightly command ends
+ * every run it starts with an entry of its own; a run on a card has a second, the card's completion (it names
+ * the card in its inputs), with the same card as its correlation. A run is that pair counted once, with the
+ * command's own outcome, when it wrote one: a card completed late, or swept as unknown after the command had
+ * said how its run ended, does not change how it ended. A card's entry alone (the command was killed before it
+ * could write) is a run of its own.
+ */
+async function nexusRuns(db: Db, now: Date): Promise<Array<{ action: string; ok: boolean; at: Date }>> {
+  const entries = await db.auditEntry.findMany({
+    where: { kind: 'action', action: { in: NEXUS_STEPS.map(([a]) => a) }, outcome: { in: ['ok', 'failed'] }, at: { lte: now } },
+    orderBy: [{ at: 'asc' }, { seq: 'asc' }], select: { action: true, outcome: true, at: true, inputs: true, correlationId: true },
+  });
+  const runs = new Map<string, { action: string; ok: boolean; at: Date; own: boolean }>();
+  entries.forEach((e, i) => {
+    const inputs = e.inputs as Record<string, unknown> | null;
+    const own = !(inputs && typeof inputs === 'object' && !Array.isArray(inputs) && 'proposalId' in inputs);
+    const key = e.correlationId ? `${e.action}:${e.correlationId}` : `#${i}`;
+    const had = runs.get(key);
+    // The command's entry, when it comes, also says when the run ended: a run is ordered by it, not by a sweep before it.
+    if (!had || (own && !had.own)) runs.set(key, { action: e.action, ok: e.outcome === 'ok', at: own ? e.at : (had?.at ?? e.at), own });
+  });
+  return [...runs.values()].sort((a, b) => a.at.getTime() - b.at.getTime());
 }
 
 /** Each phase's rows, its card's template, what counts as its week of evidence, and what the week measured. */
@@ -331,6 +376,40 @@ const PHASES: Record<Phase, PhaseOf> = {
       return { measured: `Since ${dayWords(tz, since)}, Flint suggested ${count(g.filed, 'goal')} from chat: you approved ${g.executed}, made ${g.made} into goals yourself, rejected ${g.rejected}, and ${g.expired} expired.` };
     },
   },
+  nexus: {
+    rows: NEXUS_PROMOTIONS,
+    template: 'nexus.promotion',
+    label: 'Nexus backup',
+    lets: 'Flint back up Nexus each night, send the encrypted copy to iCloud and test a restore each week',
+    evidence: 'Nexus backups',
+    shadowDays: 0,
+    after: 'after a good backup, copy and restore test',
+    none: 'Nexus has not been backed up yet',
+    says: /^Since [A-Z][a-z]{2} \d{1,2}, Flint backed up Nexus \d+ times?, sent \d+ encrypted (?:copy|copies) to iCloud, and tested a restore \d+ times?\. (?:None failed|\d+ runs? failed before a later one passed)\.$/,
+    first: async (db) => (await nexusRuns(db, new Date())).find((r) => r.action === 'backup.nexus' && r.ok)?.at,
+    covered: async () => undefined,
+    measured: async () => '',
+    // The newest run of each of the three worked. Runs are read from the audit trail, where every run of each
+    // step ends, whatever stopped it (a restore test that could not start leaves no result on a backup's record,
+    // but it leaves a failed run here). How long ago they ran is not asked: until this is signed they run only
+    // on a card, so a gap of days is the very thing it ends. The sentence counts the same runs, from the first good dump.
+    weighed: async (db, now, tz) => {
+      const all = await nexusRuns(db, now);
+      const first = all.find((r) => r.action === 'backup.nexus' && r.ok)?.at;
+      if (!first) return { gap: 'Nexus has not been backed up yet' };
+      for (const [action, words] of NEXUS_STEPS) {
+        const last = all.filter((r) => r.action === action).pop();
+        if (!last) return { gap: `Nexus has had no ${words} yet` };
+        if (!last.ok) return { gap: `the last Nexus ${words} failed` };
+      }
+      const since = all.filter((r) => r.at >= first);
+      const [dumps, copies, tests] = NEXUS_STEPS.map(([a]) => since.filter((r) => r.action === a && r.ok).length);
+      const failed = since.filter((r) => !r.ok).length;
+      // Every failure counted here had a run of its step after it that worked (the gate above): the card says so.
+      const failures = failed ? `${count(failed, 'run')} failed before a later one passed.` : 'None failed.';
+      return { measured: `Since ${dayWords(tz, first)}, Flint backed up Nexus ${count(dumps!, 'time')}, sent ${count(copies!, 'encrypted copy', 'encrypted copies')} to iCloud, and tested a restore ${count(tests!, 'time')}. ${failures}` };
+    },
+  },
 };
 
 /** The expiry's date as the console's cards show it (a UTC midnight is that date anywhere): "Mar 29, 2027". */
@@ -372,14 +451,14 @@ export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: reado
   if (opts.phase === 'p3c' && !(await chatFloorInDatabase(db))) throw new Refused(409, CHAT_FLOOR_SAYS);
   const first = await phase.first(db);
   const need = phase.shadowDays ?? SHADOW_DAYS;
-  if (!first || now.getTime() - first.getTime() < need * DAY) {
-    const days = first ? (Math.max(0, now.getTime() - first.getTime()) / DAY).toFixed(1) : '0';
-    throw new Refused(409, `the shadow ${need === SHADOW_DAYS ? 'week is' : 'weeks are'} not over: ${days} of ${need} days of ${phase.evidence}`);
-  }
+  const notOver = (days: string) => new Refused(409, `the shadow ${need === SHADOW_DAYS ? 'week is' : 'weeks are'} not over: ${days} of ${need} days of ${phase.evidence}`);
+  if (!first) throw phase.none ? new Refused(409, phase.none) : notOver('0');
+  // A table that needs no days (Nexus's) asks only its gate below.
+  if (need > 0 && now.getTime() - first.getTime() < need * DAY) throw notOver((Math.max(0, now.getTime() - first.getTime()) / DAY).toFixed(1));
   // One count for the gate and for the card's sentence, where a phase has one (P3's two tables).
   const weighed = await phase.weighed?.(db, now, opts.tz);
   const gap = weighed ? ('gap' in weighed ? weighed.gap : undefined) : await phase.covered?.(db, now, opts.tz);
-  if (gap) throw new Refused(409, `the shadow ${need === SHADOW_DAYS ? 'week does' : 'weeks do'} not count yet: ${gap}`);
+  if (gap) throw new Refused(409, need === 0 ? `not yet: ${gap}` : `the shadow ${need === SHADOW_DAYS ? 'week does' : 'weeks do'} not count yet: ${gap}`);
   const drop = new Set(opts.drop ?? []);
   const offered = await phase.offered?.(db, now, opts.tz);
   const patterns = phase.rows.filter((r) => (!offered || offered.has(r.pattern)) && !drop.has(r.pattern) && !NEVER_PROMOTED.has(r.pattern) && CODE_TABLE[r.pattern]?.tier !== 'forbidden' && CODE_TABLE[r.pattern]?.promotable !== false);
@@ -388,7 +467,7 @@ export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: reado
   // The rows are stable for a day (the expiry from the day's start, a fixed reason), so a refiling is the same card.
   const dayStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const expiresAt = new Date(dayStart + 175 * DAY).toISOString();
-  const rows: PromotionRow[] = patterns.map((r) => ({ pattern: r.pattern, tier: 'alone' as const, ...(r.dailyCap ? { dailyCap: r.dailyCap } : {}), reason: `${phase.label} promotion table, after the shadow ${need === SHADOW_DAYS ? 'week' : 'weeks'}`, expiresAt }));
+  const rows: PromotionRow[] = patterns.map((r) => ({ pattern: r.pattern, tier: 'alone' as const, ...(r.dailyCap ? { dailyCap: r.dailyCap } : {}), reason: `${phase.label} promotion table, ${phase.after ?? `after the shadow ${need === SHADOW_DAYS ? 'week' : 'weeks'}`}`, expiresAt }));
   const args = PolicyArgs.parse({ rows });
   // This table's own card, still waiting: that one (Will signs one table, not several). Its own means this
   // command filed it (the audit trail's actor), as Will's card that asks on its own, with the very rules it

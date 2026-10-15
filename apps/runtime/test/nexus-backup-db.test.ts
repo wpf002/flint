@@ -278,13 +278,14 @@ describe('the one-time setup, as the README gives it', () => {
   const section = readme.slice(readme.indexOf('## Nexus is backed up and tested (P7)'), readme.indexOf('## When a database update fails'));
   const commands = [...section.matchAll(/^ {0,3}```\n([\s\S]*?)^ {0,3}```$/gm)].flatMap((m) => m[1]!.split('\n').map((l) => l.trim()).filter(Boolean));
 
-  it('is the commands Flint itself prints: the grant, the switch, and the first backup and test', () => {
+  it('is the commands Flint itself prints: the grant, the switch, the first backup and test, and the one card that lets them run alone', () => {
     expect(section.length).toBeGreaterThan(2000);
     expect(commands).toEqual([
       "psql -d postgres -c 'GRANT CONNECT ON DATABASE nexus TO flint_backup'",
       'cd ~/flint && pnpm --filter @flint/runtime nexus-setup',
       'cd ~/flint && pnpm --filter @flint/runtime nexus-backup',
       'cd ~/flint && pnpm --filter @flint/runtime nexus-drill',
+      'cd ~/flint && pnpm --filter @flint/runtime promotion-table --phase nexus',
       "sed -i '' -E '/^(export[[:space:]]+)?FLINT_NEXUS_BACKUP_URL=/d' ~/.flint/backup.env && chmod 600 ~/.flint/backup.env",
       `psql -d flint -c "UPDATE \\"BackupRun\\" SET \\"restoreTestedAt\\" = NULL, \\"restoreOk\\" = NULL, \\"restoreDetail\\" = NULL WHERE kind = 'nexus_dump'"`,
     ]);

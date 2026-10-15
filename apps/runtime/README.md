@@ -2789,6 +2789,8 @@ while the address is set:
 - Each ships at APPROVAL: it files a card and waits for you. To let one run on
   its own, sign a rule that names it. A rule you signed for the backups as a
   group does not cover these. Nothing said in chat can ask for them.
+- To let all three run on their own with one card, file Nexus's promotion
+  table and sign it in Approvals (see below).
 - Each dump has its row counts and a fingerprint sealed with this Mac's key
   beside it, taken in the same snapshot. Large objects are left out, as in
   Flint's own dumps.
@@ -2825,6 +2827,40 @@ You get a note when one of the three jobs fails (Nexus Backup Failed, Nexus
 Offsite Backup Failed, Nexus Restore Test Failed), and a critical one, Nexus
 Backups Have Stopped, when the last good dump is over 36 hours old.
 
+### Letting it run on its own
+
+```
+cd ~/flint && pnpm --filter @flint/runtime promotion-table --phase nexus
+```
+
+It files one card, Run Nexus Backups on Their Own, with three rules: one for
+each step, by its own name, until 175 days from today. Each keeps its cap (a
+dump and a copy a day, a test a week). Sign it in Approvals with Touch ID, or
+let it expire in a week. Until it is signed each night still files its cards.
+
+It needs no week of evidence. It is refused until the newest run of each step
+worked: the dump, the encrypted copy to iCloud and the restore test. Every run
+counts once, by hand or on a card, including one that failed before it could
+record its file. A run on a card that never reported back counts as failed after
+six hours. A run by hand that was killed leaves no trace, so the run before it
+stands. How long ago they ran does not count: until the card is signed they run
+only when you approve one, so days without a run are what it ends.
+
+| Refused with | Why |
+| --- | --- |
+| Nexus has not been backed up yet | No dump has worked yet. |
+| not yet: Nexus has had no encrypted copy to iCloud yet | No offsite copy has gone. Run `nexus-offsite` once by hand. |
+| not yet: Nexus has had no restore test yet | Run `nexus-drill` once by hand. |
+| not yet: the last Nexus backup failed | The newest dump failed. A good one clears it. |
+| not yet: the last Nexus encrypted copy to iCloud failed | The newest copy to iCloud failed. A good one clears it. |
+| not yet: the last Nexus restore test failed | The newest test failed or did not finish. A passing one clears it. |
+
+The card's details count the runs from the first good dump: "Since Oct 13,
+Flint backed up Nexus 1 time, sent 1 encrypted copy to iCloud, and tested a
+restore 1 time. None failed." A failed run that a later one made good is
+counted there too. `--drop backup.nexus.offsite` (or either other name) leaves
+that step on its nightly card.
+
 ### Switching it off
 
 Take the line out, and keep the file yours alone:
@@ -2841,6 +2877,8 @@ nothing after the `=` is off too. The dumps already taken stay where they are.
 - No database update. The records use a kind the P7 update already allows.
 - Four commands: `nexus-setup`, `nexus-backup`, `nexus-offsite`,
   `nexus-drill`. The last three do nothing until the address is set.
+- `promotion-table --phase nexus` (later): no database update, and nothing
+  changes until you sign its card.
 - One setting, `FLINT_NEXUS_BACKUP_URL`, in `~/.flint/backup.env`. It is listed
   in `apps/studio/settings.manifest` as one a rebuild leaves to you.
 - Settings > Health gains the row Nexus Backup. It reads Off.

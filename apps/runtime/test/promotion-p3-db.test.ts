@@ -63,7 +63,7 @@ describe('P3’s tables, as written', () => {
     // The database has a floor under a goal from chat and none under a commitment: only the goal's row is ever offered.
     expect([...P3C_OFFERED]).toEqual(['goal.propose']);
     expect([SHADOW_DAYS, P3C_SHADOW_DAYS]).toEqual([7, 14]);
-    expect(PHASES_LIST).toEqual(['p1', 'p2', 'p25', 'p26', 'p3', 'p3c']);
+    expect(PHASES_LIST).toEqual(['p1', 'p2', 'p25', 'p26', 'p3', 'p3c', 'nexus']);
     // Each row is an action the code table lets a signed row promote, and the cap it asks is the code's own or tighter.
     for (const r of [...P3_PROMOTIONS, ...P3C_PROMOTIONS]) expect(CODE_TABLE[r.pattern], r.pattern).toMatchObject({ tier: 'approval', promotable: true });
     expect(CODE_TABLE['goal.review.local']!.cap).toEqual({ limit: 20, period: 'day' });
