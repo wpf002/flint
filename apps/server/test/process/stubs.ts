@@ -46,6 +46,8 @@ export interface OllamaModel {
    * as Ollama's does.
    */
   remoteHost?: string;
+  /** What `/api/show` says the model can do. Left out: `completion` and `tools`, as it always answered. */
+  capabilities?: string[];
 }
 
 interface ChatMessage {
@@ -64,6 +66,8 @@ export interface OllamaStub {
   replyFor: ((body: Record<string, unknown>, lastUserMessage: string) => string | undefined) | undefined;
   /** How long a chat takes to answer, in ms (a reply still on its way while the test does something else). */
   chatDelayMs: number;
+  /** A chat the "model server" answers with an error, and what it says: decided by the test from the request (a server that echoes what it was sent). */
+  errorFor: ((body: Record<string, unknown>) => { status: number; message: string } | undefined) | undefined;
   /** The models it has, as its listing gives them: a test may change one while the server runs. */
   models: Record<string, OllamaModel>;
   /**
@@ -120,6 +124,7 @@ export async function startOllamaStub(models: Record<string, OllamaModel>): Prom
     toolFor: undefined,
     replyFor: undefined,
     chatDelayMs: 0,
+    errorFor: undefined,
     models,
     looks: 'answers',
     saw: (needle, from = 0) => requests.slice(from).some((r) => JSON.stringify(r.body ?? '').includes(needle)),
@@ -158,7 +163,7 @@ export async function startOllamaStub(models: Record<string, OllamaModel>): Prom
     }
     if (req.method === 'POST' && path === '/api/show') {
       const m = named(body?.model ?? body?.name);
-      return m ? json(200, { capabilities: ['completion', 'tools'], model_info: { 'test.context_length': 131072 }, details: { family: m.family ?? 'test' } }) : json(404, { error: 'model not found' });
+      return m ? json(200, { capabilities: m.capabilities ?? ['completion', 'tools'], model_info: { 'test.context_length': 131072 }, details: { family: m.family ?? 'test' } }) : json(404, { error: 'model not found' });
     }
     if (req.method === 'POST' && path === '/api/generate') {
       const m = named(body?.model);
@@ -172,6 +177,8 @@ export async function startOllamaStub(models: Record<string, OllamaModel>): Prom
       const m = named(body?.model);
       if (!m) return json(404, { error: 'model not found' });
       m.loaded = true;
+      const bad = stub.errorFor?.(body!);
+      if (bad) return json(bad.status, { error: bad.message });
       if (stub.chatDelayMs) await new Promise((r) => setTimeout(r, stub.chatDelayMs));
       const facts = chatFacts(body);
       // One tool call a turn at most: once a result is in the messages, the "model" answers.

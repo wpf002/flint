@@ -209,6 +209,8 @@ the paths Flint uses (there is none that downloads a model), and never a redirec
 | `FLINT_LOCAL_FALLBACK_MODEL` | the tier's standby | The standby model, which answers while the main one loads: a model's name on the local server, or `off` (or `none`) for none. Unset: the hardware tier's standby model, on an Ollama server. See "Warm start". |
 | `FLINT_LOCAL_FALLBACK_NUM_CTX` | the tier's standby context | The standby's context (256 to 1048576). Unset: 8,192 on the 16 GB tier and up, 4,096 below. |
 | `FLINT_LOCAL_TOOLS` | `auto` | `auto`: the local model is offered tools when its server says it can call them (Ollama's `/api/show`). `on` / `off`: always / never. |
+| `FLINT_LOCAL_VISION` | `off` | `on`: a turn's pictures are sent to a local model its server says can see, on Ollama's own API, and a turn that stays on this Mac with a picture is answered here. `off`: no picture is sent on that wire, as before. See "Pictures and PDFs on this Mac". |
+| `FLINT_LOCAL_PDF` | `off` | What reads a PDF's text on this Mac for the local model: `spotlight` (the Mac's own PDF importer, nothing to install) or `pdftotext` (poppler's, when it is installed). `off`: no PDF is read here, as before. A reader that is not on this Mac is refused, and nothing is installed for it. |
 | `FLINT_LOCAL_CONNECT_TIMEOUT_MS` | `1500` | How long the server has to accept a connection (100 to 30000). |
 | `FLINT_LOCAL_FIRST_OUTPUT_TIMEOUT_MS` | `20000` | How long a turn waits for the model's first token (500 to 300000). |
 | `FLINT_LOCAL_TOOL_PASS_TIMEOUT_MS` | `60000` | The same for the call that follows a tool result (1000 to 600000). |
@@ -932,6 +934,293 @@ local model's state.
 - **Tools only when the server says so.** A model the table does not know is `unsupported` until
   Ollama's `/api/show` says it can call tools. A model Ollama says cannot is sent none: it used to
   be sent them and answer 400 on every turn.
+
+### Pictures and PDFs on this Mac
+
+Two settings, **both off unless set**. Off, every request, route, refusal and status line is what
+it was before they existed: a turn with a picture or a PDF goes to a cloud model that can read
+it, and one that has to stay on this Mac (Local mode, Local Only, a message that asks) is
+refused with a sentence. (Three things changed for every turn, whatever is set: see "What a
+file says is outside text" and "At the door" below, and the wording of a failed local model's
+error.)
+
+**`FLINT_LOCAL_VISION=on`: pictures.** On Ollama's own API, a local model its server says can
+see (`vision` in `/api/show`) is sent a turn's pictures in the request's `images`, as Ollama
+takes them. PNG, JPEG, GIF and WebP all go (each was checked against Ollama 0.34: the same words
+were read back from all four). Which model can see is never a setting: the server is asked, a
+model it has not said it of is sent none, and the standby is asked of its own model. On the
+OpenAI-compatible wire a model that can see was already sent pictures; that is unchanged.
+
+**`FLINT_LOCAL_PDF=spotlight` (or `pdftotext`): PDFs.** No local model reads a PDF, so a program
+on this Mac reads its text and the local model is handed that, as a text file with the PDF's
+name and a first line that says what it is (`src/pdf-text.ts`, `src/local-media.ts`):
+
+- `spotlight` is the Mac's own PDF importer, the one Spotlight indexes PDFs with, asked for a
+  test import (`/usr/bin/mdimport -t -d3 <file>`): the text is printed and nothing is stored in
+  the index. Nothing is installed.
+- `pdftotext` is poppler's (`brew install poppler`; Flint does not install it). It is looked for
+  at `/opt/homebrew/bin/pdftotext` and `/usr/local/bin/pdftotext` and nowhere else.
+- The program is run by its full path with a fixed argument list and no shell, with an empty
+  environment, as the head of a process group of its own, with a cap on what it may print.
+  Nothing from the PDF's name or its bytes is ever an argument. Two reads run at once and eight
+  may wait.
+- **Twenty seconds is how long Flint waits, not how long macOS works.** When the wait is over,
+  the program Flint started is killed, with anything it started. But the Mac's importer hands
+  the PDF to a system service, and that service goes on with it after Flint has stopped waiting:
+  a review measured a 50,000-page PDF keep it busy for three and a half minutes, during which
+  every other read timed out. So:
+  - *What is plainly too much is refused before it is handed over:* a PDF over 10 MB, or one
+    that looks to have more than 1,000 pages by a count of its own bytes (the pages inside
+    compressed object streams included). Each has its own sentence ("This PDF looks like it has
+    more than the 1,000 pages Flint reads on this Mac, ..."). The importer takes about five
+    milliseconds a page, so a thousand pages are about five seconds; and the local model is
+    handed the first 32,000 characters at most, which is ten or twenty pages.
+  - *The page count is a courtesy, not a guard.* It spares the Mac a PDF that says plainly how
+    long it is. A PDF made to hide its pages gets past it (pages behind a filter the count does
+    not undo, or written in a way a reader accepts and the count does not), and it can count
+    high (the words `/Type /Page` in a page's own text). What bounds a PDF that gets past it is
+    the twenty seconds and what follows them, below. The count itself costs little, whatever
+    the bytes: it reads the file once, holds the server for a few milliseconds at a time (about
+    twenty at the most, while a large stream is unpacked), and stops after two seconds of work, 4,096 object streams or 32 MB unpacked, any
+    of which is refused like too many pages.
+  - *After a read runs out of time the reader is busy:* every read is refused at once
+    ("Flint's PDF reader on this Mac is busy right now, ... Try again in a moment."), nothing is
+    queued behind a service that is stuck, and one small PDF of Flint's own is tried every few
+    seconds until it comes back. Then reads go on. A busy reader never tells Will to send the
+    PDF as text: the PDF is fine.
+  - *A PDF that ran out of time on its own is remembered:* by a digest of its bytes, for three
+    hours (64 of them at most). Sent again in that time it is refused at once ("Reading this PDF
+    took longer than Flint waits on this Mac, ..."), so the same file cannot keep the Mac's
+    importer busy by being sent again and again. A read that ran beside another may only have
+    waited behind that one: it is told the reader is busy, and remembered only the second time
+    it is the first to run out of time. One that ran out of time after another already had is
+    told the reader is busy. A read called off once the PDF was handed over leaves the reader
+    busy too, as a time-out does: the Mac may still be at work on it.
+  - A small PDF can still hold a great deal (a compressed page that unpacks to a hundred
+    megabytes). That is not seen before the read, and costs the Mac one such episode for each
+    different file.
+- The PDF is written to a folder of its own inside Flint's folder for reads, `flint-pdf` under
+  the temp folder (0700, made by Flint and refused if it is anything else), readable by this
+  user alone (0700, the file 0600), named so that Spotlight does not index it, and removed when the read
+  ends: when it answers, fails, runs out of time or is called off, and when Flint is stopped in
+  the middle of it (the folders of the reads under way are removed, and their programs ended, as
+  the process exits). The one case nothing in the process can cover is the process being killed
+  outright (`kill -9`, a power cut): that folder is removed the next time a PDF is read or Flint
+  starts, whatever its age, because its name carries the number of the process that made it and
+  that process is gone.
+- **The text exists only inside the local model's request.** The stored turn keeps the PDF as
+  it was sent, an outside model is handed the PDF itself or nothing, exactly as before, and the
+  text is never logged, embedded or saved. A read is kept in memory for a while, by the PDF's
+  contents, so the PDF is read once a turn.
+- **It is sized to the model's window.** One message's PDFs share 35% of the window (22,936
+  characters at a context of 16,384), and never more than 32,000 characters however large the
+  window: a local model reads its prompt before it says a word, a turn waits twenty seconds for
+  that word (`FLINT_LOCAL_FIRST_OUTPUT_TIMEOUT_MS`), and on this Mac 22,936 characters took about
+  ten. A PDF that holds more is cut, and its first line tells the model how much it was given
+  ("Only the first 22,936 of its 195,939 characters are below"), so the model can say so.
+- **Too large for the cloud.** A PDF larger than every cloud model that would be asked can read,
+  with no local model to fall back to, is refused before anything is sent: "report.pdf: larger
+  than the 3.3 MB the cloud model can read". In Hybrid, when this Mac tried it first and could
+  not read it, the sentence says why too. A PDF the local model can read is not refused for its
+  size: it falls back to the local model, which is handed its text.
+- **Too long for the cloud.** A message the cloud model cannot fit, with no picture or PDF on it,
+  is not handed to the local model after it (its window is smaller): "This message is longer
+  than the cloud model can read. Send a shorter one, or split it up."
+- **In Hybrid it counts toward the prompt's length.** The text a PDF comes to is part of what
+  the long-context rule measures, so a long PDF on top of a long thread goes to the cloud like
+  any other prompt that does not fit, unless the turn is private.
+- **A PDF with no text in it is never answered blind.** A scan (pages that are pictures) has no
+  text to read. A turn's PDFs are read before its route is decided, and a turn that stays here
+  with one that did not come out as text is refused: "This PDF has no text in it that Flint can
+  read on this Mac, and Local mode never uses the cloud. Send it as text instead." In Hybrid, a
+  turn that is not private goes to a cloud model that reads PDFs, as it did.
+
+What each mode does with a turn that carries a picture or a PDF the local model can read, with
+the setting for it on:
+
+| Mode | The turn | Who answers |
+| --- | --- | --- |
+| Local | any | The local model, on this Mac. |
+| Hybrid | Local Only, or the message asks to stay private | The local model, on this Mac. Nothing falls through to the cloud. |
+| Hybrid | any other | The rule table decides, as for a message with no file: the `media` rule no longer sends it to the cloud for being a file. It may fall through either way. |
+| Cloud | Local Only, the message asks, or no cloud model is set up | The local model, on this Mac. (Off, this turn is refused.) |
+| Cloud | any other | A cloud model, with the file itself, as before. A PDF is not read here for it. |
+
+The rules a private turn already lives by hold for its files: the model server is asked what
+runs on it before anything is sent, a model that is not known to run on this Mac is not asked,
+and the stored turn is never handed to a brain off this Mac as history, picture and all. With a
+setting on, a standby that cannot read the turn's file is not planned for it: the turn waits for
+the main model with the usual sentence, or in Hybrid goes to the cloud when it may. (With
+neither on, the standby is planned exactly as it always was.)
+
+**A file's content goes only to a model server that is this Mac.** With either setting on, a
+picture or a PDF's text is never sent to a local model server that is on another machine and
+not vouched for, is reached through a proxy, or whose model runs on Ollama's servers whatever it
+is called: on an ordinary turn as much as a private one, in every mode. The adapter then says a
+file it cannot read is attached, as it did before the settings existed, the status says why
+("Pictures for the local model are turned on, and the local model is not on this Mac, so none
+is sent to it."), and a turn Cloud mode keeps here is refused as before. The one server Will
+vouched for (`FLINT_LOCAL_ALLOW_REMOTE=1`, over https or on a network he called private) is held
+exactly as a private message is held there: it is treated as this Mac, and is sent files too.
+
+**The look at the model server is the last thing before the request.** A turn that stays here
+is decided on what the model server said a moment ago. Every PDF the request will carry (this
+turn's, and the ones earlier turns of the conversation still carry) is read before that look,
+so the request waits for no read. If it does have to wait for one, for longer than the server's
+word is good for (two seconds), the server is asked again before anything is sent, and the
+request is not made if the model has been pointed elsewhere meanwhile.
+
+**Right after a start** the model server has not yet said what its model can do. The first turn
+with a file waits for that, three seconds at most, and is answered. One boot log line says
+which of the two are on: `[local] on for the local model: pictures (FLINT_LOCAL_VISION), PDF
+text by spotlight (FLINT_LOCAL_PDF)`.
+
+**What the local model server says when it fails is not repeated,** whatever is set. An error
+keeps its class (a timeout, a server that could not answer) and says a fixed sentence ("The
+local model server could not answer."): a model server's error is its own words, and a review's
+stand-in put the request, picture and all, inside one, from where it was stored with the failed
+turn and sent back to the client. The same hole was there before pictures were, for a private
+message or a text file, so this holds with both settings off too. The adapter's own deadlines
+("did not start answering in time") and a call the caller called off pass as they are.
+
+#### What a file says is outside text
+
+This holds whatever is set, in every mode, for local and cloud models alike, and it changed for
+text files too. A text file, a PDF's text, and what a model says it saw in a picture are text
+someone else may have written, exactly as a web page or an email is. A review's stand-in model
+that obeyed whatever its prompt said ran `web.fetch_url` with an address from an attached PDF,
+`web.web_search` and `trident.gmail_search`, and saved a "fact", with no approval, and did the
+same for a `.txt` on main. So:
+
+- **A turn that carries a file is tainted from the start** (`src/turn-taint.ts`), as a turn is
+  after it reads a web page. What it leads to (anything that leaves this Mac, any write,
+  `remember` included) is filed for Will's approval and does not run on the model's say-so.
+  A turn he kept private keeps its own rules as well: it is offered only the tools that run here.
+- **The fence around a file cannot be closed from inside it.** A file's text is sent between
+  `<attached_file ...>` and `</attached_file>`. A file that held `</attached_file>` ended the
+  fence early, and what followed read as Will's words. The bracket of anything that looks like
+  the fence's tag is now written `&lt;` (`@flint/core`, `types/attachment.ts`), for every model.
+- **What follows from the mark, and should be known:**
+  - *The conversation is marked too.* While that turn is in the history a later turn is handed
+    (the history window, 48 hours unless set), the later turn starts tainted: a search or a
+    write it asks for needs approval as well, though it carries no file.
+  - *The memory extractor does not read that turn,* nor the later turns marked with it. A fact
+    Will states in a message that carries a file is not learned from that message.
+  - *A turn with a picture and a tool* asks first, where it did not: "search the web for what
+    this screenshot shows" files the search for approval.
+
+#### At the door
+
+- **A PDF too large for the model that would answer is refused with the size sentence**
+  (`report.pdf: larger than the 3.3 MB the cloud model can read`, 413), in every mode, unless
+  the local model may answer instead and reads it here. A prompt is sized at 2,000
+  tokens for each 50 KB of PDF, so a model with a 200,000-token window takes about 3 to 4 MB.
+  Until now such a PDF passed the door (its limit is 20 MB), and the message that carried it
+  was then dropped to make the prompt fit: the cloud model was sent `"messages": []` and
+  answered with an error. It is an error either way; now it is said before anything is sent.
+  And the newest message is never dropped to fit any more (`@flint/core` `assembleContext`): one
+  that cannot fit on its own is a `context_overflow`.
+- **A text file that mentions a PDF's header is a text file.** A file is a PDF by its bytes: the
+  characters `%PDF-` in its first kilobyte. A text file that held them a few lines in (notes
+  about PDFs, a script that writes one) was taken for a PDF. When the header is not at the very
+  start, and the file was sent as text and reads as text, it is the text file it says it is.
+
+`pnpm --filter server inference-status` says each setting when it is on ("Pictures are sent to
+the local model, which its server says can see."), and nothing about either when it is off.
+
+**Turning them on.** Neither is on unless Will sets it. The server reads its settings at start:
+
+```bash
+grep -q '^FLINT_LOCAL_VISION=' ~/.flint/secrets.env || printf '\nFLINT_LOCAL_VISION=on\n' >> ~/.flint/secrets.env
+grep -q '^FLINT_LOCAL_PDF=' ~/.flint/secrets.env || printf '\nFLINT_LOCAL_PDF=spotlight\n' >> ~/.flint/secrets.env
+launchctl kickstart -k gui/$(id -u)/com.flint.server
+pnpm --filter server inference-status
+```
+
+The last command asks the running server, and prints one line for each: "Pictures are sent to
+the local model, which its server says can see." and "A PDF's text is read on this Mac for the
+local model, by the Mac's own PDF importer." Then, in the console, turn Local Only on and attach
+a picture: the line "Local Only is on, so Flint can't read images or PDFs." no longer appears,
+and the answer comes from this Mac. To turn either off, remove its line from
+`~/.flint/secrets.env` and kickstart again. The server's log says which are on, a line after
+it starts: `grep 'on for the local model' ~/.flint/server.err.log | tail -1`.
+
+Known limits:
+
+- *A PDF is read as text.* Its pictures, its charts and its layout are not handed over, and a
+  scan is refused. A cloud model that reads PDFs sees the pages; the local model reads the words.
+- *`pdftotext` was not measured.* It is not installed on this Mac. Its arguments are the
+  standard ones (`-q -enc UTF-8 -eol unix <file> -`), and it is tested with a stand-in only.
+- *`spotlight` reads what the Mac's importer prints for a test import,* which is a debugging
+  format. It was checked on macOS 27.0 with odd characters, a one-word PDF, a blank page, a
+  sixty-page PDF and text made to look like the importer's own keys. If a later macOS prints it
+  differently the read fails closed: the PDF is said to have no text, or the read to have
+  failed, and the turn is refused.
+- *An animated GIF is one picture* to the model server (its first frame).
+- *An eval replay that names its own local model* (`localModel`, apps/parity) is asked through
+  a client of its own, which sends no picture and reads no PDF. Such a replay with a file is
+  refused as before; a replay on the main local model is answered with what it can read.
+- *The console changes in one line.* It already attaches pictures and PDFs. Its note under an
+  attached file ("Local Only is on, so Flint can't read images or PDFs.") now follows what the
+  server says the local model reads (`localReads` in `GET /health`, given only when one of the
+  two settings is on): no note for a file it reads, and only the other kind named for one it
+  does not. With nothing set the note is the sentence it always was.
+
+#### The vision benchmark
+
+```bash
+pnpm --filter server vision-bench                      # measure what is on this Mac, print the tables
+pnpm --silent --filter server vision-bench -- --json   # the same, as JSON on stdout
+pnpm --filter server vision-bench -- --help            # the options
+```
+
+It draws six pictures and writes four PDFs (synthetic: `src/synthetic-files.ts` makes them from
+fixed words, so what each shows is known exactly), reads the PDFs with every PDF reader that is
+already on this Mac, and puts one question a picture and one a PDF to the local model, through
+the same adapter and the same wrapper a turn uses (`src/vision-bench.ts`).
+
+What it never does:
+
+- **It loads nothing.** Only a model that is ALREADY IN MEMORY on the model server is asked,
+  at the context it is loaded with, and nothing about how long it stays loaded is sent. A model
+  that is not in memory is not measured, and the output says so. The model server is looked at
+  again at the end, and the output says whether the same models are in memory.
+- **It downloads and installs nothing.** For a reader that is not here it prints the command.
+- **It asks only a model server on this Mac**, and not through a proxy.
+- **It reads nobody's file**, shows nothing and opens nothing.
+- **It changes no setting.**
+- **It asks no model that runs somewhere else.** Which of the server's models run on it is
+  decided by the rule the server itself uses (`@flint/policy` `listedModels`): a listing row
+  that says anything of a remote host or a remote model is not a model on this Mac, in memory
+  or not.
+
+The pictures, the PDFs and the results (`results.md`, `results.json`) are left in a dated folder
+under `~/Library/Caches/Flint/vision-bench`, or wherever `--out` says, readable by this user
+alone. Never under `~/.flint`: the nightly and the offsite backups carry that folder, so an
+`--out` that is `~/.flint`, or inside it, or a link into it, is refused and nothing is written.
+
+Measured on the Studio (Apple M5 Max, 64 GB, macOS 27.0.1, Ollama 0.34.4), 13 October 2026, with
+the model that was in memory (`muse-glimmer:30b` at a context of 16,384), thinking off:
+
+| Pictures | Right | Time to the answer | Tokens in |
+| --- | --- | --- | --- |
+| Six: words, two lines of words, colours, counting, a bar chart, a position | 6 of 6 | 1.3 to 2.2 s (median 1.5 s) | 225 to 314 a turn |
+
+| PDF, read by `spotlight` | Text back | Read in |
+| --- | --- | --- |
+| Two pages, 174 characters | exact | 184 ms (the first read of the run) |
+| One page, compressed, with quotes, brackets and a backslash | exact | 19 ms |
+| Sixty pages, compressed, 195,939 characters | exact, 2,401 of 2,401 lines | 300 ms |
+| One blank page | "no text", as it should be | 19 ms |
+
+| A question about a PDF | Text given | Right | Time to the answer |
+| --- | --- | --- | --- |
+| The total on the two-page invoice | all 174 characters | yes | 2.8 s |
+| A word from page one of the sixty pages | 22,936 of 195,939 characters (6,108 tokens) | yes | 11.0 s the first time, 2.3 s when the model server had just read the same text |
+
+The same two models were in memory, at the same context, before and after. These are clean
+synthetic pictures and PDFs: a photograph, handwriting or a dense table will do worse, and the
+numbers say nothing final. No default was changed on the strength of them.
 
 ## Voice
 
@@ -2142,6 +2431,7 @@ return `ok`.
 pnpm --filter server test           # the unit tests, and the process test with them
 pnpm --filter server test:process   # the process test alone
 FLINT_TEST_REAL_SAY=1 pnpm --filter server test:process   # ...with the three that run the Mac's own `say` (a Mac only)
+FLINT_TEST_REAL_PDF=1 pnpm --filter server test:process   # ...with the nine that read a PDF with the Mac's own importer (a Mac only)
 ```
 
 Three process tests start the real `/usr/bin/say`, twenty and forty-five at a time, and compare
@@ -2154,6 +2444,16 @@ folder: nothing is played. What those three show is covered in the default run w
 program: the line, the hang-up and the signal through an injected runner, and the hang-up on a
 real server through the `local` provider and a speech stand-in that never answers. Nothing in
 the default run compares one length of time with another.
+
+Nine process tests read synthetic PDFs with the real `/usr/bin/mdimport`
+(`test/process/local-media.test.ts`: the real server with `FLINT_LOCAL_PDF=spotlight`, a PDF
+that gives the model orders, and the reader asked directly). They are **opt-in** the same way, by `FLINT_TEST_REAL_PDF=1`, and
+`install-server.sh` clears that name too: the server runs the importer by its full path, so it
+cannot be a stand-in there. In the default run the same code is held with a stand-in for the
+program and a recording of what the importer prints (`test/pdf-text.test.ts`,
+`test/local-media.test.ts`, `test/local-vision.test.ts`), the real server is started with
+pictures on and with nothing set (`test/process/local-media.test.ts`), and the benchmark is run
+whole on stand-ins (`test/vision-bench.test.ts`): no model is asked and no PDF program is run.
 
 Voice is tested without a sound: `test/voice.test.ts` and `test/voice.integration.test.ts` (each
 provider, with the programs and the network replaced; a mocked OpenAI-compatible speech server on

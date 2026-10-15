@@ -49,7 +49,9 @@ export function assembleContext(args: AssembleArgs): AssembleResult {
   const rest = messages.filter((m) => m.role !== 'system');
 
   let dropCount = 0;
-  // Drop oldest non-system messages until it fits (or nothing is left to drop).
+  // Drop oldest non-system messages until it fits. The last try keeps the NEWEST one alone, and it is never
+  // dropped: it is what is being asked. (A request left with no message at all used to be sent as
+  // `"messages": []`, which every provider refuses.)
   while (dropCount < rest.length) {
     const kept = rest.slice(dropCount);
     const candidate =
@@ -62,20 +64,17 @@ export function assembleContext(args: AssembleArgs): AssembleResult {
     dropCount++;
   }
 
-  // Could not fit even with everything droppable removed — system alone too big.
-  const minimal =
-    strategy === 'summarize' ? [...system, summaryNote(rest.length)] : [...system];
-  if (estimate(minimal) > budgetTokens) {
-    throw new FlintError(
-      makeAiError(
-        'context_overflow',
-        `Context cannot fit budget (${budgetTokens}) even after dropping all ` +
-          `non-system messages.`,
-        { retryable: false },
-      ),
-    );
-  }
-  return { messages: minimal, dropped: rest.length, strategy };
+  // Could not fit even with everything older removed: the newest message (with the system messages) is too big
+  // for this model's window on its own. Said, not sent.
+  throw new FlintError(
+    makeAiError(
+      'context_overflow',
+      rest.length > 0
+        ? `The newest message (about ${estimate([rest[rest.length - 1]!])} tokens with its files) does not fit this model's window (${budgetTokens} for the prompt), even with every earlier message left out.`
+        : `Context cannot fit budget (${budgetTokens}): the system messages alone are too big.`,
+      { retryable: false },
+    ),
+  );
 }
 
 /** A deterministic synthetic note marking elided history. */

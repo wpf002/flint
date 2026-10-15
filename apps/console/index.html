@@ -674,6 +674,8 @@ function refresh(){
   fetch(BASE+'/health').then(function(r){return r.json();}).then(function(h){
     /* The mode, for the Local Only switch and the attachment note: known here without Settings ever being opened. */
     if(h&&typeof setLocalMode==='function')setLocalMode(h.mode);
+    /* ...and what the local model reads of a file, when that is turned on (nothing, unless the server says so). */
+    LOCAL_READS={images:!!(h&&h.localReads&&h.localReads.images===true),pdfs:!!(h&&h.localReads&&h.localReads.pdfs===true)};
     var sys=$('systems');sys.textContent='';
     (h.servers||[]).forEach(function(s){var row=el('div','row');var l=el('span','lbl');l.appendChild(el('b',null,sysName(s)));row.appendChild(l);
       var st=el('span','st ok');st.appendChild(el('i'));st.appendChild(document.createTextNode('Connected'));row.appendChild(st);sys.appendChild(row);});
@@ -973,7 +975,20 @@ function addFiles(list){
     r.readAsDataURL(f);
   });
   renderChips();
-  if(PENDING.some(function(a){return a.kind!=='text';})&&(LOCAL_ONLY||LOCAL_MODE))attNote(LOCAL_MODE?'Flint is in Local mode, so it can’t read images or PDFs.':'Local Only is on, so Flint can’t read images or PDFs.');
+  var blind=attBlind();
+  if(blind)attNote(LOCAL_MODE?'Flint is in Local mode, so it can’t read '+blind+'.':'Local Only is on, so Flint can’t read '+blind+'.');
+}
+/* What the local model reads of a file, as the server says it (GET /health): nothing, unless that is turned on. */
+var LOCAL_READS={images:false,pdfs:false};
+/* The kinds of file waiting to be sent that a turn kept on this Mac can't read, in words; '' when it can read them
+   all, or the turn is not kept here. With nothing turned on it names both kinds, as it always has. */
+function attBlind(){
+  if(!(LOCAL_ONLY||LOCAL_MODE))return '';
+  var img=PENDING.some(function(a){return a.kind==='image';}),pdf=PENDING.some(function(a){return a.kind==='document';});
+  if(!img&&!pdf)return '';
+  if(!LOCAL_READS.images&&!LOCAL_READS.pdfs)return 'images or PDFs';
+  img=img&&!LOCAL_READS.images;pdf=pdf&&!LOCAL_READS.pdfs;
+  return img&&pdf?'images or PDFs':img?'images':pdf?'PDFs':'';
 }
 function chipHtml(a,removable,i){
   var lead=a.kind==='image'&&a.url?'<img src="'+a.url+'" alt="">':'<span class="ck">'+(a.kind==='document'?'PDF':a.kind==='image'?'IMG':'TXT')+'</span>';

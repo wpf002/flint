@@ -176,6 +176,9 @@ if [ "${FLINT_SKIP_TESTS:-0}" != "1" ]; then
   # the live Mac must not fail a deploy. Cleared here, so no shell that starts a deploy
   # can opt the gate in.
   unset FLINT_TEST_REAL_SAY
+  # The same for the tests that read a PDF with the Mac's own importer for real
+  # (apps/server/test/process/local-media.test.ts).
+  unset FLINT_TEST_REAL_PDF
   FLINT_REQUIRE_SWIFT=$SWIFT_CHECKS pnpm --filter server test || { echo "✗ server tests failed — NOT deploying"; exit 1; }
   echo "gate: policy typecheck + tests (isSafeTool, the tier engine, approval signatures)..."
   pnpm --filter @flint/policy typecheck || { echo "✗ policy typecheck failed — NOT deploying"; exit 1; }

@@ -20,6 +20,8 @@
  *   FLINT_LOCAL_FALLBACK_MODEL           (see ./local-brains)         ignored
  *   FLINT_LOCAL_FALLBACK_NUM_CTX         the tier's standby context   ignored: the tier's
  *   FLINT_LOCAL_TOOLS                    auto                         off
+ *   FLINT_LOCAL_VISION                   off (as before)              off: no picture is sent to the local model
+ *   FLINT_LOCAL_PDF                      off (as before)              off: no PDF is read on this Mac
  *   FLINT_LOCAL_CONNECT_TIMEOUT_MS       1500                         1500
  *   FLINT_LOCAL_FIRST_OUTPUT_TIMEOUT_MS  20000                        20000
  *   FLINT_LOCAL_TOOL_PASS_TIMEOUT_MS     60000                        60000
@@ -143,6 +145,24 @@ export type FileCheck = (path: string, kind: FileKind) => boolean;
 export const DEFAULT_LOCAL_STT_MODEL = 'whisper-1';
 export const DEFAULT_LOCAL_TTS_MODEL = 'tts-1';
 export const DEFAULT_LOCAL_TTS_VOICE = 'alloy';
+
+/**
+ * What reads a PDF's text on this Mac, for the local model (./pdf-text): `off`
+ * (as before: a PDF goes to a cloud model that reads PDFs, or is refused),
+ * `spotlight` (the Mac's own PDF importer, the one Spotlight uses: nothing to
+ * install), or `pdftotext` (poppler's, when it is installed).
+ */
+export const PDF_READERS = ['off', 'spotlight', 'pdftotext'] as const;
+export type PdfReaderKind = Exclude<(typeof PDF_READERS)[number], 'off'>;
+
+/**
+ * Where each reader's program is: full paths, tried in order, never a name a
+ * PATH could answer. (Homebrew's folder on Apple silicon, then on Intel.)
+ */
+export const PDF_READER_PROGRAMS: Readonly<Record<PdfReaderKind, readonly string[]>> = {
+  spotlight: ['/usr/bin/mdimport'],
+  pdftotext: ['/opt/homebrew/bin/pdftotext', '/usr/local/bin/pdftotext'],
+};
 
 export const DEFAULT_LOCAL_BASE_URL = 'http://127.0.0.1:11434/v1';
 export const DEFAULT_OLLAMA_HOST = 'http://127.0.0.1:11434';
@@ -281,6 +301,9 @@ export const SCHEMAS = {
     modelTag,
   ]),
   FLINT_LOCAL_TOOLS: z.string().trim().toLowerCase().pipe(z.enum(['auto', 'on', 'off'])),
+  // Pictures and PDFs on this Mac (./local-media). Both ship off: a picture or a PDF goes where it always went.
+  FLINT_LOCAL_VISION: z.string().trim().toLowerCase().pipe(z.enum(['on', 'off'])),
+  FLINT_LOCAL_PDF: z.string().trim().toLowerCase().pipe(z.enum(PDF_READERS)),
   FLINT_LOCAL_CONNECT_TIMEOUT_MS: ms(100, 30_000),
   FLINT_LOCAL_FIRST_OUTPUT_TIMEOUT_MS: ms(500, 300_000),
   FLINT_LOCAL_TOOL_PASS_TIMEOUT_MS: ms(1_000, 600_000),
@@ -374,6 +397,17 @@ export interface InferenceConfig {
     embedModel: string | undefined;
     /** May the local model be offered tools: what the server reports (`auto`), always, or never. */
     tools: 'auto' | 'on' | 'off';
+    /**
+     * FLINT_LOCAL_VISION=on: a local model the model server says can see is sent a turn's pictures on Ollama's own
+     * wire. Off (unset, or refused): no picture is sent on that wire, as before. Which model can see is never a
+     * setting: the model server is asked.
+     */
+    vision: boolean;
+    /**
+     * FLINT_LOCAL_PDF: what reads a PDF's text on this Mac, and the program that does it, as a full path.
+     * Undefined when it is off, unset, refused, or its program is not on this Mac: no PDF is read here.
+     */
+    pdf: { reader: PdfReaderKind; program: string } | undefined;
     /** Never logged, never in a status. */
     apiKey: string | undefined;
     connectTimeoutMs: number;
@@ -597,6 +631,23 @@ export function readInferenceConfig(
     return full;
   };
 
+  /**
+   * What reads a PDF on this Mac. The reader's program has to be there, and be one that can be run, when Flint
+   * starts (`opts.fileExists`): a reader that is named and not installed is refused by the setting's name, and no
+   * PDF is read here, which is what happens with the setting off. Nothing is installed for it.
+   */
+  const pdfReader = (): InferenceConfig['local']['pdf'] => {
+    const reader = or<(typeof PDF_READERS)[number]>(read('FLINT_LOCAL_PDF', 'no PDF is read on this Mac'), 'off');
+    if (reader === 'off') return undefined;
+    const programs = PDF_READER_PROGRAMS[reader];
+    const program = opts.fileExists ? programs.find((p) => opts.fileExists!(p, 'program')) : programs[0];
+    if (!program) {
+      refuse('FLINT_LOCAL_PDF', reader === 'pdftotext' ? 'set to pdftotext, which is not installed on this Mac' : "set to spotlight, and this machine does not have the Mac's own PDF importer", 'no PDF is read on this Mac', 'missing');
+      return undefined;
+    }
+    return { reader, program };
+  };
+
   return {
     mode,
     modeSource,
@@ -630,6 +681,8 @@ export function readInferenceConfig(
       fallbackNumCtx: or<number | undefined>(read('FLINT_LOCAL_FALLBACK_NUM_CTX', "ignored, so the hardware tier's standby context is used"), undefined),
       embedModel: or<string | undefined>(read('FLINT_EMBED_MODEL', "ignored, so the tier table's embedding model is used"), undefined),
       tools: or<'auto' | 'on' | 'off'>(read('FLINT_LOCAL_TOOLS', 'the local model is offered no tools'), 'auto', 'off'),
+      vision: or<'on' | 'off'>(read('FLINT_LOCAL_VISION', 'no picture is sent to the local model'), 'off') === 'on',
+      pdf: pdfReader(),
       apiKey,
       connectTimeoutMs: or(read('FLINT_LOCAL_CONNECT_TIMEOUT_MS', `using ${DEFAULTS.connectTimeoutMs}`), DEFAULTS.connectTimeoutMs),
       firstTokenTimeoutMs: or(read('FLINT_LOCAL_FIRST_OUTPUT_TIMEOUT_MS', `using ${DEFAULTS.firstTokenTimeoutMs}`), DEFAULTS.firstTokenTimeoutMs),

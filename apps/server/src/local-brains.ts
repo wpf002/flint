@@ -98,6 +98,7 @@ import {
 import type { ListedModel, PlaceSaid } from './ollama-locality';
 import { LocalMonitor, type Which } from './local-monitor';
 import { LOCAL_MODEL_MAX_LEN, LOCAL_MODEL_RE, chooseLocalBrain, keepPickingLocal, liveOllamaOptions } from './local-model';
+import { plainErrors } from './local-errors';
 import { watcher } from './local-serve';
 import { sameModel } from './memory-brain';
 
@@ -225,6 +226,21 @@ export interface BuildLocalDeps {
    * none is.
    */
   elsewhere?: (baseURL: string, model: string) => boolean;
+  /**
+   * The wrapper that hands a local model a PDF as its text (FLINT_LOCAL_PDF:
+   * ./local-media `provider`). Put around every local model's adapter, the
+   * standby's too, and around nothing else. Left out: no PDF is read here.
+   */
+  readsPdfs?: (inner: ProviderAdapter) => ProviderAdapter;
+  /**
+   * May a file's content (a picture, a PDF's text) be handed to the local
+   * model server right now: is it this Mac, or the one server Will vouched
+   * for, with a model that runs on it (./inference `confined`)? Asked for
+   * every request. A server that is anything else is sent no picture, on an
+   * ordinary turn as much as a private one. Left out: yes (tests, one-off
+   * callers that build a brain on a server they know).
+   */
+  filesStayHere?: () => boolean;
 }
 
 /** The local brain while the server runs: what the next turn uses, and when that changes. */
@@ -406,6 +422,20 @@ export async function startLocalBrains(deps: BuildLocalDeps): Promise<LocalHandl
   // token. Ollama's own API says when a reply's first line arrives (its whole passes yield nothing until the
   // reply is in); the OpenAI-compatible wire streams every pass, so its first event is the first token.
   const watching = (which: Which, timedBy: 'events' | 'callback') => watcher(which, () => monitor, deps.now, timedBy);
+  // Pictures or PDFs for the local model are turned on (FLINT_LOCAL_VISION, FLINT_LOCAL_PDF): a request to it can
+  // then carry a file, and a file's content goes only to a server that is this Mac (`filesStayHere`).
+  const filesOn = cfg.local.vision || cfg.local.pdf !== undefined;
+  /** May a file's content go to the local model server right now (BuildLocalDeps.filesStayHere)? */
+  const filesStayHere = (): boolean => deps.filesStayHere?.() !== false;
+  // What a local model server says when it fails is never repeated, whatever is set (./local-errors): an error
+  // keeps its class and says a fixed sentence. Its own words could carry the request back (a private message, a
+  // text file, a picture), into the stored turn and to the client. And with FLINT_LOCAL_PDF set, each adapter is
+  // handed a PDF as its text (./local-media), around the watched adapter: reading a PDF is not the model's time
+  // to first token.
+  const pdfs = (inner: ProviderAdapter): ProviderAdapter => {
+    const quiet = plainErrors(inner);
+    return deps.readsPdfs ? deps.readsPdfs(quiet) : quiet;
+  };
 
   let tier: HardwareTier | undefined = deps.tier && !(deps.tier instanceof Promise) ? deps.tier : undefined;
   /** What an OpenAI-compatible address turned out to be; the config's own word until it is asked. */
@@ -513,22 +543,32 @@ export async function startLocalBrains(deps: BuildLocalDeps): Promise<LocalHandl
         const numCtx = positiveInt(options.defaultOptions?.num_ctx);
         const native = (o: OllamaProviderOptions, which: Which): ProviderAdapter => {
           const w = watching(which, 'callback');
-          return w.provider(
-            new OllamaProvider({
-              ...o,
-              fetch: nativeFetch,
-              // The server's own report wins over the built-in table; a model it says cannot call tools is not sent any.
-              capabilities: (m): Partial<ModelCapabilities> | undefined => {
-                const facts = factsOf(m);
-                const tools = toolsAllowed(cfg.local.tools, facts);
-                // The model's own maximum context bounds the window (Ollama gives no more, whatever num_ctx asks).
-                const most = facts?.contextLength;
-                if (tools === undefined && most === undefined) return undefined;
-                return { ...(tools === undefined ? {} : { toolCalling: tools ? ('native' as const) : ('unsupported' as const) }), ...(most !== undefined ? { maxContextTokens: most } : {}) };
-              },
-              ...deadlines,
-              onFirstOutput: w.onFirstOutput,
-            }),
+          return pdfs(
+            w.provider(
+              new OllamaProvider({
+                ...o,
+                fetch: nativeFetch,
+                // The server's own report wins over the built-in table; a model it says cannot call tools is not sent any.
+                capabilities: (m): Partial<ModelCapabilities> | undefined => {
+                  const facts = factsOf(m);
+                  const tools = toolsAllowed(cfg.local.tools, facts);
+                  // The model's own maximum context bounds the window (Ollama gives no more, whatever num_ctx asks).
+                  const most = facts?.contextLength;
+                  // FLINT_LOCAL_VISION=on, the model server says THIS model sees, and the server is this Mac (or
+                  // the one Will vouched for): the adapter sends it a turn's pictures (@flint/core). Off, a model
+                  // it has not said that of, or a server anywhere else: no picture is sent, as before.
+                  const sees = cfg.local.vision && facts?.vision === true && filesStayHere();
+                  if (tools === undefined && most === undefined && !sees) return undefined;
+                  return {
+                    ...(tools === undefined ? {} : { toolCalling: tools ? ('native' as const) : ('unsupported' as const) }),
+                    ...(most !== undefined ? { maxContextTokens: most } : {}),
+                    ...(sees ? { vision: true } : {}),
+                  };
+                },
+                ...deadlines,
+                onFirstOutput: w.onFirstOutput,
+              }),
+            ),
           );
         };
         // A stand-in is never asked: Ollama would load it, and the next pick would take it for the model Will runs.
@@ -555,21 +595,25 @@ export async function startLocalBrains(deps: BuildLocalDeps): Promise<LocalHandl
         // Chat completions cannot set a context size: this number only sizes Flint's own history budget.
         const envCtx = cfg.local.numCtx;
         const openai = (which: Which): ProviderAdapter =>
-          watching(which, 'events').provider(
-            new LocalOpenAiProvider({
-              baseURL: openaiAt.baseURL,
-              allowRemote: cfg.local.allowRemote,
-              ...(cfg.local.apiKey ? { apiKey: cfg.local.apiKey } : {}),
-              fetch: f,
-              ...deadlines,
-              capabilities: (m) => {
-                const facts = factsOf(m);
-                // The context the server has the model loaded with, when it says; llama.cpp's own setting; else what
-                // the env says for the main model, and a small window for any other (the standby).
-                const context = monitor.contextLength(m) ?? (kind === 'llamacpp' ? facts?.contextLength : undefined) ?? (sameModel(m, choice.model) ? envCtx : undefined) ?? UNKNOWN_CONTEXT;
-                return localCapabilities({ contextTokens: context, tools: toolsAllowed(cfg.local.tools, facts) === true, ...(facts?.vision ? { vision: true } : {}) });
-              },
-            }),
+          pdfs(
+            watching(which, 'events').provider(
+              new LocalOpenAiProvider({
+                baseURL: openaiAt.baseURL,
+                allowRemote: cfg.local.allowRemote,
+                ...(cfg.local.apiKey ? { apiKey: cfg.local.apiKey } : {}),
+                fetch: f,
+                ...deadlines,
+                capabilities: (m) => {
+                  const facts = factsOf(m);
+                  // The context the server has the model loaded with, when it says; llama.cpp's own setting; else what
+                  // the env says for the main model, and a small window for any other (the standby).
+                  const context = monitor.contextLength(m) ?? (kind === 'llamacpp' ? facts?.contextLength : undefined) ?? (sameModel(m, choice.model) ? envCtx : undefined) ?? UNKNOWN_CONTEXT;
+                  // (A model that sees was always sent pictures on this wire. With pictures or PDFs for the local
+                  // model turned on, not when the server is anywhere but this Mac: BuildLocalDeps.filesStayHere.)
+                  return localCapabilities({ contextTokens: context, tools: toolsAllowed(cfg.local.tools, facts) === true, ...(facts?.vision && (!filesOn || filesStayHere()) ? { vision: true } : {}) });
+                },
+              }),
+            ),
           );
         const provider = choice.settled ? openai('primary') : unsettledProvider('local');
         primary = { which: 'primary', provider, model: choice.model, label: `${provider.name}:${choice.model}`, from: choice.from, numCtx: undefined, env: { OLLAMA_MODEL: choice.model }, settled: choice.settled };

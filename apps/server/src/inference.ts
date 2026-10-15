@@ -26,22 +26,24 @@
  * has been looked at, `hardware` and `tier` are undefined and the status says
  * Flint is checking.
  */
-import { EMBEDDING_MODEL, FlintError, hardwareTier, hardwareTierFor, makeAiError, type HardwareTier, type Tier, type Tool } from '@flint/core';
+import { EMBEDDING_MODEL, FlintError, hardwareTier, hardwareTierFor, makeAiError, type Attachment, type HardwareTier, type ProviderAdapter, type Tier, type Tool } from '@flint/core';
 import { detectHardware, type Hardware } from './hardware';
 import { addressIsLocal, localEndpoint, ollamaIsLocal, readInferenceConfig, viaProxy, type FileCheck, type InferenceConfig, type InferenceMode } from './inference-config';
 import { ModeStore } from './inference-mode';
-import { inferenceStatus, localOnlySentence, modeSentence, type InferenceStatus } from './inference-status';
+import { inferenceStatus, localOnlySentence, modeSentence, staysOn, type InferenceStatus } from './inference-status';
 import type { BrainTier } from './brains';
 import type { FrontierBreaker } from './frontier-breaker';
 import { startLocalBrains, type BuildLocalDeps, type LocalBrainSpec, type LocalBrains, type LocalHandle } from './local-brains';
+import { isPdf, localMedia, type LocalMedia } from './local-media';
 import { cloudChainFor, heldToHere, planLocal, privateRefusal, type LocalChoice, type LocalPlan } from './local-serve';
 import { finishRoute, preRoute, type ModeRoute, type OpenRoute, type PreRoute, type PreRouteInput } from './mode-route';
 import { FRESH_MS, LOCALITY } from './ollama-locality';
 import { OUTSIDE_OFF_LOCAL_MODE, isPrivateOff, offered, offeredPrivate, outsideOffPrivate, outsideTools, withPrivateNote, withheldWhenOff, type OutsideOff } from './outside-ai';
-import { brainIsLocal, brainOf, setPlaceRules, type MediaFlags } from './policy';
+import { makePdfReader, type PdfReader } from './pdf-text';
+import { brainIsLocal, brainOf, setPlaceRules, type MediaFlags, type PdfUnread } from './policy';
 import { turnStaysHere, type StayRoute } from './private-turns';
 import { paidToolSpecs, type BrainChooser, type BudgetView, type PaidToolSpec } from './spend';
-import { carriesKeptText, isEvalTurn, isPrivateRequest, isPrivateTurn, isStaysHereRequest, isStaysHereTurn, markPrivateRequest, markStaysHereRequest } from './turn-taint';
+import { carriesKeptText, isEvalTurn, isPrivateRequest, isPrivateTurn, isStaysHereRequest, isStaysHereTurn, markPrivateRequest, markStaysHereRequest, turnCarriesKept } from './turn-taint';
 import { isFile, planVoice, transcriptionMissing, type VoicePlan } from './voice';
 import type { TurnFacts } from './hybrid-rules';
 
@@ -89,6 +91,34 @@ export const FRESH_WAIT_MS = 400;
 /** How often the same kind of refused cloud call is logged. */
 const REFUSAL_LOG_EVERY_MS = 10 * 60 * 1000;
 
+/**
+ * What a handler tells the route about a turn: everything ./mode-route asks
+ * for that this object does not know itself, and the turn's files, which are
+ * looked at here (`localReads`) and nowhere else on the way to a route.
+ */
+export type RouteAsk = Omit<PreRouteInput, 'mode' | 'localCan' | 'keptCan' | 'pdfUnread'> & {
+  attachments?: readonly Attachment[] | undefined;
+  /**
+   * The files the conversation's EARLIER turns still carry, which the model is handed again as history
+   * (./persistent-store windowAttachments). A PDF among them is read here before the route's look at the model
+   * server, like this turn's own, so the request that follows waits for no read.
+   */
+  earlier?: readonly Attachment[] | undefined;
+  /**
+   * The local model that would answer is not the main one: an eval replay that names its own (`localModel`),
+   * which is asked through a client of its own. What the main model's adapter can read says nothing of that
+   * one, so nothing is said to be readable, and such a replay with a picture or a PDF is refused as it always
+   * was.
+   */
+  ownLocalModel?: boolean | undefined;
+};
+
+/** What the local model can read of one turn's files (./mode-route PreRouteInput has each). */
+export type LocalReads = Pick<PreRouteInput, 'localCan' | 'keptCan' | 'pdfUnread'>;
+
+/** How long a turn that carries a file waits for the model server's first word about its model (what it can see), right after a start. */
+export const FIRST_WORD_WAIT_MS = 3_000;
+
 /** This machine, once it has been looked at: what it is, and the tier it falls in. */
 export interface Machine {
   hardware: Hardware;
@@ -118,12 +148,15 @@ export class Inference {
   private readonly refusalLoggedAt = new Map<CloudCallKind, number>();
   /** Is there a file at this path? Asked when a status is built, of the transcription program and its model (./voice transcriptionMissing). */
   private readonly fileExists: FileCheck;
+  /** What reads a PDF's text on this Mac for the local model (FLINT_LOCAL_PDF: ./local-media). Undefined: nothing does, as before. */
+  private readonly media: LocalMedia | undefined;
 
   constructor(parts: {
     cfg: InferenceConfig; voice: VoicePlan; handle: LocalHandle; mode: ModeStore; machine: () => Machine | undefined; ready: Promise<void>; paid: readonly PaidToolSpec[];
-    log?: (msg: string) => void; now?: () => number; listing?: (baseURL: string) => Promise<void>; fileExists?: FileCheck;
+    log?: (msg: string) => void; now?: () => number; listing?: (baseURL: string) => Promise<void>; fileExists?: FileCheck; media?: LocalMedia | undefined;
   }) {
     this.cfg = parts.cfg;
+    this.media = parts.media;
     this.voicePlan = parts.voice;
     this.fileExists = parts.fileExists ?? isFile;
     this.handle = parts.handle;
@@ -220,10 +253,122 @@ export class Inference {
     return this.local.primary;
   }
 
-  /** What the local model can read. (Nothing on the native Ollama wire: its adapter sends no images.) */
+  /**
+   * What the local model can read, by what its adapter says. On Ollama's own
+   * wire that is nothing until Will turns it on: pictures with
+   * FLINT_LOCAL_VISION=on, for a model its server says can see
+   * (./local-brains), and PDFs with FLINT_LOCAL_PDF, as their text
+   * (./local-media).
+   */
   localCan(): MediaFlags {
     const caps = this.primary.provider.getCapabilities(this.primary.model);
     return { image: caps.vision === true, pdf: caps.pdfInput === true };
+  }
+
+  /**
+   * What the local model can read of THIS turn's files.
+   *
+   * A picture: what `localCan` says. A PDF is looked at first: with
+   * FLINT_LOCAL_PDF set it is read here, now (./local-media, which keeps the
+   * read for the request that follows), and only a PDF that came out as text
+   * counts as one the local model can read. One with no text in it (a scan),
+   * or one the read failed on, does not: the turn is then routed exactly as if
+   * nothing here read PDFs, so it is refused with a sentence that says which
+   * (`pdfUnread`), or goes to a cloud model that reads PDFs when it may. It is
+   * never answered blind. A PDF is read here only for a turn the local model
+   * may answer: one a cloud model answers anyway is not.
+   *
+   * `keptCan` is the same answer, given only when one of the two settings is
+   * on: it is what lets the cloud mode answer a turn it keeps here (no cloud
+   * model, Local Only, the message asked) on the local model. With both off
+   * it is left out, and such a turn with a picture or a PDF is refused as it
+   * always was, whatever the local model can see.
+   */
+  async localReads(i: RouteAsk): Promise<LocalReads> {
+    if (i.ownLocalModel) return { localCan: {} };
+    const on = this.filesOn;
+    // Right after a start the model server has not yet said what its model can do, and "not known" is "no": the
+    // first turn with a file would be refused for it. It waits for that first word, a few seconds at most.
+    if (on && (i.needs.image || i.needs.pdf)) await this.firstWord();
+    const can = this.localCan();
+    // A file's content goes to a model server only when it is this Mac, or the one Will vouched for (`confined`).
+    // With any other, the turns the cloud mode keeps here are refused as they always were, ordinary ones included.
+    const here = this.confined.ok;
+    const said = (pdf: boolean, pdfUnread?: PdfUnread): LocalReads => {
+      const localCan: MediaFlags = { image: can.image === true, pdf };
+      return { localCan, ...(on && here ? { keptCan: localCan } : {}), ...(pdfUnread ? { pdfUnread } : {}) };
+    };
+    const { attachments: _files, ownLocalModel: _own, earlier: _earlier, ...ask } = i;
+    /** Is a local model the first to be asked this turn (or may it be: a hybrid turn not yet decided)? */
+    const localFirst = (r: LocalReads): boolean => {
+      const first = preRoute({ ...ask, mode: this.mode.current(), ...r });
+      return !('error' in first) && ('open' in first || first.brain === 'local');
+    };
+    let result: LocalReads;
+    if (!i.needs.pdf || can.pdf !== true || !this.media) result = said(can.pdf === true);
+    else {
+      const pdfs = (i.attachments ?? []).filter(isPdf);
+      // (No PDF among the files the route was handed: nothing was read, so nothing is said to be readable.)
+      if (pdfs.length === 0) result = said(false);
+      else if (!localFirst(said(true))) result = said(true);
+      else {
+        const reads = await Promise.all(pdfs.map((a) => this.media!.text(a)));
+        const bad = reads.find((r) => !r.ok);
+        result = bad && !bad.ok ? said(false, bad.why) : said(true);
+      }
+    }
+    // The PDFs the conversation's earlier turns still carry are read now too, before the look at the model server
+    // that follows (`routeFirst`): the request then finds every read kept, and nothing is awaited between that
+    // look and the request. Only for a turn a local model is first to answer; what a read came to changes no route.
+    const earlier = (i.earlier ?? []).filter(isPdf);
+    if (this.media && here && can.pdf === true && earlier.length > 0 && localFirst(result)) await Promise.all(earlier.map((a) => this.media!.text(a)));
+    return result;
+  }
+
+  /** Are pictures or PDFs for the local model turned on (FLINT_LOCAL_VISION, FLINT_LOCAL_PDF)? */
+  private get filesOn(): boolean {
+    return this.cfg.local.vision || this.media !== undefined;
+  }
+
+  /**
+   * Wait, a few seconds at most, for the model server's first word about the
+   * main model: what it can do (./local-monitor facts), which is asked behind
+   * the boot. Returns at once when it is known. A server that does not answer
+   * is not waited for past its own look.
+   */
+  private async firstWord(): Promise<void> {
+    const known = (): boolean => this.primary.settled && this.local.monitor.facts(this.primary.model) !== undefined;
+    if (known()) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      (async () => {
+        await this.ready;
+        if (!known()) await this.local.monitor.check().then(() => undefined, () => undefined);
+      })(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, FIRST_WORD_WAIT_MS);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+  }
+
+  /**
+   * A request to a local model had to wait for a read for longer than the
+   * model server's word is good for (./local-media WrapOptions.lookAgain):
+   * ask the server again now, and refuse if this turn stays here, or is
+   * handed what stays here (a kept turn in its history, a fact, the goals),
+   * and the model is no longer known to run here. Nothing has been sent when this
+   * throws.
+   */
+  async lookAgain(provider: ProviderAdapter, model: string): Promise<void> {
+    await this.local.monitor.check().then(
+      () => undefined,
+      () => undefined,
+    );
+    const kept = isPrivateTurn() || isStaysHereTurn() || turnCarriesKept() || isPrivateRequest() || isStaysHereRequest();
+    if (kept && !brainIsLocal(brainOf(provider, model))) {
+      throw new FlintError(makeAiError('provider_unavailable', `Flint cannot confirm right now that its local model runs on ${staysOn(this.allowedRemote())}, so nothing was sent to it.`, { retryable: false }));
+    }
   }
 
   /** The standby local model, when one is configured (./local-brains). */
@@ -268,8 +413,10 @@ export class Inference {
    * refused still went to the embedding model, and with the whole server hung
    * the turn waited on that request instead of getting its sentence.
    */
-  preRoute(i: Omit<PreRouteInput, 'mode' | 'localCan'>): PreRoute {
-    const pre = preRoute({ ...i, mode: this.mode.current(), localCan: this.localCan() });
+  preRoute(i: Omit<PreRouteInput, 'mode' | 'localCan'> & { localCan?: MediaFlags }): PreRoute {
+    // (`routeFirst` hands in what the local model can read of this turn's files. A caller with no files to look at
+    // gets what its adapter says.)
+    const pre = preRoute({ ...i, mode: this.mode.current(), localCan: i.localCan ?? this.localCan() });
     if ('error' in pre) return pre;
     if (!pre.private) {
       if (turnStaysHere(pre)) markStaysHereRequest();
@@ -307,6 +454,33 @@ export class Inference {
     return withPrivateNote(context, route.private, this.allowedRemote());
   }
 
+  /**
+   * What the local model reads, for the console's line under an attached file ("Local Only is on, so Flint
+   * can't read ..."): given only when Will has turned pictures or PDFs for it on. Undefined with both off, and
+   * the console then says what it always said.
+   */
+  readsForConsole(): { images: boolean; pdfs: boolean } | undefined {
+    if (!this.filesOn) return undefined;
+    // (Neither, for a model server that is not this Mac: no file's content is sent to it.)
+    const here = this.confined.ok;
+    const can = this.localCan();
+    return { images: here && can.image === true, pdfs: here && can.pdf === true };
+  }
+
+  /**
+   * How many characters of a turn's PDFs the local model would be handed as text (./local-media): part of how
+   * long its prompt is, for the hybrid rules' long-context test. Nothing when no PDF is read here, and nothing
+   * for one that was not read for this turn (a turn a cloud model answers anyway).
+   */
+  /** Why a PDF among these could not be read here, when one was tried: for a refusal that says so beside its own reason. */
+  pdfRefusedHere(attachments: readonly Attachment[]): PdfUnread | undefined {
+    return this.media?.refused(attachments);
+  }
+
+  pdfTextChars(attachments: readonly Attachment[]): number {
+    return this.media ? this.media.chars(attachments, this.primary.provider.getCapabilities(this.primary.model).maxContextTokens) : 0;
+  }
+
   /** A hybrid turn, once its tier and tools are known. A route that was already decided passes through. */
   finishRoute(pre: ModeRoute | OpenRoute, more: { tier: Tier; toolsLikely: boolean; promptChars: number }): ModeRoute {
     if (!('open' in pre)) return pre;
@@ -320,7 +494,7 @@ export class Inference {
    * sentence for Will (`refusal`). The main model is warmed here when the plan
    * asks for it: by the monitor, detached, never by the turn.
    */
-  planLocal<P>(route: ModeRoute, who: { primary: LocalChoice<P>; standby?: LocalChoice<P> | undefined; evalOwnModel?: boolean }): LocalPlan<P> {
+  planLocal<P>(route: ModeRoute, who: { primary: LocalChoice<P>; standby?: LocalChoice<P> | undefined; evalOwnModel?: boolean; needs?: MediaFlags | undefined }): LocalPlan<P> {
     const snapshot = this.local.monitor.snapshot();
     const planned = planLocal({
       route,
@@ -328,7 +502,10 @@ export class Inference {
       confined: this.confined,
       primary: who.primary,
       // A standby that is a cloud model under a plain name is not a local model: it is never asked, in any mode.
-      standby: this.local.fallback && !this.standbyElsewhere() ? who.standby : undefined,
+      // Neither, once pictures or PDFs for the local model are turned on, is one that cannot read this turn's
+      // picture or PDF (`needs`): it would answer without having seen it. With both off the standby is planned
+      // exactly as it always was, on either wire. (And it is asked only of a turn a local model may answer.)
+      standby: this.local.fallback && !this.standbyElsewhere() && this.standbyReads(this.filesOn && (route.brain === 'local' || route.localFallback) ? who.needs : undefined) ? who.standby : undefined,
       now: this.now(),
       ...(who.evalOwnModel ? { evalOwnModel: true } : {}),
       ...(this.allowedRemote() ? { allowedRemote: true } : {}),
@@ -388,6 +565,19 @@ export class Inference {
     return at !== undefined && brainIsLocal(brainOf(at.provider, model));
   }
 
+  /**
+   * Can the standby read what this turn carries? A turn with no picture and
+   * no PDF: yes. Otherwise by what its own adapter says of ITS model (a small
+   * standby often cannot see when the main model can).
+   */
+  private standbyReads(needs: MediaFlags | undefined): boolean {
+    if (!needs?.image && !needs?.pdf) return true;
+    const spare = this.local.fallback;
+    if (!spare) return false;
+    const caps = spare.provider.getCapabilities(spare.model);
+    return (!needs.image || caps.vision === true) && (!needs.pdf || caps.pdfInput === true);
+  }
+
   /** Is the standby model known to run on Ollama's servers, whatever it is called? */
   private standbyElsewhere(): boolean {
     const spare = this.local.fallback;
@@ -423,15 +613,19 @@ export class Inference {
    * settings alone already refuse (a model server on another machine, or
    * reached through a proxy): nothing that server says changes that answer.
    */
-  async routeFirst(i: Omit<PreRouteInput, 'mode' | 'localCan'>): Promise<PreRoute> {
-    const asked = preRoute({ ...i, mode: this.mode.current(), localCan: this.localCan() });
+  async routeFirst(i: RouteAsk): Promise<PreRoute> {
+    const { attachments: _files, ownLocalModel: _own, earlier: _earlier, ...ask } = i;
+    // What the local model can read of this turn's files, once: a PDF is read here (./local-media) before the
+    // route is decided, and both decisions below are made on the same answer.
+    const reads = await this.localReads(i);
+    const asked = preRoute({ ...ask, mode: this.mode.current(), ...reads });
     if (!('error' in asked) && turnStaysHere(asked) && this.local.confined.ok) {
       await this.local.monitor.check().then(
         () => undefined,
         () => undefined,
       );
     }
-    return this.preRoute(i);
+    return this.preRoute({ ...ask, ...reads });
   }
 
   /**
@@ -775,6 +969,11 @@ export interface BuildInferenceDeps {
    * (./ollama-locality fresh). A test hands one in.
    */
   listing?: (baseURL: string) => Promise<void>;
+  /**
+   * What reads a PDF's text, in place of the program FLINT_LOCAL_PDF names
+   * (./pdf-text). Used only when that setting is on. A test hands one in.
+   */
+  pdfReader?: PdfReader;
 }
 
 /**
@@ -811,9 +1010,23 @@ export async function buildInference(deps: BuildInferenceDeps): Promise<Inferenc
     for (const note of hardware.notes) log(`[local] hardware: ${note}`);
     return tier;
   })().catch(() => undefined);
+  // What reads a PDF's text on this Mac for the local model (FLINT_LOCAL_PDF; it ships off, and then nothing does).
+  // A status command reads no PDF, and builds no reader.
+  const media = cfg.local.pdf && !deps.observeOnly ? localMedia(deps.pdfReader ?? makePdfReader(cfg.local.pdf)) : undefined;
+  // One line, names only, when either is on: what a restart turned on is in the log.
+  if (cfg.local.vision || cfg.local.pdf) {
+    log(`[local] on for the local model: ${[cfg.local.vision ? 'pictures (FLINT_LOCAL_VISION)' : '', cfg.local.pdf ? `PDF text by ${cfg.local.pdf.reader} (FLINT_LOCAL_PDF)` : ''].filter(Boolean).join(', ')}`);
+  }
+  // The object main() holds, once it is built (below): the local adapters ask it, for every request, whether a
+  // file's content may go to the model server (`confined`), and to look at the server again after a long wait.
+  // Until it exists, the answer is no.
+  let built: Inference | undefined;
+  const filesStayHere = (): boolean => built?.confined.ok === true;
   const handle = await startLocalBrains({
     cfg,
     env: deps.env,
+    filesStayHere,
+    ...(media ? { readsPdfs: (inner: ProviderAdapter) => media.provider(inner, { filesStayHere, lookAgain: (p, m) => (built ? built.lookAgain(p, m) : Promise.reject(new FlintError(makeAiError('provider_unavailable', 'Flint is still starting.', { retryable: true })))) }) } : {}),
     // A tier Will named needs no look at the machine: the brain is built on it from the start.
     tier: cfg.hardwareTier === 'auto' ? looked : hardwareTier(cfg.hardwareTier),
     ...(deps.pick ? { pick: deps.pick } : {}),
@@ -874,5 +1087,6 @@ export async function buildInference(deps: BuildInferenceDeps): Promise<Inferenc
     // A brain adopted behind the boot (the tier's model, the server's late answer) is looked at and warmed the same way.
     handle.onChange(() => void ready.then(follow));
   }
-  return new Inference({ cfg, voice: planVoice(cfg, deps.env), handle, mode, machine: () => machine, ready, paid: paidToolSpecs(deps.env), log, ...(deps.listing ? { listing: deps.listing } : {}), ...(deps.fileExists ? { fileExists: deps.fileExists } : {}) });
+  built = new Inference({ cfg, voice: planVoice(cfg, deps.env), handle, mode, machine: () => machine, ready, paid: paidToolSpecs(deps.env), log, ...(deps.listing ? { listing: deps.listing } : {}), ...(deps.fileExists ? { fileExists: deps.fileExists } : {}), ...(media ? { media } : {}) });
+  return built;
 }

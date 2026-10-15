@@ -61,6 +61,55 @@ describe('cloud mode is routeTurn, unchanged', () => {
   });
 });
 
+// FLINT_LOCAL_VISION / FLINT_LOCAL_PDF (both ship off). `keptCan` is what the local model can read on a turn the
+// cloud mode keeps here, and ./inference gives it only when Will turned one of them on.
+describe('cloud mode, with local pictures or PDFs turned on (`keptCan`)', () => {
+  const can = { image: true, pdf: true };
+
+  it('a turn it keeps here, with a file the local model can read, is answered by the local model', () => {
+    for (const needs of [{ image: true }, { pdf: true }, { image: true, pdf: true }]) {
+      expect(preRoute(input('cloud', { localOnly: true, needs, localCan: can, keptCan: can })), JSON.stringify(needs)).toEqual({ brain: 'local', localFallback: true, cloudFallback: false, reason: 'mode_cloud', mode: 'cloud', private: true });
+      expect(preRoute(input('cloud', { message: 'keep this private: what is it?', needs, localCan: can, keptCan: can }))).toMatchObject({ brain: 'local', private: true });
+      expect(preRoute(input('cloud', { hasFrontier: false, needs, localCan: can, keptCan: can }))).toEqual({ brain: 'local', localFallback: true, cloudFallback: false, reason: 'mode_cloud', mode: 'cloud', private: false });
+    }
+  });
+
+  it('without it, the same turn is refused as it always was, even when the local model can see', () => {
+    const was = routeTurn({ message: base.message, hasFrontier: true, localOnly: true, needs: { image: true }, frontierCan: base.frontierCan });
+    if (!('error' in was)) throw new Error('expected a refusal');
+    expect(preRoute(input('cloud', { localOnly: true, needs: { image: true }, localCan: can }))).toEqual({ error: was.error, status: 422 });
+    expect(preRoute(input('cloud', { localOnly: true, needs: { image: true }, localCan: can, keptCan: undefined }))).toEqual({ error: was.error, status: 422 });
+    expect(preRoute(input('cloud', { hasFrontier: false, needs: { pdf: true }, localCan: can }))).toMatchObject({ error: expect.stringContaining('no frontier brain is configured'), status: 422 });
+  });
+
+  it('a turn a cloud model answers goes to it exactly as before', () => {
+    for (const needs of [{}, { image: true }, { pdf: true }]) {
+      const was = preRoute(input('cloud', { needs }));
+      expect(preRoute(input('cloud', { needs, localCan: can, keptCan: can }))).toEqual(was);
+    }
+    expect(preRoute(input('cloud', { needs: { image: true }, localCan: can, keptCan: can }))).toMatchObject({ brain: 'frontier', localFallback: false });
+  });
+
+  it('a kept turn with a file the local model cannot read is still refused, and a PDF that was tried says so', () => {
+    expect(preRoute(input('cloud', { localOnly: true, needs: { image: true, pdf: true }, localCan: { image: true }, keptCan: { image: true } }))).toEqual({
+      error: "Local-only is on, and the on-device brain can't read PDFs. Turn Local-only off to send the file to the frontier brain, or remove the attachment.",
+      status: 422,
+    });
+    expect(preRoute(input('cloud', { localOnly: true, needs: { pdf: true }, localCan: { pdf: false }, keptCan: { pdf: false }, pdfUnread: 'no_text' }))).toEqual({
+      error: 'Local-only is on, and this PDF has no text in it that Flint can read on this Mac. Turn Local-only off to send the file to the frontier brain, or remove the attachment.',
+      status: 422,
+    });
+  });
+
+  it('an eval replay for a local model, with a picture it can see, runs on it: in Cloud, Hybrid and Local mode', () => {
+    for (const mode of ['cloud', 'hybrid', 'local'] as const) {
+      expect(preRoute(input(mode, { evalMode: true, localOnly: true, needs: { image: true }, localCan: can, keptCan: can })), mode).toMatchObject({ brain: 'local', reason: 'eval', mode });
+      // ...and without the setting it is refused, as before.
+      expect('error' in preRoute(input(mode, { evalMode: true, localOnly: true, needs: { image: true }, localCan: can })), mode).toBe(true);
+    }
+  });
+});
+
 describe('local mode never leaves this Mac', () => {
   it('is local for every message, with or without a frontier configured, private or not, deep or not', () => {
     for (const over of [{}, { hasFrontier: false }, { localOnly: true }, { deep: true }, { message: 'think hard and write a function' }] as Array<Partial<PreRouteInput>>) {
@@ -87,6 +136,21 @@ describe('local mode never leaves this Mac', () => {
 
   it('a local model that can read images answers an image turn', () => {
     expect(preRoute(input('local', { needs: { image: true }, localCan: { image: true } }))).toMatchObject({ brain: 'local', reason: 'mode_local' });
+  });
+
+  it('a PDF the local model is handed as text is answered here, and one that could not be read is refused in words that say which', () => {
+    expect(preRoute(input('local', { needs: { pdf: true }, localCan: { pdf: true } }))).toMatchObject({ brain: 'local', reason: 'mode_local' });
+    expect(preRoute(input('local', { needs: { image: true, pdf: true }, localCan: { image: true, pdf: true } }))).toMatchObject({ brain: 'local' });
+    expect(preRoute(input('local', { needs: { pdf: true }, localCan: {}, pdfUnread: 'no_text' }))).toEqual({ error: 'This PDF has no text in it that Flint can read on this Mac, and Local mode never uses the cloud. Send it as text instead.', status: 422 });
+    expect(preRoute(input('local', { needs: { pdf: true }, localCan: { image: true }, pdfUnread: 'failed' }))).toEqual({ error: "Flint couldn't read this PDF on this Mac just now, and Local mode never uses the cloud. Try again in a moment.", status: 422 });
+    // A reader that is busy says so, and never "send it as text": the PDF is fine.
+    expect(preRoute(input('local', { needs: { pdf: true }, localCan: {}, pdfUnread: 'busy' }))).toEqual({ error: "Flint's PDF reader on this Mac is busy right now, and Local mode never uses the cloud. Try again in a moment.", status: 422 });
+    expect(preRoute(input('local', { needs: { pdf: true }, localCan: {}, pdfUnread: 'too_big' }))).toEqual({ error: 'This PDF is larger than the 10 MB Flint reads on this Mac, and Local mode never uses the cloud. Send a smaller part of it, or its text.', status: 422 });
+    expect(preRoute(input('local', { needs: { pdf: true }, localCan: {}, pdfUnread: 'too_long' }))).toEqual({ error: 'This PDF looks like it has more than the 1,000 pages Flint reads on this Mac, and Local mode never uses the cloud. Send a smaller part of it, or its text.', status: 422 });
+    // With a picture it cannot see as well, the plain words name both.
+    expect(preRoute(input('local', { needs: { image: true, pdf: true }, localCan: {}, pdfUnread: 'no_text' }))).toEqual({ error: "The local model can't read images or PDFs, and Local mode never uses the cloud. Send it as text instead.", status: 422 });
+    // And the words about a PDF are never said of a turn that carries none.
+    expect(preRoute(input('local', { needs: { image: true }, localCan: {}, pdfUnread: 'no_text' }))).toEqual({ error: "The local model can't read images, and Local mode never uses the cloud. Send it as text instead.", status: 422 });
   });
 });
 
@@ -115,6 +179,28 @@ describe('hybrid mode: refusals first, then the rule table', () => {
     const pre = preRoute(input('hybrid', { needs: { image: true } })) as OpenRoute;
     expect(pre.mediaLocalCannotRead).toBe(true);
     expect(finishRoute(pre, plain)).toEqual({ brain: 'frontier', localFallback: false, cloudFallback: false, reason: 'media', mode: 'hybrid', private: false });
+  });
+
+  it('a file the local model CAN read is not the cloud’s for that: the table decides as for any message, and a private one stays here', () => {
+    const pre = preRoute(input('hybrid', { needs: { image: true, pdf: true }, localCan: { image: true, pdf: true } })) as OpenRoute;
+    expect(pre).toMatchObject({ open: true, mediaLocalCannotRead: false });
+    expect(finishRoute(pre, plain)).toMatchObject({ brain: 'local', cloudFallback: true });
+    const priv = preRoute(input('hybrid', { localOnly: true, needs: { pdf: true }, localCan: { pdf: true } })) as OpenRoute;
+    expect(finishRoute(priv, plain)).toEqual({ brain: 'local', localFallback: true, cloudFallback: false, reason: 'private', mode: 'hybrid', private: true });
+    // A turn the table sends to the cloud may come back here if the cloud fails: the local model can read it.
+    expect(finishRoute(pre, { ...plain, toolsLikely: true })).toMatchObject({ brain: 'frontier', localFallback: true });
+  });
+
+  it('a PDF that was tried here and could not be read: a private turn says so, and any other goes to a cloud model that reads PDFs', () => {
+    expect(preRoute(input('hybrid', { localOnly: true, needs: { pdf: true }, localCan: { image: true }, pdfUnread: 'no_text' }))).toEqual({
+      error: 'Local-only is on, and this PDF has no text in it that Flint can read on this Mac. Turn Local-only off to send the file to the frontier brain, or remove the attachment.',
+      status: 422,
+    });
+    const pre = preRoute(input('hybrid', { needs: { pdf: true }, localCan: { image: true }, pdfUnread: 'no_text' })) as OpenRoute;
+    expect(pre.mediaLocalCannotRead).toBe(true);
+    expect(finishRoute(pre, plain)).toEqual({ brain: 'frontier', localFallback: false, cloudFallback: false, reason: 'media', mode: 'hybrid', private: false });
+    // A private turn's words name only the kind the local model cannot read.
+    expect(preRoute(input('hybrid', { localOnly: true, needs: { image: true, pdf: true }, localCan: { image: true } }))).toMatchObject({ error: expect.stringContaining("the on-device brain can't read PDFs.") });
   });
 
   it('a plain message is answered here, and may fall through to the cloud', () => {

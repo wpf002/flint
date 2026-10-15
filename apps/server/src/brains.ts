@@ -55,6 +55,7 @@ import {
 } from '@flint/core';
 import { readContextSize, readInferenceConfig } from './inference-config';
 import { guardedFetch, openAiPaths } from './local-backend';
+import { plainErrors } from './local-errors';
 
 
 /**
@@ -171,10 +172,13 @@ export function buildFrontierProvider(env: Env, warn: (msg: string) => void = ()
     const model = env.FLINT_FRONTIER_MODEL?.trim();
     if (!model) return undefined;
     return {
-      provider: new OllamaProvider({
-        baseURL: baseURL ?? 'http://127.0.0.1:11434',
-        defaultOptions: { num_ctx: Number(env.FLINT_FRONTIER_NUM_CTX ?? 8192) },
-      }),
+      // (A model server's own words when it fails are not repeated, for this brain as for the main model: ./local-errors.)
+      provider: plainErrors(
+        new OllamaProvider({
+          baseURL: baseURL ?? 'http://127.0.0.1:11434',
+          defaultOptions: { num_ctx: Number(env.FLINT_FRONTIER_NUM_CTX ?? 8192) },
+        }),
+      ),
       model,
     };
   }
@@ -212,15 +216,20 @@ export function envProviderFactory(env: Env): ProviderFactory {
         const apiKey = env.PERPLEXITY_API_KEY?.trim();
         return apiKey ? new PerplexityProvider({ apiKey }) : undefined;
       }
+      // A tier on a local wire (`ollama`, `local`) is a model server of Will's own, asked with whatever the turn
+      // carries: what it says when it fails is not repeated, exactly as for the main model and the standby
+      // (./local-errors plainErrors). The error keeps its class, so the chain still moves on as it did.
       case 'ollama':
-        return new OllamaProvider({
-          baseURL:
-            env.FLINT_TIER_OLLAMA_HOST?.trim() ||
-            env.FLINT_FRONTIER_BASE_URL?.trim() ||
-            env.OLLAMA_HOST?.trim() ||
-            'http://127.0.0.1:11434',
-          defaultOptions: { num_ctx: Number(env.FLINT_FRONTIER_NUM_CTX ?? 8192) },
-        });
+        return plainErrors(
+          new OllamaProvider({
+            baseURL:
+              env.FLINT_TIER_OLLAMA_HOST?.trim() ||
+              env.FLINT_FRONTIER_BASE_URL?.trim() ||
+              env.OLLAMA_HOST?.trim() ||
+              'http://127.0.0.1:11434',
+            defaultOptions: { num_ctx: Number(env.FLINT_FRONTIER_NUM_CTX ?? 8192) },
+          }),
+        );
       case 'local': {
         // An OpenAI-compatible local server (llama.cpp, Ollama's /v1) as a tier: FLINT_LOCAL_BASE_URL,
         // held to this Mac unless FLINT_LOCAL_ALLOW_REMOTE=1 (./inference-config). A refused address
@@ -231,15 +240,17 @@ export function envProviderFactory(env: Env): ProviderFactory {
         if (!at) return undefined;
         // Held to the rule every context size is (./inference-config readContextSize): anything else is the default.
         const context = readContextSize(env.FLINT_FRONTIER_NUM_CTX) ?? 8192;
-        return new LocalOpenAiProvider({
-          baseURL: at.baseURL,
-          allowRemote: cfg.allowRemote,
-          ...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
-          fetch: guardedFetch({ origin: at.origin, paths: openAiPaths(at.path), connectTimeoutMs: cfg.connectTimeoutMs }),
-          firstTokenTimeoutMs: cfg.firstTokenTimeoutMs,
-          toolPassTimeoutMs: cfg.toolPassTimeoutMs,
-          capabilities: () => localCapabilities({ contextTokens: context, tools: cfg.tools === 'on' }),
-        });
+        return plainErrors(
+          new LocalOpenAiProvider({
+            baseURL: at.baseURL,
+            allowRemote: cfg.allowRemote,
+            ...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
+            fetch: guardedFetch({ origin: at.origin, paths: openAiPaths(at.path), connectTimeoutMs: cfg.connectTimeoutMs }),
+            firstTokenTimeoutMs: cfg.firstTokenTimeoutMs,
+            toolPassTimeoutMs: cfg.toolPassTimeoutMs,
+            capabilities: () => localCapabilities({ contextTokens: context, tools: cfg.tools === 'on' }),
+          }),
+        );
       }
       default:
         return undefined;
@@ -453,6 +464,27 @@ export function shouldFallBack(err: unknown, signal?: AbortSignal): boolean {
 export function mayAskAnother(err: unknown, o: { acted: boolean; signal?: AbortSignal | undefined }): boolean {
   return !o.acted && shouldFallBack(err, o.signal);
 }
+
+/** What Will reads when that happens. */
+export const TOO_LONG_FOR_THE_CLOUD = 'This message is longer than the cloud model can read. Send a shorter one, or split it up.';
+/**
+ * Did the cloud brains fail because the turn is longer than their window, so
+ * that the local model, whose room for a prompt is no larger, could only fail
+ * the same way? It is then not asked after them, and Will reads one plain
+ * sentence (a long message in Cloud mode was answered with the local model's
+ * window). Only for a turn with no picture or PDF on it: the local model is
+ * handed a PDF as text cut to its window, so a PDF too large for the cloud may
+ * well be read here (a Hybrid turn's planned fallback). And only when every
+ * brain that was asked has at least as much room for the prompt (its window
+ * less what it keeps for its reply) as the most any planned local model has: a
+ * brain with less says nothing about the local model.
+ */
+export function outgrewTheCloud(err: unknown, turn: { media: boolean; localRoom: number; rooms: readonly number[] }): boolean {
+  return isFlintError(err) && err.kind === 'context_overflow' && !turn.media && turn.rooms.length > 0 && turn.rooms.every((r) => r >= turn.localRoom);
+}
+
+/** A model's room for a prompt: its window, less what it keeps for its reply. */
+export const promptRoom = (caps: { maxContextTokens: number; maxOutputTokens: number }): number => Math.max(0, caps.maxContextTokens - caps.maxOutputTokens);
 
 /**
  * Run `attempt` on each brain of the chain in turn until one succeeds. Throws

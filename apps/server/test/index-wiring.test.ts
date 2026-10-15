@@ -166,7 +166,9 @@ describe('index.ts wiring', () => {
   it('a reply stopped mid-stream because no brain has budget left sends Will the reason beside the raw error', () => {
     // The refusal the stream throws is the one Will reads: set just before that throw, and only there.
     expect(chat).toMatch(/stopWords = budget\.localRefusal;\s*throw new Error\(`frontier failed: \$\{String\(err\)\}\. \$\{budget\.localRefusal\}`\);/);
-    expect(chat.match(/stopWords = /g)).toHaveLength(1);
+    // ...and a cloud window too small for the turn, which the local model is not asked after (./brains outgrewTheCloud).
+    expect(chat).toContain('if (answer.length === 0 && outgrew(err)) stopWords = TOO_LONG_FOR_THE_CLOUD;');
+    expect(chat.match(/stopWords = /g)).toHaveLength(2);
     expect(chat).toContain("res.write(`data: ${JSON.stringify({ type: 'error', error: String(err), ...(stopWords ? { message: stopWords } : {}) })}\\n\\n`);");
   });
 
@@ -368,7 +370,7 @@ describe('index.ts wiring', () => {
 
   it('/chat: an error from the last frontier tier goes to the local model when it may answer, as /generate\'s does', () => {
     expect(chat).toContain("if ((recoverable || (tried !== undefined && toLocal)) && ev.type === 'error' && answer.length === 0 && !acted && providerFailure(ev.error) && !ac.signal.aborted) throw new FlintError(ev.error);");
-    expect(chat).toContain('if (answer.length === 0 && toLocal && mayAskAnother(err, { acted, signal: ac.signal })) {');
+    expect(chat).toContain('if (answer.length === 0 && toLocal && mayAskAnother(err, { acted, signal: ac.signal }) && !outgrew(err)) {');
     // The console is told a local model is answering (and when it is the standby) before its text streams.
     expect(chat).toMatch(/brain = 'local';\s*await askLocal\(\{ \.\.\.\(paused \? \{ frontierPaused: paused \} : \{\}\) \}\);/);
     const askLocal = chat.slice(chat.indexOf('const askLocal = async (meta'), chat.indexOf("if (brain === 'frontier' && plan) {"));
@@ -383,7 +385,7 @@ describe('index.ts wiring', () => {
     expect(chat.match(/mayAskAnother\(err, \{ acted, signal: ac\.signal \}\)/g)).toHaveLength(2);
     // /generate: the turn's own action-log entries (TurnLog), not a concurrent turn's.
     expect(generate).toContain('{ signal: abort.signal, acted: () => turn.acted, onFallback: logFallback },');
-    expect(generate).toContain('if (!route.localFallback || localPlan.steps.length === 0 || !mayAskAnother(err, { acted: turn.acted })) {');
+    expect(generate).toContain('if (!route.localFallback || localPlan.steps.length === 0 || !mayAskAnother(err, { acted: turn.acted }) || outgrew(err)) {');
     // The local side follows the same rule (./local-serve runLocalPlan asks mayAskAnother): a step gives way to the
     // next only while nothing was shown and no tool was called.
     expect(chat).toContain('{ signal: ac.signal, progressed: () => answer.length > 0 || acted, onMove: logLocalMove, ...ctx.inference.keeping(route) },');
@@ -513,7 +515,8 @@ describe('index.ts wiring', () => {
   it('both routes are routed by the mode: routeFirst before anything else, finishRoute once the tier is known, and no routeTurn left here', () => {
     expect(src).not.toMatch(/\brouteTurn\(/);
     for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
-      expect(route, name).toMatch(/const pre = await ctx\.inference\.routeFirst\(\{ message(: prompt)?, localOnly, deep: body\.deep === true, evalMode(: false)?, hasFrontier: !!ctx\.frontier, needs: mediaNeeds\(attachments\), frontierCan: ctx\.frontier\?\.media \?\? \{\} \}\);/);
+      expect(route, name).toMatch(/const pre = await ctx\.inference\.routeFirst\(\{ message(: prompt)?, localOnly, deep: body\.deep === true, evalMode(: false)?, hasFrontier: !!ctx\.frontier, needs: mediaNeeds\(attachments\), frontierCan: ctx\.frontier\?\.media \?\? \{\}, attachments(, ownLocalModel: lm\.model !== undefined|, earlier: ctx\.memory\.windowAttachments\(conversationId\))? \}\);/);
+      // (The turn's files go with it: a PDF is read on this Mac before the route is decided, when that is turned on.)
       expect(route, name).toContain("if ('error' in pre) return json(res, pre.status, { error: pre.error });");
       expect(route.indexOf('const tier = classifyMessage('), name).toBeLessThan(route.indexOf('const route = ctx.inference.finishRoute(pre, { tier, toolsLikely,'));
       // The spend plan and the breaker are handed the finished route, as before.
@@ -526,21 +529,58 @@ describe('index.ts wiring', () => {
     // A hybrid turn may still go to the cloud, so the "deep thread" rule counts its history as a frontier turn's.
     expect(chat).toContain('const turns = mayUseCloud(pre) && ctx.brains?.tiered ? history.sent : 0;');
     // The long-context rule is sized with the message, its text files and the history it is sent with.
-    expect(chat).toContain('promptChars: asText.length + textChars(attachments) + ctx.memory.historyChars(conversationId) });');
-    expect(generate).toContain('promptChars: asText.length + textChars(attachments) });');
+    // (A PDF the local model would be handed as text is part of it too, when PDFs are read here: ./inference pdfTextChars.)
+    expect(chat).toContain('promptChars: asText.length + textChars(attachments) + ctx.inference.pdfTextChars(attachments) + ctx.memory.historyChars(conversationId) });');
+    expect(generate).toContain('promptChars: asText.length + textChars(attachments) + ctx.inference.pdfTextChars(attachments) });');
+    // An eval replay that names its own local model is asked through a client of its own: nothing is said to be readable by it.
+    expect(generate).toContain('frontierCan: ctx.frontier?.media ?? {}, attachments, ownLocalModel: lm.model !== undefined });');
+    expect(chat).not.toContain('ownLocalModel');
+    // /chat hands the route the files the conversation's earlier turns still carry: a PDF among them is read before
+    // the route's look at the model server, so the request that follows waits for no read. (/generate has no history.)
+    expect(chat).toContain('frontierCan: ctx.frontier?.media ?? {}, attachments, earlier: ctx.memory.windowAttachments(conversationId) });');
+    expect(generate).not.toContain('windowAttachments');
+  });
+
+  // What a file says is outside text (a review's obedient stand-in ran web.fetch_url, web.web_search and
+  // trident.gmail_search on the say-so of a PDF, and of a .txt, with no approval). Both routes mark the turn at the
+  // door, before it is routed, for every kind of file and whichever brain answers.
+  it('a turn that carries a file is tainted from the start, on both routes, before it is routed', () => {
+    expect(src).toContain("const ATTACHMENT_TAINT = 'attachment';");
+    for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
+      const marked = route.indexOf('if (attachments.length > 0) markTainted(ATTACHMENT_TAINT);');
+      expect(marked, name).toBeGreaterThan(-1);
+      expect(marked, name).toBeGreaterThan(route.indexOf('const attachments = att.attachments;'));
+      expect(marked, name).toBeLessThan(route.indexOf('ctx.inference.routeFirst('));
+      expect(route.match(/markTainted\(/g), name).toHaveLength(1);
+    }
+    // No condition on the mode, the brain or the kind of file stands between the files and the mark.
+    expect(src.match(/if \(attachments\.length > 0\) markTainted\(ATTACHMENT_TAINT\);/g)).toHaveLength(2);
+  });
+
+  // A PDF too large for every model that would be asked used to be sent on with no message at all.
+  it('a PDF too large for every cloud model that would be asked is refused with the size sentence, on both routes, before any call', () => {
+    for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
+      const check = route.indexOf("const tooBig = budget.brain === 'frontier' && plan && !toLocal ? pdfTooBigFor(attachments, plan.chain.map((b) => b.provider.getCapabilities(b.model))) : undefined;");
+      expect(check, name).toBeGreaterThan(-1);
+      // The cloud's size, and why this Mac could not read it when it tried first (a Hybrid turn).
+      expect(route.slice(check), name).toMatch(/^[^\n]*\n\s*if \(tooBig\) \{\n\s*\/\/ [^\n]*\n\s*const here = route\.mode === 'hybrid' \? ctx\.inference\.pdfRefusedHere\(\[tooBig\.pdf\]\) : undefined;\n\s*return json\(res, 413, \{ error: tooBigSentence\(tooBig, here && pdfUnreadClause\(here\)\) \}\);/);
+      expect(check, name).toBeLessThan(route.indexOf('const gate = gateTurn('));
+      expect(check, name).toBeGreaterThan(route.indexOf('const toLocal = '));
+    }
   });
 
   it('a turn that must be local with no local model to answer it gets a 503 with a sentence, before any call and before anything streams', () => {
     for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
-      expect(route, name).toMatch(/const localPlan = ctx\.inference\.planLocal\(route, \{ primary: [^;]+, standby: ctx\.standby(?:, evalOwnModel: lm\.model !== undefined)? \}\);\s*if \(route\.brain === 'local' && localPlan\.steps\.length === 0\) return json\(res, 503, \{ error: localPlan\.refusal \}\);/);
+      expect(route, name).toMatch(/const localPlan = ctx\.inference\.planLocal\(route, \{ primary: [^;]+, standby: ctx\.standby(?:, evalOwnModel: lm\.model !== undefined)?, needs: mediaNeeds\(attachments\) \}\);\s*if \(route\.brain === 'local' && localPlan\.steps\.length === 0\) return json\(res, 503, \{ error: localPlan\.refusal \}\);/);
       expect(route.indexOf('ctx.inference.planLocal(route'), name).toBeLessThan(route.indexOf('budgetTurn('));
       // The plan is made once per turn, before anything is asked: no mid-turn swaps.
       expect(route.match(/planLocal\(/g), name).toHaveLength(1);
     }
     expect(chat.indexOf('ctx.inference.planLocal(route')).toBeLessThan(chat.indexOf("res.writeHead(200, {"));
     // /generate plans with the turn's own local persona (a style variant, an eval candidate); /chat with the live one.
-    expect(generate).toContain('ctx.inference.planLocal(route, { primary: local, standby: ctx.standby, evalOwnModel: lm.model !== undefined });');
-    expect(chat).toContain('ctx.inference.planLocal(route, { primary: { persona: ctx.persona, model: ctx.model }, standby: ctx.standby });');
+    // (`needs`: a standby that cannot read the turn's picture or PDF is not planned.)
+    expect(generate).toContain('ctx.inference.planLocal(route, { primary: local, standby: ctx.standby, evalOwnModel: lm.model !== undefined, needs: mediaNeeds(attachments) });');
+    expect(chat).toContain('ctx.inference.planLocal(route, { primary: { persona: ctx.persona, model: ctx.model }, standby: ctx.standby, needs: mediaNeeds(attachments) });');
   });
 
   it('Local mode and a private turn reach no outside service: not offered, and switched off where the tool is called, whoever calls it', () => {
@@ -682,7 +722,7 @@ describe('index.ts wiring', () => {
     // The gate answers 503 no_local_model for a brain that is undefined (test/background-complete.test.ts).
     expect(src).toContain('brain: () => inference.helperBrain(backgroundBrain),');
     // An eval replay that names its own local model is that model's turn, not the stand-in's.
-    expect(generate).toContain('const localPlan = ctx.inference.planLocal(route, { primary: local, standby: ctx.standby, evalOwnModel: lm.model !== undefined });');
+    expect(generate).toContain('const localPlan = ctx.inference.planLocal(route, { primary: local, standby: ctx.standby, evalOwnModel: lm.model !== undefined, needs: mediaNeeds(attachments) });');
     // A local turn with nothing to answer it is a 503 with the plan's sentence, on both routes, before anything is asked.
     for (const [name, route] of [['generate', generate], ['chat', chat]] as const) {
       expect(route, name).toContain("if (route.brain === 'local' && localPlan.steps.length === 0) return json(res, 503, { error: localPlan.refusal });");

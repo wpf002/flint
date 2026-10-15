@@ -119,7 +119,7 @@ export function historyOrigin(): number | undefined {
   return scope.getStore()?.historyOrigin;
 }
 
-const localScope = new AsyncLocalStorage<{ private: boolean; staysHere: boolean }>();
+const localScope = new AsyncLocalStorage<{ private: boolean; staysHere: boolean; carriesKept?: true }>();
 
 /**
  * Run `fn` as (part of) a turn the LOCAL model is answering: Local-only, a
@@ -154,6 +154,24 @@ export function isPrivateTurn(): boolean {
 /** Is this a turn that was routed to stay on this Mac: private, or any turn of Local mode? */
 export function isStaysHereTurn(): boolean {
   return localScope.getStore()?.staysHere === true;
+}
+
+/**
+ * This local model's turn is about to be handed what stays on this Mac: a turn
+ * in its history that stays here, a fact, the goals (./goals-chat ask, once the
+ * gate has marked its context). Only the look a read's long wait asks for reads
+ * it (./inference lookAgain): such a request is refused if its model is no
+ * longer known to run here, as a turn that stays here by its route is. Outside
+ * a local model's turn, nothing.
+ */
+export function markTurnCarriesKept(): void {
+  const t = localScope.getStore();
+  if (t) t.carriesKept = true;
+}
+
+/** Is this local model's turn one that is handed what stays on this Mac (markTurnCarriesKept)? */
+export function turnCarriesKept(): boolean {
+  return localScope.getStore()?.carriesKept === true;
 }
 
 /**
