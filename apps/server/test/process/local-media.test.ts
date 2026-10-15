@@ -41,7 +41,7 @@
  * The pictures and PDFs are synthetic (../../src/synthetic-files).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -118,6 +118,8 @@ let inject: Booted;
 let remote: Booted;
 let pdf: (Booted & { tmp: string }) | undefined;
 const temps: string[] = [];
+/** The folders of the reads under way (or left behind) under a temp folder: in Flint's own folder there (../../src/pdf-text). */
+const readFolders = (tmp: string): string[] => (existsSync(join(tmp, 'flint-pdf')) ? readdirSync(join(tmp, 'flint-pdf')) : []);
 
 beforeAll(async () => {
   const pdfTmp = REAL_PDF ? mkdtempSync(join(tmpdir(), 'lm-')) : undefined;
@@ -528,7 +530,7 @@ describe('a PDF reader that is stopped in the middle of a read', () => {
       for (let i = 0; i < 1500 && !/READING (\S+)/.test(out) && !out.includes('NEVER STARTED'); i++) await sleep(20);
       const folder = /READING (\S+)/.exec(out)?.[1];
       expect(folder, out).toBeDefined();
-      const inner = join(tmp, folder!, 'read.noindex');
+      const inner = join(tmp, 'flint-pdf', folder!, 'read.noindex');
       // The PDF is on disk, in a folder named for the process that made it (tsx runs the script in a process of
       // its own), and the program is running.
       maker = Number(/^flint-pdf-(\d+)-/.exec(folder!)?.[1]);
@@ -539,7 +541,7 @@ describe('a PDF reader that is stopped in the middle of a read', () => {
       child.kill('SIGTERM');
       expect(await exited).toBe(0);
       // Stopped: the folder is gone with the PDF in it, and so is the program.
-      expect(readdirSync(tmp).filter((n) => n.startsWith('flint-pdf-'))).toEqual([]);
+      expect(readFolders(tmp)).toEqual([]);
       for (let i = 0; i < 500 && alive(programPid); i++) await sleep(20);
       expect(alive(programPid)).toBe(false);
     } finally {
@@ -565,16 +567,16 @@ describe('a PDF reader that is stopped in the middle of a read', () => {
       for (let i = 0; i < 1500 && !/READING (\S+)/.test(out) && !out.includes('NEVER STARTED'); i++) await sleep(20);
       const folder = /READING (\S+)/.exec(out)?.[1];
       expect(folder, out).toBeDefined();
-      programPid = Number(readFileSync(join(tmp, folder!, 'read.noindex', 'pid'), 'utf8'));
+      programPid = Number(readFileSync(join(tmp, 'flint-pdf', folder!, 'read.noindex', 'pid'), 'utf8'));
       // tsx runs the script in a process of its own: the one that made the folder is the one its name carries.
       maker = Number(/^flint-pdf-(\d+)-/.exec(folder!)![1]);
       process.kill(maker, 'SIGKILL');
       for (let i = 0; i < 500 && alive(maker); i++) await sleep(20);
-      expect(existsSync(join(tmp, folder!, 'read.noindex', 'doc.pdf'))).toBe(true);
+      expect(existsSync(join(tmp, 'flint-pdf', folder!, 'read.noindex', 'doc.pdf'))).toBe(true);
       // The next reader made on that temp folder (a start), a moment later: gone, though it is seconds old.
       const { makePdfReader: make } = await import('../../src/pdf-text');
       make({ reader: 'pdftotext', program }, { tmp, run: async () => ({ stdout: 'x', truncated: false }) });
-      expect(readdirSync(tmp).filter((n) => n.startsWith('flint-pdf-'))).toEqual([]);
+      expect(readFolders(tmp)).toEqual([]);
     } finally {
       if (child.exitCode === null) child.kill('SIGKILL');
       await exited;
@@ -600,7 +602,7 @@ describe.runIf(REAL_PDF)('FLINT_LOCAL_PDF=spotlight, with the Mac’s own import
     expect(cloud.saw(PDF_SECRET)).toBe(false);
     expect(srv.log()).not.toContain(PDF_SECRET);
     // The folder the PDF was read in is gone.
-    expect(readdirSync(tmp).filter((n) => n.startsWith('flint-pdf-'))).toEqual([]);
+    expect(readFolders(tmp)).toEqual([]);
   });
 
   it('the next turn goes to the outside brain without the PDF and without its text', async () => {
@@ -627,7 +629,7 @@ describe.runIf(REAL_PDF)('FLINT_LOCAL_PDF=spotlight, with the Mac’s own import
     const r = await srv.post('/chat', { conversationId: 'pdf-blank', message: 'what does it say?', localOnly: true, attachments: [pdfFile(BLANK_PDF_B64, 'scan.pdf')] });
     expect(r).toMatchObject({ status: 422, json: { error: 'Local-only is on, and this PDF has no text in it that Flint can read on this Mac. Turn Local-only off to send the file to the frontier brain, or remove the attachment.' } });
     expect(ollama.chats().length).toBe(chats);
-    expect(readdirSync(tmp).filter((n) => n.startsWith('flint-pdf-'))).toEqual([]);
+    expect(readFolders(tmp)).toEqual([]);
   });
 
   it('Local mode answers a PDF turn here; the status names the reader; no connection was refused', async () => {
@@ -643,6 +645,42 @@ describe.runIf(REAL_PDF)('FLINT_LOCAL_PDF=spotlight, with the Mac’s own import
     expect(st.lines).toContain("A PDF's text is read on this Mac for the local model, by the Mac's own PDF importer.");
     expect((await srv.get('/health', null)).json).toMatchObject({ localReads: { images: false, pdfs: true } });
     expect(blocked(srv)).toEqual([]);
+  });
+});
+
+// A review (2026-10-13): one megabyte of object-stream markers with nothing after them held this whole server for
+// 4.2 seconds while its pages were counted, and two megabytes for 16.5. (The count is held by ../pdf-text.test.ts in
+// the default run. Here it is the real server with PDFs on: the importer is there to be run, and must not be.)
+describe.runIf(REAL_PDF)('a PDF made to be slow to count, sent to the real server (opt-in: FLINT_TEST_REAL_PDF=1)', () => {
+  const mdimports = (): number => {
+    const out = spawnSync('/bin/ps', ['-axo', 'comm'], { encoding: 'utf8' }).stdout;
+    return out.split('\n').filter((l) => l.trim() === '/usr/bin/mdimport').length;
+  };
+
+  it('is refused by the count, soon, with the importer never run; and the server answers its health check meanwhile', async () => {
+    const { srv, ollama, cloud, tmp } = pdf!;
+    for (const mb of [1, 2, 10]) {
+      const unit = '/Type/ObjStm stream\nxx ';
+      const crafted = Buffer.concat([Buffer.from('%PDF-1.5\n'), Buffer.from(unit.repeat(Math.floor((mb * 1024 * 1024 - 16) / unit.length)))]).toString('base64');
+      const chats = ollama.chats().length;
+      const clouds = cloud.requests.length;
+      let seen = 0;
+      const watch = setInterval(() => (seen = Math.max(seen, mdimports())), 20);
+      const began = Date.now();
+      const turn = srv.post('/chat', { conversationId: `pdf-crafted-${mb}`, message: 'what is this?', localOnly: true, attachments: [pdfFile(crafted, 'crafted.pdf')] }).then((r) => ({ r, ms: Date.now() - began }));
+      const health = srv.get('/health', null).then((r) => ({ r, ms: Date.now() - began }));
+      const [t, h] = await Promise.all([turn, health]);
+      clearInterval(watch);
+      expect(t.r).toMatchObject({ status: 422, json: { error: 'Local-only is on, and this PDF looks like it has more than the 1,000 pages Flint reads on this Mac. Send a smaller part of it, or its text.' } });
+      expect(h.r.status).toBe(200);
+      // (Seconds of room for a busy Mac. It was 4.2 s for one megabyte, and minutes for ten.)
+      expect(t.ms).toBeLessThan(3000);
+      expect(h.ms).toBeLessThan(3000);
+      expect(seen).toBe(0);
+      expect(ollama.chats().length).toBe(chats);
+      expect(cloud.requests.length).toBe(clouds);
+      expect(readFolders(tmp)).toEqual([]);
+    }
   });
 });
 
@@ -688,7 +726,7 @@ describe.runIf(REAL_PDF)('the Mac’s own importer, asked directly (opt-in: FLIN
     for (const compress of [false, true]) {
       expect(await reader.read(textPdf(pages, { compress }))).toEqual({ ok: true, text: 'Invoice 4471 for the QUARTZHERON workshop.\nThe total due is 1,284.50 dollars.\nPage two: "quoted", (bracketed) and a \\ backslash.', cut: false, pages: 2 });
     }
-    expect(readdirSync(dir)).toEqual([]);
+    expect(readFolders(dir)).toEqual([]);
   });
 
   it('a long PDF comes back whole: sixty pages', async () => {
@@ -710,6 +748,6 @@ describe.runIf(REAL_PDF)('the Mac’s own importer, asked directly (opt-in: FLIN
     const reader = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { tmp: dir });
     expect(await reader.read(textPdf([[]]))).toEqual({ ok: false, why: 'no_text' });
     expect(await reader.read(Buffer.from('%PDF-1.4\nthis is not really a PDF\n'))).toEqual({ ok: false, why: 'no_text' });
-    expect(readdirSync(dir)).toEqual([]);
+    expect(readFolders(dir)).toEqual([]);
   });
 });

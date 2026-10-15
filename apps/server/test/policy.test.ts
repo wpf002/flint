@@ -137,8 +137,8 @@ describe('routeTurn: a turn the local brain keeps, with a file it can read', () 
     expect(alone('busy')).toBe("Flint's PDF reader on this Mac is busy right now, and no frontier brain is configured. Try again in a moment.");
     expect(kept('too_big')).toBe('Local-only is on, and this PDF is larger than the 10 MB Flint reads on this Mac. Send a smaller part of it, or its text.');
     expect(alone('too_big')).toBe('This PDF is larger than the 10 MB Flint reads on this Mac, and no frontier brain is configured. Send a smaller part of it, or its text.');
-    expect(kept('too_long')).toBe('Local-only is on, and this PDF has more than the 1,000 pages Flint reads on this Mac. Send a smaller part of it, or its text.');
-    expect(alone('too_long')).toBe('This PDF has more than the 1,000 pages Flint reads on this Mac, and no frontier brain is configured. Send a smaller part of it, or its text.');
+    expect(kept('too_long')).toBe('Local-only is on, and this PDF looks like it has more than the 1,000 pages Flint reads on this Mac. Send a smaller part of it, or its text.');
+    expect(alone('too_long')).toBe('This PDF looks like it has more than the 1,000 pages Flint reads on this Mac, and no frontier brain is configured. Send a smaller part of it, or its text.');
     for (const why of ['busy', 'failed'] as const) {
       expect(kept(why)).not.toMatch(/as text|its text/);
       expect(alone(why)).not.toMatch(/as text|its text/);

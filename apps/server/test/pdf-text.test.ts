@@ -1,10 +1,15 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { deflateSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   COUNT_BUDGET_BYTES,
+  COUNT_SLICE_MS,
+  COUNT_STREAMS,
+  COUNT_WORK_MS,
+  FOLDER_PARENT,
   FOLDER_PREFIX,
   LEFTOVER_AFTER_MS,
   MAX_OUTPUT_BYTES,
@@ -15,13 +20,17 @@ import {
   READER_ARGS,
   READ_TIMEOUT_MS,
   ReadTimedOut,
+  SLOW_FOR_MS,
+  SLOW_REMEMBERED,
   countPdfPages,
   endReadsNow,
   folderPrefix,
   makePdfReader,
+  ownReadsFolder,
   parseSpotlight,
   plainText,
   plistValue,
+  readsFolder,
   runProgram,
   sweepLeftovers,
   sweepLeftoversNow,
@@ -61,6 +70,14 @@ const scratch = (): string => {
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
+/** What reads left under `tmp`: in Flint's own folder there, and beside it (where a read puts nothing at all). */
+const left = (tmp: string): string[] => [...readdirSync(tmp).filter((n) => n !== FOLDER_PARENT), ...(existsSync(join(tmp, FOLDER_PARENT)) ? readdirSync(join(tmp, FOLDER_PARENT)) : [])];
+/** A temp folder with Flint's own folder for reads made in it: `[the temp folder, Flint's folder]`. */
+const withReadsFolder = (): [string, string] => {
+  const tmp = scratch();
+  mkdirSync(join(tmp, FOLDER_PARENT), { mode: 0o700 });
+  return [tmp, join(tmp, FOLDER_PARENT)];
+};
 
 describe('a value as the Mac prints it', () => {
   const quoted = (s: string) => plistValue(`    k = ${s};`, 8);
@@ -245,15 +262,19 @@ describe('the reader', () => {
     const { run, runs } = standIn(() => ({ stdout: RECORDED }));
     await makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp }).read(PDF);
     const r = runs[0]!;
-    expect(r.cwd.startsWith(join(tmp, FOLDER_PREFIX))).toBe(true);
+    // In Flint's own folder under the temp folder, which is this user's alone too: nothing is put beside it.
+    expect(readsFolder(tmp)).toBe(join(tmp, 'flint-pdf'));
+    expect(r.cwd.startsWith(join(tmp, FOLDER_PARENT, FOLDER_PREFIX))).toBe(true);
+    expect(statSync(join(tmp, FOLDER_PARENT)).mode & 0o777).toBe(0o700);
+    expect(readdirSync(tmp)).toEqual([FOLDER_PARENT]);
     // Its name says which process made it: what is left by one that was killed can be told from a read under way.
-    expect(r.cwd.startsWith(join(tmp, `${FOLDER_PREFIX}${process.pid}-`))).toBe(true);
+    expect(r.cwd.startsWith(join(tmp, FOLDER_PARENT, `${FOLDER_PREFIX}${process.pid}-`))).toBe(true);
     expect(folderPrefix()).toBe(`flint-pdf-${process.pid}-`);
     expect(r.cwd.endsWith('.noindex')).toBe(true);
     expect(r.folderMode).toBe(0o700);
     expect(r.innerMode).toBe(0o700);
     expect(r.fileMode).toBe(0o600);
-    expect(readdirSync(tmp)).toEqual([]);
+    expect(left(tmp)).toEqual([]);
   });
 
   it('the folder is gone when the program fails, too, and the read says it failed', async () => {
@@ -272,7 +293,7 @@ describe('the reader', () => {
     expect(await reader.read(PDF)).toEqual({ ok: false, why: 'failed' });
     expect(seen).not.toBe('');
     expect(existsSync(seen)).toBe(false);
-    expect(readdirSync(tmp)).toEqual([]);
+    expect(left(tmp)).toEqual([]);
   });
 
   it('a PDF with no text in it is said to have none: an empty text, or no text at all', async () => {
@@ -360,7 +381,7 @@ describe('the reader', () => {
     await expect.poll(() => gates.length, WAIT).toBe(5);
     gates[4]!();
     expect((await again).ok).toBe(true);
-    expect(readdirSync(tmp)).toEqual([]);
+    expect(left(tmp)).toEqual([]);
   });
 
   it('a read that was already called off is not started', async () => {
@@ -398,27 +419,246 @@ describe('what is refused before it is handed to a reader', () => {
     return { run, runs };
   };
 
-  it('the pages are counted from the bytes: page objects, the page tree’s own count, and what is inside compressed object streams', () => {
-    expect(countPdfPages(textPdf([['one'], ['two'], ['three']]))).toBe(3);
-    expect(countPdfPages(textPdf([[]]))).toBe(1);
-    expect(countPdfPages(manyPages(250))).toBe(250);
-    // The page TREE is not a page, and a page count it gives is believed even when the pages are not there to count.
-    expect(countPdfPages(Buffer.from('%PDF-1.4\n1 0 obj << /Type /Pages /Count 5 /Kids [] >> endobj', 'latin1'))).toBe(5);
-    expect(countPdfPages(Buffer.from('%PDF-1.4\n2 0 obj << /Type /Pages /Count 1000000 /Kids [2 0 R 2 0 R] >> endobj', 'latin1'))).toBe(1_000_000);
-    expect(countPdfPages(Buffer.from('%PDF-1.4 /Type/Page /Type /PageLabels /Type /Pages', 'latin1'))).toBe(1);
-    expect(countPdfPages(objectStreamPdf(40))).toBe(40);
-    expect(countPdfPages(objectStreamPdf(2500))).toBe(2500);
-    expect(countPdfPages(Buffer.from('not a PDF at all'))).toBe(0);
-    expect(countPdfPages(new Uint8Array(0))).toBe(0);
+  const latin = (s: string): Buffer => Buffer.from(s, 'latin1');
+
+  it('the pages are counted from the bytes: the page objects, in the file and inside compressed object streams', async () => {
+    expect(await countPdfPages(textPdf([['one'], ['two'], ['three']]))).toBe(3);
+    expect(await countPdfPages(textPdf([[]]))).toBe(1);
+    expect(await countPdfPages(manyPages(250))).toBe(250);
+    // The page TREE is not a page, nor is anything else whose name only begins like one, or like `/Type`.
+    expect(await countPdfPages(latin('%PDF-1.4 /Type/Page /Type /PageLabels /Type /Pages /Type /Pag /Types /Page /Subtype /Type1 /Page /Type Page'))).toBe(1);
+    expect(await countPdfPages(latin('/Type\r\n\t\f\0 /Page<</Type/Page>>[/Type/Page]/Type/Page/Type/Page'))).toBe(5);
+    expect(await countPdfPages(objectStreamPdf(40))).toBe(40);
+    expect(await countPdfPages(objectStreamPdf(900))).toBe(900);
+    expect(await countPdfPages(Buffer.concat([manyPages(30), objectStreamPdf(40).subarray(9), objectStreamPdf(5).subarray(9), latin('<< /Type /Page >>')]))).toBe(76);
+    expect(await countPdfPages(Buffer.from('not a PDF at all'))).toBe(0);
+    expect(await countPdfPages(new Uint8Array(0))).toBe(0);
+    for (const cut of ['/', '/T', '/Type', '/Type ', '/Type /', '/Type /Pag', '/#', '/Type /P#6']) expect(await countPdfPages(latin(cut))).toBe(0);
   });
 
-  it('object streams that unpack to more than the budget are too much to count, and so too much to read', () => {
-    const big = objectStreamPdf(3000);
-    expect(countPdfPages(big, 1024)).toBe(Infinity);
-    expect(countPdfPages(big)).toBe(3000);
+  it('the count stops once the answer is known: one past the most that is read', async () => {
+    expect(await countPdfPages(manyPages(2500))).toBe(MAX_PDF_PAGES + 1);
+    expect(await countPdfPages(objectStreamPdf(2500))).toBe(MAX_PDF_PAGES + 1);
+    expect(await countPdfPages(objectStreamPdf(2500), { stopAfter: 5000 })).toBe(2500);
+    expect(await countPdfPages(manyPages(40), { stopAfter: 9 })).toBe(10);
+    // (Nothing after that is unpacked, either.)
+    const tally = { searched: 0, opened: 0, yields: 0 };
+    expect(await countPdfPages(Buffer.concat([manyPages(40), objectStreamPdf(5).subarray(9)]), { stopAfter: 9, tally })).toBe(10);
+    expect(tally.opened).toBe(0);
+  });
+
+  // The count used to take the largest `/Count` in the file for the pages. An outline has a `/Count` too (a review:
+  // a two-page PDF with a long outline was refused as 1,500 pages), and so can an object nothing uses.
+  it('a count the PDF gives of itself is not believed, an outline’s least of all: only page objects are pages', async () => {
+    const outlined = Buffer.concat([textPdf([['Two pages.'], ['Second.']]), latin('\n9 0 obj\n<< /Type /Outlines /Count 1500 >>\nendobj\n')]);
+    expect(await countPdfPages(outlined)).toBe(2);
+    expect(await countPdfPages(latin('%PDF-1.4\n2 0 obj << /Type /Pages /Count 1000000 /Kids [2 0 R 2 0 R] >> endobj'))).toBe(0);
+    const { run, runs } = standIn(() => ({ stdout: RECORDED }));
+    expect((await makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp: scratch() }).read(outlined)).ok).toBe(true);
+    expect(runs).toHaveLength(1);
+  });
+
+  // (A review: 50,000 pages written `/Type /P#61ge` were counted as none, and handed to the Mac.)
+  it('a name’s escapes are decoded: `/P#61ge` is a page, `/T#79pe` is its key, `/Obj#53tm` is an object stream', async () => {
+    expect(await countPdfPages(latin(`%PDF-1.5\n${'<< /Type /P#61ge >>\n'.repeat(7)}`))).toBe(7);
+    expect(await countPdfPages(latin('/T#79pe/Page /#54#79#70#65 /#50#61#67#65 /#54ype/#50age /Type/Pa#67e'))).toBe(4);
+    expect(await countPdfPages(latin('/Type /P#4Age /Type /P#4age'))).toBe(0); // (`J`, in either case of the digit)
+    // What is not an escape is the characters themselves, and no page.
+    expect(await countPdfPages(latin('/Type /Page# /Type /P#zzge /Type /P#6 /Type /Pag#65s /Typ#65s /Page'))).toBe(0);
+    const escaped = objectStreamPdf(900);
+    const at = escaped.indexOf('/ObjStm');
+    const renamed = Buffer.concat([escaped.subarray(0, at), latin('/Obj#53tm'), escaped.subarray(at + 7)]);
+    expect(await countPdfPages(renamed)).toBe(900);
+    const { run, runs } = standIn(() => ({ stdout: RECORDED }));
+    const reader = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp: scratch() });
+    expect(await reader.read(latin(`%PDF-1.5\n${'<< /Type /P#61ge >>\n'.repeat(MAX_PDF_PAGES + 1)}`))).toEqual({ ok: false, why: 'too_long' });
+    expect(runs).toHaveLength(0);
+  });
+
+  it('a value too far from its key is not looked for: the white space between them is bounded', async () => {
+    expect(await countPdfPages(latin(`/Type${' '.repeat(256)}/Page`))).toBe(1);
+    expect(await countPdfPages(latin(`/Type${' '.repeat(257)}/Page`))).toBe(0);
+    // Nor is an object stream's `stream` looked for past where a dictionary could end.
+    const streamAfter = (n: number): Buffer => Buffer.concat([latin(`%PDF-1.5\n<< /Type /ObjStm${' '.repeat(n)}stream\n`), deflateSync(latin('<< /Type /Page >>')), latin('\nendstream')]);
+    expect(await countPdfPages(streamAfter(4095))).toBe(1);
+    expect(await countPdfPages(streamAfter(4096))).toBe(0);
+  });
+
+  it('object streams that unpack to more than the budget are more than will be counted, and so more than is read', async () => {
+    const big = objectStreamPdf(900);
+    expect(await countPdfPages(big, { unpack: 1024 })).toBe(Infinity);
+    expect(await countPdfPages(big)).toBe(900);
     expect(COUNT_BUDGET_BYTES).toBe(32 * 1024 * 1024);
-    // A stream that is not one this can unpack is passed over: the PDF is counted by what else it holds.
-    expect(countPdfPages(Buffer.from('%PDF-1.5\n<< /Type /ObjStm >>\nstream\nthis is not deflate\nendstream\n<< /Type /Page >>', 'latin1'))).toBe(1);
+    // The budget is for all of a PDF's object streams together: every one that is opened is held to what is left of it.
+    const each = 300 * '<< /Type /Page /Parent 2 0 R >>\n'.length - 1;
+    const two = Buffer.concat([objectStreamPdf(300), objectStreamPdf(300).subarray(9)]);
+    expect(await countPdfPages(two, { unpack: 2 * each })).toBe(600);
+    expect(await countPdfPages(two, { unpack: 2 * each - 1 })).toBe(Infinity);
+    expect(await countPdfPages(two, { unpack: each })).toBe(Infinity);
+    // Sixteen megabytes of nothing in a few kilobytes: said to be too much, and not unpacked past the budget.
+    const bomb = deflateSync(Buffer.alloc(16 * 1024 * 1024));
+    expect(bomb.length).toBeLessThan(20_000);
+    expect(await countPdfPages(Buffer.concat([latin(`%PDF-1.5\n<< /Type /ObjStm /Length ${bomb.length} >>\nstream\n`), bomb, latin('\nendstream')]), { unpack: 1024 * 1024 })).toBe(Infinity);
+  });
+
+  it('a stream that is not one this can unpack is passed over: the PDF is counted by what else it holds', async () => {
+    const tally = { searched: 0, opened: 0, yields: 0 };
+    // Not deflate at all: never handed to the unpacker.
+    expect(await countPdfPages(latin('%PDF-1.5\n<< /Type /ObjStm >>\nstream\nthis is not deflate\nendstream\n<< /Type /Page >>'), { tally })).toBe(1);
+    expect(tally.opened).toBe(0);
+    // It begins like deflate, and is not: the unpacker says so, and the count goes on.
+    expect(await countPdfPages(Buffer.concat([latin('%PDF-1.5\n<< /Type /ObjStm >>\nstream\n'), Buffer.from([0x78, 0x9c, 0xff, 0xff, 0xff, 0xff]), latin('\nendstream\n<< /Type /Page >>')]), { tally })).toBe(1);
+    expect(tally.opened).toBe(1);
+    // One that ends early is read as far as it goes.
+    const whole = deflateSync(latin('<< /Type /Page >>\n'.repeat(50) + Array.from({ length: 4000 }, (_, i) => `${i * 7919}`).join(' ')));
+    const half = whole.subarray(0, whole.length >> 1);
+    expect(await countPdfPages(Buffer.concat([latin('%PDF-1.5\n<< /Type /ObjStm >>\nstream\r\n'), half, latin('\nendstream')]))).toBe(50);
+    // What is inside a stream that was unpacked is not read a second time as the file's own, and an object stream inside one is not opened.
+    const inner = objectStreamPdf(3).subarray(9);
+    const outer = deflateSync(Buffer.concat([latin('<< /Type /Page >>'), inner]));
+    const nested = { searched: 0, opened: 0, yields: 0 };
+    expect(await countPdfPages(Buffer.concat([latin('%PDF-1.5\n<< /Type /ObjStm >>\nstream\n'), outer, latin('\nendstream')]), { tally: nested })).toBe(1);
+    expect(nested.opened).toBe(1);
+    // No `stream` after its dictionary, no line end after it, only the end of another object's stream, no `endstream`: left alone.
+    for (const not of ['<< /Type /ObjStm >>\n', '<< /Type /ObjStm >>\nstream', '<< /Type /ObjStm >>\nstreamX\nxx\nendstream', '<< /Type /ObjStm >>\nendstream\nxx\nendstream', '<< /Type /ObjStm >>\nstream\nxx\n']) {
+      const t = { searched: 0, opened: 0, yields: 0 };
+      expect(await countPdfPages(latin(`%PDF-1.5\n${not}<< /Type /Page >>`), { tally: t })).toBe(1);
+      expect(t.opened).toBe(0);
+    }
+  });
+
+  // A review (2026-10-13): the count ran on the event loop and looked from each object stream's marker to the end
+  // of the file. One megabyte of `/Type/ObjStm stream\nxx ` with no `endstream` held the whole server for 4.2
+  // seconds, two for 16.5: about seven minutes at the ten the reader takes. These are those files.
+  describe('what a count costs is bounded, whatever the bytes are', () => {
+    const MB = 1024 * 1024;
+    const repeated = (unit: string, bytes: number): Buffer => Buffer.concat([latin('%PDF-1.5\n'), latin(unit.repeat(Math.floor(bytes / unit.length)))]);
+    const noEnd = (bytes: number): Buffer => repeated('/Type/ObjStm stream\nxx ', bytes);
+    /** A bound for a count that takes a few milliseconds: generous enough for a busy Mac, and far under what it used to take. */
+    const SOON_MS = 3_000;
+    const counted = async (bytes: Uint8Array, limits: Parameters<typeof countPdfPages>[1] = {}) => {
+      const tally = { searched: 0, opened: 0, yields: 0 };
+      const began = performance.now();
+      const pages = await countPdfPages(bytes, { ...limits, tally });
+      return { pages, tally, ms: performance.now() - began };
+    };
+
+    it('the review’s files, one megabyte and two: counted in one pass, soon, and refused as more than will be counted', async () => {
+      for (const mb of [1, 2]) {
+        const file = noEnd(mb * MB);
+        const got = await counted(file);
+        expect(got.pages).toBe(Infinity);
+        expect(got.ms).toBeLessThan(SOON_MS);
+        // All the markers together: the look for a stream's start read the file's bytes once at most, and so did the
+        // look for its end. (It was once from every marker to the end of the file: thousands of times over.)
+        expect(got.tally.searched).toBeLessThanOrEqual(2 * file.length);
+        expect(got.tally.opened).toBe(0);
+      }
+    });
+
+    it('ten megabytes of the same is refused as soon, and no program is started for it', async () => {
+      const file = noEnd(MAX_PDF_BYTES);
+      expect(file.length).toBeGreaterThan(MAX_PDF_BYTES - 64);
+      const { run, runs } = standIn(() => ({ stdout: RECORDED }));
+      const tmp = scratch();
+      const reader = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp });
+      const began = performance.now();
+      expect(await reader.read(file)).toEqual({ ok: false, why: 'too_long' });
+      expect(performance.now() - began).toBeLessThan(SOON_MS);
+      expect(runs).toHaveLength(0);
+      expect(left(tmp)).toEqual([]);
+    });
+
+    it('more object streams than any PDF that is read has are more than will be counted', async () => {
+      expect(COUNT_STREAMS).toBe(4096);
+      const marker = '<< /Type /ObjStm >>\n';
+      expect(await countPdfPages(latin(marker.repeat(COUNT_STREAMS)))).toBe(0);
+      expect(await countPdfPages(latin(marker.repeat(COUNT_STREAMS + 1)))).toBe(Infinity);
+      expect(await countPdfPages(latin(marker.repeat(4)), { streams: 3 })).toBe(Infinity);
+      // (Counted whether or not they have a stream to open: that is what the review's files are.)
+      expect((await counted(repeated('/Type/ObjStm ', MB))).pages).toBe(Infinity);
+      expect((await counted(repeated('/Type/ObjStm stream\nxx endstream ', MB))).pages).toBe(Infinity);
+    });
+
+    it('with fewer markers than that, spread over megabytes, each byte is still looked at once: nothing is searched again', async () => {
+      const far = 'x'.repeat(1000);
+      const shapes: Array<[string, Buffer]> = [
+        ['every marker’s `stream` is the same one, at the very end', Buffer.concat([latin(`/Type/ObjStm ${far}`.repeat(4000)), latin('stream\nxx endstream')])],
+        ['every marker has a `stream`, and none has an end', latin(`/Type/ObjStm stream\n${far}`.repeat(4000))],
+        ['every marker has a stream of its own, of nothing', latin(`/Type/ObjStm stream\n${far}endstream `.repeat(4000))],
+        ['one stream, and every marker after it inside it', Buffer.concat([latin('/Type/ObjStm stream\n'), latin(`/Type/ObjStm stream\n${far}`.repeat(4000)), latin('endstream')])],
+      ];
+      for (const [what, file] of shapes) {
+        const got = await counted(file);
+        expect(got.pages, what).toBe(0);
+        expect(file.length, what).toBeGreaterThan(4_000_000);
+        expect(got.tally.searched, what).toBeLessThanOrEqual(2 * file.length);
+        expect(got.ms, what).toBeLessThan(SOON_MS);
+      }
+    });
+
+    // A clock the test moves: each look at it is a millisecond later. Nothing here depends on how fast this Mac is.
+    const ticking = (): (() => number) => {
+      let t = 0;
+      return () => t++;
+    };
+
+    it('it works a slice at a time and gives everything else a turn between slices; past its budget of work it stops', async () => {
+      expect(COUNT_SLICE_MS).toBe(8);
+      expect(COUNT_WORK_MS).toBe(2000);
+      const names = latin('/Tx '.repeat(256 * 400)); // the clock is looked at once for every 256 names
+      const whole = await counted(names, { now: ticking() });
+      expect(whole.pages).toBe(0);
+      // 400 looks at the clock, a millisecond apart: a turn is given each time eight have passed since the last.
+      expect(whole.tally.yields).toBeGreaterThanOrEqual(40);
+      expect(whole.tally.yields).toBeLessThanOrEqual(50);
+      expect((await counted(names, { now: ticking(), sliceMs: 2 })).tally.yields).toBeGreaterThan(whole.tally.yields * 2);
+      // The budget: 400 ms of work is more than 100 allows, and not more than 2,000 does.
+      expect((await counted(names, { now: ticking(), workMs: 100 })).pages).toBe(Infinity);
+      expect((await counted(names, { now: ticking(), workMs: 100 })).tally.yields).toBeLessThan(whole.tally.yields / 2);
+      // Unpacked object streams are looked through the same way, under the same budget.
+      const packed = deflateSync(names);
+      const inStream = Buffer.concat([latin('%PDF-1.5\n<< /Type /ObjStm >>\nstream\n'), packed, latin('\nendstream')]);
+      expect((await counted(inStream, { now: ticking() })).tally.yields).toBeGreaterThanOrEqual(40);
+      expect((await counted(inStream, { now: ticking(), workMs: 100 })).pages).toBe(Infinity);
+    });
+
+    it('while a long count is under way everything else is answered: a request to this process comes back before the count ends', async () => {
+      // A megabyte of names that are nearly `/Type`, by a clock that makes every look at it the end of a slice: thousands
+      // of turns for everything else, however fast this Mac is.
+      const file = latin('/T'.repeat(MB));
+      const server = createServer((_req, res) => res.end('{"status":"ok"}'));
+      await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+      try {
+        const port = (server.address() as { port: number }).port;
+        const order: string[] = [];
+        const count = counted(file, { now: ticking(), sliceMs: 1, workMs: Number.MAX_SAFE_INTEGER }).then((got) => (order.push('count'), got));
+        const health = Array.from({ length: 3 }, () => fetch(`http://127.0.0.1:${port}/health`).then(async (r) => (order.push('health'), r.json())));
+        expect(await Promise.all(health)).toEqual([{ status: 'ok' }, { status: 'ok' }, { status: 'ok' }]);
+        const got = await count;
+        expect(order).toEqual(['health', 'health', 'health', 'count']);
+        expect(got.pages).toBe(0);
+        expect(got.tally.yields).toBeGreaterThan(1000);
+      } finally {
+        await new Promise((r) => server.close(r));
+      }
+    });
+
+    it('a reader counts one PDF at a time, takes no more of them than it lets wait, and a read called off during its count starts no program', async () => {
+      const { run, runs } = standIn(() => ({ stdout: RECORDED }));
+      const tmp = scratch();
+      const reader = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp, atOnce: 1, waiting: 2, count: { sliceMs: 0 } });
+      // Each count gives a turn at every look at the clock, so all of these are asked for before the first is done.
+      const pdf = (i: number): Buffer => Buffer.concat([manyPages(3), latin(`%${i} ${'/Tx '.repeat(2000)}`)]);
+      const gone = new AbortController();
+      const reads = [reader.read(pdf(0)), reader.read(pdf(1), gone.signal), reader.read(pdf(2)), reader.read(pdf(3))];
+      gone.abort();
+      expect(await Promise.all(reads)).toEqual([expect.objectContaining({ ok: true }), { ok: false, why: 'failed' }, expect.objectContaining({ ok: true }), { ok: false, why: 'busy' }]);
+      expect(runs).toHaveLength(2);
+      // Its place is given back when a count ends.
+      expect((await reader.read(pdf(4))).ok).toBe(true);
+      expect(left(tmp)).toEqual([]);
+    });
   });
 
   it('a PDF with more pages than are read here is refused, and no program is run for it', async () => {
@@ -429,7 +669,7 @@ describe('what is refused before it is handed to a reader', () => {
     expect(await reader.read(manyPages(MAX_PDF_PAGES + 1))).toEqual({ ok: false, why: 'too_long' });
     expect(await reader.read(objectStreamPdf(MAX_PDF_PAGES + 1))).toEqual({ ok: false, why: 'too_long' });
     expect(runs).toHaveLength(0);
-    expect(readdirSync(tmp)).toEqual([]);
+    expect(left(tmp)).toEqual([]);
     // At the bound it is read.
     expect((await reader.read(manyPages(MAX_PDF_PAGES))).ok).toBe(true);
     expect(runs).toHaveLength(1);
@@ -468,17 +708,19 @@ describe('after a read runs out of time the reader is busy, and nothing is queue
   };
   const PDF = textPdf([['hello']]);
 
-  it('the read that timed out says it failed; every read after it is told "busy" at once, and no program is run for any of them', async () => {
+  const OTHER = textPdf([['another PDF']]);
+
+  it('the read that ran out of time says so; every read after it is told "busy" at once, and no program is run for any of them', async () => {
     const { reader, state, waits, tmp } = stuckable();
     expect(reader.stuck!()).toBe(false);
-    expect(await reader.read(PDF)).toEqual({ ok: false, why: 'failed' });
+    expect(await reader.read(PDF)).toEqual({ ok: false, why: 'too_slow' });
     expect(reader.stuck!()).toBe(true);
     expect(state.runs).toHaveLength(1);
-    for (let i = 0; i < 12; i++) expect(await reader.read(PDF)).toEqual({ ok: false, why: 'busy' });
+    for (let i = 0; i < 12; i++) expect(await reader.read(textPdf([[`another PDF, ${i}`]]))).toEqual({ ok: false, why: 'busy' });
     expect(state.runs).toHaveLength(1);
     // One try of Flint's own small PDF is waiting, and only one.
     expect(waits.map((w) => w.ms)).toEqual([PROBE_AFTER_MS]);
-    expect(readdirSync(tmp)).toEqual([]);
+    expect(left(tmp)).toEqual([]);
   });
 
   it('a small PDF of Flint’s own is tried, with a short wait of its own; while it does not come back the reader stays busy and tries again later', async () => {
@@ -491,7 +733,7 @@ describe('after a read runs out of time the reader is busy, and nothing is queue
     expect(state.runs[1]!.bytes).toBeLessThan(2000); // Flint's own page, not anything of Will's
     expect(waits[0]!.ms).toBe(PROBE_EVERY_MS);
     expect(reader.stuck!()).toBe(true);
-    expect(await reader.read(PDF)).toEqual({ ok: false, why: 'busy' });
+    expect(await reader.read(OTHER)).toEqual({ ok: false, why: 'busy' });
   });
 
   it('when the small PDF comes back the reader reads again, and nothing more is tried', async () => {
@@ -501,11 +743,11 @@ describe('after a read runs out of time the reader is busy, and nothing is queue
     waits.shift()!.fn();
     await expect.poll(() => reader.stuck!(), WAIT).toBe(false);
     expect(waits).toEqual([]);
-    expect((await reader.read(PDF)).ok).toBe(true);
+    expect((await reader.read(OTHER)).ok).toBe(true);
     expect(state.runs).toHaveLength(3);
   });
 
-  it('reads that were waiting their turn when it happened are told "busy" too: none of them is run', async () => {
+  it('reads that were waiting their turn when it happened are told "busy" too, and one of the same PDF that it is too slow: none of them is run', async () => {
     const tmp = scratch();
     const gates: Array<(v: 'timeout' | 'ok') => void> = [];
     let runs = 0;
@@ -516,13 +758,14 @@ describe('after a read runs out of time the reader is busy, and nothing is queue
       return { stdout: RECORDED, truncated: false };
     };
     const reader = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp, atOnce: 1, waiting: 4, later: () => {} });
-    const reads = [0, 1, 2].map(() => reader.read(PDF));
+    const reads = [PDF, OTHER, textPdf([['a third']]), Buffer.from(PDF)].map((pdf) => reader.read(pdf));
     await expect.poll(() => gates.length, WAIT).toBe(1);
     gates[0]!('timeout');
     expect(await Promise.all(reads)).toEqual([
-      { ok: false, why: 'failed' },
+      { ok: false, why: 'too_slow' },
       { ok: false, why: 'busy' },
       { ok: false, why: 'busy' },
+      { ok: false, why: 'too_slow' },
     ]);
     expect(runs).toBe(1);
   });
@@ -548,6 +791,113 @@ describe('after a read runs out of time the reader is busy, and nothing is queue
   });
 });
 
+// A review (2026-10-13): the same heavy PDF sent a second time started the same minutes of work in macOS's services
+// a second time. The reader remembers what ran out of time, by a digest of its bytes, for a few hours.
+describe('a PDF whose read ran out of time is remembered, and not handed to the Mac again for a few hours', () => {
+  const HEAVY = textPdf([['a PDF the Mac takes minutes over: HEAVYQ']]);
+  const OTHER = textPdf([['another PDF']]);
+  /** A reader whose program runs out of time on any PDF `heavy` says is one, with a clock and a "later" the test runs. */
+  const forgetful = (heavy: (bytes: Buffer) => boolean = (b) => b.includes('HEAVYQ')) => {
+    const tmp = scratch();
+    const clock = { t: 1_000_000 };
+    const runs: number[] = [];
+    const waits: Array<() => void> = [];
+    const run: RunProgram = async (_p, args) => {
+      const bytes = readFileSync(args.find((a) => a.endsWith('doc.pdf'))!);
+      runs.push(bytes.length);
+      if (heavy(bytes)) throw new ReadTimedOut();
+      return { stdout: RECORDED, truncated: false };
+    };
+    const reader = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp, now: () => clock.t, later: (fn) => void waits.push(fn) });
+    /** Flint's own small PDF comes back: the reader reads again. */
+    const unstick = async (): Promise<void> => {
+      waits.shift()!();
+      await expect.poll(() => reader.stuck!(), WAIT).toBe(false);
+    };
+    return { reader, runs, clock, unstick, waits, tmp };
+  };
+
+  it('the same PDF sent again is refused at once, with no program run and no new wait; any other PDF is read', async () => {
+    const { reader, runs, unstick, tmp } = forgetful();
+    expect(reader.slow!()).toBe(0);
+    expect(await reader.read(HEAVY)).toEqual({ ok: false, why: 'too_slow' });
+    expect(reader.slow!()).toBe(1);
+    await unstick();
+    const before = runs.length;
+    // The same bytes, however they are held: a copy, and a view into the middle of something larger.
+    expect(await reader.read(Buffer.from(HEAVY))).toEqual({ ok: false, why: 'too_slow' });
+    const within = Buffer.concat([Buffer.from('xxxxx'), HEAVY, Buffer.from('yyy')]);
+    expect(await reader.read(new Uint8Array(within.buffer, within.byteOffset + 5, HEAVY.length))).toEqual({ ok: false, why: 'too_slow' });
+    expect(runs).toHaveLength(before);
+    expect(reader.stuck!()).toBe(false);
+    expect(reader.slow!()).toBe(1);
+    expect((await reader.read(OTHER)).ok).toBe(true);
+    expect(runs).toHaveLength(before + 1);
+    expect(left(tmp)).toEqual([]);
+  });
+
+  it('for three hours by the reader’s clock; then it is tried once more, and remembered again if it runs out of time again', async () => {
+    const { reader, runs, clock, unstick } = forgetful();
+    expect(SLOW_FOR_MS).toBe(3 * 60 * 60 * 1000);
+    await reader.read(HEAVY);
+    await unstick();
+    const before = runs.length;
+    clock.t += SLOW_FOR_MS - 1;
+    expect(await reader.read(HEAVY)).toEqual({ ok: false, why: 'too_slow' });
+    expect(runs).toHaveLength(before);
+    clock.t += 1;
+    expect(await reader.read(HEAVY)).toEqual({ ok: false, why: 'too_slow' }); // tried: the program ran, and ran out of time
+    expect(runs).toHaveLength(before + 1);
+    expect(reader.slow!()).toBe(1);
+    await unstick();
+    clock.t += SLOW_FOR_MS - 1;
+    expect(await reader.read(HEAVY)).toEqual({ ok: false, why: 'too_slow' });
+    expect(runs).toHaveLength(before + 2); // (+1: Flint's own small PDF)
+    // Forgotten when its time is up, whatever is asked for next.
+    clock.t += 1;
+    expect((await reader.read(OTHER)).ok).toBe(true);
+    expect(reader.slow!()).toBe(0);
+  });
+
+  it('a bounded list: with more of them than it holds, the oldest is forgotten first', async () => {
+    const { reader, runs, unstick } = forgetful();
+    expect(SLOW_REMEMBERED).toBe(64);
+    const heavy = (i: number): Buffer => textPdf([[`HEAVYQ number ${i}`]]);
+    for (let i = 0; i <= SLOW_REMEMBERED; i++) {
+      expect(await reader.read(heavy(i))).toEqual({ ok: false, why: 'too_slow' });
+      await unstick();
+    }
+    expect(reader.slow!()).toBe(SLOW_REMEMBERED);
+    const before = runs.length;
+    expect(await reader.read(heavy(1))).toEqual({ ok: false, why: 'too_slow' });
+    expect(await reader.read(heavy(SLOW_REMEMBERED))).toEqual({ ok: false, why: 'too_slow' });
+    expect(runs).toHaveLength(before);
+    // The first of them was let go: it is handed over again (and runs out of time again).
+    expect(await reader.read(heavy(0))).toEqual({ ok: false, why: 'too_slow' });
+    expect(runs).toHaveLength(before + 1);
+    expect(reader.slow!()).toBe(SLOW_REMEMBERED);
+  });
+
+  it('only a PDF someone sent, and only one that ran out of time: not Flint’s own small PDF, not a read that failed some other way', async () => {
+    // Everything runs out of time, Flint's own small PDF too.
+    const all = forgetful(() => true);
+    await all.reader.read(OTHER);
+    expect(all.reader.slow!()).toBe(1);
+    all.waits.shift()!();
+    await expect.poll(() => all.waits.length, WAIT).toBe(1); // tried, ran out of time, and to be tried again later
+    expect(all.runs).toHaveLength(2);
+    expect(all.reader.stuck!()).toBe(true);
+    expect(all.reader.slow!()).toBe(1);
+    all.reader.close!();
+    // A read that fails is tried again the next time.
+    let n = 0;
+    const failing = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { tmp: scratch(), later: () => {}, run: async () => (n++ === 0 ? Promise.reject(new Error('the reader failed')) : { stdout: RECORDED, truncated: false }) });
+    expect(await failing.read(HEAVY)).toEqual({ ok: false, why: 'failed' });
+    expect(failing.slow!()).toBe(0);
+    expect((await failing.read(HEAVY)).ok).toBe(true);
+  });
+});
+
 describe('a read under way when the process is stopped', () => {
   it('its folder is removed, and its program ended, as the process exits: what `finally` cannot do then', async () => {
     const tmp = scratch();
@@ -563,10 +913,10 @@ describe('a read under way when the process is stopped', () => {
     // What the process's exit hook runs (index.ts turns SIGTERM and SIGINT into an exit).
     endReadsNow();
     expect(existsSync(folder)).toBe(false);
-    expect(readdirSync(tmp)).toEqual([]);
+    expect(left(tmp)).toEqual([]);
     release();
     await pending;
-    expect(readdirSync(tmp)).toEqual([]);
+    expect(left(tmp)).toEqual([]);
     // The hook is one listener for the process, however many readers were made.
     expect(process.listeners('exit').filter((l) => l === endReadsNow)).toHaveLength(1);
   });
@@ -594,12 +944,12 @@ describe('a read under way when the process is stopped', () => {
 });
 
 describe('a folder a crash left behind', () => {
-  it('is removed once it is older than any read, by its name, and nothing else in the temp folder is touched', async () => {
-    const tmp = scratch();
-    const old = join(tmp, `${FOLDER_PREFIX}old`);
-    const fresh = join(tmp, `${FOLDER_PREFIX}fresh`);
-    const other = join(tmp, 'someone-elses');
-    const file = join(tmp, `${FOLDER_PREFIX}a-file`);
+  it('is removed once it is older than any read, by its name, and nothing else is touched', async () => {
+    const [tmp, mine] = withReadsFolder();
+    const old = join(mine, `${FOLDER_PREFIX}old`);
+    const fresh = join(mine, `${FOLDER_PREFIX}fresh`);
+    const other = join(mine, 'someone-elses');
+    const file = join(mine, `${FOLDER_PREFIX}a-file`);
     for (const d of [old, fresh, other]) mkdirSync(join(d, 'read.noindex'), { recursive: true });
     writeFileSync(join(old, 'read.noindex', 'doc.pdf'), 'left behind');
     writeFileSync(file, 'not a folder');
@@ -609,7 +959,48 @@ describe('a folder a crash left behind', () => {
     utimesSync(other, before, before);
     utimesSync(file, before, before);
     expect(await sweepLeftovers(tmp, now)).toBe(1);
-    expect(readdirSync(tmp).sort()).toEqual([`${FOLDER_PREFIX}a-file`, `${FOLDER_PREFIX}fresh`, 'someone-elses'].sort());
+    expect(readdirSync(mine).sort()).toEqual([`${FOLDER_PREFIX}a-file`, `${FOLDER_PREFIX}fresh`, 'someone-elses'].sort());
+  });
+
+  // Each read used to list the whole temp folder to find what was left (a review: about 91,000 folders of other
+  // programs' on this Mac, 50 ms a read). Only Flint's own folder is listed, and only what is in it can be removed.
+  it('only Flint’s own folder is looked in: a folder by that name anywhere else under the temp folder is not Flint’s to remove', async () => {
+    const [tmp, mine] = withReadsFolder();
+    const GONE = 4_000_001;
+    const beside = join(tmp, `${FOLDER_PREFIX}${GONE}-AbCdEf`);
+    const inside = join(mine, `${FOLDER_PREFIX}${GONE}-AbCdEf`);
+    for (const d of [beside, inside]) mkdirSync(join(d, 'read.noindex'), { recursive: true });
+    const before = new Date(Date.now() - LEFTOVER_AFTER_MS - 1000);
+    utimesSync(beside, before, before);
+    expect(await sweepLeftovers(tmp, Date.now(), () => false)).toBe(1);
+    expect(sweepLeftoversNow(tmp, Date.now(), () => false)).toBe(0);
+    expect(readdirSync(tmp).sort()).toEqual([FOLDER_PARENT, `${FOLDER_PREFIX}${GONE}-AbCdEf`].sort());
+    expect(readdirSync(mine)).toEqual([]);
+  });
+
+  it('Flint’s folder is made this user’s alone, and put right if it was opened up; a link or a file by its name is not used, and nothing is read', async () => {
+    const tmp = scratch();
+    expect(ownReadsFolder(tmp)).toBe(join(tmp, FOLDER_PARENT));
+    expect(statSync(join(tmp, FOLDER_PARENT)).mode & 0o777).toBe(0o700);
+    chmodSync(join(tmp, FOLDER_PARENT), 0o755);
+    expect(ownReadsFolder(tmp)).toBe(join(tmp, FOLDER_PARENT));
+    expect(statSync(join(tmp, FOLDER_PARENT)).mode & 0o777).toBe(0o700);
+    // A link where the folder should be: someone else's doing. It is not followed, to read in or to sweep.
+    for (const plant of ['link', 'file'] as const) {
+      const bad = scratch();
+      const target = join(bad, 'elsewhere');
+      mkdirSync(join(target, `${FOLDER_PREFIX}4000001-AbCdEf`), { recursive: true });
+      if (plant === 'link') symlinkSync(target, join(bad, FOLDER_PARENT));
+      else writeFileSync(join(bad, FOLDER_PARENT), 'not a folder');
+      expect(ownReadsFolder(bad)).toBeUndefined();
+      let runs = 0;
+      const reader = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { tmp: bad, running: () => false, run: async () => (runs++, { stdout: RECORDED, truncated: false }) });
+      expect(await reader.read(textPdf([['hello']]))).toEqual({ ok: false, why: 'failed' });
+      expect(runs).toBe(0);
+      expect(await sweepLeftovers(bad, Date.now(), () => false)).toBe(0);
+      expect(sweepLeftoversNow(bad, Date.now(), () => false)).toBe(0);
+      expect(readdirSync(target)).toEqual([`${FOLDER_PREFIX}4000001-AbCdEf`]);
+    }
   });
 
   it('a temp folder that is not there is nothing to sweep', async () => {
@@ -621,13 +1012,13 @@ describe('a folder a crash left behind', () => {
   // younger than ten minutes. A folder's name now says who made it.
   it('one made by a process that is gone is removed at once, whatever its age; one made by a process still running is left until it is old', async () => {
     for (const sweep of [(tmp: string, now: number, running: (pid: number) => boolean) => sweepLeftovers(tmp, now, running), async (tmp: string, now: number, running: (pid: number) => boolean) => sweepLeftoversNow(tmp, now, running)]) {
-      const tmp = scratch();
+      const [tmp, own] = withReadsFolder();
       const GONE = 4_000_001;
       const ALIVE = 4_000_002;
-      const gone = join(tmp, `${FOLDER_PREFIX}${GONE}-AbCdEf`);
-      const alive = join(tmp, `${FOLDER_PREFIX}${ALIVE}-AbCdEf`);
-      const aliveOld = join(tmp, `${FOLDER_PREFIX}${ALIVE}-GhIjKl`);
-      const mine = join(tmp, `${FOLDER_PREFIX}${process.pid}-MnOpQr`);
+      const gone = join(own, `${FOLDER_PREFIX}${GONE}-AbCdEf`);
+      const alive = join(own, `${FOLDER_PREFIX}${ALIVE}-AbCdEf`);
+      const aliveOld = join(own, `${FOLDER_PREFIX}${ALIVE}-GhIjKl`);
+      const mine = join(own, `${FOLDER_PREFIX}${process.pid}-MnOpQr`);
       for (const d of [gone, alive, aliveOld, mine]) {
         mkdirSync(join(d, 'read.noindex'), { recursive: true });
         writeFileSync(join(d, 'read.noindex', 'doc.pdf'), 'a PDF left behind');
@@ -637,34 +1028,34 @@ describe('a folder a crash left behind', () => {
       utimesSync(aliveOld, before, before);
       // (`mine`: this process's own, and not a read under way: a leftover of a failed removal.)
       expect(await sweep(tmp, now, (pid) => pid === ALIVE)).toBe(3);
-      expect(readdirSync(tmp)).toEqual([`${FOLDER_PREFIX}${ALIVE}-AbCdEf`]);
+      expect(readdirSync(own)).toEqual([`${FOLDER_PREFIX}${ALIVE}-AbCdEf`]);
     }
   });
 
   it('a link by that name is not a folder this made: it is left, and so is what it points at', async () => {
-    const tmp = scratch();
+    const [tmp, mine] = withReadsFolder();
     const target = join(tmp, 'precious');
     mkdirSync(target);
     writeFileSync(join(target, 'keep.txt'), 'keep');
-    const link = join(tmp, `${FOLDER_PREFIX}4000001-AbCdEf`);
+    const link = join(mine, `${FOLDER_PREFIX}4000001-AbCdEf`);
     symlinkSync(target, link);
     const before = new Date(Date.now() - LEFTOVER_AFTER_MS - 1000);
     utimesSync(target, before, before);
     expect(await sweepLeftovers(tmp, Date.now(), () => false)).toBe(0);
     expect(sweepLeftoversNow(tmp, Date.now(), () => false)).toBe(0);
     expect(existsSync(join(target, 'keep.txt'))).toBe(true);
-    expect(readdirSync(tmp).sort()).toEqual([`${FOLDER_PREFIX}4000001-AbCdEf`, 'precious']);
+    expect(readdirSync(mine)).toEqual([`${FOLDER_PREFIX}4000001-AbCdEf`]);
   });
 
   it('every read sweeps first: what a killed process left is gone by the time the next PDF is read, with no restart', async () => {
-    const tmp = scratch();
+    const [tmp, mine] = withReadsFolder();
     const run: RunProgram = async () => ({ stdout: RECORDED, truncated: false });
     const reader = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp, running: () => false });
-    const left = join(tmp, `${FOLDER_PREFIX}4000001-AbCdEf`);
-    mkdirSync(join(left, 'read.noindex'), { recursive: true });
-    writeFileSync(join(left, 'read.noindex', 'doc.pdf'), 'a PDF left behind');
+    const stale = join(mine, `${FOLDER_PREFIX}4000001-AbCdEf`);
+    mkdirSync(join(stale, 'read.noindex'), { recursive: true });
+    writeFileSync(join(stale, 'read.noindex', 'doc.pdf'), 'a PDF left behind');
     expect((await reader.read(textPdf([['hello']]))).ok).toBe(true);
-    expect(readdirSync(tmp)).toEqual([]);
+    expect(left(tmp)).toEqual([]);
   });
 
   it('a read under way in this process is never swept, by this reader or another', async () => {
@@ -684,12 +1075,12 @@ describe('a folder a crash left behind', () => {
     expect(existsSync(join(inFlight, 'doc.pdf'))).toBe(true);
     release();
     expect((await first).ok).toBe(true);
-    expect(readdirSync(tmp)).toEqual([]);
+    expect(left(tmp)).toEqual([]);
   });
 
   it('making a reader sweeps', async () => {
-    const tmp = scratch();
-    const old = join(tmp, `${FOLDER_PREFIX}old`);
+    const [tmp, mine] = withReadsFolder();
+    const old = join(mine, `${FOLDER_PREFIX}old`);
     mkdirSync(old);
     const before = new Date(Date.now() - LEFTOVER_AFTER_MS - 1000);
     utimesSync(old, before, before);

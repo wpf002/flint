@@ -8,9 +8,9 @@
  * program is running, and waits. What the test then checks is what is left on
  * disk, and what is left running, after it has been stopped.
  */
-import { readdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { makePdfReader } from '../../src/pdf-text';
+import { makePdfReader, readsFolder } from '../../src/pdf-text';
 import { textPdf } from '../../src/synthetic-files';
 
 const tmp = process.env.READER_TMP!;
@@ -22,9 +22,10 @@ const reader = makePdfReader({ reader: 'pdftotext', program }, { tmp });
 void reader.read(textPdf([['A PDF that is being read when Flint is stopped: KEPTONDISKQ8.']]));
 const started = Date.now();
 const timer = setInterval(() => {
-  const folders = readdirSync(tmp).filter((n) => n.startsWith('flint-pdf-'));
+  // (Every read's folder is in Flint's own folder under the temp folder: ../../src/pdf-text readsFolder.)
+  const folders = existsSync(readsFolder(tmp)) ? readdirSync(readsFolder(tmp)) : [];
   const folder = folders[0];
-  if (folder && readdirSync(join(tmp, folder, 'read.noindex')).includes('started')) {
+  if (folder && readdirSync(join(readsFolder(tmp), folder, 'read.noindex')).includes('started')) {
     clearInterval(timer);
     console.log(`READING ${folder}`);
     // Stay alive, as a server does, until it is told to stop.

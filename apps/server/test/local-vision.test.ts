@@ -470,7 +470,7 @@ describe('each reason a PDF was not read reaches Will as its own sentence', () =
     const reader = standInReader({ big: { ok: false, why: 'too_big' }, long: { ok: false, why: 'too_long' }, busy: { ok: false, why: 'busy' } });
     const { inference } = await boot({ [MAIN]: { loaded: true, contextLength: 16384, capabilities: BLIND }, [EMBED]: {} }, { FLINT_LOCAL_PDF: 'spotlight', FLINT_INFERENCE_MODE: 'local' }, { reader });
     expect(await inference.routeFirst(ask({ files: [pdf('b.pdf', 'big')] }))).toEqual({ error: 'This PDF is larger than the 10 MB Flint reads on this Mac, and Local mode never uses the cloud. Send a smaller part of it, or its text.', status: 422 });
-    expect(await inference.routeFirst(ask({ files: [pdf('l.pdf', 'long')] }))).toEqual({ error: 'This PDF has more than the 1,000 pages Flint reads on this Mac, and Local mode never uses the cloud. Send a smaller part of it, or its text.', status: 422 });
+    expect(await inference.routeFirst(ask({ files: [pdf('l.pdf', 'long')] }))).toEqual({ error: 'This PDF looks like it has more than the 1,000 pages Flint reads on this Mac, and Local mode never uses the cloud. Send a smaller part of it, or its text.', status: 422 });
     expect(await inference.routeFirst(ask({ files: [pdf('z.pdf', 'busy')] }))).toEqual({ error: "Flint's PDF reader on this Mac is busy right now, and Local mode never uses the cloud. Try again in a moment.", status: 422 });
     inference.mode.set('cloud', 'console');
     expect(await inference.routeFirst(ask({ files: [pdf('z.pdf', 'busy')], localOnly: true }))).toEqual({ error: "Local-only is on, and Flint's PDF reader on this Mac is busy right now. Try again in a moment.", status: 422 });

@@ -52,11 +52,13 @@
  * Kept free of index.ts so it is unit-testable (index.ts runs main() on import).
  */
 import { spawn } from 'node:child_process';
-import { lstatSync, readdirSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, lstatSync, mkdirSync, readdirSync, rmSync, type Stats } from 'node:fs';
 import { lstat, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { constants as zlib, inflateSync } from 'node:zlib';
+import { promisify } from 'node:util';
+import { constants as zlib, inflate } from 'node:zlib';
 import type { PdfReaderKind } from './inference-config';
 import { MAX_PDF_BYTES, MAX_PDF_PAGES } from './pdf-limits';
 import { textPdf } from './synthetic-files';
@@ -65,7 +67,10 @@ import { textPdf } from './synthetic-files';
  * What a read gives.
  *   no_text    the PDF was read and carries no text (a scan);
  *   too_big    it is over MAX_PDF_BYTES, and was not handed to the reader;
- *   too_long   it has more than MAX_PDF_PAGES pages, and was not handed over;
+ *   too_long   it looks to have more than MAX_PDF_PAGES pages (or more than
+ *              will be counted), and was not handed over;
+ *   too_slow   reading it ran out of time: this read, or one of the same PDF
+ *              in the last few hours, after which it is not handed over again;
  *   busy       too many reads at once, or the reader is waiting for the Mac to
  *              finish with a PDF Flint stopped waiting for;
  *   failed     the program did not answer.
@@ -80,7 +85,7 @@ export type PdfText =
       /** How many pages it has, when the reader says. */
       pages?: number;
     }
-  | { ok: false; why: 'no_text' | 'too_big' | 'too_long' | 'busy' | 'failed' };
+  | { ok: false; why: 'no_text' | 'too_big' | 'too_long' | 'too_slow' | 'busy' | 'failed' };
 
 /** The most text kept from one PDF. More than any local model's window holds, and a bound on what a read costs. */
 export const MAX_TEXT_CHARS = 1_000_000;
@@ -91,7 +96,9 @@ export const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 /** Reads that run at once, and how many more may wait their turn. One past that is `busy`. */
 export const READS_AT_ONCE = 2;
 export const READS_WAITING = 8;
-/** The temp folders are named with this and the pid of the process that made them, so a leftover can be told from anything else there. */
+/** Every read's folder is made in this one folder under the temp folder: Flint's own (0700), so what is left of a read is looked for there and nowhere else. */
+export const FOLDER_PARENT = 'flint-pdf';
+/** The folders in it are named with this and the pid of the process that made them, so it can be told whose a leftover is. */
 export const FOLDER_PREFIX = 'flint-pdf-';
 /** A folder whose maker cannot be told to be gone is removed once it is this old: far longer than any read may take. */
 export const LEFTOVER_AFTER_MS = 10 * 60 * 1000;
@@ -99,8 +106,19 @@ export const LEFTOVER_AFTER_MS = 10 * 60 * 1000;
 export const PROBE_AFTER_MS = 5_000;
 export const PROBE_EVERY_MS = 15_000;
 export const PROBE_TIMEOUT_MS = 5_000;
-/** The most a PDF's object streams may unpack to while its pages are counted. Past it the PDF is too much to count, and is refused. */
+/** A PDF whose read ran out of time is remembered (by a digest of its bytes) for this long, and this many of them at most: the oldest goes first. */
+export const SLOW_FOR_MS = 3 * 60 * 60 * 1000;
+export const SLOW_REMEMBERED = 64;
+/**
+ * What counting a PDF's pages may cost (`countPdfPages`). Past any of these the PDF is more than will be counted, and
+ * is refused: what its object streams unpack to in all; how many object streams it has (a 1,000-page PDF has a few
+ * hundred at most); how long the count works in all (ten megabytes take a small fraction of this); and how long it
+ * works at a time before everything else here gets a turn.
+ */
 export const COUNT_BUDGET_BYTES = 32 * 1024 * 1024;
+export const COUNT_STREAMS = 4_096;
+export const COUNT_WORK_MS = 2_000;
+export const COUNT_SLICE_MS = 8;
 
 /**
  * Each reader's arguments, for a file at `file`. Fixed: the path is the only
@@ -207,53 +225,177 @@ export const runProgram: RunProgram = (program, args, opts) =>
 // ---------------------------------------------------------------------------
 // how many pages, by a look at the bytes
 
-const PAGE_OBJECT = /\/Type\s*\/Page(?![A-Za-z])/g;
-const PAGE_COUNT = /\/Count\s+(\d{1,12})(?!\d)/g;
-const OBJECT_STREAM = /\/Type\s*\/ObjStm/g;
+/** What a count may cost. Past any of these the PDF is more than will be counted, and that is refused like too many pages. */
+export interface CountLimits {
+  /** The most its object streams may unpack to, in all. */
+  unpack?: number;
+  /** The most object streams looked at. */
+  streams?: number;
+  /** The most time the count may work, in all: its own work, not the turns it gave everything else. */
+  workMs?: number;
+  /** The longest it works before everything else here gets a turn. */
+  sliceMs?: number;
+  /** The count stops once it is past this: the answer is known. */
+  stopAfter?: number;
+  now?: () => number;
+  /** What the count did, for tests: bytes searched for a stream's start and end, streams unpacked, turns given. */
+  tally?: { searched: number; opened: number; yields: number };
+}
 
-function pagesIn(text: string): number {
-  let objects = 0;
-  for (const _ of text.matchAll(PAGE_OBJECT)) objects++;
-  let said = 0;
-  for (const m of text.matchAll(PAGE_COUNT)) said = Math.max(said, Number(m[1]));
-  return Math.max(objects, said);
+const SLASH = 0x2f;
+const HASH = 0x23;
+const isSpace = (c: number | undefined): boolean => c === 0x20 || c === 0x0a || c === 0x0d || c === 0x09 || c === 0x0c || c === 0x00;
+/** What ends a name, besides white space: / ( ) < > [ ] { } % */
+const ENDS_NAME = new Set([0x2f, 0x28, 0x29, 0x3c, 0x3e, 0x5b, 0x5d, 0x7b, 0x7d, 0x25]);
+const hex = (c: number | undefined): number => (c === undefined ? -1 : c >= 0x30 && c <= 0x39 ? c - 0x30 : (c | 0x20) >= 0x61 && (c | 0x20) <= 0x66 ? (c | 0x20) - 0x57 : -1);
+/** No name looked for is longer than this (`ObjStm`); a longer one is not read to its end. */
+const LONGEST_NAME = 6;
+/** How much white space may stand between `/Type` and its value, and how far after an object stream's `/Type` its `stream` may begin. */
+const MOST_SPACE = 256;
+const DICT_WINDOW = 4096;
+
+/** The name that begins with the `/` at `at`, its `#xx` escapes decoded (`/P#61ge` is `/Page`), and where the look at it ended. */
+function nameAt(buf: Buffer, at: number): { name: string; end: number } {
+  let name = '';
+  let i = at + 1;
+  for (; i < buf.length && name.length <= LONGEST_NAME; i++) {
+    let c = buf[i]!;
+    if (isSpace(c) || ENDS_NAME.has(c)) break;
+    const high = c === HASH ? hex(buf[i + 1]) : -1;
+    const low = high === -1 ? -1 : hex(buf[i + 2]);
+    if (low !== -1) {
+      c = high * 16 + low;
+      i += 2;
+    }
+    name += String.fromCharCode(c);
+  }
+  return { name, end: i };
 }
 
 /**
- * How many pages a PDF has, as near as a look at its bytes can tell, without
- * handing it to anything: the page objects it holds, and the largest count a
- * page tree gives. A modern PDF keeps its objects in compressed object
- * streams, so those are unpacked and looked at too, within `budget` bytes in
- * all. Infinity when they unpack to more than that: too much to count is too
- * much to read.
- *
- * It errs high on purpose (a count in an outline is taken for pages): this
- * only decides what is refused before the Mac is asked to work on it.
+ * Where `needle` next begins at or after `from` and before `from + window`, or
+ * -1. `from` never goes back over a count, and what was searched is never
+ * searched again: all the calls together read the bytes once.
  */
-export function countPdfPages(bytes: Uint8Array, budget: number = COUNT_BUDGET_BYTES): number {
-  const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const text = buf.toString('latin1');
-  let most = pagesIn(text);
-  let left = budget;
-  for (const m of text.matchAll(OBJECT_STREAM)) {
-    const at = text.indexOf('stream', m.index);
-    if (at === -1) continue;
-    const from = text[at + 6] === '\r' && text[at + 7] === '\n' ? at + 8 : text[at + 6] === '\n' ? at + 7 : -1;
-    if (from === -1) continue;
-    const end = text.indexOf('endstream', from);
-    let unpacked: Buffer;
-    try {
-      // (Whatever unpacks is looked at: a stream that ends early is read as far as it goes.)
-      unpacked = inflateSync(buf.subarray(from, end === -1 ? buf.length : end), { maxOutputLength: Math.max(1, left), finishFlush: zlib.Z_SYNC_FLUSH });
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ERR_BUFFER_TOO_LARGE') return Infinity;
-      continue; // not a stream this can unpack: its pages, if any, are not counted
+function finder(buf: Buffer, needle: string, tally: { searched: number }): (from: number, window: number) => number {
+  let hit = -1; // found earlier, and maybe still ahead
+  let clear = 0; // nothing begins before here that a later call could want, but `hit`
+  return (from, window) => {
+    const end = Math.min(buf.length, from + window);
+    if (hit >= from) return hit < end ? hit : -1;
+    const start = Math.max(from, clear);
+    if (start >= end) return -1;
+    const i = buf.subarray(start, Math.min(buf.length, end + needle.length - 1)).indexOf(needle, 0, 'latin1');
+    tally.searched += i === -1 ? end - start : i + needle.length;
+    if (i === -1) {
+      clear = end;
+      return -1;
     }
-    left -= unpacked.length;
-    most = Math.max(most, pagesIn(unpacked.toString('latin1')));
-    if (left <= 0) return Infinity;
-  }
-  return most;
+    hit = start + i;
+    clear = hit + 1;
+    return hit;
+  };
+}
+
+const unpackStream = promisify(inflate);
+/** Does this begin like a deflate stream (RFC 1950's two bytes)? Anything else is not handed to the unpacker. */
+const looksDeflated = (b: Buffer): boolean => b.length > 2 && (b[0]! & 0x0f) === 8 && ((b[0]! << 8) | b[1]!) % 31 === 0;
+
+/**
+ * How many pages a PDF looks to have, by its own bytes, without handing it to
+ * anything: the page objects in it (`/Type /Page`, with a name's escapes
+ * decoded), in the file and in its object streams, which a modern PDF keeps
+ * its objects in and which are unpacked for the look. Infinity when it is more
+ * than will be counted: its object streams unpack past `unpack` bytes in all,
+ * there are more of them than `streams`, or the count worked longer than
+ * `workMs`.
+ *
+ * A COURTESY, NOT A GUARD. It spares the Mac a PDF that says plainly how long
+ * it is. A PDF made to hide its pages gets past it (page objects behind a
+ * filter this does not undo, or written some way a reader accepts and this
+ * does not), and it can count high (the words `/Type /Page` in a page's own
+ * text). What bounds a PDF that gets past it is the reader's deadline and what
+ * follows one (see the header).
+ *
+ * WHAT IT COSTS IS BOUNDED, whatever the bytes are. It goes over the file
+ * once and never back: a stream's start and end are each looked for once
+ * (`finder`), a stream that was unpacked is stepped over, and one with no end
+ * is left alone. It never holds the event loop for longer than a slice
+ * (`sliceMs`): it gives everything else a turn between slices, and unpacking
+ * is done off the loop.
+ */
+export async function countPdfPages(bytes: Uint8Array, limits: CountLimits = {}): Promise<number> {
+  const top = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const now = limits.now ?? performance.now.bind(performance);
+  const tally = limits.tally ?? { searched: 0, opened: 0, yields: 0 };
+  const stopAfter = limits.stopAfter ?? MAX_PDF_PAGES;
+  const sliceMs = limits.sliceMs ?? COUNT_SLICE_MS;
+  const workMs = limits.workMs ?? COUNT_WORK_MS;
+  const mostStreams = limits.streams ?? COUNT_STREAMS;
+  let left = limits.unpack ?? COUNT_BUDGET_BYTES;
+  let pages = 0;
+  let streams = 0;
+  let spent = 0;
+  let since = now();
+  /** A turn for everything else when a slice is used up. False: the count has worked as long as it may. */
+  const breathe = async (): Promise<boolean> => {
+    const t = now();
+    if (t - since < sliceMs) return true;
+    spent += t - since;
+    if (spent > workMs) return false;
+    tally.yields++;
+    await new Promise<void>((r) => setImmediate(r));
+    since = now();
+    return true;
+  };
+  /** Count the page objects in `buf`. False: more than will be counted. */
+  const look = async (buf: Buffer, file: boolean): Promise<boolean> => {
+    const streamAt = finder(buf, 'stream', tally);
+    const endAt = finder(buf, 'endstream', tally);
+    let names = 0;
+    for (let at = buf.indexOf(SLASH); at !== -1 && pages <= stopAfter; at = buf.indexOf(SLASH, at)) {
+      if ((++names & 255) === 0 && !(await breathe())) return false;
+      if (buf[at + 1] !== 0x54 /* T */ && buf[at + 1] !== HASH) {
+        at++;
+        continue;
+      }
+      const key = nameAt(buf, at);
+      at = key.end;
+      if (key.name !== 'Type') continue;
+      for (const stop = Math.min(buf.length, at + MOST_SPACE); at < stop && isSpace(buf[at]); ) at++;
+      if (buf[at] !== SLASH) continue;
+      const value = nameAt(buf, at);
+      at = value.end;
+      if (value.name === 'Page') pages++;
+      if (value.name !== 'ObjStm' || !file) continue;
+      if (++streams > mostStreams) return false;
+      // Its bytes: after the `stream` that ends its dictionary, up to `endstream`. One without either is left alone.
+      const s = streamAt(at, DICT_WINDOW);
+      if (s === -1 || buf.toString('latin1', s - 3, s) === 'end') continue;
+      const from = buf[s + 6] === 0x0d && buf[s + 7] === 0x0a ? s + 8 : buf[s + 6] === 0x0a ? s + 7 : -1;
+      const end = from === -1 ? -1 : endAt(from, Infinity);
+      if (end === -1) continue;
+      at = end; // stepped over: nothing inside it is read as the file's own
+      const packed = buf.subarray(from, end);
+      if (!looksDeflated(packed)) continue;
+      let unpacked: Buffer;
+      spent += now() - since;
+      tally.opened++;
+      try {
+        // (Whatever unpacks is looked at: a stream that ends early is read as far as it goes.)
+        unpacked = await unpackStream(packed, { maxOutputLength: Math.max(1, left), finishFlush: zlib.Z_SYNC_FLUSH });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ERR_BUFFER_TOO_LARGE') return false;
+        continue; // not a stream this can unpack: its pages, if any, are not counted
+      } finally {
+        since = now();
+      }
+      left -= unpacked.length;
+      if (!(await look(unpacked, false))) return false;
+    }
+    return true;
+  };
+  return (await look(top, true)) ? pages : Infinity;
 }
 
 // ---------------------------------------------------------------------------
@@ -417,8 +559,46 @@ function isRunning(pid: number): boolean {
 /** The folder name's prefix for this process: `flint-pdf-<pid>-`. */
 export const folderPrefix = (pid: number = process.pid): string => `${FOLDER_PREFIX}${pid}-`;
 
+/** Flint's folder for reads, under the temp folder `tmp`. Every read's own folder is made in it, and nothing else is. */
+export const readsFolder = (tmp: string = tmpdir()): string => join(tmp, FOLDER_PARENT);
+
+/** Is this a real folder (not a link to one) that is this user's? Nothing else is written to, listed or swept. */
+const ownFolder = (s: Stats): boolean => s.isDirectory() && (typeof process.getuid !== 'function' || s.uid === process.getuid());
+
 /**
- * Remove the folders a reader left behind in `tmp`, by their name:
+ * Flint's folder for reads, made if it is not there and kept this user's alone
+ * (0700). Undefined when what has that name is not a folder of this user's (a
+ * link, a file, someone else's): nothing is then read.
+ */
+export function ownReadsFolder(tmp: string = tmpdir()): string | undefined {
+  const parent = readsFolder(tmp);
+  try {
+    mkdirSync(parent, { mode: 0o700 });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return undefined;
+  }
+  try {
+    const s = lstatSync(parent);
+    if (!ownFolder(s)) return undefined;
+    if ((s.mode & 0o777) !== 0o700) chmodSync(parent, 0o700);
+    return parent;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Is this leftover one to remove now? (See sweepLeftovers.) */
+function leftover(name: string, s: Stats, now: number, running: (pid: number) => boolean): boolean {
+  if (!s.isDirectory()) return false;
+  const pid = Number(/^(\d{1,10})-/.exec(name.slice(FOLDER_PREFIX.length))?.[1] ?? NaN);
+  const makerGone = Number.isInteger(pid) && pid > 0 && (pid === process.pid || !running(pid));
+  return makerGone || now - s.mtimeMs >= LEFTOVER_AFTER_MS;
+}
+
+/**
+ * Remove the folders a reader left behind, by their name. Only Flint's own
+ * folder under `tmp` is listed (`readsFolder`): the temp folder itself holds
+ * whatever everything else on this Mac left in it, and is never listed.
  *  - one made by a process that is gone (a crash, a kill, a power cut in the
  *    middle of a read) goes at once, whatever its age;
  *  - one made by THIS process that is not a read under way goes at once too;
@@ -428,18 +608,16 @@ export const folderPrefix = (pid: number = process.pid): string => `${FOLDER_PRE
  * Never throws; a folder that cannot be removed is left.
  */
 export async function sweepLeftovers(tmp: string = tmpdir(), now: number = Date.now(), running: (pid: number) => boolean = isRunning): Promise<number> {
+  const parent = readsFolder(tmp);
   let removed = 0;
   try {
-    for (const name of await readdir(tmp)) {
+    if (!ownFolder(await lstat(parent))) return 0;
+    for (const name of await readdir(parent)) {
       if (!name.startsWith(FOLDER_PREFIX)) continue;
-      const path = join(tmp, name);
+      const path = join(parent, name);
       if (LIVE.has(path)) continue;
       try {
-        const s = await lstat(path);
-        if (!s.isDirectory()) continue;
-        const pid = Number(/^(\d{1,10})-/.exec(name.slice(FOLDER_PREFIX.length))?.[1] ?? NaN);
-        const makerGone = Number.isInteger(pid) && pid > 0 && (pid === process.pid || !running(pid));
-        if (!makerGone && now - s.mtimeMs < LEFTOVER_AFTER_MS) continue;
+        if (!leftover(name, await lstat(path), now, running)) continue;
         await rm(path, { recursive: true, force: true });
         removed++;
       } catch {
@@ -452,20 +630,18 @@ export async function sweepLeftovers(tmp: string = tmpdir(), now: number = Date.
   return removed;
 }
 
-/** The same, at once, for the moment a process starts: before anything else reads the temp folder. */
+/** The same, at once, for the moment a process starts: before anything else of it reads a PDF. */
 export function sweepLeftoversNow(tmp: string = tmpdir(), now: number = Date.now(), running: (pid: number) => boolean = isRunning): number {
+  const parent = readsFolder(tmp);
   let removed = 0;
   try {
-    for (const name of readdirSync(tmp)) {
+    if (!ownFolder(lstatSync(parent))) return 0;
+    for (const name of readdirSync(parent)) {
       if (!name.startsWith(FOLDER_PREFIX)) continue;
-      const path = join(tmp, name);
+      const path = join(parent, name);
       if (LIVE.has(path)) continue;
       try {
-        const s = lstatSync(path);
-        if (!s.isDirectory()) continue;
-        const pid = Number(/^(\d{1,10})-/.exec(name.slice(FOLDER_PREFIX.length))?.[1] ?? NaN);
-        const makerGone = Number.isInteger(pid) && pid > 0 && (pid === process.pid || !running(pid));
-        if (!makerGone && now - s.mtimeMs < LEFTOVER_AFTER_MS) continue;
+        if (!leftover(name, lstatSync(path), now, running)) continue;
         rmSync(path, { recursive: true, force: true });
         removed++;
       } catch {
@@ -487,6 +663,8 @@ export interface PdfReader {
   read(bytes: Uint8Array, signal?: AbortSignal): Promise<PdfText>;
   /** Is the reader waiting for the Mac to finish with a PDF Flint stopped waiting for? Every read is then `busy`. */
   stuck?(): boolean;
+  /** How many PDFs are remembered as too slow to read just now. */
+  slow?(): number;
   /** Stop trying Flint's own small PDF (tests, a process that is ending). */
   close?(): void;
 }
@@ -504,6 +682,8 @@ export interface PdfReaderDeps {
   later?: (fn: () => void, ms: number) => void;
   /** Is there a process with this number (tests)? */
   running?: (pid: number) => boolean;
+  /** What a count of pages may cost (tests). */
+  count?: CountLimits;
 }
 
 /** Flint's own small PDF: one page, one line. What is tried while the reader is busy, to learn that the Mac is done. */
@@ -542,6 +722,37 @@ export function makePdfReader(which: { reader: PdfReaderKind; program: string },
   // nothing else of this process is in the temp folder).
   sweepLeftoversNow(tmp, now(), deps.running);
 
+  // ---- too slow: the PDFs whose read ran out of time, by a digest of their bytes, oldest first. The same PDF sent
+  // again is refused at once, for a few hours: it is not handed to the Mac to start the same work over.
+  const slow = new Map<string, number>();
+  const digestOf = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
+  const tooSlow = (bytes: Uint8Array): boolean => {
+    for (const [id, until] of slow) if (now() >= until) slow.delete(id);
+    return slow.size > 0 && slow.has(digestOf(bytes));
+  };
+  const rememberSlow = (bytes: Uint8Array): void => {
+    slow.set(digestOf(bytes), now() + SLOW_FOR_MS);
+    for (const oldest of slow.keys()) {
+      if (slow.size <= SLOW_REMEMBERED) break;
+      slow.delete(oldest);
+    }
+  };
+
+  // ---- the count of pages: one PDF at a time, so all the counts together hold the event loop no longer than one
+  // does (a slice), and no more of them waiting than reads may wait.
+  let counting: Promise<unknown> = Promise.resolve();
+  let counts = 0;
+  const pagesOf = (bytes: Uint8Array): Promise<number> | undefined => {
+    if (counts >= atOnce + mayWait) return undefined;
+    counts++;
+    // (A count that broke says nothing about the PDF: it is not refused for it. The read has its own bounds.)
+    const mine = counting.then(() => countPdfPages(bytes, deps.count)).catch(() => 0);
+    counting = mine.then(() => {
+      counts--;
+    });
+    return mine;
+  };
+
   // ---- busy: a read ran out of time, and the Mac may still be at work on that PDF
   let stuck = false;
   let closed = false;
@@ -559,7 +770,7 @@ export function makePdfReader(which: { reader: PdfReaderKind; program: string },
     if (probing || !stuck || closed) return;
     probing = true;
     try {
-      const got = await once(PROBE_PDF, undefined, PROBE_TIMEOUT_MS);
+      const got = await once(PROBE_PDF, undefined, PROBE_TIMEOUT_MS, false);
       if (got.ok) stuck = false;
     } finally {
       probing = false;
@@ -567,12 +778,17 @@ export function makePdfReader(which: { reader: PdfReaderKind; program: string },
     }
   };
 
-  /** One read: the folder, the program, what it printed. No line, no checks: `read` and `probe` decide whether it runs. */
-  const once = async (bytes: Uint8Array, signal: AbortSignal | undefined, timeoutMs: number): Promise<PdfText> => {
+  /**
+   * One read: the folder, the program, what it printed. No line, no checks: `read` and `probe` decide whether it
+   * runs. `asked`: this is a PDF someone sent (not Flint's own small one), remembered if its read runs out of time.
+   */
+  const once = async (bytes: Uint8Array, signal: AbortSignal | undefined, timeoutMs: number, asked: boolean): Promise<PdfText> => {
     let folder: string | undefined;
     try {
+      const parent = ownReadsFolder(tmp);
+      if (!parent) return { ok: false, why: 'failed' };
       await sweepLeftovers(tmp, now(), deps.running);
-      folder = await mkdtemp(join(tmp, folderPrefix())); // 0700, and a name nobody could guess
+      folder = await mkdtemp(join(parent, folderPrefix())); // 0700, and a name nobody could guess
       LIVE.add(folder);
       // Spotlight skips a folder whose name ends `.noindex`: the PDF is read when asked, and never indexed.
       const inner = join(folder, 'read.noindex');
@@ -597,13 +813,16 @@ export function makePdfReader(which: { reader: PdfReaderKind; program: string },
       if (text.length === 0) return { ok: false, why: whole ? 'no_text' : 'failed' };
       return { ok: true, text: text.slice(0, MAX_TEXT_CHARS), cut: !whole || text.length > MAX_TEXT_CHARS, ...(pages !== undefined ? { pages } : {}) };
     } catch (err) {
-      if (err instanceof ReadTimedOut && !stuck) {
+      if (!(err instanceof ReadTimedOut)) return { ok: false, why: 'failed' };
+      if (!stuck) {
         // Flint has stopped waiting. The Mac may not have stopped working: nothing more is handed to it until
         // a small PDF of Flint's own comes back.
         stuck = true;
         probeLater(PROBE_AFTER_MS);
       }
-      return { ok: false, why: 'failed' };
+      if (!asked) return { ok: false, why: 'failed' };
+      rememberSlow(bytes);
+      return { ok: false, why: 'too_slow' };
     } finally {
       if (folder) {
         await rm(folder, { recursive: true, force: true }).catch(() => {});
@@ -615,6 +834,7 @@ export function makePdfReader(which: { reader: PdfReaderKind; program: string },
   return {
     kind: which.reader,
     stuck: () => stuck,
+    slow: () => slow.size,
     close: () => {
       closed = true;
     },
@@ -622,13 +842,19 @@ export function makePdfReader(which: { reader: PdfReaderKind; program: string },
       if (signal?.aborted) return { ok: false, why: 'failed' };
       // Refused before anything is asked to work on it (./pdf-limits).
       if (bytes.byteLength > MAX_PDF_BYTES) return { ok: false, why: 'too_big' };
-      if (countPdfPages(bytes) > MAX_PDF_PAGES) return { ok: false, why: 'too_long' };
+      if (tooSlow(bytes)) return { ok: false, why: 'too_slow' };
+      const pages = pagesOf(bytes);
+      if (!pages) return { ok: false, why: 'busy' };
+      if ((await pages) > MAX_PDF_PAGES) return { ok: false, why: 'too_long' };
+      if (signal?.aborted) return { ok: false, why: 'failed' };
       if (!(await turn())) return { ok: false, why: 'busy' };
       try {
         // Busy (a read ran out of time, and the Mac may still be at work on it): refused here, whether this read
-        // came just now or was waiting its turn when it happened. Nothing is handed to a stuck service.
+        // came just now or was waiting its turn when it happened. Nothing is handed to a stuck service. (And when
+        // it was this same PDF that ran out of time, in a read ahead of this one, that is what is said of it.)
+        if (tooSlow(bytes)) return { ok: false, why: 'too_slow' };
         if (stuck) return { ok: false, why: 'busy' };
-        return await once(bytes, signal, deps.timeoutMs ?? READ_TIMEOUT_MS);
+        return await once(bytes, signal, deps.timeoutMs ?? READ_TIMEOUT_MS, true);
       } finally {
         done();
       }

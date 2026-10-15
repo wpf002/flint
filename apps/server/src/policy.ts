@@ -50,14 +50,17 @@ export interface MediaFlags {
  * text:
  *   no_text    it carries none (a scan);
  *   too_big    it is larger than is read here (./pdf-limits);
- *   too_long   it has more pages than are read here;
+ *   too_long   it looks to have more pages than are read here, by a count of
+ *              its own bytes (or more than Flint will count);
+ *   too_slow   reading it ran out of time, now or in the last few hours: it
+ *              is not handed to the Mac again for a while;
  *   busy       the reader is busy: too many reads at once, or the Mac is still
  *              working on a PDF that Flint stopped waiting for;
  *   failed     the read did not work this time.
- * The first three are about the PDF, and will be the same next time. The last
- * two are about the moment.
+ * The first four are about the PDF, and will be the same next time (the fourth
+ * for a few hours). The last two are about the moment.
  */
-export type PdfUnread = 'no_text' | 'too_big' | 'too_long' | 'busy' | 'failed';
+export type PdfUnread = 'no_text' | 'too_big' | 'too_long' | 'too_slow' | 'busy' | 'failed';
 
 /** That, as the clause a refusal is built on. */
 export function pdfUnreadClause(why: PdfUnread): string {
@@ -67,7 +70,10 @@ export function pdfUnreadClause(why: PdfUnread): string {
     case 'too_big':
       return `this PDF is larger than the ${Math.round(MAX_PDF_BYTES / (1024 * 1024))} MB Flint reads on this Mac`;
     case 'too_long':
-      return `this PDF has more than the ${MAX_PDF_PAGES.toLocaleString('en-US')} pages Flint reads on this Mac`;
+      // ("Looks like": the count is of the PDF's own bytes, before anything reads it. It is not a reader's count.)
+      return `this PDF looks like it has more than the ${MAX_PDF_PAGES.toLocaleString('en-US')} pages Flint reads on this Mac`;
+    case 'too_slow':
+      return 'reading this PDF took longer than Flint waits on this Mac';
     case 'busy':
       return "Flint's PDF reader on this Mac is busy right now";
     case 'failed':
