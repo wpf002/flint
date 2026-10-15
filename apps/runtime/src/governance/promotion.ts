@@ -248,9 +248,29 @@ function calendarPhase(source: keyof typeof CALENDAR_NAMES, rows: PhaseOf['rows'
 
 /** Nexus's three steps, as the gate names them when one has not worked. */
 const NEXUS_STEPS = [['backup.nexus', 'backup'], ['backup.nexus.offsite', 'encrypted copy to iCloud'], ['restore.drill.nexus', 'restore test']] as const;
-/** A Nexus step's first or last run with this outcome, from the audit trail (each run of a step ends there). */
-const nexusRun = async (db: Db, action: string, outcome: string, order: 'asc' | 'desc', now?: Date): Promise<Date | undefined> =>
-  (await db.auditEntry.findFirst({ where: { kind: 'action', action, outcome, ...(now ? { at: { lte: now } } : {}) }, orderBy: [{ at: order }, { seq: order }], select: { at: true } }))?.at;
+/**
+ * Each run of Nexus's three steps, oldest first, from the audit trail: one per run. The nightly command ends
+ * every run it starts with an entry of its own; a run on a card has a second, the card's completion (it names
+ * the card in its inputs), with the same card as its correlation. A run is that pair counted once, with the
+ * command's own outcome, when it wrote one: a card completed late, or swept as unknown after the command had
+ * said how its run ended, does not change how it ended. A card's entry alone (the command was killed before it
+ * could write) is a run of its own.
+ */
+async function nexusRuns(db: Db, now: Date): Promise<Array<{ action: string; ok: boolean; at: Date }>> {
+  const entries = await db.auditEntry.findMany({
+    where: { kind: 'action', action: { in: NEXUS_STEPS.map(([a]) => a) }, outcome: { in: ['ok', 'failed'] }, at: { lte: now } },
+    orderBy: [{ at: 'asc' }, { seq: 'asc' }], select: { action: true, outcome: true, at: true, inputs: true, correlationId: true },
+  });
+  const runs = new Map<string, { action: string; ok: boolean; at: Date; own: boolean }>();
+  entries.forEach((e, i) => {
+    const inputs = e.inputs as Record<string, unknown> | null;
+    const own = !(inputs && typeof inputs === 'object' && !Array.isArray(inputs) && 'proposalId' in inputs);
+    const key = e.correlationId ? `${e.action}:${e.correlationId}` : `#${i}`;
+    const had = runs.get(key);
+    if (!had || (own && !had.own)) runs.set(key, { action: e.action, ok: e.outcome === 'ok', at: had?.at ?? e.at, own });
+  });
+  return [...runs.values()].sort((a, b) => a.at.getTime() - b.at.getTime());
+}
 
 /** Each phase's rows, its card's template, what counts as its week of evidence, and what the week measured. */
 const PHASES: Record<Phase, PhaseOf> = {
@@ -365,7 +385,7 @@ const PHASES: Record<Phase, PhaseOf> = {
     after: 'after a good backup, copy and restore test',
     none: 'Nexus has not been backed up yet',
     says: /^Since [A-Z][a-z]{2} \d{1,2}, Flint backed up Nexus \d+ times?, sent \d+ encrypted (?:copy|copies) to iCloud, and tested a restore \d+ times?\. (?:None failed|\d+ runs? failed before a later one passed)\.$/,
-    first: (db) => nexusRun(db, 'backup.nexus', 'ok', 'asc'),
+    first: async (db) => (await nexusRuns(db, new Date())).find((r) => r.action === 'backup.nexus' && r.ok)?.at,
     covered: async () => undefined,
     measured: async () => '',
     // The newest run of each of the three worked. Runs are read from the audit trail, where every run of each
@@ -373,16 +393,17 @@ const PHASES: Record<Phase, PhaseOf> = {
     // but it leaves a failed run here). How long ago they ran is not asked: until this is signed they run only
     // on a card, so a gap of days is the very thing it ends. The sentence counts the same runs, from the first good dump.
     weighed: async (db, now, tz) => {
-      const first = await nexusRun(db, 'backup.nexus', 'ok', 'asc', now);
+      const all = await nexusRuns(db, now);
+      const first = all.find((r) => r.action === 'backup.nexus' && r.ok)?.at;
       if (!first) return { gap: 'Nexus has not been backed up yet' };
       for (const [action, words] of NEXUS_STEPS) {
-        const last = await db.auditEntry.findFirst({ where: { kind: 'action', action, outcome: { in: ['ok', 'failed'] }, at: { lte: now } }, orderBy: [{ at: 'desc' }, { seq: 'desc' }], select: { outcome: true } });
+        const last = all.filter((r) => r.action === action).pop();
         if (!last) return { gap: `Nexus has had no ${words} yet` };
-        if (last.outcome !== 'ok') return { gap: `the last Nexus ${words} failed` };
+        if (!last.ok) return { gap: `the last Nexus ${words} failed` };
       }
-      const runs = (action: string, outcome: string) => db.auditEntry.count({ where: { kind: 'action', action, outcome, at: { gte: first, lte: now } } });
-      const [dumps, copies, tests] = await Promise.all(NEXUS_STEPS.map(([a]) => runs(a, 'ok')));
-      const failed = (await Promise.all(NEXUS_STEPS.map(([a]) => runs(a, 'failed')))).reduce((x, y) => x + y, 0);
+      const since = all.filter((r) => r.at >= first);
+      const [dumps, copies, tests] = NEXUS_STEPS.map(([a]) => since.filter((r) => r.action === a && r.ok).length);
+      const failed = since.filter((r) => !r.ok).length;
       // Every failure counted here had a run of its step after it that worked (the gate above): the card says so.
       const failures = failed ? `${count(failed, 'run')} failed before a later one passed.` : 'None failed.';
       return { measured: `Since ${dayWords(tz, first)}, Flint backed up Nexus ${count(dumps!, 'time')}, sent ${count(copies!, 'encrypted copy', 'encrypted copies')} to iCloud, and tested a restore ${count(tests!, 'time')}. ${failures}` };

@@ -9,7 +9,7 @@ import { FORECAST_SIGNED_ACTIONS, GOAL_SIGNED_ACTIONS, PREDICT_JOB_ACTIONS, PROP
 import { NO_DB, freshDb, withClient, type TestUrls } from './db';
 import { enrollTestKey } from './sign';
 import { createDb, type Db } from '../src/db';
-import { approveProposal, activePolicies, Refused } from '../src/governance/proposals';
+import { approveProposal, activePolicies, completeProposal, Refused } from '../src/governance/proposals';
 import { runInternal, PolicyArgs } from '../src/governance/internal';
 import { markProcessed, recordEvent } from '../src/events/record';
 import { promotionTable, NEVER_PROMOTED, NEXUS_PROMOTIONS, P1_PROMOTIONS, P2_PROMOTIONS, P25_PROMOTIONS, P26_PROMOTIONS } from '../src/governance/promotion';
@@ -200,6 +200,36 @@ describe.skipIf(NO_DB)('the Nexus backup promotion table', () => {
     expect(await gate(db, 'nexus-backup', 'UTC', undefined, new Date())).toMatchObject({ go: true, why: 'promoted' });
     // Its cap: a second run the same day does not go.
     expect(await gate(db, 'nexus-backup', 'UTC', undefined, new Date())).toMatchObject({ go: false });
+  });
+
+  it('a run on a card is one run, though the card and the command each write an entry; the command says how it ended', async () => {
+    const own = await freshDb();
+    const fresh = createDb(own.app);
+    try {
+      const byHand = (action: string, outcome: 'ok' | 'failed') => appendAudit(fresh, [{ actor: 'will:cli', context: 'console', kind: 'action', action, decision: 'act', outcome, inputs: {} }]);
+      for (const a of NEXUS_PROMOTIONS.map((r) => r.pattern)) await byHand(a, 'ok');
+      // Tonight's dump, as the nightly command runs it: the card is filed, Will approves it, the run claims it,
+      // completes it (the card's entry), and writes its own entry.
+      expect(await gate(fresh, 'nexus-backup', 'UTC', undefined, new Date())).toMatchObject({ go: false });
+      const card = await fresh.proposal.findFirstOrThrow({ where: { origin: 'runtime:nexus-backup', status: 'pending' } });
+      const key = await enrollTestKey(own);
+      await approveProposal(fresh, card.id, await key.approve({ subjectId: card.id, action: 'backup.nexus', argsDigest: card.argsDigest }), undefined, 'test');
+      const g = await gate(fresh, 'nexus-backup', 'UTC', undefined, new Date());
+      expect(g).toMatchObject({ go: true, proposalId: card.id });
+      await completeProposal(fresh, card.id, { ok: true, result: { bytes: 1 } }, 'runtime');
+      await appendAudit(fresh, [{ actor: 'runtime', context: 'autonomous', kind: 'action', action: 'backup.nexus', decision: 'act', outcome: 'ok', inputs: { bytes: 1 }, correlationId: card.id }]);
+      expect(await fresh.auditEntry.count({ where: { kind: 'action', action: 'backup.nexus' } })).toBe(3);
+      // A card swept later as unknown (its completion never came) does not undo what the command said.
+      await appendAudit(fresh, [{ actor: 'runtime', context: 'autonomous', kind: 'action', action: 'backup.nexus', decision: 'act', outcome: 'failed', inputs: { proposalId: card.id, outcomeUnknown: true }, correlationId: card.id }]);
+      const t = await promotionTable(fresh, { phase: 'nexus', tz: 'UTC' });
+      const filed = await fresh.proposal.findUniqueOrThrow({ where: { id: t.proposalId } });
+      expect(filed.reason).toMatch(/\. Since [A-Z][a-z]{2} \d{1,2}, Flint backed up Nexus 2 times, sent 1 encrypted copy to iCloud, and tested a restore 1 time\. None failed\.$/);
+      // A card's entry alone (the command was killed before it wrote its own) is a run, and here a failed one.
+      await appendAudit(fresh, [{ actor: 'runtime', context: 'autonomous', kind: 'action', action: 'backup.nexus', decision: 'act', outcome: 'failed', inputs: { proposalId: 'gone', outcomeUnknown: true }, correlationId: 'gone' }]);
+      await expect(promotionTable(fresh, { phase: 'nexus', tz: 'UTC' })).rejects.toThrow(/^not yet: the last Nexus backup failed$/);
+    } finally {
+      await fresh.$disconnect();
+    }
   });
 
   it('one good run of each, nothing failed: the sentence says so in the singular', async () => {

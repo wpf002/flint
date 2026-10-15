@@ -2840,10 +2840,11 @@ let it expire in a week. Until it is signed each night still files its cards.
 
 It needs no week of evidence. It is refused until the newest run of each step
 worked: the dump, the encrypted copy to iCloud and the restore test. Every run
-counts, by hand or at night, including one that stopped before it could leave a
-record of its file. How long ago they ran does not count: until the card is
-signed they run only when you approve one, so days without a run are what it
-ends.
+counts once, by hand or on a card, including one that failed before it could
+record its file. A run on a card that never reported back counts as failed after
+six hours. A run by hand that was killed leaves no trace, so the run before it
+stands. How long ago they ran does not count: until the card is signed they run
+only when you approve one, so days without a run are what it ends.
 
 | Refused with | Why |
 | --- | --- |
