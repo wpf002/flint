@@ -267,7 +267,8 @@ async function nexusRuns(db: Db, now: Date): Promise<Array<{ action: string; ok:
     const own = !(inputs && typeof inputs === 'object' && !Array.isArray(inputs) && 'proposalId' in inputs);
     const key = e.correlationId ? `${e.action}:${e.correlationId}` : `#${i}`;
     const had = runs.get(key);
-    if (!had || (own && !had.own)) runs.set(key, { action: e.action, ok: e.outcome === 'ok', at: had?.at ?? e.at, own });
+    // The command's entry, when it comes, also says when the run ended: a run is ordered by it, not by a sweep before it.
+    if (!had || (own && !had.own)) runs.set(key, { action: e.action, ok: e.outcome === 'ok', at: own ? e.at : (had?.at ?? e.at), own });
   });
   return [...runs.values()].sort((a, b) => a.at.getTime() - b.at.getTime());
 }
