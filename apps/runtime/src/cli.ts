@@ -25,7 +25,7 @@
  *   pnpm --filter @flint/runtime p25-report [--source google_calendar|apple_calendar]
  *                                                    P2.5's exit criteria for a calendar, measured now (JSON)
  *   pnpm --filter @flint/runtime p3-report            P3's exit criteria, measured now (JSON, numbers only)
- *   pnpm --filter @flint/runtime promotion-table [--phase p1|p2|p25|p26|p3|p3c] [--drop <pattern>]...
+ *   pnpm --filter @flint/runtime promotion-table [--phase p1|p2|p25|p26|p3|p3c|nexus] [--drop <pattern>]...
  *                                                    file a phase's promotion table for Will to sign
  *   pnpm --filter @flint/runtime enable-source <name> file the card that turns a source on, for Will
  *                                                    to sign in the console
@@ -323,7 +323,7 @@ async function main(): Promise<void> {
     return;
   }
   const cmd = process.argv[2] as Command;
-  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | rules [--off <id>...] | predictions-on [key]... | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | p3-report | promotion-table [--phase p1|p2|p25|p26|p3|p3c] [--drop <pattern>] | backup|offsite|drill [--auto] | nexus-setup [--database <name>] | nexus-backup|nexus-offsite|nexus-drill [--auto] | prune [--remove] | prune --auto | restore-production [--dump <file>] [--without-copy] [--without-fingerprint] [--check] | restore-production --compare | restore-production --repair | restore-empty --from-rebuild --dump <file>');
+  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | rules [--off <id>...] | predictions-on [key]... | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | p3-report | promotion-table [--phase p1|p2|p25|p26|p3|p3c|nexus] [--drop <pattern>] | backup|offsite|drill [--auto] | nexus-setup [--database <name>] | nexus-backup|nexus-offsite|nexus-drill [--auto] | prune [--remove] | prune --auto | restore-production [--dump <file>] [--without-copy] [--without-fingerprint] [--check] | restore-production --compare | restore-production --repair | restore-empty --from-rebuild --dump <file>');
   const auto = process.argv.includes('--auto');
   const b = loadBackupConfig();
   const action = ACTION[cmd];

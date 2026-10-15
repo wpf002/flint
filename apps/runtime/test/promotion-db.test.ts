@@ -2,6 +2,7 @@
  * The P2 promotion table: refused before the shadow week is over; its rows
  * meet the policy rules (and the database's, once signed); what must stay at
  * APPROVAL is never in it; Will can drop a row; filing it twice is one card.
+ * Nexus's backup table: refused until its dump, copy and test are each good.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { FORECAST_SIGNED_ACTIONS, GOAL_SIGNED_ACTIONS, PREDICT_JOB_ACTIONS, PROPHET_ACTIONS, resolveTier } from '@flint/policy';
@@ -11,7 +12,8 @@ import { createDb, type Db } from '../src/db';
 import { approveProposal, activePolicies, Refused } from '../src/governance/proposals';
 import { runInternal, PolicyArgs } from '../src/governance/internal';
 import { markProcessed, recordEvent } from '../src/events/record';
-import { promotionTable, NEVER_PROMOTED, P1_PROMOTIONS, P2_PROMOTIONS, P25_PROMOTIONS, P26_PROMOTIONS } from '../src/governance/promotion';
+import { promotionTable, NEVER_PROMOTED, NEXUS_PROMOTIONS, P1_PROMOTIONS, P2_PROMOTIONS, P25_PROMOTIONS, P26_PROMOTIONS } from '../src/governance/promotion';
+import { gate } from '../src/backup/nightly';
 
 const DAY = 86_400_000;
 
@@ -127,5 +129,75 @@ describe.skipIf(NO_DB)('the P2 promotion table', () => {
     const chat = (tool: string) => resolveTier(`mcp:runtime.${tool}`, { context: 'chat', tainted: false, policies, mcp: { server: 'runtime', tool, destructiveHint: false } });
     expect(chat('world_now').tier).toBe('alone');
     expect(chat('ledger_record_prediction')).toMatchObject({ tier: 'alone', cap: { limit: 10, period: 'day' } });
+  });
+});
+
+describe.skipIf(NO_DB)('the Nexus backup promotion table', () => {
+  let urls: TestUrls;
+  let db: Db;
+  beforeAll(async () => {
+    urls = await freshDb();
+    db = createDb(urls.app);
+  });
+  afterAll(async () => db?.$disconnect());
+
+  let n = 0;
+  const run = (location: 'local' | 'icloud', status: 'ok' | 'failed', hoursAgo: number, drill?: boolean) => {
+    const at = new Date(Date.now() - hoursAgo * 3_600_000);
+    return db.backupRun.create({ data: {
+      kind: 'nexus_dump', location, path: `/x/nexus-${++n}.dump${location === 'icloud' ? '.age' : ''}`, encrypted: location === 'icloud', status, startedAt: at, finishedAt: at,
+      ...(drill === undefined ? {} : { restoreTestedAt: new Date(at.getTime() + 60_000), restoreOk: drill }),
+    } });
+  };
+
+  it('is refused until the newest dump, copy and restore test are each good; then one card of three rules, each by name', async () => {
+    await expect(promotionTable(db, { phase: 'nexus', tz: 'UTC' })).rejects.toThrow(/^Nexus has not been backed up yet$/);
+    // A first-ever dump that failed is still no backup.
+    await run('local', 'failed', 60);
+    await expect(promotionTable(db, { phase: 'nexus', tz: 'UTC' })).rejects.toThrow(/^Nexus has not been backed up yet$/);
+    await run('local', 'ok', 50);
+    await expect(promotionTable(db, { phase: 'nexus', tz: 'UTC' })).rejects.toThrow(/^not yet: Nexus has no good encrypted copy to iCloud yet$/);
+    await run('icloud', 'ok', 49);
+    await expect(promotionTable(db, { phase: 'nexus', tz: 'UTC' })).rejects.toThrow(/^not yet: Nexus has had no restore test yet$/);
+    await run('local', 'ok', 40, false);
+    await expect(promotionTable(db, { phase: 'nexus', tz: 'UTC' })).rejects.toThrow(/^not yet: the last Nexus restore test failed$/);
+    await run('local', 'ok', 30, true);
+    await run('icloud', 'failed', 20);
+    await expect(promotionTable(db, { phase: 'nexus', tz: 'UTC' })).rejects.toThrow(/^not yet: the last Nexus encrypted copy to iCloud failed$/);
+    await run('icloud', 'ok', 10);
+    await run('local', 'failed', 5);
+    await expect(promotionTable(db, { phase: 'nexus', tz: 'UTC' })).rejects.toThrow(/^not yet: the last Nexus backup failed$/);
+    await run('local', 'ok', 2);
+
+    const t = await promotionTable(db, { phase: 'nexus', tz: 'UTC' });
+    expect(PolicyArgs.safeParse({ rows: t.rows }).success).toBe(true);
+    expect(t.rows.map((r) => r.pattern)).toEqual(NEXUS_PROMOTIONS.map((r) => r.pattern));
+    for (const r of t.rows) expect(r).toMatchObject({ tier: 'alone', reason: 'Nexus backup promotion table, after a good backup, copy and restore test' });
+    for (const r of t.rows) expect(r.dailyCap).toBeUndefined();
+    const card = await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } });
+    expect(card.templateId).toBe('nexus.promotion');
+    expect(card.consequential).toBe(true);
+    // The first failed dump is before the first good one, so it is not counted; the other four failures are.
+    expect(card.reason).toMatch(/^This lets Flint back up Nexus each night, send the encrypted copy to iCloud and test a restore each week without asking until [A-Z][a-z]{2} \d{1,2}, \d{4}\. Since [A-Z][a-z]{2} \d{1,2}, Flint backed up Nexus 4 times, sent 2 encrypted copies to iCloud, and tested a restore 2 times\. 3 steps failed before a later one passed\.$/);
+    // Filing it again is the same card.
+    expect(await promotionTable(db, { phase: 'nexus', tz: 'UTC', now: new Date(Date.now() + 60_000) })).toMatchObject({ proposalId: t.proposalId, deduped: true });
+    // A step Will drops stays on its nightly card: that table is another card.
+    const dropped = await promotionTable(db, { phase: 'nexus', drop: ['backup.nexus.offsite'], tz: 'UTC' });
+    expect(dropped.proposalId).not.toBe(t.proposalId);
+    expect(dropped.rows.map((r) => r.pattern)).toEqual(['backup.nexus', 'restore.drill.nexus']);
+
+    // Signed: each of the three runs on its own under its own cap, from the nightly job; Flint's own backups and chat do not.
+    const key = await enrollTestKey(urls);
+    await approveProposal(db, card.id, await key.approve({ subjectId: card.id, action: 'policy.change', argsDigest: card.argsDigest }), undefined, 'test');
+    expect(await runInternal(db, card.id, undefined, 'UTC', 'test')).toEqual({ rows: 3 });
+    const policies = await activePolicies(db);
+    const auto = (a: string) => resolveTier(a, { context: 'autonomous', tainted: false, policies });
+    expect(auto('backup.nexus')).toMatchObject({ tier: 'alone', cap: { limit: 1, period: 'day' } });
+    expect(auto('backup.nexus.offsite')).toMatchObject({ tier: 'alone', cap: { limit: 1, period: 'day' } });
+    expect(auto('restore.drill.nexus')).toMatchObject({ tier: 'alone', cap: { limit: 1, period: 'week' } });
+    for (const a of ['backup.local', 'backup.offsite', 'restore.drill', 'backup.prune']) expect(auto(a).tier, a).not.toBe('alone');
+    for (const a of NEXUS_PROMOTIONS.map((r) => r.pattern)) expect(resolveTier(a, { context: 'chat', tainted: false, policies }).tier, a).not.toBe('alone');
+    const g = await gate(db, 'nexus-backup', 'UTC', undefined, new Date());
+    expect(g).toMatchObject({ go: true, why: 'promoted' });
   });
 });

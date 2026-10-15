@@ -486,7 +486,7 @@ describe.skipIf(NO_DB)('the P3 report on flint_test', () => {
       // A phase it does not have is refused by name.
       const unknown = await cli('promotion-table', '--phase', 'p9');
       expect(unknown.code).not.toBe(0);
-      expect(unknown.stderr).toContain('promotion-table: --phase is p1, p2, p25, p26, p3 or p3c');
+      expect(unknown.stderr).toContain('promotion-table: --phase is p1, p2, p25, p26, p3, p3c or nexus');
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
