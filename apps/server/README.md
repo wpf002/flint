@@ -991,9 +991,11 @@ name and a first line that says what it is (`src/pdf-text.ts`, `src/local-media.
   - *A PDF that ran out of time on its own is remembered:* by a digest of its bytes, for three
     hours (64 of them at most). Sent again in that time it is refused at once ("Reading this PDF
     took longer than Flint waits on this Mac, ..."), so the same file cannot keep the Mac's
-    importer busy by being sent again and again. A read that ran beside another is not
-    remembered, since it may only have waited behind that one, and one that ran out of time
-    after another already had is told the reader is busy.
+    importer busy by being sent again and again. A read that ran beside another may only have
+    waited behind that one: it is told the reader is busy, and remembered only the second time
+    it is the first to run out of time. One that ran out of time after another already had is
+    told the reader is busy. A read called off once the PDF was handed over leaves the reader
+    busy too, as a time-out does: the Mac may still be at work on it.
   - A small PDF can still hold a great deal (a compressed page that unpacks to a hundred
     megabytes). That is not seen before the read, and costs the Mac one such episode for each
     different file.

@@ -203,7 +203,7 @@ function loadSecrets(): void {
  * bridge off later — or repointing it at a self-hosted model — is a one-liner.
  */
 import { isLocalWire, isSafeTool, type MediaFlags } from './policy';
-import { buildTiers, buildFrontierProvider, envProviderFactory, classifyMessage, runWithFallback, mayAskAnother, outgrewTheCloud, TOO_LONG_FOR_THE_CLOUD, providerFailure, NoFallback, type BrainSet, mediaOf, canReadMedia } from './brains';
+import { buildTiers, buildFrontierProvider, envProviderFactory, classifyMessage, runWithFallback, mayAskAnother, outgrewTheCloud, promptRoom, TOO_LONG_FOR_THE_CLOUD, providerFailure, NoFallback, type BrainSet, mediaOf, canReadMedia } from './brains';
 
 // SMART-FIRST routing. The local 7B is reliable on a narrow band — simple live
 // lookups, the user's own systems, casual chat, memory recall — and fast there.
@@ -1483,7 +1483,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     }
     /** A cloud window too small for a turn the local model could not fit either (./brains outgrewTheCloud). */
     const outgrew = (err: unknown): boolean =>
-      outgrewTheCloud(err, { media: attachments.some((a) => a.kind === 'image' || a.kind === 'document'), localWindow: ctx.inference.localFacts().contextTokens, windows: plan?.chain.map((b) => b.provider.getCapabilities(b.model).maxContextTokens) ?? [] });
+      outgrewTheCloud(err, {
+        media: attachments.some((a) => a.kind === 'image' || a.kind === 'document'),
+        localRoom: Math.max(0, ...localPlan.steps.flatMap((s) => (s.kind === 'local' ? [promptRoom(ctx.inference.primary.provider.getCapabilities(s.model))] : []))),
+        rooms: plan?.chain.map((b) => promptRoom(b.provider.getCapabilities(b.model))) ?? [],
+      });
     if (plan) logPlan(plan);
     // The breaker's say (./frontier-breaker gateTurn): brains whose provider is paused are left
     // out, and with none left the local model answers at once instead of after their failures.
@@ -1768,7 +1772,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
       }
       /** A cloud window too small for a turn the local model could not fit either (./brains outgrewTheCloud). */
       const outgrew = (err: unknown): boolean =>
-        outgrewTheCloud(err, { media: attachments.some((a) => a.kind === 'image' || a.kind === 'document'), localWindow: ctx.inference.localFacts().contextTokens, windows: plan?.chain.map((b) => b.provider.getCapabilities(b.model).maxContextTokens) ?? [] });
+        outgrewTheCloud(err, {
+          media: attachments.some((a) => a.kind === 'image' || a.kind === 'document'),
+          localRoom: Math.max(0, ...localPlan.steps.flatMap((s) => (s.kind === 'local' ? [promptRoom(ctx.inference.primary.provider.getCapabilities(s.model))] : []))),
+          rooms: plan?.chain.map((b) => promptRoom(b.provider.getCapabilities(b.model))) ?? [],
+        });
       // The breaker's say (./frontier-breaker gateTurn): brains whose provider is paused are left
       // out, and with none left the local model answers at once instead of after their failures.
       const gate = gateTurn({ brain: budget.brain, chain: plan?.chain, canLocal: toLocal, breaker: ctx.breaker });

@@ -866,42 +866,85 @@ describe('a PDF whose read ran out of time is remembered, and not handed to the 
 
   // A review (2026-10-15): two reads run at once, and one that only waited behind a heavy PDF ran out of time too. It
   // was remembered as too slow, and a PDF that is fine was refused for three hours with advice to send less of it.
-  it('only a read that ran alone is remembered: one that timed out beside another, or after it, is not', async () => {
+  /** A reader with two at once, each read held until the test says how it ends; Flint's own small PDF answers at once once `free`. */
+  const gated = () => {
     const tmp = scratch();
-    const gates: Array<(v: 'timeout' | 'ok') => void> = [];
+    const gates: Array<{ how: (v: 'timeout' | 'ok') => void; heavy: boolean }> = [];
     const waits: Array<() => void> = [];
-    let slow = true;
-    const run: RunProgram = async (_p, args) => {
+    const state = { free: false };
+    const run: RunProgram = async (_p, args, opts) => {
       const bytes = readFileSync(args.find((a) => a.endsWith('doc.pdf'))!);
-      // Flint's own small PDF: back at once, once the Mac has finished.
-      if (!bytes.includes('HEAVYQ') && !bytes.includes('another PDF')) return slow ? Promise.reject(new ReadTimedOut()) : { stdout: RECORDED, truncated: false };
-      const how = await new Promise<'timeout' | 'ok'>((r) => gates.push(r));
+      if (!bytes.includes('HEAVYQ') && !bytes.includes('another PDF')) {
+        if (!state.free) throw new ReadTimedOut();
+        return { stdout: RECORDED, truncated: false };
+      }
+      const how = await new Promise<'timeout' | 'ok' | 'abort'>((r) => {
+        gates.push({ how: r, heavy: bytes.includes('HEAVYQ') });
+        opts.signal?.addEventListener('abort', () => r('abort'), { once: true });
+      });
+      if (how === 'abort') throw new Error('the read was called off');
       if (how === 'timeout') throw new ReadTimedOut();
       return { stdout: RECORDED, truncated: false };
     };
     const reader = makePdfReader({ reader: 'spotlight', program: '/usr/bin/mdimport' }, { run, tmp, atOnce: 2, later: (fn) => void waits.push(fn) });
+    const unstick = async (): Promise<void> => {
+      state.free = true;
+      waits.shift()!();
+      await expect.poll(() => reader.stuck!(), WAIT).toBe(false);
+      state.free = false;
+    };
+    /** The read under way of the heavy PDF, or of the other: two reads start in either order. */
+    const gate = (heavy: boolean, from = 0) => gates.slice(from).find((g) => g.heavy === heavy)!;
+    return { reader, gates, gate, waits, unstick };
+  };
+
+  it('a read beside another that runs out of time is told the reader is busy, and the one behind it too; neither is remembered the first time', async () => {
+    const { reader, gates, gate, unstick } = gated();
     const heavy = reader.read(HEAVY);
     const fine = reader.read(OTHER);
     await expect.poll(() => gates.length, WAIT).toBe(2);
-    gates[0]!('timeout'); // the heavy one first
-    expect(await heavy).toEqual({ ok: false, why: 'too_slow' });
-    gates[1]!('timeout'); // the one that waited behind it
+    gate(true).how('timeout'); // the heavy one first
+    expect(await heavy).toEqual({ ok: false, why: 'busy' });
+    gate(false).how('timeout'); // the one that waited behind it
     expect(await fine).toEqual({ ok: false, why: 'busy' });
-    // Neither is remembered: the heavy one did not run alone, so it cannot be told from the other.
     expect(reader.slow!()).toBe(0);
-    slow = false;
-    waits.shift()!();
-    await expect.poll(() => reader.stuck!(), WAIT).toBe(false);
-    const other = reader.read(OTHER);
-    await expect.poll(() => gates.length, WAIT).toBe(3);
-    gates[2]!('ok');
-    expect((await other).ok).toBe(true);
-    // Alone, the heavy one runs out of time again, and now it is remembered.
-    const again = reader.read(HEAVY);
+    await unstick();
+    // The same pair again: the heavy one is first to run out of time a second time, and now it is remembered. The
+    // other, which only ever timed out behind it, is not.
+    const heavy2 = reader.read(HEAVY);
+    const fine2 = reader.read(OTHER);
     await expect.poll(() => gates.length, WAIT).toBe(4);
-    gates[3]!('timeout');
-    expect(await again).toEqual({ ok: false, why: 'too_slow' });
+    gate(true, 2).how('timeout');
+    expect(await heavy2).toEqual({ ok: false, why: 'too_slow' });
+    gate(false, 2).how('timeout');
+    expect(await fine2).toEqual({ ok: false, why: 'busy' });
     expect(reader.slow!()).toBe(1);
+    await unstick();
+    const other = reader.read(OTHER);
+    await expect.poll(() => gates.length, WAIT).toBe(5);
+    gates[4]!.how('ok');
+    expect((await other).ok).toBe(true);
+    expect(await reader.read(HEAVY)).toEqual({ ok: false, why: 'too_slow' });
+    expect(gates).toHaveLength(5); // refused at once: not handed over
+  });
+
+  it('a read called off once its PDF was handed over leaves the reader busy, as a time-out does: the next PDF is not read behind it and remembered', async () => {
+    const { reader, gates, unstick } = gated();
+    const ac = new AbortController();
+    const big = reader.read(HEAVY, ac.signal);
+    await expect.poll(() => gates.length, WAIT).toBe(1);
+    ac.abort();
+    expect(await big).toEqual({ ok: false, why: 'failed' });
+    expect(reader.stuck!()).toBe(true);
+    // The next PDF is told the reader is busy, at once: it is not handed to the Mac while it may still be at work.
+    expect(await reader.read(OTHER)).toEqual({ ok: false, why: 'busy' });
+    expect(gates).toHaveLength(1);
+    expect(reader.slow!()).toBe(0);
+    await unstick();
+    const other = reader.read(OTHER);
+    await expect.poll(() => gates.length, WAIT).toBe(2);
+    gates[1]!.how('ok');
+    expect((await other).ok).toBe(true);
   });
 
   it('a bounded list: with more of them than it holds, the oldest is forgotten first', async () => {

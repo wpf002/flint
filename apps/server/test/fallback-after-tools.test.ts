@@ -15,7 +15,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { ActionLogObserver, Flint, FlintError, InMemoryStore, makeAiError, type AiError, type ProviderAdapter, type StreamEvent, type Tool } from '@flint/core';
-import { NoFallback, TOO_LONG_FOR_THE_CLOUD, mayAskAnother, outgrewTheCloud, providerFailure, runWithFallback, shouldFallBack, type BrainTier } from '../src/brains';
+import { NoFallback, TOO_LONG_FOR_THE_CLOUD, mayAskAnother, outgrewTheCloud, promptRoom, providerFailure, runWithFallback, shouldFallBack, type BrainTier } from '../src/brains';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { TurnLog, recordTurnEntry } from '../src/grounding';
@@ -144,7 +144,7 @@ describe('the rule (./brains)', () => {
 
   it('outgrewTheCloud: a cloud window too small for a turn the local model could not fit either; then the local model is not asked after it', () => {
     const overflow = new FlintError(makeAiError('context_overflow', 'The newest message does not fit this model\'s window', { retryable: false }));
-    const plain = { media: false, localWindow: 16_384, windows: [200_000, 128_000] };
+    const plain = { media: false, localRoom: 16_384 - 4_096, rooms: [200_000 - 64_000, 128_000 - 16_000] };
     expect(outgrewTheCloud(overflow, plain)).toBe(true);
     for (const e of [overloaded(), makeAiError('rate_limit', '429'), makeAiError('timeout', 't', { retryable: true }), makeAiError('internal', '413 request too large', { providerCode: '413' })]) {
       expect(outgrewTheCloud(new FlintError(e), plain), e.kind).toBe(false);
@@ -153,14 +153,26 @@ describe('the rule (./brains)', () => {
     // A turn with a PDF or a picture: the local model is handed a PDF as text cut to its window, so a PDF too large
     // for the cloud may be read here (Hybrid's planned fallback). It is asked.
     expect(outgrewTheCloud(overflow, { ...plain, media: true })).toBe(false);
-    // A brain with a smaller window than the local model's (a tier on a local wire) says nothing about the local model.
-    expect(outgrewTheCloud(overflow, { ...plain, windows: [200_000, 8_192] })).toBe(false);
-    expect(outgrewTheCloud(overflow, { ...plain, windows: [] })).toBe(false);
+    // A brain with less room for the prompt than the local model (a tier on a local wire, or a 32k window keeping 20k
+    // for its reply) says nothing about the local model.
+    expect(outgrewTheCloud(overflow, { ...plain, rooms: [136_000, 8_192] })).toBe(false);
+    expect(outgrewTheCloud(overflow, { ...plain, rooms: [promptRoom({ maxContextTokens: 32_000, maxOutputTokens: 20_000 })] })).toBe(false);
+    expect(outgrewTheCloud(overflow, { ...plain, rooms: [] })).toBe(false);
+    expect(promptRoom({ maxContextTokens: 1_000, maxOutputTokens: 4_000 })).toBe(0);
     // Every place a cloud failure can fall to the local model asks it first (index.ts: /generate and /chat).
     const index = readFileSync(join(__dirname, '../src/index.ts'), 'utf8');
     expect(index.match(/mayAskAnother\(err, \{ acted[^)]*\}\) \|\| outgrew\(err\)/g)).toHaveLength(1);
     expect(index.match(/mayAskAnother\(err, \{ acted, signal: ac\.signal \}\) && !outgrew\(err\)/g)).toHaveLength(2);
-    expect(index.match(/const outgrew = \(err: unknown\): boolean =>\n\s*outgrewTheCloud\(err, \{ media: attachments\.some\(\(a\) => a\.kind === 'image' \|\| a\.kind === 'document'\), localWindow: ctx\.inference\.localFacts\(\)\.contextTokens, windows: plan\?\.chain\.map\(\(b\) => b\.provider\.getCapabilities\(b\.model\)\.maxContextTokens\) \?\? \[\] \}\);/g)).toHaveLength(2);
+    for (const ind of ['    ', '      ']) {
+      expect(index, `outgrew at ${ind.length}`).toContain([
+        `${ind}const outgrew = (err: unknown): boolean =>`,
+        `${ind}  outgrewTheCloud(err, {`,
+        `${ind}    media: attachments.some((a) => a.kind === 'image' || a.kind === 'document'),`,
+        `${ind}    localRoom: Math.max(0, ...localPlan.steps.flatMap((s) => (s.kind === 'local' ? [promptRoom(ctx.inference.primary.provider.getCapabilities(s.model))] : []))),`,
+        `${ind}    rooms: plan?.chain.map((b) => promptRoom(b.provider.getCapabilities(b.model))) ?? [],`,
+        `${ind}  });`,
+      ].join('\n'));
+    }
     expect(index).toContain("if (outgrew(err)) return json(res, 413, { error: TOO_LONG_FOR_THE_CLOUD, ...evalFields() });");
     expect(TOO_LONG_FOR_THE_CLOUD).toBe('This message is longer than the cloud model can read. Send a shorter one, or split it up.');
   });

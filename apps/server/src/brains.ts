@@ -469,18 +469,22 @@ export function mayAskAnother(err: unknown, o: { acted: boolean; signal?: AbortS
 export const TOO_LONG_FOR_THE_CLOUD = 'This message is longer than the cloud model can read. Send a shorter one, or split it up.';
 /**
  * Did the cloud brains fail because the turn is longer than their window, so
- * that the local model, whose window is no larger, could only fail the same
- * way? It is then not asked after them, and Will reads one plain sentence (a
- * long message in Cloud mode was answered with the local model's window).
- * Only for a turn with no picture or PDF on it: the local model is handed a
- * PDF as text cut to its window, so a PDF too large for the cloud may well be
- * read here (a Hybrid turn's planned fallback). And only when every brain that
- * was asked has a window at least as large as the local model's: a tier with a
- * smaller one says nothing about the local model.
+ * that the local model, whose room for a prompt is no larger, could only fail
+ * the same way? It is then not asked after them, and Will reads one plain
+ * sentence (a long message in Cloud mode was answered with the local model's
+ * window). Only for a turn with no picture or PDF on it: the local model is
+ * handed a PDF as text cut to its window, so a PDF too large for the cloud may
+ * well be read here (a Hybrid turn's planned fallback). And only when every
+ * brain that was asked has at least as much room for the prompt (its window
+ * less what it keeps for its reply) as the most any planned local model has: a
+ * brain with less says nothing about the local model.
  */
-export function outgrewTheCloud(err: unknown, turn: { media: boolean; localWindow: number; windows: readonly number[] }): boolean {
-  return isFlintError(err) && err.kind === 'context_overflow' && !turn.media && turn.windows.length > 0 && turn.windows.every((w) => w >= turn.localWindow);
+export function outgrewTheCloud(err: unknown, turn: { media: boolean; localRoom: number; rooms: readonly number[] }): boolean {
+  return isFlintError(err) && err.kind === 'context_overflow' && !turn.media && turn.rooms.length > 0 && turn.rooms.every((r) => r >= turn.localRoom);
 }
+
+/** A model's room for a prompt: its window, less what it keeps for its reply. */
+export const promptRoom = (caps: { maxContextTokens: number; maxOutputTokens: number }): number => Math.max(0, caps.maxContextTokens - caps.maxOutputTokens);
 
 /**
  * Run `attempt` on each brain of the chain in turn until one succeeds. Throws

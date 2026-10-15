@@ -732,6 +732,20 @@ export function makePdfReader(which: { reader: PdfReaderKind; program: string },
     for (const [id, until] of slow) if (now() >= until) slow.delete(id);
     return slow.size > 0 && slow.has(digestOf(bytes));
   };
+  /** First time-outs of a PDF that ran beside another, by digest, each for as long as a PDF is remembered. */
+  const strikes = new Map<string, number>();
+  /** Note one; true when it is the PDF's second inside that time (it is then remembered). */
+  const strike = (bytes: Uint8Array): boolean => {
+    for (const [id, until] of strikes) if (now() >= until) strikes.delete(id);
+    const id = digestOf(bytes);
+    if (strikes.delete(id)) return true;
+    strikes.set(id, now() + SLOW_FOR_MS);
+    for (const oldest of strikes.keys()) {
+      if (strikes.size <= SLOW_REMEMBERED) break;
+      strikes.delete(oldest);
+    }
+    return false;
+  };
   const rememberSlow = (bytes: Uint8Array): void => {
     slow.set(digestOf(bytes), now() + SLOW_FOR_MS);
     for (const oldest of slow.keys()) {
@@ -794,6 +808,7 @@ export function makePdfReader(which: { reader: PdfReaderKind; program: string },
     const me = { shared: stuck || inFlight.size > 0 };
     for (const other of inFlight) other.shared = true;
     inFlight.add(me);
+    let handedOver = false;
     try {
       const parent = ownReadsFolder(tmp);
       if (!parent) return { ok: false, why: 'failed' };
@@ -805,6 +820,7 @@ export function makePdfReader(which: { reader: PdfReaderKind; program: string },
       await mkdir(inner, { mode: 0o700 });
       const file = join(inner, 'doc.pdf');
       await writeFile(file, bytes, { mode: 0o600, flag: 'wx' });
+      handedOver = true;
       const out = await run(which.program, READER_ARGS[which.reader](file), { timeoutMs, maxBytes: deps.maxBytes ?? MAX_OUTPUT_BYTES, cwd: inner, signal });
       let raw: string;
       let whole = !out.truncated;
@@ -823,19 +839,26 @@ export function makePdfReader(which: { reader: PdfReaderKind; program: string },
       if (text.length === 0) return { ok: false, why: whole ? 'no_text' : 'failed' };
       return { ok: true, text: text.slice(0, MAX_TEXT_CHARS), cut: !whole || text.length > MAX_TEXT_CHARS, ...(pages !== undefined ? { pages } : {}) };
     } catch (err) {
-      if (!(err instanceof ReadTimedOut)) return { ok: false, why: 'failed' };
+      const timedOut = err instanceof ReadTimedOut;
+      // A read called off once its PDF was handed over leaves the Mac as one that ran out of time does: at work on
+      // it, after Flint stopped waiting. Either way, nothing more is handed over until a small PDF of Flint's own
+      // comes back (a read after a called-off one used to wait behind that work, and be remembered as too slow).
+      const calledOff = handedOver && signal?.aborted === true;
       const first = !stuck;
-      if (first) {
-        // Flint has stopped waiting. The Mac may not have stopped working: nothing more is handed to it until
-        // a small PDF of Flint's own comes back.
+      if ((timedOut || calledOff) && first) {
         stuck = true;
         probeLater(PROBE_AFTER_MS);
       }
-      if (!asked) return { ok: false, why: 'failed' };
+      if (!timedOut || !asked) return { ok: false, why: 'failed' };
       // One that timed out after another already had was waiting behind it: the reader is busy, the PDF may be fine.
       if (!first) return { ok: false, why: 'busy' };
-      if (!me.shared) rememberSlow(bytes);
-      return { ok: false, why: 'too_slow' };
+      // One that ran alone is remembered at once. One that ran beside another may only have waited behind it: it
+      // is told the reader is busy, and remembered only the second time it is the first to run out of time.
+      if (!me.shared || strike(bytes)) {
+        rememberSlow(bytes);
+        return { ok: false, why: 'too_slow' };
+      }
+      return { ok: false, why: 'busy' };
     } finally {
       inFlight.delete(me);
       if (folder) {
