@@ -14,6 +14,7 @@ import { runInternal, PolicyArgs } from '../src/governance/internal';
 import { markProcessed, recordEvent } from '../src/events/record';
 import { promotionTable, NEVER_PROMOTED, NEXUS_PROMOTIONS, P1_PROMOTIONS, P2_PROMOTIONS, P25_PROMOTIONS, P26_PROMOTIONS } from '../src/governance/promotion';
 import { gate } from '../src/backup/nightly';
+import { appendAudit } from '../src/governance/audit';
 
 const DAY = 86_400_000;
 
@@ -141,35 +142,34 @@ describe.skipIf(NO_DB)('the Nexus backup promotion table', () => {
   });
   afterAll(async () => db?.$disconnect());
 
-  let n = 0;
-  const run = (location: 'local' | 'icloud', status: 'ok' | 'failed', hoursAgo: number, drill?: boolean) => {
-    const at = new Date(Date.now() - hoursAgo * 3_600_000);
-    return db.backupRun.create({ data: {
-      kind: 'nexus_dump', location, path: `/x/nexus-${++n}.dump${location === 'icloud' ? '.age' : ''}`, encrypted: location === 'icloud', status, startedAt: at, finishedAt: at,
-      ...(drill === undefined ? {} : { restoreTestedAt: new Date(at.getTime() + 60_000), restoreOk: drill }),
-    } });
-  };
+  // A run of a step as the nightly command ends it: one action entry in the audit trail, ok or failed.
+  const run = (action: string, outcome: 'ok' | 'failed', hoursAgo: number) =>
+    appendAudit(db, [{ actor: 'will:cli', context: 'console', kind: 'action', action, decision: 'act', outcome, inputs: {}, at: new Date(Date.now() - hoursAgo * 3_600_000).toISOString() }]);
 
-  it('is refused until the newest dump, copy and restore test are each good; then one card of three rules, each by name', async () => {
-    await expect(promotionTable(db, { phase: 'nexus', tz: 'UTC' })).rejects.toThrow(/^Nexus has not been backed up yet$/);
+  it('is refused until the newest run of the dump, the copy and the restore test each worked; then one card of three rules, each by name', async () => {
+    const nexus = () => promotionTable(db, { phase: 'nexus', tz: 'UTC' });
+    await expect(nexus()).rejects.toThrow(/^Nexus has not been backed up yet$/);
     // A first-ever dump that failed is still no backup.
-    await run('local', 'failed', 60);
-    await expect(promotionTable(db, { phase: 'nexus', tz: 'UTC' })).rejects.toThrow(/^Nexus has not been backed up yet$/);
-    await run('local', 'ok', 50);
-    await expect(promotionTable(db, { phase: 'nexus', tz: 'UTC' })).rejects.toThrow(/^not yet: Nexus has no good encrypted copy to iCloud yet$/);
-    await run('icloud', 'ok', 49);
-    await expect(promotionTable(db, { phase: 'nexus', tz: 'UTC' })).rejects.toThrow(/^not yet: Nexus has had no restore test yet$/);
-    await run('local', 'ok', 40, false);
-    await expect(promotionTable(db, { phase: 'nexus', tz: 'UTC' })).rejects.toThrow(/^not yet: the last Nexus restore test failed$/);
-    await run('local', 'ok', 30, true);
-    await run('icloud', 'failed', 20);
-    await expect(promotionTable(db, { phase: 'nexus', tz: 'UTC' })).rejects.toThrow(/^not yet: the last Nexus encrypted copy to iCloud failed$/);
-    await run('icloud', 'ok', 10);
-    await run('local', 'failed', 5);
-    await expect(promotionTable(db, { phase: 'nexus', tz: 'UTC' })).rejects.toThrow(/^not yet: the last Nexus backup failed$/);
-    await run('local', 'ok', 2);
+    await run('backup.nexus', 'failed', 60);
+    await expect(nexus()).rejects.toThrow(/^Nexus has not been backed up yet$/);
+    await run('backup.nexus', 'ok', 50);
+    await expect(nexus()).rejects.toThrow(/^not yet: Nexus has had no encrypted copy to iCloud yet$/);
+    await run('backup.nexus.offsite', 'ok', 49);
+    await expect(nexus()).rejects.toThrow(/^not yet: Nexus has had no restore test yet$/);
+    // A restore test that could not start leaves no result on any backup's record; its run is still a failure.
+    await run('restore.drill.nexus', 'failed', 40);
+    await expect(nexus()).rejects.toThrow(/^not yet: the last Nexus restore test failed$/);
+    await run('restore.drill.nexus', 'ok', 30);
+    await run('backup.nexus.offsite', 'failed', 20);
+    await expect(nexus()).rejects.toThrow(/^not yet: the last Nexus encrypted copy to iCloud failed$/);
+    await run('backup.nexus.offsite', 'ok', 10);
+    await run('backup.nexus', 'failed', 5);
+    await expect(nexus()).rejects.toThrow(/^not yet: the last Nexus backup failed$/);
+    await run('backup.nexus', 'ok', 2);
+    // A run that went to Flint's own database is not Nexus's.
+    await run('backup.local', 'failed', 1);
 
-    const t = await promotionTable(db, { phase: 'nexus', tz: 'UTC' });
+    const t = await nexus();
     expect(PolicyArgs.safeParse({ rows: t.rows }).success).toBe(true);
     expect(t.rows.map((r) => r.pattern)).toEqual(NEXUS_PROMOTIONS.map((r) => r.pattern));
     for (const r of t.rows) expect(r).toMatchObject({ tier: 'alone', reason: 'Nexus backup promotion table, after a good backup, copy and restore test' });
@@ -177,8 +177,8 @@ describe.skipIf(NO_DB)('the Nexus backup promotion table', () => {
     const card = await db.proposal.findUniqueOrThrow({ where: { id: t.proposalId } });
     expect(card.templateId).toBe('nexus.promotion');
     expect(card.consequential).toBe(true);
-    // The first failed dump is before the first good one, so it is not counted; the other four failures are.
-    expect(card.reason).toMatch(/^This lets Flint back up Nexus each night, send the encrypted copy to iCloud and test a restore each week without asking until [A-Z][a-z]{2} \d{1,2}, \d{4}\. Since [A-Z][a-z]{2} \d{1,2}, Flint backed up Nexus 4 times, sent 2 encrypted copies to iCloud, and tested a restore 2 times\. 3 steps failed before a later one passed\.$/);
+    // The first failed dump is before the first good one, so it is not counted; the other three failures are.
+    expect(card.reason).toMatch(/^This lets Flint back up Nexus each night, send the encrypted copy to iCloud and test a restore each week without asking until [A-Z][a-z]{2} \d{1,2}, \d{4}\. Since [A-Z][a-z]{2} \d{1,2}, Flint backed up Nexus 2 times, sent 2 encrypted copies to iCloud, and tested a restore 1 time\. 3 runs failed before a later one passed\.$/);
     // Filing it again is the same card.
     expect(await promotionTable(db, { phase: 'nexus', tz: 'UTC', now: new Date(Date.now() + 60_000) })).toMatchObject({ proposalId: t.proposalId, deduped: true });
     // A step Will drops stays on its nightly card: that table is another card.
@@ -197,7 +197,20 @@ describe.skipIf(NO_DB)('the Nexus backup promotion table', () => {
     expect(auto('restore.drill.nexus')).toMatchObject({ tier: 'alone', cap: { limit: 1, period: 'week' } });
     for (const a of ['backup.local', 'backup.offsite', 'restore.drill', 'backup.prune']) expect(auto(a).tier, a).not.toBe('alone');
     for (const a of NEXUS_PROMOTIONS.map((r) => r.pattern)) expect(resolveTier(a, { context: 'chat', tainted: false, policies }).tier, a).not.toBe('alone');
-    const g = await gate(db, 'nexus-backup', 'UTC', undefined, new Date());
-    expect(g).toMatchObject({ go: true, why: 'promoted' });
+    expect(await gate(db, 'nexus-backup', 'UTC', undefined, new Date())).toMatchObject({ go: true, why: 'promoted' });
+    // Its cap: a second run the same day does not go.
+    expect(await gate(db, 'nexus-backup', 'UTC', undefined, new Date())).toMatchObject({ go: false });
+  });
+
+  it('one good run of each, nothing failed: the sentence says so in the singular', async () => {
+    const fresh = createDb((await freshDb()).app);
+    try {
+      for (const a of NEXUS_PROMOTIONS.map((r) => r.pattern)) await appendAudit(fresh, [{ actor: 'will:cli', context: 'console', kind: 'action', action: a, decision: 'act', outcome: 'ok', inputs: {} }]);
+      const t = await promotionTable(fresh, { phase: 'nexus', tz: 'UTC' });
+      const card = await fresh.proposal.findUniqueOrThrow({ where: { id: t.proposalId } });
+      expect(card.reason).toMatch(/\. Since [A-Z][a-z]{2} \d{1,2}, Flint backed up Nexus 1 time, sent 1 encrypted copy to iCloud, and tested a restore 1 time\. None failed\.$/);
+    } finally {
+      await fresh.$disconnect();
+    }
   });
 });

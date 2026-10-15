@@ -12,9 +12,9 @@
  *    Google Calendar syncs, and P2.6's Apple Calendar syncs (each source
  *    running for a week); P3's goal reviews (on for each of the 7 days, none
  *    over a day late, the local model answering). p3c needs 14 days of chat's
- *    suggestion cards. Nexus's needs no week: it needs a good dump, a good
- *    encrypted copy in iCloud and a restore test that passed, each the newest
- *    of its kind, with no failure since (what Health shows as Normal).
+ *    suggestion cards. Nexus's needs no week: the newest run of each of its
+ *    three steps (the dump, the encrypted copy to iCloud, the restore test)
+ *    must have worked.
  *  - Never runtime.frontier.complete or triage.rule.create (they stay at
  *    APPROVAL), never anything FORBIDDEN, never an action a pattern of Will's
  *    choosing was dropped for (`--drop`).
@@ -246,9 +246,11 @@ function calendarPhase(source: keyof typeof CALENDAR_NAMES, rows: PhaseOf['rows'
   };
 }
 
-/** Nexus's first good dump: its table's records run from there. */
-const nexusFirst = async (db: Db): Promise<Date | undefined> =>
-  (await db.backupRun.findFirst({ where: { kind: 'nexus_dump', location: 'local', status: 'ok' }, orderBy: { startedAt: 'asc' }, select: { startedAt: true } }))?.startedAt;
+/** Nexus's three steps, as the gate names them when one has not worked. */
+const NEXUS_STEPS = [['backup.nexus', 'backup'], ['backup.nexus.offsite', 'encrypted copy to iCloud'], ['restore.drill.nexus', 'restore test']] as const;
+/** A Nexus step's first or last run with this outcome, from the audit trail (each run of a step ends there). */
+const nexusRun = async (db: Db, action: string, outcome: string, order: 'asc' | 'desc', now?: Date): Promise<Date | undefined> =>
+  (await db.auditEntry.findFirst({ where: { kind: 'action', action, outcome, ...(now ? { at: { lte: now } } : {}) }, orderBy: [{ at: order }, { seq: order }], select: { at: true } }))?.at;
 
 /** Each phase's rows, its card's template, what counts as its week of evidence, and what the week measured. */
 const PHASES: Record<Phase, PhaseOf> = {
@@ -362,34 +364,28 @@ const PHASES: Record<Phase, PhaseOf> = {
     shadowDays: 0,
     after: 'after a good backup, copy and restore test',
     none: 'Nexus has not been backed up yet',
-    says: /^Since [A-Z][a-z]{2} \d{1,2}, Flint backed up Nexus \d+ times?, sent \d+ encrypted (?:copy|copies) to iCloud, and tested a restore \d+ times?\. (?:None failed|\d+ steps? failed before a later one passed)\.$/,
-    // Its first good dump: the records run from there.
-    first: nexusFirst,
+    says: /^Since [A-Z][a-z]{2} \d{1,2}, Flint backed up Nexus \d+ times?, sent \d+ encrypted (?:copy|copies) to iCloud, and tested a restore \d+ times?\. (?:None failed|\d+ runs? failed before a later one passed)\.$/,
+    first: (db) => nexusRun(db, 'backup.nexus', 'ok', 'asc'),
     covered: async () => undefined,
     measured: async () => '',
-    // Each of the three is good now: its newest record is a success, with no failure after it (a restore test's
-    // newest result passed). The sentence counts the same records, from the first good dump.
+    // The newest run of each of the three worked. Runs are read from the audit trail, where every run of each
+    // step ends, whatever stopped it (a restore test that could not start leaves no result on a backup's record,
+    // but it leaves a failed run here). How long ago they ran is not asked: until this is signed they run only
+    // on a card, so a gap of days is the very thing it ends. The sentence counts the same runs, from the first good dump.
     weighed: async (db, now, tz) => {
-      const newest = (location: string, status: string) => db.backupRun.findFirst({ where: { kind: 'nexus_dump', location, status }, orderBy: { startedAt: 'desc' }, select: { startedAt: true } });
-      const firstDump = await nexusFirst(db);
-      if (!firstDump) return { gap: 'Nexus has not been backed up yet' };
-      for (const [location, words] of [['local', 'backup'], ['icloud', 'encrypted copy to iCloud']] as const) {
-        const good = await newest(location, 'ok');
-        if (!good) return { gap: `Nexus has no good ${words} yet` };
-        const bad = await newest(location, 'failed');
-        if (bad && bad.startedAt > good.startedAt) return { gap: `the last Nexus ${words} failed` };
+      const first = await nexusRun(db, 'backup.nexus', 'ok', 'asc', now);
+      if (!first) return { gap: 'Nexus has not been backed up yet' };
+      for (const [action, words] of NEXUS_STEPS) {
+        const last = await db.auditEntry.findFirst({ where: { kind: 'action', action, outcome: { in: ['ok', 'failed'] }, at: { lte: now } }, orderBy: [{ at: 'desc' }, { seq: 'desc' }], select: { outcome: true } });
+        if (!last) return { gap: `Nexus has had no ${words} yet` };
+        if (last.outcome !== 'ok') return { gap: `the last Nexus ${words} failed` };
       }
-      const drill = await db.backupRun.findFirst({ where: { kind: 'nexus_dump', location: 'local', restoreTestedAt: { not: null } }, orderBy: { restoreTestedAt: 'desc' }, select: { restoreOk: true } });
-      if (!drill) return { gap: 'Nexus has had no restore test yet' };
-      if (drill.restoreOk !== true) return { gap: 'the last Nexus restore test failed' };
-      const since = { startedAt: { gte: firstDump, lte: now } };
-      const dumps = await db.backupRun.count({ where: { kind: 'nexus_dump', location: 'local', status: 'ok', ...since } });
-      const copies = await db.backupRun.count({ where: { kind: 'nexus_dump', location: 'icloud', status: 'ok', ...since } });
-      const tests = await db.backupRun.count({ where: { kind: 'nexus_dump', location: 'local', restoreTestedAt: { gte: firstDump, lte: now } } });
-      const failed = await db.backupRun.count({ where: { kind: 'nexus_dump', OR: [{ status: 'failed', ...since }, { restoreOk: false, restoreTestedAt: { gte: firstDump, lte: now } }] } });
-      // A failure before the newest good run of its kind is past (the gate above): the card still counts it.
-      const failures = failed ? `${count(failed, 'step')} failed before a later one passed.` : 'None failed.';
-      return { measured: `Since ${dayWords(tz, firstDump)}, Flint backed up Nexus ${count(dumps, 'time')}, sent ${count(copies, 'encrypted copy', 'encrypted copies')} to iCloud, and tested a restore ${count(tests, 'time')}. ${failures}` };
+      const runs = (action: string, outcome: string) => db.auditEntry.count({ where: { kind: 'action', action, outcome, at: { gte: first, lte: now } } });
+      const [dumps, copies, tests] = await Promise.all(NEXUS_STEPS.map(([a]) => runs(a, 'ok')));
+      const failed = (await Promise.all(NEXUS_STEPS.map(([a]) => runs(a, 'failed')))).reduce((x, y) => x + y, 0);
+      // Every failure counted here had a run of its step after it that worked (the gate above): the card says so.
+      const failures = failed ? `${count(failed, 'run')} failed before a later one passed.` : 'None failed.';
+      return { measured: `Since ${dayWords(tz, first)}, Flint backed up Nexus ${count(dumps!, 'time')}, sent ${count(copies!, 'encrypted copy', 'encrypted copies')} to iCloud, and tested a restore ${count(tests!, 'time')}. ${failures}` };
     },
   },
 };
@@ -433,11 +429,10 @@ export async function promotionTable(db: Db, opts: { phase?: Phase; drop?: reado
   if (opts.phase === 'p3c' && !(await chatFloorInDatabase(db))) throw new Refused(409, CHAT_FLOOR_SAYS);
   const first = await phase.first(db);
   const need = phase.shadowDays ?? SHADOW_DAYS;
-  if (!first && phase.none) throw new Refused(409, phase.none);
-  if (!first || now.getTime() - first.getTime() < need * DAY) {
-    const days = first ? (Math.max(0, now.getTime() - first.getTime()) / DAY).toFixed(1) : '0';
-    throw new Refused(409, `the shadow ${need === SHADOW_DAYS ? 'week is' : 'weeks are'} not over: ${days} of ${need} days of ${phase.evidence}`);
-  }
+  const notOver = (days: string) => new Refused(409, `the shadow ${need === SHADOW_DAYS ? 'week is' : 'weeks are'} not over: ${days} of ${need} days of ${phase.evidence}`);
+  if (!first) throw phase.none ? new Refused(409, phase.none) : notOver('0');
+  // A table that needs no days (Nexus's) asks only its gate below.
+  if (need > 0 && now.getTime() - first.getTime() < need * DAY) throw notOver((Math.max(0, now.getTime() - first.getTime()) / DAY).toFixed(1));
   // One count for the gate and for the card's sentence, where a phase has one (P3's two tables).
   const weighed = await phase.weighed?.(db, now, opts.tz);
   const gap = weighed ? ('gap' in weighed ? weighed.gap : undefined) : await phase.covered?.(db, now, opts.tz);

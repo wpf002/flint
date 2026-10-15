@@ -2838,21 +2838,25 @@ each step, by its own name, until 175 days from today. Each keeps its cap (a
 dump and a copy a day, a test a week). Sign it in Approvals with Touch ID, or
 let it expire in a week. Until it is signed each night still files its cards.
 
-It needs no week of evidence. It is refused until Nexus has all three of these,
-each the newest of its kind with no failure after it, which is what Health
-shows as Normal:
+It needs no week of evidence. It is refused until the newest run of each step
+worked: the dump, the encrypted copy to iCloud and the restore test. Every run
+counts, by hand or at night, including one that stopped before it could leave a
+record of its file. How long ago they ran does not count: until the card is
+signed they run only when you approve one, so days without a run are what it
+ends.
 
 | Refused with | Why |
 | --- | --- |
-| Nexus has not been backed up yet | There is no good dump on record. |
-| not yet: Nexus has no good encrypted copy to iCloud yet | No offsite copy has gone. Run `nexus-offsite` once by hand. |
-| not yet: the last Nexus backup failed | The newest dump failed. A good one clears it. |
+| Nexus has not been backed up yet | No dump has worked yet. |
+| not yet: Nexus has had no encrypted copy to iCloud yet | No offsite copy has gone. Run `nexus-offsite` once by hand. |
 | not yet: Nexus has had no restore test yet | Run `nexus-drill` once by hand. |
-| not yet: the last Nexus restore test failed | The newest test did not match. A passing one clears it. |
+| not yet: the last Nexus backup failed | The newest dump failed. A good one clears it. |
+| not yet: the last Nexus encrypted copy to iCloud failed | The newest copy to iCloud failed. A good one clears it. |
+| not yet: the last Nexus restore test failed | The newest test failed or did not finish. A passing one clears it. |
 
-The card's details count the records from the first good dump: "Since Oct 13,
+The card's details count the runs from the first good dump: "Since Oct 13,
 Flint backed up Nexus 1 time, sent 1 encrypted copy to iCloud, and tested a
-restore 1 time. None failed." An earlier failure a later run made good is
+restore 1 time. None failed." A failed run that a later one made good is
 counted there too. `--drop backup.nexus.offsite` (or either other name) leaves
 that step on its nightly card.
 
