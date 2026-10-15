@@ -1110,7 +1110,8 @@ same for a `.txt` on main. So:
 #### At the door
 
 - **A PDF too large for the model that would answer is refused with the size sentence**
-  (`report.pdf: larger than the 3 MB limit`, 413), in every mode. A prompt is sized at 2,000
+  (`report.pdf: larger than the 3.3 MB the cloud model can read`, 413), in every mode, unless
+  the local model may answer instead and reads it here. A prompt is sized at 2,000
   tokens for each 50 KB of PDF, so a model with a 200,000-token window takes about 3 to 4 MB.
   Until now such a PDF passed the door (its limit is 20 MB), and the message that carried it
   was then dropped to make the prompt fit: the cloud model was sent `"messages": []` and
