@@ -1983,6 +1983,46 @@ switched off, and it is off until you sign its card.
   template's, the rule checks still run, and nothing a result says is ever
   carried out. A task whose items you don't trust is one to run without titles.
 
+### Local Reviews (part 5)
+
+The third asset, **Local Reviews**, argues each card that needs a review before
+you approve it, on this Mac's own model, and writes down a verdict beside the
+card. A review is advice: it never approves, rejects or changes a card. Like the
+rest of P5 it runs only while tasks are switched on, and only once you sign the
+card that turns Local Reviews on.
+
+- **Which cards.** The ones the database marks as needing a review when they are
+  filed: any card with text from outside Flint in it, one that can't be undone,
+  one about financial data, and any card that spends, changes a policy or a rule,
+  opens a pull request, forgets or voids. Your own card that changes whether
+  reviews are required is never one of them.
+- **How a review is made.** A short debate: the case against approving the card,
+  then the case for it (answering the case against), then a judge that hears
+  both twice — once with the case against first and once with the case for
+  first. If the two passes disagree, the more careful verdict is kept, the review
+  says they did not agree, and it is only as sure as the less sure pass.
+- **What a review holds.** What Flint's own code found in the card (the facts
+  that made it need a review, never the model's words), the verdict — Go Ahead,
+  Go Ahead with Changes, or Hold Off — how sure the judge was, up to four of its
+  reasons from a fixed list, its one sentence, and the two cases. The words are
+  the model's, kept as outside text, and they are cleared later like a card's;
+  what the review found never changes.
+- **Of the card as you'd see it.** A review is written once, while the card still
+  waits, of exactly that card's contents, and only while Local Reviews is on. A
+  card decided, changed or lapsed while the model was answering gets none, and
+  the database refuses one written after Local Reviews was turned off.
+- **Within its limits.** 20 reviews a day. Each card takes one of them once a
+  day, and its reviews make at most 12 requests a day however many times its job
+  runs. The model is asked one request at a time, shared with everything else
+  local, and chat comes first: a review waits while a chat turn runs. The tasks
+  tick sends every waiting card that needs a review every two minutes until it
+  has one.
+- **In shadow.** Reviews are written and nothing waits for them. Requiring them
+  stays your switch, and it has no button yet: it comes with the part that shows
+  a card's review in Approvals and makes Approve name the review you saw, which
+  the database insists on once reviews are required.
+- **Health** says when Local Reviews is on with no local model set up.
+
 The console's Tasks panel and Settings > Assets use these routes, through the
 server's checked proxy. They sit behind the same token scope as approvals, so
 no model can read a task or start one:

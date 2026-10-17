@@ -9,7 +9,8 @@
  * says how it ended. The local worker does the three jobs that need words, on
  * this Mac's own model and nowhere else; a runtime with no local model named
  * has nothing to run it, so New Task offers none of its kinds of task and
- * Settings > Health says so.
+ * Settings > Health says so. Local Reviews argues each card that needs a
+ * review, on the same model, and runs no task.
  */
 import { dispatchActionOf, type AssetKind, type TaskTemplateId } from '@flint/policy';
 
@@ -42,8 +43,14 @@ export const LOCAL_WORKER: AssetDef = assetOf({
   line: 'Flint summarizes, sorts and drafts on this Mac’s own model.',
 });
 
+/** Reviews cards before Will approves them: it runs no task, and is handed work under review.local. */
+export const LOCAL_REVIEWER: AssetDef = assetOf({
+  id: 'as-local-reviewer-v1', kind: 'local_reviewer', externalRef: 'ollama:review:v1', name: 'Local Reviews', capabilities: ['review'], spends: false,
+  line: 'Flint argues each card that needs a review, on this Mac’s own model.',
+});
+
 /** Every asset there is. Adding one is a reviewed code change. */
-export const ASSETS: readonly AssetDef[] = [CI_WATCHER, LOCAL_WORKER];
+export const ASSETS: readonly AssetDef[] = [CI_WATCHER, LOCAL_WORKER, LOCAL_REVIEWER];
 
 export const assetDef = (id: string, registry: readonly AssetDef[] = ASSETS): AssetDef | undefined => registry.find((a) => a.id === id);
 /** The asset that runs a template, if one is defined. */

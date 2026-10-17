@@ -276,7 +276,7 @@ describe('the runtime’s notes to Will', () => {
       for (const re of NEVER) expect(`${HEALTH_NAMES.tasks}\n${line}`, line).not.toMatch(re);
       expect(line, line).toMatch(/^[A-Z0-9].*\.$/);
     };
-    const health = [TASK_HEALTH.none, TASK_HEALTH.stopped, TASK_HEALTH.noModel, ...[1, 2, 14].map((n) => TASK_HEALTH.stuck(n))];
+    const health = [TASK_HEALTH.none, TASK_HEALTH.stopped, ...[[true, false], [false, true], [true, true]].map(([w, r]) => TASK_HEALTH.noModel(w!, r!)), ...[1, 2, 14].map((n) => TASK_HEALTH.stuck(n))];
     for (const line of [...health, WAITING, SPEND_NEEDS_ESTIMATE, WHOLE_NUMBERS_ONLY, ...ASSETS.map((a) => a.line)]) said(line);
     expect(HEALTH_NAMES.tasks).toBe('Tasks');
     expect([TASK_HEALTH.stuck(1), TASK_HEALTH.stuck(14)]).toEqual(['A task is past its time and hasn’t been ended.', '14 tasks are past their time and haven’t been ended.']);

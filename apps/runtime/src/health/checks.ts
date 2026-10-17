@@ -566,7 +566,11 @@ export const TASK_HEALTH = {
   none: 'No task has run yet.',
   stuck: (n: number) => (n === 1 ? 'A task is past its time and hasn’t been ended.' : `${n} tasks are past their time and haven’t been ended.`),
   stopped: 'A rule stops Flint from checking results, so finished tasks wait.',
-  noModel: 'No local model is set up, so the Local Worker can’t do a task.',
+  /** Which of the assets that need the local model are on: the sentence names those. */
+  noModel: (worker: boolean, reviews: boolean) =>
+    worker && reviews ? 'No local model is set up, so the Local Worker and Local Reviews can’t work.'
+    : reviews ? 'No local model is set up, so Local Reviews can’t review a card.'
+    : 'No local model is set up, so the Local Worker can’t do a task.',
 } as const;
 /** How long past the tick's own limit a task may sit before Health says so. */
 const TASK_STUCK_SLACK_MS = 3_600_000;
@@ -583,12 +587,16 @@ async function tasks(d: CheckDeps): Promise<ComponentCheck> {
   const { db, now } = d;
   const component = 'tasks';
   if (!d.config.assets) return { component, status: 'disabled' };
-  if (!(await db.asset.count({ where: { enabled: true, kind: { in: [...TASK_ASSET_KINDS] } } }))) return { component, status: 'disabled' };
+  // An asset that runs tasks, or Local Reviews, which reviews their cards: with none on there is nothing to watch.
+  if (!(await db.asset.count({ where: { enabled: true, kind: { in: [...TASK_ASSET_KINDS, 'local_reviewer'] } } }))) return { component, status: 'disabled' };
   const stuck = await db.task.count({ where: { status: { in: ['queued', 'dispatched', 'running', 'submitted'] }, updatedAt: { lt: new Date(now.getTime() - STALE_MS - TASK_STUCK_SLACK_MS) } } });
   if (stuck) return { component, status: 'degraded', detail: TASK_HEALTH.stuck(stuck) };
-  // The Local Worker is on with no local model to ask (FLINT_TRIAGE_MODEL is not set): its three kinds of task are
-  // neither offered nor run, so a task of one would fail as unavailable.
-  if (!d.config.ollama && (await db.asset.count({ where: { enabled: true, kind: 'local_worker' } }))) return { component, status: 'degraded', detail: TASK_HEALTH.noModel };
+  // An asset that needs the local model is on with none to ask (FLINT_TRIAGE_MODEL is not set): the Local Worker's
+  // three kinds of task are neither offered nor run, and Local Reviews reviews nothing.
+  if (!d.config.ollama) {
+    const on = new Set((await db.asset.findMany({ where: { enabled: true, kind: { in: ['local_worker', 'local_reviewer'] } }, select: { kind: true } })).map((a) => a.kind));
+    if (on.size) return { component, status: 'degraded', detail: TASK_HEALTH.noModel(on.has('local_worker'), on.has('local_reviewer')) };
+  }
   if ((await checkStanding(db, now)) === 'stopped') return { component, status: 'degraded', detail: TASK_HEALTH.stopped };
   const ran = await db.task.count({ where: { dispatchedAt: { not: null } } });
   return { component, status: 'ok', ...(ran ? {} : { detail: TASK_HEALTH.none }) };

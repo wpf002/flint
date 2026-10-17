@@ -39,6 +39,8 @@ import { PlanJob, ReviewJob, runReview } from './goals/review.js';
 import { runPlan } from './goals/batch.js';
 import { TASK_TICK_CRON, taskTick } from './tasks/tick.js';
 import { TaskJob, adaptersFor, runTaskJob } from './tasks/run.js';
+import { CardReviewJob } from '@flint/policy';
+import { runCardReview, sendCardReviews } from './reviews/run.js';
 import { workerDeps } from './tasks/local-worker.js';
 import { checkTaskJob } from './tasks/check.js';
 import { predictionsStarted, sweep } from './ledger/sweep.js';
@@ -414,6 +416,24 @@ export function taskJobs(ctx: JobContext): JobSpec[] {
       handler: async () => {
         const r = await taskTick({ db: ctx.db, bus: ctx.bus, log });
         if (r.failed || r.cancelled || r.scored || r.ranOut) ctx.log(`tasks: ${r.failed} ended as failed, ${r.cancelled} cancelled, ${r.scored} forecast(s) scored, ${r.ranOut} run out`);
+        // And the cards that wait for a review: one job each, while Local Reviews is on and a local model is named. A
+        // failure here costs the tick nothing: the next one sends them again.
+        try {
+          const sent = await sendCardReviews({ db: ctx.db, bus: ctx.bus, config: ctx.config });
+          if (sent) ctx.log(`reviews: ${sent} card(s) sent for review`);
+        } catch (err) {
+          ctx.log(`reviews: the cards were not sent for review: ${failureClass(err)}`);
+        }
+      },
+    },
+    {
+      // One card's review on the local model: a debate and a verdict, written beside the card. Its data is a card's id.
+      queue: 'reviews.run',
+      handler: async (jobs) => {
+        for (const job of jobs) {
+          const data = CardReviewJob.safeParse(job.data);
+          if (data.success) await runCardReview({ db: ctx.db, config: ctx.config, log }, data.data);
+        }
       },
     },
     {

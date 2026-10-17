@@ -629,7 +629,7 @@ describe('P4: predictions', () => {
 
 describe('P5: assets, tasks and reviews', () => {
   const consoleCtx: TierContext = { context: 'console', tainted: false };
-  const AUTO = ['task.check_bar'];
+  const AUTO = ['review.local', 'task.check_bar'];
   const NEVER = ['asset.enable', 'review.enforce', 'task.bar_override', 'task.cancel', PAID_DISPATCH, 'review.trident_panel'];
 
   it('every P5 action is in the code table at APPROVAL, with its cap, shadow, write and egress marks', () => {
@@ -651,16 +651,19 @@ describe('P5: assets, tasks and reviews', () => {
     expect(P5_ACTIONS.filter((a) => CODE_TABLE[a]!.egress)).toEqual([PAID_DISPATCH, 'review.trident_panel']);
   });
 
-  it('autonomously, exactly one may be asked for: checking a result. No dispatch and no review, even with a row that promotes it', () => {
+  it('autonomously, two may be asked for: checking a result, and Local Reviews’ review of a card. No dispatch, even with a row that promotes it', () => {
     expect([...AUTONOMOUS_ACTIONS].filter((a) => (P5_ACTIONS as readonly string[]).includes(a)).sort()).toEqual([...AUTO].sort());
     for (const a of P5_ACTIONS) {
       const d = resolveTier(a, auto);
       if (AUTO.includes(a)) expect(d, a).toMatchObject({ tier: 'approval', rule: 'code' });
       else expect(d, a).toMatchObject({ tier: 'forbidden', rule: 'autonomous' });
     }
-    for (const a of ['task.dispatch.local_worker', 'task.dispatch.ci_runner', 'review.local']) {
+    for (const a of ['task.dispatch.local_worker', 'task.dispatch.ci_runner']) {
       expect(resolveTier(a, { ...auto, policies: [row(a, 'alone'), row('*', 'alone')], now: NOW }), a).toMatchObject({ tier: 'forbidden', rule: 'autonomous' });
     }
+    // A review runs in shadow at APPROVAL, under its own 20 a day; one that is promoted keeps that cap.
+    expect(resolveTier('review.local', auto)).toMatchObject({ tier: 'approval', rule: 'code', cap: { limit: 20, period: 'day' } });
+    expect(runsInShadow('review.local')).toBe(true);
     // A job can never file what only Will files, and never a dispatch that spends.
     for (const a of TASK_WILL_ONLY) expect(resolveTier(a, auto).tier, a).toBe('forbidden');
     for (const a of P5_ACTIONS) expect(resolveTier(a, consoleCtx), a).toMatchObject({ tier: 'approval', rule: 'code' });

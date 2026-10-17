@@ -23,5 +23,6 @@ export * from './predict.js';
 export * from './goals-now.js';
 export * from './suggestions.js';
 export * from './tasks.js';
+export * from './reviews.js';
 export * from './models.js';
 export * from './policy-change.js';
