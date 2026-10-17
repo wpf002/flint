@@ -249,6 +249,19 @@ describe.skipIf(NO_DB)('the task routes on flint_test', () => {
     expect(await ok('POST', `/v1/tasks/${again.id}/cancel`, {})).toEqual({ ok: true });
   });
 
+  it('P5’s report is numbers on the world:read scope, served whether tasks are on or not', async () => {
+    const off = harness(db, { assets: false });
+    for (const app of [h, off]) {
+      for (const token of [SERVER, MCP]) {
+        const r = await app.call('GET', '/v1/p5/report', undefined, token);
+        expect(r.statusCode).toBe(200);
+        expect((r.json() as { criteria: Array<{ n: number }> }).criteria.map((c) => c.n)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+      }
+      expect((await app.call('GET', '/v1/p5/report', undefined, null)).statusCode).toBe(401);
+    }
+    await off.app.close();
+  });
+
   it('Require Reviews over HTTP: it needs Local Reviews on, its card waits for Will, then reviews are required; stopping is a card too', async () => {
     const gate = async () => AssetsPage.parse(await ok('GET', '/v1/assets'));
     const say = async (url: string, status: number, error: string, code: string) => {

@@ -1662,6 +1662,8 @@ var APPR_GOAL_WORDS={'goal.criteria_change':['Change a Goal','This changes what 
 var APPR_PROMOTES={'goal.review.local':['Let Goal Reviews Run on Their Own','Flint files its plan suggestions as cards you sign'],
   'goal.propose':['Let Flint Suggest Goals from Chat','Flint adds goals it hears in chat to Suggested'],
   'world.commitment.from_chat':['Let Flint Add Commitments from Chat','Flint adds the things you say you’ll do in chat, unconfirmed'],
+  /* P5's table: a task's result that passes its checks is accepted with no card, 20 a day at most. */
+  'task.check_bar':['Let Flint Accept Passing Task Results','Flint accepts a task’s result on its own when it passes its checks'],
   /* Removing old backups deletes files: its own card says so by name, never as one of "the backups". */
   'backup.prune':['Let Flint Remove Old Backups on Its Own','Flint deletes update backups past the newest 10 and the last 30 days']};
 /* The table for suggestions from chat signs both rows at once (part 5): goals to Suggested, and commitments. */
@@ -1712,7 +1714,7 @@ var APPR_RULES={'goal.review.local':['Goal Reviews','run',2],'goal.propose':['Go
   'notify.inapp':['In-App Notes','be posted',2],'notify.banner':['Banners','be shown',2],'notify.push':['Phone Pings','be sent',2],
   'health.check':['Health Checks','run',2],'health.report':['Health Reports','be sent',2],'digest.daily':['Daily Summary','be sent',1],'maintenance.retention':['Nightly Cleanup','run',1],
   'backup.local':['Backup','run',1,['1 a Day','once a day']],'backup.offsite':['Offsite Copy','be sent',1,['1 a Day','once a day']],'restore.drill':['Restore Test','run',1,['1 a Week','once a week']],
-  'backup.prune':['Backup Cleanup','run',1,['1 a Day','once a day']],
+  'backup.prune':['Backup Cleanup','run',1,['1 a Day','once a day']],'task.check_bar':['Passing Task Results','be accepted',2],
   'backup.nexus':['Nexus Backup','run',1,['1 a Day','once a day']],'backup.nexus.offsite':['Nexus Offsite Copy','be sent',1,['1 a Day','once a day']],'restore.drill.nexus':['Nexus Restore Test','run',1,['1 a Week','once a week']]};
 function apprRule(pat){return apprGet(APPR_RULES,pat)||null;}
 /* Names that are written their own way. ONE map for every place this panel makes words out of a stored name (a

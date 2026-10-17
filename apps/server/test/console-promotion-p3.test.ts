@@ -107,7 +107,7 @@ describe('P3’s promotion cards', () => {
   });
 
   it('every line is Will’s standard: Title Case titles and labels, one complete sentence under the title, nothing internal on screen', () => {
-    for (const [name, template] of [['P3_PROMOTIONS', 'p3.promotion'], ['P3C_PROMOTIONS', 'p3c.promotion']] as const) {
+    for (const [name, template] of [['P3_PROMOTIONS', 'p3.promotion'], ['P3C_PROMOTIONS', 'p3c.promotion'], ['P5_PROMOTIONS', 'p5.promotion']] as const) {
       const c = say(card(rowsOf(name), template));
       expect(titleCase(c.title), c.title).toBe(true);
       expect(c.sub, c.sub).toMatch(/^[A-Z][^.!?]*\.$/);
@@ -117,6 +117,13 @@ describe('P3’s promotion cards', () => {
       }
       for (const text of [c.title, c.sub, ...c.facts.flat()]) expect(plain(text), text).toBe(true);
     }
+  });
+
+  it('P5’s table says what it lets Flint do: accept a result that passes its checks, 20 a day', () => {
+    const c = say(card(rowsOf('P5_PROMOTIONS'), 'p5.promotion'));
+    expect(c.title).toBe('Let Flint Accept Passing Task Results');
+    expect(c.sub).toBe(`Until ${date}, Flint accepts a task’s result on its own when it passes its checks.`);
+    expect(c.facts).toEqual([['Until', date], ['Limits', 'Passing Task Results 20 a Day'], ['Filed By', 'You']]);
   });
 
   it('the title follows the rows the card signs, never a label it carries', () => {
@@ -169,7 +176,7 @@ describe('P3’s promotion cards', () => {
 });
 
 describe('Show Details on every rule card, old and new', () => {
-  const TABLES = ['P1_PROMOTIONS', 'P2_PROMOTIONS', 'P25_PROMOTIONS', 'P26_PROMOTIONS', 'P3_PROMOTIONS', 'P3C_PROMOTIONS'] as const;
+  const TABLES = ['P1_PROMOTIONS', 'P2_PROMOTIONS', 'P25_PROMOTIONS', 'P26_PROMOTIONS', 'P3_PROMOTIONS', 'P3C_PROMOTIONS', 'P5_PROMOTIONS'] as const;
   const BACKUPS = [{ pattern: 'backup.local' }, { pattern: 'backup.offsite' }, { pattern: 'restore.drill' }];
   /** A sentence that fell back to a quoted name: the panel had no words of its own for the rule. */
   const fellBack = (t: string) => /[“”]/.test(t);
@@ -387,6 +394,7 @@ describe('a card can name anything: every table is read by its own entries only'
 describe('every rule the panel has words for', () => {
   const SENTENCES: Record<string, string> = {
     'goal.review.local': 'Goal reviews may run on their own',
+    'task.check_bar': 'Passing task results may be accepted on their own',
     'goal.propose': 'Goal suggestions from chat may be filed on their own',
     'world.commitment.from_chat': 'Commitments from chat may be added on their own',
     'world.sync.google_calendar': 'Google Calendar reads may run on their own',

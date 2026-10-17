@@ -2062,6 +2062,46 @@ findings, verdict, confidence, reasons, whether the passes agreed, and its words
 unless cleared, never the models it was made with or its cost) and
 `reviewFirst`: whether the card must have its review before it is approved.
 
+### The P5 report and its promotion table
+
+`GET /v1/p5/report` (the `world:read` scope, like the other reports) and:
+
+```sh
+cd ~/flint && pnpm --filter @flint/runtime p5-report
+```
+
+measure P5's exit criteria as numbers: pass, fail, or not enough data yet. The
+Machine plan's P5 section isn't in this repository, so these seven were written
+from what P5 built:
+
+1. Every task goes out only on a card you signed.
+2. No result is accepted without passing its checks, or your signed Accept
+   Anyway.
+3. Every daily limit holds: local tasks, CI watches, reviews and accepting
+   alone.
+4. Nothing is spent.
+5. Once reviews are required, no card that needs one is approved before its
+   review.
+6. Local Reviews reviews at least 90% of the cards that need one (over 30 days,
+   at least 5 cards).
+7. Flint's checks agree with your own calls on results: at most 10% of them go
+   against the check (over 30 days, at least 5 calls).
+
+**The promotion table** lets Flint accept a task's result on its own when it
+passes its checks, 20 a day at most:
+
+```sh
+cd ~/flint && pnpm --filter @flint/runtime promotion-table --phase p5
+```
+
+It is refused until a week has passed since Flint's checks first sent you a
+passing result, and until a week holds at least one such result with none that
+you rejected and no check you overruled. The card says what the week measured,
+and you sign it in Approvals like any rule. Signed, a result that passes its
+checks is accepted with no card; past 20 in a day, or where a rule of yours is
+stricter, it comes to you on a card as before. Turning an asset on, requiring
+reviews, overruling a check and anything that spends are never in a table.
+
 The console's Tasks panel and Settings > Assets use these routes, through the
 server's checked proxy. They sit behind the same token scope as approvals, so
 no model can read a task or start one:

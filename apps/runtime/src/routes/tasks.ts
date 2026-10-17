@@ -15,6 +15,7 @@
  *   POST /v1/tasks/:id/accept|reject      Accept Anyway, Reject Anyway: that card
  *   POST /v1/tasks/:id/again {draftKey}   Run Again: a new task like an ended one, and its dispatch card
  *   GET  /v1/task-form                    what New Task can offer now (TaskForm)
+ *   GET  /v1/p5/report                    P5's exit criteria, measured now: numbers only (scope world:read, served whether tasks are on or not)
  *
  * Input is checked with the shared contracts (@flint/policy); a refusal is one
  * of TASK_SAYS's sentences with its code (a card the tier engine forbids
@@ -36,6 +37,7 @@ import { SAY } from '../tasks/errors.js';
 import type { AdapterSet } from '../tasks/adapters/types.js';
 import { cancelTask, createTask, overrideTask, runAgain } from '../tasks/service.js';
 import { taskForm, taskView, tasksPage } from '../tasks/view.js';
+import { p5Report } from '../report/p5.js';
 
 export interface TaskRouteDeps {
   db: Db;
@@ -103,6 +105,9 @@ export function registerTaskRoutes(app: FastifyInstance, d: TaskRouteDeps): void
       return reply.code(err.status).send({ error: err.message, ...(code ? { code } : {}) });
     }
   };
+
+  // Numbers only, like the other phases' reports: it says how P5 is doing whether tasks are on or not.
+  app.get('/v1/p5/report', { preHandler: need('world:read') }, async () => p5Report(db));
 
   app.get('/v1/assets', pre, guarded(async () => out(AssetsPage, await assetsPage(db))));
 
