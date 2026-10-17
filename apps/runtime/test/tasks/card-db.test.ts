@@ -889,7 +889,8 @@ describe.skipIf(NO_DB)('asset and task cards on flint_test', () => {
 
   it('a task for the local model goes out on its own signed card, under the day’s cap, and no result of it reaches a log, a card or the audit trail', async () => {
     const worker: AssetDef = assetOf({ id: 'as-test-worker-v1', kind: 'local_worker', externalRef: 'ollama:worker:test', name: 'Local Tasks', capabilities: ['draft_note'], spends: false, line: 'The local model runs tasks on this Mac.' });
-    const registry = [...ASSETS, worker];
+    // In place of the real local worker (whose adapter asks a model): this test's own asset, with a stand-in behind it.
+    const registry = [...ASSETS.filter((a) => a.kind !== 'local_worker'), worker];
     // A stand-in for the local model: it writes what it was asked to, with a canary in every field.
     // Its words carry what the database cannot store (a NUL, half of a surrogate pair), as a model's may.
     const fake: TaskAdapter = { kind: 'local_worker', estimate: () => 0, run: async () => ({ output: { title: `${CANARY} ti\u0000tle`, body: `${CANARY} body \uD83D` }, summary: `${CANARY} sum\u0000mary` }) };

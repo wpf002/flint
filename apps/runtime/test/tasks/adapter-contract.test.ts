@@ -241,7 +241,8 @@ describe.skipIf(NO_DB)('the path money takes, on flint_test', () => {
   let fx: TaskFixture;
   const bus = new FakeBus();
   const asset: AssetDef = assetOf({ id: 'as-test-paid-v1', kind: 'nexus_participant', externalRef: 'nexus:test-participant', name: 'Paid Tasks', capabilities: ['draft_note'], spends: true, line: 'It runs on a Nexus participant and costs money.' });
-  const registry = [...ASSETS, asset];
+  // The paid asset is the one that drafts a note here: the real local worker, which would also draft one, is left out.
+  const registry = [...ASSETS.filter((a) => a.kind !== 'local_worker'), asset];
   const adapters = { nexus_participant: paid };
   const refusal = async (p: Promise<unknown>): Promise<Refused> => {
     try {

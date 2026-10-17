@@ -28,7 +28,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { TASK_FAILURES, TASK_OUTPUTS, TaskId, TaskSpec, entityRef, outputRefOf, redact, specItems, type TaskFailure } from '@flint/policy';
+import { TASK_FAILURES, TASK_OUTPUTS, TaskId, TaskSpec, entityRef, outputRefOf, redact, specItems, specTainted, type TaskFailure } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 import { inTx, type Bus } from '../bus.js';
 import { jsonbBytes } from '../jsonsize.js';
@@ -36,6 +36,7 @@ import { clip, wellFormedDeep } from '../sources/text.js';
 import { schemaSkew, sqlState } from '../dbcodes.js';
 import { ciWatch } from './adapters/ci-watch.js';
 import type { AdapterSet, ItemFact } from './adapters/types.js';
+import { TITLE_CHARS, localWorker, type WorkerDeps } from './local-worker.js';
 import { endingCost } from './card.js';
 import { taskLog } from './errors.js';
 
@@ -44,8 +45,17 @@ export const CHECK_QUEUE = 'tasks.check';
 export const TaskJob = z.object({ taskId: TaskId }).strict();
 export type TaskJob = z.infer<typeof TaskJob>;
 
-/** The adapters there are. A spending one is not among them: none is built. */
-export const ADAPTERS: AdapterSet = { ci_runner: ciWatch };
+/**
+ * The adapters the runtime has, by what it is set up with: the CI watcher, which
+ * calls nothing, always; the local worker only when a local model is named
+ * (local-worker.ts's workerDeps says), since without one it could run nothing.
+ * A spending one is never among them: none is built.
+ */
+export function adaptersFor(worker?: WorkerDeps): AdapterSet {
+  return { ci_runner: ciWatch, ...(worker ? { local_worker: localWorker(worker) } : {}) };
+}
+/** The adapters of a runtime with no local model: the CI watcher alone. */
+export const ADAPTERS: AdapterSet = adaptersFor();
 
 export interface RunDeps {
   db: Db;
@@ -113,16 +123,23 @@ export function plainData(v: unknown, depth = 0, left = { values: OUTPUT_MAX_VAL
  * each one's ref, kind and clean state fields. A field someone else's text
  * reached (the item's tainted paths) is left out, and so is any value that is
  * not a number, a flag or a short structural word. A forgotten item is gone.
+ *
+ * `titles` adds each item's own title, which IS text someone else wrote: only
+ * for a spec Will signed with `titles` on, which marks the task tainted. It is
+ * clipped and made well formed first, and a blank one is left out.
  */
-export async function itemFacts(db: Db | Tx, ids: readonly string[]): Promise<ItemFact[]> {
-  const rows = ids.length ? await db.entity.findMany({ where: { id: { in: [...ids] }, status: { not: 'forgotten' } }, select: { id: true, kind: true, state: true, taintedPaths: true } }) : [];
+export async function itemFacts(db: Db | Tx, ids: readonly string[], titles = false): Promise<ItemFact[]> {
+  const rows = ids.length
+    ? await db.entity.findMany({ where: { id: { in: [...ids] }, status: { not: 'forgotten' } }, select: { id: true, kind: true, state: true, taintedPaths: true, ...(titles ? { name: true } : {}) } })
+    : [];
   const facts = rows.map((e) => {
     const state: Record<string, string | number | boolean | null> = {};
     for (const [k, v] of Object.entries((e.state ?? {}) as Record<string, unknown>)) {
       if (e.taintedPaths.includes(`state.${k}`)) continue;
       if (v === null || typeof v === 'number' || typeof v === 'boolean' || (typeof v === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(v))) state[k] = v;
     }
-    return { id: e.id, ref: entityRef(e.kind, e.id), kind: e.kind, state };
+    const title = titles ? clip((e as { name?: string }).name ?? '', TITLE_CHARS).trim() : '';
+    return { id: e.id, ref: entityRef(e.kind, e.id), kind: e.kind, state, ...(title ? { title } : {}) };
   });
   return ids.map((id) => facts.find((f) => f.id === id)).filter((f): f is ItemFact => f !== undefined);
 }
@@ -168,7 +185,8 @@ export async function runTaskJob(d: RunDeps, job: TaskJob): Promise<RunOutcome> 
   const adapter = (d.adapters ?? ADAPTERS)[task.asset.kind as keyof AdapterSet];
   if (!spec.success) return fail('invalid');
   if (!adapter) return fail('error');
-  const input = { taskId: task.id, spec: spec.data, items: await itemFacts(db, specItems(spec.data)), now };
+  // The titles go in only for a spec Will signed with them on (specTainted), which is why the task is tainted.
+  const input = { taskId: task.id, spec: spec.data, items: await itemFacts(db, specItems(spec.data), specTainted(spec.data)), now };
   /** What the adapter gave is not a result: the task ends, told by one of UNUSABLE's words, never by any text of its own. */
   const unusable = async (what: Unusable): Promise<RunOutcome> => {
     d.log?.(taskLog(task.id, 'result unusable', what));

@@ -35,6 +35,8 @@ import { registerP2Routes } from './routes/p2.js';
 import { registerGoalRoutes } from './routes/goals.js';
 import { registerPredictionRoutes } from './routes/predictions.js';
 import { registerTaskRoutes } from './routes/tasks.js';
+import { adaptersFor } from './tasks/run.js';
+import { workerDeps } from './tasks/local-worker.js';
 import { registerAppleCalendarRoutes } from './routes/apple-calendar.js';
 import type { CalendarInbox } from './sources/apple/inbox.js';
 import type { Bus } from './bus.js';
@@ -70,7 +72,7 @@ export const HEALTH_RUN_STALE_MS = 10 * 60_000;
 
 export interface AppDeps {
   db: Db;
-  config: Pick<Config, 'tokens' | 'rp' | 'tz'> & Partial<Pick<Config, 'triage' | 'home' | 'planner' | 'predict' | 'assets' | 'ollama'>>;
+  config: Pick<Config, 'tokens' | 'rp' | 'tz'> & Partial<Pick<Config, 'triage' | 'home' | 'planner' | 'predict' | 'assets' | 'ollama' | 'server'>>;
   logger?: boolean;
   /** Where the log lines go (tests read them); stdout by default. */
   logStream?: { write(line: string): void };
@@ -376,7 +378,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // numbers or a question's words, nor answer one for Will).
   registerPredictionRoutes(app, { db, need, tz: config.tz, predict: config.predict ?? false, model: config.ollama !== undefined });
   // P5: assets and tasks (scope proposals: no model reads a task's words, and chat has no tool that files or runs one).
-  registerTaskRoutes(app, { db, need, tz: config.tz, on: assetsOn });
+  // Which kinds of task can run at all: the local worker is among them only while a local model is named.
+  registerTaskRoutes(app, { db, need, tz: config.tz, on: assetsOn, adapters: adaptersFor(workerDeps(db, config)) });
   // P2.6: Flint Calendar's push (scope calendar:push only; up to the wire's byte budget, 2 MiB, this route alone).
   registerAppleCalendarRoutes(app, {
     db, need, bus: () => deps.status?.bus, log: (msg) => app.log.warn(msg),

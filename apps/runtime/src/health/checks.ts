@@ -566,6 +566,7 @@ export const TASK_HEALTH = {
   none: 'No task has run yet.',
   stuck: (n: number) => (n === 1 ? 'A task is past its time and hasn’t been ended.' : `${n} tasks are past their time and haven’t been ended.`),
   stopped: 'A rule stops Flint from checking results, so finished tasks wait.',
+  noModel: 'No local model is set up, so the Local Worker can’t do a task.',
 } as const;
 /** How long past the tick's own limit a task may sit before Health says so. */
 const TASK_STUCK_SLACK_MS = 3_600_000;
@@ -585,6 +586,9 @@ async function tasks(d: CheckDeps): Promise<ComponentCheck> {
   if (!(await db.asset.count({ where: { enabled: true, kind: { in: [...TASK_ASSET_KINDS] } } }))) return { component, status: 'disabled' };
   const stuck = await db.task.count({ where: { status: { in: ['queued', 'dispatched', 'running', 'submitted'] }, updatedAt: { lt: new Date(now.getTime() - STALE_MS - TASK_STUCK_SLACK_MS) } } });
   if (stuck) return { component, status: 'degraded', detail: TASK_HEALTH.stuck(stuck) };
+  // The Local Worker is on with no local model to ask (FLINT_TRIAGE_MODEL is not set): its three kinds of task are
+  // neither offered nor run, so a task of one would fail as unavailable.
+  if (!d.config.ollama && (await db.asset.count({ where: { enabled: true, kind: 'local_worker' } }))) return { component, status: 'degraded', detail: TASK_HEALTH.noModel };
   if ((await checkStanding(db, now)) === 'stopped') return { component, status: 'degraded', detail: TASK_HEALTH.stopped };
   const ran = await db.task.count({ where: { dispatchedAt: { not: null } } });
   return { component, status: 'ok', ...(ran ? {} : { detail: TASK_HEALTH.none }) };

@@ -1870,9 +1870,10 @@ What the database now holds to, whatever the runtime's code does:
 Part 2 ships switched off (see "Switching tasks on" below). What the runtime
 does once tasks are switched on and an asset is on:
 
-- **The CI Watcher** is the one asset so far. It watches a CI run that the
-  GitHub source already tracks and reports how it ended. It calls nothing and
-  costs nothing. Turning it on needs the GitHub source on first.
+- **The CI Watcher** is the asset that needs no model. It watches a CI run that
+  the GitHub source already tracks and reports how it ended. It calls nothing
+  and costs nothing. Turning it on needs the GitHub source on first. (The other
+  asset, the Local Worker, is part 3's, below.)
 - **A task's life.** You ask for a task. Flint writes it down and files its
   card. You approve the card, and the task goes out with a forecast that it
   will meet its bar. The asset hands in a result. Flint checks the result
@@ -1924,7 +1925,63 @@ does once tasks are switched on and an asset is on:
   its line then says its checks are no longer kept.
 - **Health** has a Tasks row, under THIS MAC. It's shown as off while tasks
   are switched off or no asset that runs tasks is on. Otherwise it says when a
-  task is stuck or a rule stops Flint from checking results.
+  task is stuck, when the Local Worker is on with no local model set up, or when
+  a rule stops Flint from checking results.
+
+### The local worker (part 3)
+
+The second asset, the **Local Worker**, does the three kinds of task that need
+words, on this Mac's own model and nowhere else. Like the rest of P5 it ships
+switched off, and it is off until you sign its card.
+
+- **What it does.** **Summarize Items** gives a headline, up to 6 points and up
+  to 5 items to look at. **Sort Items** puts every item under one of the labels
+  you gave. **Draft a Note** writes a title and a body about what you described
+  in your own words. Each kind of task goes out on its own card, as a watched
+  run does, and at most 20 of them a day.
+- **It needs a local model.** The model is the one every local call on this Mac
+  uses (`FLINT_TRIAGE_MODEL`). With none named this runtime has no local worker
+  at all: New Task offers none of its three kinds, a task of one sent by hand is
+  refused with "No asset that is on can run this kind of task.", and Settings >
+  Health says no local model is set up. You can still turn the asset on; nothing
+  it could run exists until the model does.
+- **It never reaches a model anywhere else.** Only Ollama on loopback, and only
+  a model Ollama's own listing holds as its own — asked before anything is sent
+  and again immediately before every request. A cloud model's name is never
+  asked, whatever the address says. A model that is not there means the task
+  fails as "Its asset wasn't available.", never another model's answer.
+- **Chat comes first.** While a chat turn is running the task waits, and the
+  tick sends it again two minutes later; nothing is sent and nothing is counted.
+  One local-model request at a time in the runtime, shared with triage, goal
+  reviews and forecasts. A task that waits this way still ends at its due time,
+  or after a day of not moving.
+- **What the model is shown.** The items the card you signed names, each by its
+  kind and its clean state fields — never a title, unless the task asked for
+  titles, and a task that asks for them is marked as having read outside text.
+  Your own words where the kind of task takes them. It is shown no ref, nothing
+  of another task, and nothing of what Flint keeps beyond those items.
+- **What it may answer.** A flat shape for its kind of task, which the model
+  server holds it to. An item in that answer is a **number** — its place in the
+  list it was shown — so the result can name no item the task was not given; a
+  number that is not one of them is a failed attempt, not a line quietly
+  dropped. At most 2 requests in one run, and 4 for one task in a day, counted
+  in the database by the task's id, whatever runs it again.
+- **An answer that misses its bar is asked again, once**, told in fixed words
+  which rule it missed (too long, left items out, used words about chances). If
+  the second answer is no better, the first is handed in as it came — nothing is
+  cut or rounded into shape — and the bar then rejects it, which you see in the
+  panel with the check that failed.
+- **The sentence beside a result is Flint's own**, built from counts ("It made 3
+  points about 5 items."). No second model call writes it, and no word the model
+  wrote is in it. The result itself is the model's words, kept as outside text.
+- **It costs nothing**: the model is on this Mac, so a task of its kinds carries
+  no estimate and no cost, and no card of its is a spend card.
+- **A title is someone else's words.** A task that shows the model titles shows
+  it text written outside Flint, which can try to steer what the model writes.
+  What that can reach is the result's own words, which are kept and shown as
+  outside text: the refs in a result are the code's, the shape is the
+  template's, the rule checks still run, and nothing a result says is ever
+  carried out. A task whose items you don't trust is one to run without titles.
 
 The console's Tasks panel and Settings > Assets use these routes, through the
 server's checked proxy. They sit behind the same token scope as approvals, so

@@ -12,7 +12,7 @@
  */
 import type { AssetKind, TaskFailure, TaskSpec } from '@flint/policy';
 
-/** One item a task names, as an adapter may see it: its ref, its kind and its clean state fields. Never a title. */
+/** One item a task names, as an adapter may see it: its ref, its kind, its clean state fields, and its title only where the signed spec asked for titles. */
 export interface ItemFact {
   id: string;
   /** kind#<last 6 of its id>. */
@@ -20,6 +20,13 @@ export interface ItemFact {
   kind: string;
   /** Structural fields only (enums, numbers, a commit's hex): never text someone else wrote. */
   state: Readonly<Record<string, string | number | boolean | null>>;
+  /**
+   * The item's own title, which is text someone else wrote. It is here only
+   * when the spec Will signed says `titles` (TASK_PARAMS: the task is then
+   * marked tainted), and the runner leaves it out otherwise. Clipped, and
+   * never part of a state field.
+   */
+  title?: string;
 }
 
 export interface AdapterInput {

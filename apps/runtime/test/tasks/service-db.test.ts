@@ -16,19 +16,24 @@
  *    offered only what an asset that is on can run, items by label alone.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { AssetEnableArgs, AssetsPage, TASK_FORM_ITEMS_MAX, TASK_SAYS, TASK_STATUS_SAYS, TaskAnswer, TaskForm, TaskSpec, TasksPage, noteProblems, titleCase } from '@flint/policy';
+import { AssetEnableArgs, AssetsPage, TASK_FORM_ITEMS_MAX, TASK_SAYS, TASK_STATUS_SAYS, TASK_TEMPLATE_IDS, TaskAnswer, TaskForm, TaskSpec, TasksPage, noteProblems, titleCase } from '@flint/policy';
 import { HEX, NO_DB, freshDb, id, type TestUrls } from '../db';
 import { createDb, type Db } from '../../src/db';
 import { Forbidden, Refused } from '../../src/governance/proposals';
-import { ASSETS, CI_WATCHER, assetDef, assetFor, enableArgsOf, sameAsset } from '../../src/assets/registry';
+import { ASSETS, CI_WATCHER, LOCAL_WORKER, assetDef, assetFor, enableArgsOf, sameAsset } from '../../src/assets/registry';
 import { fileEnable, known, syncAssets, turnOff } from '../../src/assets/service';
 import { WAITING, assetsPage } from '../../src/assets/view';
 import { checkTaskJob } from '../../src/tasks/check';
 import { runTaskJob } from '../../src/tasks/run';
+import { ciWatch } from '../../src/tasks/adapters/ci-watch';
+import type { TaskAdapter } from '../../src/tasks/adapters/types';
 import { DUE_MAX_MS, TASK_TITLES, againProblem, cancelTask, createTask, overrideTask, runAgain } from '../../src/tasks/service';
-import { FORM_ITEM_KIND, aboutProblem, offerProblem } from '../../src/tasks/offer';
+import { FORM_ITEM_KINDS, WORK_ITEM_KINDS, aboutProblem, offerProblem } from '../../src/tasks/offer';
 import { taskForm, taskView, tasksPage } from '../../src/tasks/view';
 import { DAY, FakeBus, SHA, draft, taskFixture, type TaskFixture } from './fixture';
+
+/** A stand-in for the local worker's adapter: this file tests what is offered, never what a model answers. */
+const stubWorker: TaskAdapter = { kind: 'local_worker', estimate: () => 0, run: async () => ({ failure: 'unavailable' }) };
 
 const refusal = async (p: Promise<unknown>): Promise<Refused> => {
   try {
@@ -41,9 +46,14 @@ const refusal = async (p: Promise<unknown>): Promise<Refused> => {
 };
 
 describe('the asset registry, before the database', () => {
-  it('is a closed list: the CI watcher, which calls nothing and costs nothing; every name and sentence is fit to show', () => {
-    expect(ASSETS).toEqual([CI_WATCHER]);
+  it('is a closed list: the CI watcher and the local worker, each calling nothing off this Mac and costing nothing; every name and sentence is fit to show', () => {
+    expect(ASSETS).toEqual([CI_WATCHER, LOCAL_WORKER]);
     expect(CI_WATCHER).toMatchObject({ kind: 'ci_runner', externalRef: 'github:ci:v1', capabilities: ['watch_ci'], dispatchAction: 'task.dispatch.ci_runner', spends: false });
+    expect(LOCAL_WORKER).toMatchObject({
+      kind: 'local_worker', externalRef: 'ollama:local:v1', capabilities: ['summarize_items', 'sort_items', 'draft_note'], dispatchAction: 'task.dispatch.local_worker', spends: false, entityId: null,
+    });
+    // Nothing either asset does spends, and neither stands for one item of Will's.
+    for (const a of ASSETS) expect([a.spends, a.entityId], a.id).toEqual([false, null]);
     for (const a of ASSETS) {
       expect(noteProblems(a.name, a.line), a.id).toEqual([]);
       expect(a.id).toMatch(/^[a-z0-9-]{1,40}$/);
@@ -53,8 +63,14 @@ describe('the asset registry, before the database', () => {
     expect(assetDef(CI_WATCHER.id)).toBe(CI_WATCHER);
     expect(assetDef('nope')).toBeUndefined();
     expect(assetFor('watch_ci')).toBe(CI_WATCHER);
-    // No asset runs the local model's templates yet.
-    for (const t of ['summarize_items', 'sort_items', 'draft_note'] as const) expect(assetFor(t)).toBeUndefined();
+    // The three kinds of task that need words run on the local worker, and nothing else runs them.
+    for (const t of ['summarize_items', 'sort_items', 'draft_note'] as const) expect(assetFor(t), t).toBe(LOCAL_WORKER);
+    expect(assetDef(LOCAL_WORKER.id)).toBe(LOCAL_WORKER);
+    // Will signs what the local worker is, too, its list of what it can do in that order.
+    const worker = { kind: 'local_worker', externalRef: 'ollama:local:v1', name: 'Local Worker', capabilities: ['summarize_items', 'sort_items', 'draft_note'], dispatchAction: 'task.dispatch.local_worker', spends: false, entityId: null };
+    expect(enableArgsOf(LOCAL_WORKER)).toEqual({ assetId: LOCAL_WORKER.id, ...worker });
+    expect(AssetEnableArgs.safeParse(enableArgsOf(LOCAL_WORKER)).success).toBe(true);
+    expect(sameAsset(LOCAL_WORKER, { ...worker, capabilities: ['sort_items', 'summarize_items', 'draft_note'] })).toBe(false);
     // An asset is exactly its definition: a changed list of what it can do, or its order, is another asset.
     const facts = { kind: 'ci_runner', externalRef: 'github:ci:v1', name: 'CI Watcher', capabilities: ['watch_ci'], dispatchAction: 'task.dispatch.ci_runner', spends: false, entityId: null as string | null };
     expect(sameAsset(CI_WATCHER, facts)).toBe(true);
@@ -88,25 +104,32 @@ describe.skipIf(NO_DB)('the Tasks panel’s writes and views on flint_test', () 
   it('Settings: the CI watcher is off, waits for the GitHub source, then for Will’s card, then is on', async () => {
     const page = async () => AssetsPage.parse(await assetsPage(db));
     const row = { id: CI_WATCHER.id, name: 'CI Watcher', kind: 'ci_runner', costs: false };
+    // Every asset the registry holds has a row, each off; this test is the CI watcher's.
+    const worker = { id: LOCAL_WORKER.id, name: 'Local Worker', kind: 'local_worker', costs: false, on: false, waiting: false, canTurnOn: true, line: LOCAL_WORKER.line };
+    const others = async () => (await page()).assets.filter((a) => a.id !== CI_WATCHER.id);
     // The row is made by the first read, off. Until the GitHub source is on it says what it needs.
-    expect(await page()).toEqual({ assets: [{ ...row, on: false, waiting: false, canTurnOn: false, line: TASK_SAYS.needsGithub }], reviewsRequired: false });
+    expect(await page()).toEqual({ assets: [{ ...row, on: false, waiting: false, canTurnOn: false, line: TASK_SAYS.needsGithub }, worker], reviewsRequired: false });
+    expect(await others()).toEqual([worker]);
     expect(await refusal(fileEnable(db, CI_WATCHER.id))).toMatchObject({ status: 409, message: TASK_SAYS.needsGithub });
     await fx.sourceOn();
-    expect((await page()).assets).toEqual([{ ...row, on: false, waiting: false, canTurnOn: true, line: CI_WATCHER.line }]);
+    const watcher = async () => (await page()).assets.filter((a) => a.id === CI_WATCHER.id);
+    expect(await watcher()).toEqual([{ ...row, on: false, waiting: false, canTurnOn: true, line: CI_WATCHER.line }]);
     const filed = await fileEnable(db, CI_WATCHER.id);
-    expect((await page()).assets).toEqual([{ ...row, on: false, waiting: true, canTurnOn: false, line: WAITING }]);
+    expect(await watcher()).toEqual([{ ...row, on: false, waiting: true, canTurnOn: false, line: WAITING }]);
     await fx.signRun(filed.proposalId);
-    expect((await page()).assets).toEqual([{ ...row, on: true, waiting: false, canTurnOn: false, line: CI_WATCHER.line }]);
+    expect(await watcher()).toEqual([{ ...row, on: true, waiting: false, canTurnOn: false, line: CI_WATCHER.line }]);
+    // One asset waiting for a card, or on, says nothing about another: the local worker's row is untouched.
+    expect(await others()).toEqual([worker]);
     // Turning it off needs no signature and is on record by id.
     await turnOff(db, CI_WATCHER.id);
-    expect((await page()).assets[0]).toMatchObject({ on: false, canTurnOn: true, line: CI_WATCHER.line });
+    expect((await watcher())[0]).toMatchObject({ on: false, canTurnOn: true, line: CI_WATCHER.line });
     const off = await db.auditEntry.findFirstOrThrow({ where: { action: 'asset.disable' } });
     expect(off).toMatchObject({ actor: 'will:console', kind: 'action', outcome: 'ok', correlationId: `asset:${CI_WATCHER.id}` });
     expect(off.inputs).toEqual({ assetId: CI_WATCHER.id });
     expect(await refusal(turnOff(db, 'as-unknown-v1'))).toMatchObject({ status: 404, message: TASK_SAYS.noAsset });
     // A row the registry does not describe is left out: nothing can run on it.
     await syncAssets(db, [{ ...CI_WATCHER, id: 'as-stray-v1', externalRef: 'github:ci:stray' }]);
-    expect((await page()).assets.map((a) => a.id)).toEqual([CI_WATCHER.id]);
+    expect((await page()).assets.map((a) => a.id)).toEqual([CI_WATCHER.id, LOCAL_WORKER.id]);
     await fx.watcherOn();
   });
 
@@ -376,14 +399,31 @@ describe.skipIf(NO_DB)('the Tasks panel’s writes and views on flint_test', () 
     await no(plain, TASK_SAYS.assetOff);
     await fx.watcherOn();
     expect((await view(plain)).can.again).toBe(true);
-    // The rules are the form's own: one table says what each kind of task is about, and both read it.
-    expect(FORM_ITEM_KIND).toEqual({ watch_ci: 'ci_run' });
+    // The rules are the form's own: one table says which items each kind of task is about, and both read it. Every
+    // kind of task has its entry, so adding one is a change here too.
+    expect(Object.keys(FORM_ITEM_KINDS).sort()).toEqual([...TASK_TEMPLATE_IDS].sort());
+    expect(FORM_ITEM_KINDS.watch_ci).toEqual(['ci_run']);
+    expect(FORM_ITEM_KINDS.summarize_items).toBe(WORK_ITEM_KINDS);
     const spec = { template: 'watch_ci' as const, params: { item: 'no-such-item', sha: null } };
     expect(await offerProblem(db, spec, null)).toBe(TASK_SAYS.itemGone);
-    expect(await offerProblem(db, { template: 'draft_note', params: { about: 'A note', items: [], titles: false } }, null)).toBe(TASK_SAYS.cantRun);
-    // A kind of task the form has no field for is not offered, whatever asset says it could run one.
+    // The local worker's own kinds of task: with no local model named this runtime has nothing behind it, so none
+    // of them is offered, whatever asset says it could run one.
+    const note = { template: 'draft_note' as const, params: { about: 'A note', items: [], titles: false } };
+    expect(await offerProblem(db, note, null)).toBe(TASK_SAYS.cantRun);
+    // An asset that claims a kind of task its row was not signed for is not that asset: it reads as off, not as one
+    // that could run it.
     const reach = { registry: [{ ...CI_WATCHER, capabilities: [...CI_WATCHER.capabilities, 'draft_note' as const] }] };
-    expect(await offerProblem(db, { template: 'draft_note', params: { about: 'A note', items: [], titles: false } }, null, reach)).toBe(TASK_SAYS.cantRun);
+    expect(await offerProblem(db, note, null, reach)).toBe(TASK_SAYS.assetOff);
+    // With its asset on and an adapter behind it, a note (which needs no item) is offered, and a summary is held to
+    // the same items as any other task: one that is archived is not offered.
+    const worker = { adapters: { ci_runner: ciWatch, local_worker: stubWorker }, registry: ASSETS };
+    await fx.assetOn(LOCAL_WORKER.id);
+    expect(await offerProblem(db, note, null, worker)).toBeUndefined();
+    const stale = await fx.entity('pull_request', { number: 7, state: 'closed' });
+    await db.entity.update({ where: { id: stale }, data: { status: 'archived' } });
+    expect(await offerProblem(db, { template: 'summarize_items', params: { items: [stale], titles: false } }, null, worker)).toBe(TASK_SAYS.itemEnded);
+    await turnOff(db, LOCAL_WORKER.id);
+    expect(await offerProblem(db, note, null, worker)).toBe(TASK_SAYS.assetOff);
     expect(await offerProblem(db, { ...spec, params: { item: await fx.entity('pull_request', { number: 4, state: 'open' }), sha: null } }, null)).toBe(TASK_SAYS.itemEnded);
   });
 
