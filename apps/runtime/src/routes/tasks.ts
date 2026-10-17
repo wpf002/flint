@@ -7,6 +7,7 @@
  *   GET  /v1/assets                       Settings > Assets (AssetsPage)
  *   POST /v1/assets/:id/on                the card that turns it on
  *   POST /v1/assets/:id/off               unsigned, audited
+ *   POST /v1/reviews/require|stop         the card that requires reviews, or stops requiring them
  *   GET  /v1/tasks?tab=active|finished    a tab of the panel (TasksPage)
  *   GET  /v1/tasks/:id                    one task, open (TaskView)
  *   POST /v1/tasks {draftKey, template, params, ...}   a new task and its dispatch card
@@ -25,11 +26,11 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { AssetId, AssetsPage, EmptyBody, NewTaskBody, TASK_TABS, TaskAgainBody, TaskAnswer, TaskCardFiled, TaskDone, TaskFiled, TaskForm, TaskId, TasksPage, taskCodeOf } from '@flint/policy';
+import { AssetId, AssetsPage, EmptyBody, NewTaskBody, REVIEW_GATE_VERBS, TASK_TABS, TaskAgainBody, TaskAnswer, TaskCardFiled, TaskDone, TaskFiled, TaskForm, TaskId, TasksPage, taskCodeOf } from '@flint/policy';
 import type { RuntimeScope } from '../config.js';
 import type { Db } from '../db.js';
 import { Forbidden, Refused } from '../governance/proposals.js';
-import { fileEnable, turnOff } from '../assets/service.js';
+import { fileEnable, fileReviewGate, turnOff } from '../assets/service.js';
 import { assetsPage } from '../assets/view.js';
 import { SAY } from '../tasks/errors.js';
 import type { AdapterSet } from '../tasks/adapters/types.js';
@@ -71,6 +72,7 @@ const Tab = z.object({ tab: z.enum(TASK_TABS).default('active') }).strict();
 const Task = z.object({ id: TaskId }).strict();
 const TaskVerb = z.object({ id: TaskId, verb: z.enum(['cancel', 'accept', 'reject', 'again']) }).strict();
 const AssetVerb = z.object({ id: AssetId, verb: z.enum(['on', 'off']) }).strict();
+const GateVerb = z.object({ verb: z.enum(REVIEW_GATE_VERBS) }).strict();
 
 export function registerTaskRoutes(app: FastifyInstance, d: TaskRouteDeps): void {
   const { db, need, tz } = d;
@@ -112,6 +114,13 @@ export function registerTaskRoutes(app: FastifyInstance, d: TaskRouteDeps): void
       return out(TaskDone, { ok: true });
     }
     return out(TaskCardFiled, await fileEnable(db, id));
+  }));
+
+  // Will's switch: the card that requires reviews before a card that needs one is approved, or stops requiring them.
+  app.post('/v1/reviews/:verb', pre, guarded(async (req) => {
+    const { verb } = parse(GateVerb, req.params);
+    parse(EmptyBody, req.body ?? {});
+    return out(TaskCardFiled, await fileReviewGate(db, verb === 'require'));
   }));
 
   app.get('/v1/tasks', pre, guarded(async (req) => {

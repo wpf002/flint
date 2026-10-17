@@ -31,7 +31,7 @@ import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
 import { webcrypto } from 'node:crypto';
 import {
-  ACTION_WORDS, AssetEnableArgs, AssetsPage, CHECK_NAMES, DraftKey, EmptyBody, NewTaskBody, REVIEW_SAYS, TASK_SAYS, TASK_STATUS_SAYS, TASK_TEMPLATE_IDS, TaskAcceptArgs, TaskAgainBody, TaskAnswer, TaskCancelArgs, TaskDispatchArgs,
+  ACTION_WORDS, AssetEnableArgs, AssetsPage, CHECK_NAMES, DraftKey, EmptyBody, NewTaskBody, REVIEW_GATE_SAYS, REVIEW_SAYS, TASK_SAYS, TASK_STATUS_SAYS, TASK_TEMPLATE_IDS, TaskAcceptArgs, TaskAgainBody, TaskAnswer, TaskCancelArgs, TaskDispatchArgs,
   TaskForm, TaskOverrideArgs, TasksPage, digestOf, noteProblems, ruleChecks, TaskSpec,
 } from '@flint/policy';
 import { TASKS_SAY } from '../src/tasks-routes';
@@ -1854,6 +1854,100 @@ describe('Settings > Assets', () => {
     expect(title()).toBe('Tasks');
     expect(said()).toEqual(['It’s waiting in Approvals.', 'res ok']);
     expect(signed).toHaveLength(1);
+  });
+
+  describe('Require Reviews (P5)', () => {
+    const gate = (over: Record<string, unknown> = {}) => ({ required: false, waiting: false, line: REVIEW_GATE_SAYS.notRequired, canChange: true, ...over });
+    const page = (g: Record<string, unknown>) => ({ assets: [asset()], reviewsRequired: g.required === true, reviews: g });
+    const gateRow = () => host().all().find((e) => e.id === 'reviewgate');
+    const REQUIRE = card('prgate00001', 'review.enforce', { gate: 'proposal', enforced: true }, { kind: 'policy', consequential: true, reason: 'Approving makes cards that matter wait for a review.' });
+    const STOP = card('prgate00002', 'review.enforce', { gate: 'proposal', enforced: false }, { kind: 'policy', consequential: true, reason: 'Approving lets you approve cards before Flint reviews them.' });
+
+    it('a row under the assets, as the runtime says it is: On, Off or Waiting, its sentence, and the one thing that can be done now', async () => {
+      const states: Array<[Record<string, unknown>, string, string[], string]> = [
+        [gate(), 'Off', ['Turn On'], 'st off'],
+        [gate({ required: true, line: REVIEW_GATE_SAYS.required }), 'On', ['Turn Off'], 'st ok'],
+        [gate({ waiting: true, canChange: false, line: 'A card is waiting for your approval.' }), 'Waiting', ['Open Approvals'], 'st unknown'],
+        // No reviewer on: what it needs first, and nothing to press.
+        [gate({ canChange: false, line: TASK_SAYS.reviewerFirst }), 'Off', [], 'st off'],
+      ];
+      for (const [g, state, buttons, cls] of states) {
+        expect(AssetsPage.safeParse(page(g)).success, JSON.stringify(g)).toBe(true);
+        routes = answers({ 'GET /assets': { status: 200, body: page(g) } });
+        await load();
+        expect(rows(host())).toEqual([['CI Watcher', ['Flint reports how your CI runs end.'], 'On'], ['Require Reviews', [g.line as string], state]]);
+        expect(gateRow()!.buttons(), state).toEqual(buttons);
+        expect(gateRow()!.with('st').map((e) => e.className)).toEqual([cls]);
+      }
+      expect(host().shown()).not.toMatch(/review\.enforce|enforced|[{}[\]]|undefined|null/);
+      ownWords(['Require Reviews'], []);
+      // A runtime from before the row sends none, and none is drawn.
+      routes = answers({ 'GET /assets': { status: 200, body: assets(asset()) } });
+      await load();
+      expect(gateRow()).toBeUndefined();
+    });
+
+    it('Turn On files the card that requires reviews and shows it in the Tasks panel to sign; nothing changes until he does', async () => {
+      routes = answers({
+        'GET /assets': { status: 200, body: page(gate()) },
+        'POST /reviews/require': { status: 200, body: { proposalId: REQUIRE.id, deduped: false } },
+        'GET /proposals': { status: 200, body: { proposals: [REQUIRE], signed: true } },
+      });
+      await load();
+      calls = [];
+      gateRow()!.button('Turn On').onclick!();
+      gateRow()!.button('Turn On').onclick!();
+      await settle();
+      expect(posts()).toEqual([{ url: '/reviews/require', method: 'POST', body: {} }]);
+      expect(panels).toMatchObject({ tasks: true, settings: false });
+      expect(title()).toBe('Require Reviews');
+      expect(signed).toEqual([]);
+      await click(foot(), 'Approve with Touch ID');
+      expect(signed).toEqual([[REQUIRE.id, { fresh: true, reason: 'require reviews', args: REQUIRE.args }]]);
+      expect(said()).toEqual(['Reviews are required now.', 'res ok']);
+    });
+
+    it('Turn Off files the card that stops requiring them; a refusal is said under the list, which is read again', async () => {
+      routes = answers({
+        'GET /assets': { status: 200, body: page(gate({ required: true, line: REVIEW_GATE_SAYS.required })) },
+        'POST /reviews/stop': { status: 200, body: { proposalId: STOP.id, deduped: false } },
+        'GET /proposals': { status: 200, body: { proposals: [STOP], signed: true } },
+      });
+      await load();
+      calls = [];
+      await click(gateRow()!, 'Turn Off');
+      expect(posts()).toEqual([{ url: '/reviews/stop', method: 'POST', body: {} }]);
+      expect(title()).toBe('Stop Requiring Reviews');
+      await click(foot(), 'Approve with Touch ID');
+      expect(signed.at(-1)).toEqual([STOP.id, { fresh: true, reason: 'stop requiring reviews', args: STOP.args }]);
+      expect(said()).toEqual(['Reviews aren’t required now.', 'res ok']);
+      // The runtime refuses (Local Reviews was turned off in the meantime): its sentence, and the list read again.
+      routes = answers({
+        'GET /assets': { status: 200, body: page(gate()) },
+        'POST /reviews/require': { status: 409, body: { error: TASK_SAYS.reviewerFirst, code: 'reviewerFirst' } },
+      });
+      run('openSettings();loadAssets()');
+      await settle();
+      calls = [];
+      await click(gateRow()!, 'Turn On');
+      expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(['POST /reviews/require', 'GET /assets']);
+      expect(host().all().find((e) => e.id === 'assetsmsg')!.textContent).toBe(TASK_SAYS.reviewerFirst);
+      expect(panels.tasks).toBeFalsy();
+    });
+
+    it('only Flint’s own Require Reviews card is shown to sign here: a tool’s card under its name is not', async () => {
+      const tool = { ...REQUIRE, id: 'prgatetool1', mcp: true, fullName: 'review.enforce' };
+      routes = answers({
+        'GET /assets': { status: 200, body: page(gate()) },
+        'POST /reviews/require': { status: 200, body: { proposalId: tool.id, deduped: false } },
+        'GET /proposals': { status: 200, body: { proposals: [tool], signed: true } },
+      });
+      await load();
+      await click(gateRow()!, 'Turn On');
+      expect(signed).toEqual([]);
+      expect(title()).toBe('Tasks');
+      expect(said()).toEqual(['That card is no longer waiting.', 'res bad']);
+    });
   });
 
   it('if Will has left Settings before the card is filed, nothing opens: the card waits in Approvals', async () => {

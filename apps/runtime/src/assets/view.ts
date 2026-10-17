@@ -5,7 +5,7 @@
  * @flint/policy's; a row holds no words of anyone else's.
  */
 import type { z } from 'zod';
-import type { AssetRow, AssetsPage } from '@flint/policy';
+import { REVIEW_GATE_SAYS, TASK_SAYS, type AssetRow, type AssetsPage, type ReviewGateRow } from '@flint/policy';
 import type { Db } from '../db.js';
 import { ASSETS, sameAsset, type AssetDef } from './registry.js';
 import { enableProblem, syncAssets } from './service.js';
@@ -33,5 +33,16 @@ export async function assetsPage(db: Db, registry: readonly AssetDef[] = ASSETS)
     });
   }
   const gate = await db.reviewGate.findUnique({ where: { id: 'proposal' }, select: { enforced: true } });
-  return { assets, reviewsRequired: gate?.enforced ?? false };
+  const required = gate?.enforced ?? false;
+  return { assets, reviewsRequired: required, reviews: await reviewGateRow(db, required, rows.some((r) => r.kind === 'local_reviewer' && r.enabled)) };
+}
+
+/**
+ * The Require Reviews row: required or not, its card waiting, and whether it can be asked for now. Requiring them
+ * needs a reviewer that is on; stopping needs nothing more. A card he can approve is one filed for him (WILL_ORIGINS).
+ */
+async function reviewGateRow(db: Db, required: boolean, reviewerOn: boolean): Promise<ReviewGateRow> {
+  const waiting = !!(await db.proposal.findFirst({ where: { action: 'review.enforce', origin: { in: [...WILL_ORIGINS] }, status: 'pending', expiresAt: { gt: new Date() } }, select: { id: true } }));
+  const line = waiting ? WAITING : required ? REVIEW_GATE_SAYS.required : reviewerOn ? REVIEW_GATE_SAYS.notRequired : TASK_SAYS.reviewerFirst;
+  return { required, waiting, line, canChange: !waiting && (required || reviewerOn) };
 }

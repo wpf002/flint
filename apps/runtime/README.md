@@ -2017,8 +2017,8 @@ card that turns Local Reviews on.
   local, and chat comes first: a review waits while a chat turn runs. The tasks
   tick sends every waiting card that needs a review every two minutes until it
   has one.
-- **In shadow.** Reviews are written and nothing waits for them. Requiring them
-  stays your switch, and it has no button yet (it comes next).
+- **In shadow.** Reviews are written and nothing waits for them until you turn
+  on Require Reviews (below).
 - **Health** says when Local Reviews is on with no local model set up.
 
 ### Reviews in Approvals (part 6)
@@ -2039,10 +2039,23 @@ A card's review is on the card, in Approvals and on the Tasks panel's card alike
   request it gets back names the same review. A review that came in after you
   opened the card is never signed for you: Approve says so, and you read it
   first.
-- **When reviews are required** (the switch that comes next), a card that needs
-  a review can't be approved until its review is in: the card says so and its
-  Approve button is off. You can still reject it. The runtime checks that the
-  signature names the card's review and its verdict, and so does the database.
+- **When reviews are required**, a card that needs a review can't be approved
+  until its review is in: the card says so and its Approve button is off. You
+  can still reject it. The runtime checks that the signature names the card's
+  review and its verdict, and so does the database.
+
+### Require Reviews (part 6)
+
+Settings > Assets has a **Require Reviews** row under the assets. It says On,
+Off, or Waiting while its card waits for you.
+
+- **Turn On** files the card that requires reviews, and shows it in the Tasks
+  panel to approve, as an asset's Turn On does. It needs Local Reviews on first:
+  until it is, the row says so and offers nothing.
+- **Turn Off** files the card that stops requiring them. That card never waits
+  for a review itself, so it can always be approved.
+- Nothing changes until you approve the card. While reviews are required, Local
+  Reviews stays on: turning it off is refused, and Settings says why.
 
 `GET /v1/proposals` and `GET /v1/proposals/:id` carry each card's review (its
 findings, verdict, confidence, reasons, whether the passes agreed, and its words
@@ -2055,9 +2068,10 @@ no model can read a task or start one:
 
 | Route | What it does |
 |---|---|
-| `GET /v1/assets` | The assets, whether each is on, and whether reviews are required |
+| `GET /v1/assets` | The assets, whether each is on, and the Require Reviews row |
 | `POST /v1/assets/:id/on` | Files the card that turns it on |
 | `POST /v1/assets/:id/off` | Turns it off. No signature needed |
+| `POST /v1/reviews/require` and `/stop` | Files the card that requires reviews, or stops requiring them |
 | `GET /v1/tasks?tab=active\|finished` | A tab of tasks |
 | `GET /v1/tasks/:id` | One task |
 | `POST /v1/tasks` | A new task and its card |

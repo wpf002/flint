@@ -16,12 +16,13 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createHash } from 'node:crypto';
-import { AssetsPage, GOAL_SAYS, PAID_DISPATCH, TASK_SAYS, TASK_SIGNED_ACTIONS, TASK_STATUS_SAYS, TaskAnswer, TaskCardFiled, TaskFiled, TaskForm, TasksPage, digestOf } from '@flint/policy';
+import { AssetsPage, GOAL_SAYS, PAID_DISPATCH, REVIEW_GATE_SAYS, TASK_SAYS, TASK_SIGNED_ACTIONS, TASK_STATUS_SAYS, TaskAnswer, TaskCardFiled, TaskFiled, TaskForm, TasksPage, digestOf } from '@flint/policy';
 import { buildApp, type RuntimeStatus } from '../src/app';
 import type { RuntimeScope } from '../src/config';
 import { createDb, type Db } from '../src/db';
 import { SPEND_NEEDS_ESTIMATE, WHOLE_NUMBERS_ONLY } from '../src/governance/proposals';
 import { CI_WATCHER, LOCAL_REVIEWER, LOCAL_WORKER } from '../src/assets/registry';
+import { WAITING } from '../src/assets/view';
 import { checkTaskJob } from '../src/tasks/check';
 import { runTaskJob } from '../src/tasks/run';
 import { NO_DB, freshDb, id, withClient, type TestUrls } from './db';
@@ -57,6 +58,8 @@ const ROUTES: Array<['GET' | 'POST', string, unknown?]> = [
   ['GET', '/v1/assets'],
   ['POST', `/v1/assets/${CI_WATCHER.id}/on`, {}],
   ['POST', `/v1/assets/${CI_WATCHER.id}/off`, {}],
+  ['POST', '/v1/reviews/require', {}],
+  ['POST', '/v1/reviews/stop', {}],
   ['GET', '/v1/tasks?tab=active'],
   ['GET', `/v1/tasks/${TASK}`],
   ['POST', '/v1/tasks', form()],
@@ -109,6 +112,10 @@ describe('the task routes, before the database', () => {
       ['POST', `/v1/assets/${CI_WATCHER.id}/on`, { force: true }],
       ['POST', `/v1/assets/${CI_WATCHER.id}/toggle`, {}],
       ['POST', '/v1/assets/bad%20id/on', {}],
+      // Requiring reviews takes nothing but which way: no gate of the caller's choosing, no reviewer, no reason.
+      ['POST', '/v1/reviews/require', { gate: 'task' }],
+      ['POST', '/v1/reviews/stop', { why: CANARY }],
+      ['POST', '/v1/reviews/toggle', {}],
     ];
     for (const [method, url, body] of bad) {
       const r = await h.call(method, url, body);
@@ -240,6 +247,42 @@ describe.skipIf(NO_DB)('the task routes on flint_test', () => {
     const going = await h.call('POST', `/v1/tasks/${again.id}/again`, { draftKey: draft() });
     expect([going.statusCode, going.json()]).toEqual([409, { error: TASK_STATUS_SAYS.proposed, code: 'status.proposed' }]);
     expect(await ok('POST', `/v1/tasks/${again.id}/cancel`, {})).toEqual({ ok: true });
+  });
+
+  it('Require Reviews over HTTP: it needs Local Reviews on, its card waits for Will, then reviews are required; stopping is a card too', async () => {
+    const gate = async () => AssetsPage.parse(await ok('GET', '/v1/assets'));
+    const say = async (url: string, status: number, error: string, code: string) => {
+      const r = await h.call('POST', url, {});
+      expect([r.statusCode, r.json()], url).toEqual([status, { error, code }]);
+    };
+    // No reviewer on: the row says what it needs first, and neither way can be asked for.
+    expect((await gate()).reviews).toEqual({ required: false, waiting: false, line: TASK_SAYS.reviewerFirst, canChange: false });
+    await say('/v1/reviews/require', 409, TASK_SAYS.reviewerFirst, 'reviewerFirst');
+    await say('/v1/reviews/stop', 400, TASK_SAYS.nothing, 'nothing');
+    // Local Reviews on, by its own card.
+    await signRun(TaskCardFiled.parse(await ok('POST', `/v1/assets/${LOCAL_REVIEWER.id}/on`, {})).proposalId);
+    expect((await gate()).reviews).toEqual({ required: false, waiting: false, line: REVIEW_GATE_SAYS.notRequired, canChange: true });
+    // Require Reviews files its card. While it waits the row says so, and asking again is the same card.
+    const require = TaskCardFiled.parse(await ok('POST', '/v1/reviews/require', {}));
+    expect(require.deduped).toBe(false);
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: require.proposalId } })).toMatchObject({
+      action: 'review.enforce', kind: 'policy', origin: 'console', args: { gate: 'proposal', enforced: true }, consequential: true, reviewRequired: false, status: 'pending',
+    });
+    expect((await gate()).reviews).toEqual({ required: false, waiting: true, line: WAITING, canChange: false });
+    expect(TaskCardFiled.parse(await ok('POST', '/v1/reviews/require', {}))).toEqual({ proposalId: require.proposalId, deduped: true });
+    // Signed and carried out: reviews are required, and the last reviewer stays on.
+    expect(await signRun(require.proposalId)).toEqual({ gate: 'proposal', enforced: true });
+    expect(await gate()).toMatchObject({ reviewsRequired: true, reviews: { required: true, waiting: false, line: REVIEW_GATE_SAYS.required, canChange: true } });
+    await say('/v1/reviews/require', 400, TASK_SAYS.nothing, 'nothing');
+    await say(`/v1/assets/${LOCAL_REVIEWER.id}/off`, 409, TASK_SAYS.reviewerStays, 'reviewerStays');
+    // Stopping is a card of its own, never held for a review itself.
+    const stop = TaskCardFiled.parse(await ok('POST', '/v1/reviews/stop', {}));
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: stop.proposalId } })).toMatchObject({ args: { gate: 'proposal', enforced: false }, reviewRequired: false });
+    expect(await signRun(stop.proposalId)).toEqual({ gate: 'proposal', enforced: false });
+    expect(await gate()).toMatchObject({ reviewsRequired: false, reviews: { required: false, waiting: false, line: REVIEW_GATE_SAYS.notRequired, canChange: true } });
+    // And Local Reviews can be turned off again.
+    expect(await ok('POST', `/v1/assets/${LOCAL_REVIEWER.id}/off`, {})).toEqual({ ok: true });
+    expect((await gate()).reviews).toMatchObject({ line: TASK_SAYS.reviewerFirst, canChange: false });
   });
 
   it('every refusal is a sentence with its code; cancelling and overruling go through their routes', async () => {

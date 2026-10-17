@@ -3418,7 +3418,7 @@ if(typeof setInterval==='function')setInterval(predProbe,300000);
  * sentence and offers nothing. Chat can do none of this: no tool reaches these routes.
  * The helpers are the Goals and Predictions panels' (goals-js, predictions-js): one of each for all three. ES5, no
  * confirm(), alert() or prompt(): the Mac app's web view has none. */
-var TASKS={tab:'active',view:'list',on:false,off:false,offSays:'',assets:null,task:null,form:null,again:null,busy:false,seq:0,nav:0,back:null,aseq:0};
+var TASKS={tab:'active',view:'list',on:false,off:false,offSays:'',assets:null,gate:null,task:null,form:null,again:null,busy:false,seq:0,nav:0,back:null,aseq:0};
 var TASK_TABS=[['active','Active'],['finished','Finished']];
 /* The kinds of asset a task runs on (a reviewer runs none), and how a sentence names each. */
 var TASK_RUNS={ci_runner:1,local_worker:1,nexus_participant:1};
@@ -3446,7 +3446,8 @@ var TASK_SAY={waiting:'Flint is waiting for your approval.',later:'It’s waitin
   itemsFull:'A task can be about 12 items at most.',itemsAll:'Every item Flint offers is already picked.',
   labelsFew:'Give at least two labels.',labelsSame:'Give each label once.',labelsEmpty:'Fill in every label, or take it out.',
   titlesSay:'Flint shows the model each item’s title, which is text from outside Flint.',
-  nothing:'No asset that is on can run a task yet.',unreadable:'The runtime sent an answer Flint can’t read.'};
+  nothing:'No asset that is on can run a task yet.',unreadable:'The runtime sent an answer Flint can’t read.',
+  gateOn:'Reviews are required now.',gateOff:'Reviews aren’t required now.'};
 /* What the panel says once a card it showed has run, by the card. */
 var TASK_DONE={'asset.enable':'It’s on.','task.check_bar':'You accepted its result.','task.cancel':'You cancelled it.'};
 /* A second tap that lands within this long of the first (a double tap) is not taken for the second. */
@@ -3457,7 +3458,10 @@ function taskNow(){return Date.now();}
 /* A table's own entry for a name the runtime sent, or nothing. */
 function tGet(table,key){key=String(key===null||key===undefined?'':key);return Object.prototype.hasOwnProperty.call(table,key)?table[key]:undefined;}
 function taskDoneSays(p){var f=String((p&&p.fullName)||''),own=tGet(TASK_DONE,f);if(own)return own;
-  if(f==='task.bar_override')return p.args&&p.args.to==='rejected'?'You rejected it.':'You accepted it.';return TASK_SAY.started;}
+  if(f==='task.bar_override')return p.args&&p.args.to==='rejected'?'You rejected it.':'You accepted it.';
+  if(taskGateCard(p))return p.args.enforced===true?TASK_SAY.gateOn:TASK_SAY.gateOff;return TASK_SAY.started;}
+/* Settings' Require Reviews card (review.enforce), one way or the other: Flint's own, never a tool's under its name. */
+function taskGateCard(p){var q=typeof apprAs==='function'?apprAs(p):p;return !!q&&!q.tool&&q.fullName==='review.enforce'&&!!q.args&&typeof q.args.enforced==='boolean';}
 
 /* ---------- the panel ---------- */
 function tasksShown(on){var b=document.getElementById('tasksbtn');if(b)b.hidden=!on;}
@@ -3651,9 +3655,9 @@ function taskCard(id,o){taskNav('card');var seq=++TASKS.seq;TASKS.back=function(
   taskHead('Tasks',true,false);taskFoot();taskBody().appendChild(gEl('div','empty','Loading…'));
   gCall('/proposals').then(function(d){if(seq!==TASKS.seq)return;var p=null;((d&&d.proposals)||[]).forEach(function(x){if(x&&x.id===id&&x.status==='pending')p=x;});
     if(d&&d.runtime==='down'){taskBody().appendChild(goalEmpty('Couldn’t Load the Card',TASK_SAY.down,gBtn('ghost','Try Again',function(){taskCard(id,o);})));return;}
-    /* Only a card about a task or an asset is signed here; anything else (a tool's card under such a name too), or
-       one already decided, is not shown. */
-    if(!p||typeof apprTaskCard!=='function'||!apprTaskCard(p)){o.back(TASK_SAY.gone,'bad');return;}
+    /* Only a card about a task or an asset, or Settings' Require Reviews card, is signed here; anything else (a tool's
+       card under such a name too), or one already decided, is not shown. */
+    if(!p||typeof apprTaskCard!=='function'||!(apprTaskCard(p)||taskGateCard(p))){o.back(TASK_SAY.gone,'bad');return;}
     /* Its task's name is read first, for a short while: the card is drawn once, with the looked-up row or without it,
        and never again for a name that lands later or after Will has gone elsewhere. */
     var drawn=false,draw=function(){if(drawn||seq!==TASKS.seq)return;drawn=true;taskCardShow(p,o);};
@@ -3837,16 +3841,36 @@ function settingsOpen(){var p=document.getElementById('settings');return !!(p&&p
 /* Turn On files the card that turns it on. The card is then shown in the Tasks panel, to read and approve there. If Will
    has left Settings by the time it is filed, nothing opens: the card waits in Approvals. */
 function assetOn(a,b){if(TASKS.busy||taskIsOff(assetsMsg))return;TASKS.busy=true;if(b)b.disabled=true;assetsMsg('');
-  gCall('/assets/'+encodeURIComponent(a.id)+'/on',{}).then(function(d){TASKS.busy=false;if(!settingsOpen()){loadAssets();return;}
-    if(typeof showPanel==='function')showPanel('tasks',true);if(typeof loadCreds==='function')loadCreds();
-    taskCard(d.proposalId,{back:function(say,kind){taskTab('active',say,kind);},done:function(say){taskTab('active',say);}});},
+  gCall('/assets/'+encodeURIComponent(a.id)+'/on',{}).then(function(d){TASKS.busy=false;assetCardShow(d);},
   function(e){TASKS.busy=false;if(typeof e.code==='string'&&e.code){loadAssets(gSay(e));return;}if(b)b.disabled=false;assetsMsg(gSay(e));});}
+/* ---------- Require Reviews (P5) ----------
+   Whether a card that needs a review waits for one before Will can approve it. A row under the assets, as the runtime
+   says it is: On or Off, Waiting while its card is, and the runtime's sentence under it. Turning it on or off is a card
+   either way (review.enforce), shown in the Tasks panel to sign, as Turn On's is: no tap here changes it by itself. On
+   needs Local Reviews on first (the row says so, and offers nothing); Off can always be asked for. */
+function gateState(r){var s=gEl('span','st '+(r.required?'ok':r.waiting?'unknown':'off'));s.appendChild(gEl('i'));s.appendChild(document.createTextNode(r.required?'On':r.waiting?'Waiting':'Off'));return s;}
+function gateRow(r){var row=gEl('div','row two gwrap');row.id='reviewgate';var l=gEl('span','lbl');l.appendChild(gEl('b',null,'Require Reviews'));l.appendChild(gEl('span',null,r.line));row.appendChild(l);
+  row.appendChild(gateState(r));var acts=gEl('span','pacts');row.appendChild(acts);
+  if(r.waiting)acts.appendChild(gBtn('btn','Open Approvals',function(){if(typeof openApprovals==='function')openApprovals();}));
+  else if(r.canChange)acts.appendChild(r.required?gBtn('btn','Turn Off',function(b){gateAsk('stop',b);}):gBtn('btn pri','Turn On',function(b){gateAsk('require',b);}));
+  return row;}
+/* Turn On or Turn Off files the card that says so, and shows it in the Tasks panel, as Turn On does for an asset. */
+function gateAsk(verb,b){if(TASKS.busy||taskIsOff(assetsMsg))return;TASKS.busy=true;if(b)b.disabled=true;assetsMsg('');
+  gCall('/reviews/'+(verb==='stop'?'stop':'require'),{}).then(function(d){TASKS.busy=false;assetCardShow(d);},
+  function(e){TASKS.busy=false;if(typeof e.code==='string'&&e.code){loadAssets(gSay(e));return;}if(b)b.disabled=false;assetsMsg(gSay(e));});}
+/* A card Settings filed, shown in the Tasks panel to read and approve there. If Will has left Settings by the time it is
+   filed, nothing opens: the card waits in Approvals. */
+function assetCardShow(d){if(!settingsOpen()){loadAssets();return;}
+  if(typeof showPanel==='function')showPanel('tasks',true);if(typeof loadCreds==='function')loadCreds();
+  taskCard(d.proposalId,{back:function(say,kind){taskTab('active',say,kind);},done:function(say){taskTab('active',say);}});}
 /* `say`: why a tap did nothing, once the list is drawn again. With no runtime (or an older one) the section is not
-   there; with tasks switched off on this Mac it says the one sentence and offers nothing. */
+   there; with tasks switched off on this Mac it says the one sentence and offers nothing. A runtime from before the
+   Require Reviews row sends none, and none is drawn. */
 function loadAssets(say){var host=document.getElementById('setassets');if(!host)return;if(typeof TOKEN!=='undefined'&&!TOKEN){host.hidden=true;return;}var seq=++TASKS.aseq;
-  gCall('/assets').then(function(d){if(seq!==TASKS.aseq)return;taskIsOn();TASKS.assets=(d&&d.assets)||[];assetsDraw(host,TASKS.assets,null);if(say)assetsMsg(say);},
+  gCall('/assets').then(function(d){if(seq!==TASKS.aseq)return;taskIsOn();TASKS.assets=(d&&d.assets)||[];TASKS.gate=d&&d.reviews&&typeof d.reviews==='object'?d.reviews:null;
+    assetsDraw(host,TASKS.assets,null,TASKS.gate);if(say)assetsMsg(say);},
     function(e){if(seq!==TASKS.aseq)return;assetsDraw(host,null,e);});}
-function assetsDraw(host,assets,e){host.textContent='';
+function assetsDraw(host,assets,e,gate){host.textContent='';
   if(e&&(e.status===501||e.status===401)){host.hidden=true;return;}
   host.hidden=false;host.appendChild(gEl('div','gsh','Assets'));var g=gEl('div','group');g.id='assets';host.appendChild(g);
   if(e){if(taskOff(e)){g.appendChild(predLine(gSay(e)));return;}
@@ -3854,6 +3878,7 @@ function assetsDraw(host,assets,e){host.textContent='';
     l.appendChild(gEl('span',null,e.status===503?'The runtime isn’t answering, so assets can’t load.':gSay(e)));row.appendChild(l);row.appendChild(gBtn('ghost','Try Again',function(){loadAssets();}));g.appendChild(row);return;}
   if(!assets.length){g.appendChild(predLine(TASK_SAY.noAssets));return;}
   assets.forEach(function(a){g.appendChild(assetRow(a));});
+  if(gate&&typeof gate.line==='string')g.appendChild(gateRow(gate));
   var m=gEl('div','err');m.id='assetsmsg';m.hidden=true;m.setAttribute('role','status');host.appendChild(m);}
 
 /* The panel is one of the page's panels (opening another closes it), and Escape closes it. */
