@@ -58,6 +58,21 @@ export async function fileEnable(db: Db, assetId: string, now = new Date()): Pro
   return { proposalId: filed.id, deduped: filed.deduped };
 }
 
+/**
+ * The card that requires reviews, or stops requiring them (review.enforce): Will's switch in Settings. One already
+ * waiting that says the same is that card. Refused when it would change nothing, and when it would require reviews
+ * with no reviewer on (checkTaskCard: the database holds both too).
+ */
+export async function fileReviewGate(db: Db, enforced: boolean, now = new Date()): Promise<{ proposalId: string; deduped: boolean }> {
+  const filed = await createProposal(db, {
+    kind: 'policy', origin: 'console', action: 'review.enforce',
+    args: { gate: 'proposal', enforced },
+    // checkTaskCard sets where each detail came from (Will), the fixed reason and the fresh-touch mark.
+    argsProvenance: {}, tainted: false, sensitivity: 'ops', destructive: false, consequential: true, ttlMinutes: CARD_TTL_MINUTES,
+  }, CONSOLE_ACTOR, now);
+  return { proposalId: filed.id, deduped: filed.deduped };
+}
+
 /** Turn an asset off: nothing more is handed to it, and what is out on it fails as its asset being off. */
 export async function turnOff(db: Db, assetId: string, now = new Date()): Promise<void> {
   try {

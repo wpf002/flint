@@ -8,6 +8,7 @@
  *   GET  /assets                                 -> Settings > Assets (runtime GET /v1/assets)
  *   POST /assets/:id/on {}                       -> the card that turns it on
  *   POST /assets/:id/off {}                      -> unsigned
+ *   POST /reviews/require|stop {}                -> the card that requires reviews, or stops requiring them
  *   GET  /tasks?tab=active|finished              -> a tab of the panel
  *   GET  /tasks/form                             -> what New Task can offer now (runtime GET /v1/task-form)
  *   GET  /tasks/:id                              -> one task, open
@@ -204,6 +205,7 @@ const FIELDS: ReadonlySet<string> = new Set([
   'tasks', 'more', 'task', 'id', 'title', 'status', 'line', 'runsOn', 'outside', 'costs', 'createdAt', 'result', 'checks', 'name', 'state', 'checkedBy', 'askedBy',
   'chance', 'likelihood', 'percent', 'cost', 'micros', 'estimate', 'card', 'can', 'cancel', 'accept', 'reject', 'again',
   'assets', 'reviewsRequired', 'kind', 'on', 'waiting', 'canTurnOn', 'templates', 'goals', 'entityId', 'label', 'proposalId', 'deduped', 'ok',
+  'reviews', 'required', 'canChange',
 ]);
 /** Where a request or an answer broke its contract: up to 8 places, each at most 6 deep, in the contracts' own words. */
 export const fieldPaths = (e: z.ZodError): string =>
@@ -241,6 +243,7 @@ async function forward<T extends z.ZodTypeAny>(res: ServerResponse, deps: TasksD
 const Cancelled = z.union([TaskDone, TaskCardFiled]);
 
 const ASSET = /^\/assets\/([^/]+)\/(on|off)$/;
+const GATE = /^\/reviews\/(require|stop)$/;
 const TASK = /^\/tasks\/([^/]+)$/;
 const VERB = /^\/tasks\/([^/]+)\/(cancel|accept|reject|again)$/;
 const VERBS = { cancel: ['cancel', Cancelled], accept: ['accept anyway', TaskCardFiled], reject: ['reject anyway', TaskCardFiled] } as const;
@@ -249,15 +252,16 @@ const VERBS = { cancel: ['cancel', Cancelled], accept: ['accept anyway', TaskCar
 export async function tasksRoutes(req: IncomingMessage, res: ServerResponse, url: string, deps: TasksDeps): Promise<boolean> {
   const u = new URL(url, 'http://x');
   const path = u.pathname;
-  if (path !== '/tasks' && !path.startsWith('/tasks/') && path !== '/assets' && !path.startsWith('/assets/')) return false;
+  if (path !== '/tasks' && !path.startsWith('/tasks/') && path !== '/assets' && !path.startsWith('/assets/') && !path.startsWith('/reviews/')) return false;
   const get = req.method === 'GET';
   const post = req.method === 'POST';
   const page = get && (path === '/assets' || path === '/tasks' || path === '/tasks/form');
   const one = get && !page ? TASK.exec(path) : null;
   const asset = post ? ASSET.exec(path) : null;
+  const gate = post ? GATE.exec(path) : null;
   const verb = post ? VERB.exec(path) : null;
   const create = post && path === '/tasks';
-  if (!page && !one && !asset && !verb && !create) return false;
+  if (!page && !one && !asset && !gate && !verb && !create) return false;
   const rt = deps.runtime();
   // Without the runtime there are no tasks: the console hides its button, as for an older runtime.
   if (!rt) {
@@ -308,6 +312,13 @@ export async function tasksRoutes(req: IncomingMessage, res: ServerResponse, url
     const what = asset[2] === 'on' ? 'turn on' : 'turn off';
     if (!id.success || !b.success) return invalid(res, deps, what, b.success ? undefined : b.error);
     return forward(res, deps, rt, 'POST', `/v1/assets/${id.data}/${asset[2]}`, {}, asset[2] === 'on' ? TaskCardFiled : TaskDone, { what });
+  }
+  if (gate) {
+    // Will's switch: which way, and nothing else.
+    const b = EmptyBody.safeParse(body ?? {});
+    const what = gate[1] === 'require' ? 'require reviews' : 'stop requiring reviews';
+    if (!b.success) return invalid(res, deps, what, b.error);
+    return forward(res, deps, rt, 'POST', `/v1/reviews/${gate[1]}`, {}, TaskCardFiled, { what, newer: true });
   }
   const id = TaskId.safeParse(verb![1]);
   if (verb![2] === 'again') {

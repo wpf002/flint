@@ -132,7 +132,7 @@ const post = async (p: string, body?: unknown) => {
 };
 /** Every route the proxy has, with a request it takes. */
 const EVERY: ReadonlyArray<readonly ['GET' | 'POST', string, unknown?]> = [
-  ['GET', '/assets'], ['POST', `/assets/${AID}/on`, {}], ['POST', `/assets/${AID}/off`, {}],
+  ['GET', '/assets'], ['POST', `/assets/${AID}/on`, {}], ['POST', `/assets/${AID}/off`, {}], ['POST', '/reviews/require', {}], ['POST', '/reviews/stop', {}],
   ['GET', '/tasks'], ['GET', '/tasks?tab=finished'], ['GET', '/tasks/form'], ['GET', `/tasks/${TID}`],
   ['POST', '/tasks', fresh()], ['POST', `/tasks/${TID}/cancel`, {}], ['POST', `/tasks/${TID}/accept`, {}], ['POST', `/tasks/${TID}/reject`, {}], ['POST', `/tasks/${TID}/again`, { draftKey: DRAFT }],
 ];
@@ -143,6 +143,13 @@ describe('reads', () => {
     answer = () => ({ status: 200, body: assets() });
     expect(await get('/assets')).toEqual({ status: 200, body: assets() });
     expect(asked).toEqual([{ method: 'GET', url: '/v1/assets', auth: `Bearer ${TOKEN}`, body: '' }]);
+    // With the Require Reviews row (P5); one out of shape is not passed on.
+    const gate = { required: false, waiting: false, line: 'You can approve cards before Flint reviews them.', canChange: true };
+    answer = () => ({ status: 200, body: assets({ reviews: gate }) });
+    expect(await get('/assets')).toEqual({ status: 200, body: assets({ reviews: gate }) });
+    answer = () => ({ status: 200, body: assets({ reviews: { ...gate, enforced: true } }) });
+    expect((await get('/assets')).status).toBe(502);
+    asked = asked.slice(0, 1);
     answer = () => ({ status: 200, body: tab() });
     expect(await get('/tasks')).toEqual({ status: 200, body: tab() });
     expect(asked.at(-1)!.url).toBe('/v1/tasks?tab=active');
@@ -423,6 +430,30 @@ describe('writes', () => {
     expect(logged.join('\n')).not.toContain(CANARY);
   });
 
+  it('Require Reviews and Stop Requiring each file a card, saying which way in the path and nothing in the body (P5)', async () => {
+    answer = () => ({ status: 200, body: { proposalId: 'pr3', deduped: false } });
+    expect(await post('/reviews/require')).toEqual({ status: 200, body: { proposalId: 'pr3', deduped: false } });
+    expect(asked).toEqual([{ method: 'POST', url: '/v1/reviews/require', auth: `Bearer ${TOKEN}`, body: '{}' }]);
+    expect(await post('/reviews/stop')).toEqual({ status: 200, body: { proposalId: 'pr3', deduped: false } });
+    expect(asked.at(-1)).toEqual({ method: 'POST', url: '/v1/reviews/stop', auth: `Bearer ${TOKEN}`, body: '{}' });
+    // Never "done" without a card.
+    answer = () => ({ status: 200, body: { ok: true } });
+    expect((await post('/reviews/require')).status).toBe(502);
+    // A refusal in the closed set is its sentence and code; a runtime from before the route is "older".
+    answer = () => ({ status: 409, body: { error: 'whatever the runtime says', code: 'reviewerFirst' } });
+    expect(await post('/reviews/require')).toEqual({ status: 409, body: { error: 'Turn on Local Reviews first.', code: 'reviewerFirst' } });
+    answer = () => ({ status: 404, body: { error: 'Route POST:/v1/reviews/require not found' } });
+    expect(await post('/reviews/require')).toEqual({ status: 501, body: { error: TASKS_SAY.older } });
+    asked = [];
+    for (const [p, b] of [['/reviews/require', { gate: 'task' }], ['/reviews/stop', { why: CANARY }], ['/reviews/require?now=1', {}]] as const) {
+      expect(await post(p, b), `${p} ${JSON.stringify(b)}`).toEqual({ status: 400, body: { error: TASKS_SAY.invalid } });
+    }
+    // Any other way is no route of this proxy's.
+    expect((await post('/reviews/toggle')).status).toBe(404);
+    expect(asked).toEqual([]);
+    expect(logged.join('\n')).not.toContain(CANARY);
+  });
+
   it('Cancel is done or a card; Accept Anyway and Reject Anyway are always a card; Run Again sends the new task’s key alone', async () => {
     answer = () => ({ status: 200, body: { ok: true } });
     expect(await post(`/tasks/${TID}/cancel`)).toEqual({ status: 200, body: { ok: true } });
@@ -572,6 +603,7 @@ describe('where the routes sit', () => {
     for (const [, p] of EVERY) expect(routeOf(p), p).toBeUndefined();
     expect(routeOf('/tasksx')).toBe('other');
     expect(routeOf('/assetsx')).toBe('other');
+    expect(routeOf('/reviews/require')).toBeUndefined();
   });
 
   it('only the console’s full token reaches them: a voice or eval token reaches none', () => {
@@ -584,7 +616,7 @@ describe('where the routes sit', () => {
 
   it('no model reaches a task: this proxy is the server’s one way to the runtime’s task routes, and chat’s runtime tools have none', () => {
     const dir = join(__dirname, '..', 'src');
-    const names = /\/v1\/(tasks|assets|task-form)/;
+    const names = /\/v1\/(tasks|assets|task-form|reviews)/;
     const users = readdirSync(dir).filter((f) => f.endsWith('.ts') && names.test(readFileSync(join(dir, f), 'utf8')));
     expect(users).toEqual(['tasks-routes.ts']);
     // The tools a model is offered for the runtime are the runtime connector's: none of them asks for a task or an asset.

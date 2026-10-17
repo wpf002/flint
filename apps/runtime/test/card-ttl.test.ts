@@ -45,7 +45,7 @@ const FILERS: Record<string, { minutes: number[]; files: string }> = {
   'apps/runtime/src/world/person-create.ts': { minutes: [24 * 60], files: 'world.person.create' },
   'apps/runtime/src/predict/enable.ts': { minutes: [WEEK], files: 'forecast.series.enable, from the command line (predictions-on)' },
   // P5: the seven asset and task cards.
-  'apps/runtime/src/assets/service.ts': { minutes: [WEEK], files: 'asset.enable' },
+  'apps/runtime/src/assets/service.ts': { minutes: [WEEK, WEEK], files: 'asset.enable, and review.enforce (Settings\' Require Reviews)' },
   'apps/runtime/src/tasks/service.ts': { minutes: [WEEK, WEEK, WEEK], files: 'a task\'s dispatch card, task.cancel and task.bar_override' },
   'apps/runtime/src/tasks/check.ts': { minutes: [WEEK], files: 'task.check_bar (the accept card)' },
   // The exception: the weekly restore tests' cards, a week and two hours (they run on Sundays only): restore.drill, and

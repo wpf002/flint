@@ -21,6 +21,8 @@ import {
   NewTaskBody,
   OutputRef,
   outputRefOf,
+  REVIEW_GATE_SAYS,
+  REVIEW_GATE_VERBS,
   ReviewEnforceArgs,
   ruleChecks,
   specItems,
@@ -340,6 +342,14 @@ describe('the cards', () => {
     const asset = { id: 'as-ci-watcher-v1', name: 'CI Watcher', kind: 'ci_runner', on: false, waiting: false, line: 'Flint reports how your CI runs end.', canTurnOn: true, costs: false };
     expect(AssetsPage.safeParse({ assets: [asset], reviewsRequired: false }).success).toBe(true);
     expect(AssetsPage.safeParse({ assets: [{ ...asset, approvalId: 'ap1' }], reviewsRequired: false }).success).toBe(false);
+    // The Require Reviews row (P5): a runtime from before it sends none; one that does says exactly these four things.
+    const reviews = { required: false, waiting: false, line: REVIEW_GATE_SAYS.notRequired, canChange: true };
+    expect(AssetsPage.parse({ assets: [asset], reviewsRequired: false, reviews }).reviews).toEqual(reviews);
+    for (const bad of [{ ...reviews, enforced: true }, { ...reviews, line: '' }, { ...reviews, canChange: 'yes' }, { required: false }]) {
+      expect(AssetsPage.safeParse({ assets: [asset], reviewsRequired: false, reviews: bad }).success, JSON.stringify(bad)).toBe(false);
+    }
+    expect([...REVIEW_GATE_VERBS]).toEqual(['require', 'stop']);
+    for (const t of Object.values(REVIEW_GATE_SAYS)) expect(t, t).toMatch(/^[A-Z].*\.$/);
   });
 
   it('Run Again is a key a runtime may leave out, and its body is the new task\'s draft key alone', () => {

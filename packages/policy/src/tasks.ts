@@ -655,7 +655,23 @@ export const AssetRow = z
   })
   .strict();
 export type AssetRow = z.infer<typeof AssetRow>;
-export const AssetsPage = z.object({ assets: z.array(AssetRow).max(50), reviewsRequired: z.boolean() }).strict();
+
+/** What the Require Reviews row says while each is so. (Turning Local Reviews on first is TASK_SAYS.reviewerFirst.) */
+export const REVIEW_GATE_SAYS = {
+  required: 'Cards that matter wait for a review before you can approve them.',
+  notRequired: 'You can approve cards before Flint reviews them.',
+} as const;
+/**
+ * Settings' Require Reviews row (P5): whether reviews are required before a card that needs one is approved, whether
+ * the card that changes it is waiting for Will, the sentence under it, and whether it can be asked for now (to require
+ * them, a reviewer must be on; to stop, nothing more).
+ */
+export const ReviewGateRow = z.object({ required: z.boolean(), waiting: z.boolean(), line: Sentence, canChange: z.boolean() }).strict();
+export type ReviewGateRow = z.infer<typeof ReviewGateRow>;
+/** The two ways the row's card can go: POST /v1/reviews/require or /v1/reviews/stop. */
+export const REVIEW_GATE_VERBS = ['require', 'stop'] as const;
+/** Settings > Assets. `reviews` is the Require Reviews row; a runtime from before it does not send one. */
+export const AssetsPage = z.object({ assets: z.array(AssetRow).max(50), reviewsRequired: z.boolean(), reviews: ReviewGateRow.optional() }).strict();
 
 /** How many items a template's list in the New Task form holds. */
 export const TASK_FORM_ITEMS_MAX = 50;

@@ -112,7 +112,11 @@ describe.skipIf(NO_DB)('the Tasks panel’s writes and views on flint_test', () 
     const reviews = { id: LOCAL_REVIEWER.id, name: 'Local Reviews', kind: 'local_reviewer', costs: false, on: false, waiting: false, canTurnOn: true, line: LOCAL_REVIEWER.line };
     const others = async () => (await page()).assets.filter((a) => a.id !== CI_WATCHER.id);
     // The row is made by the first read, off. Until the GitHub source is on it says what it needs.
-    expect(await page()).toEqual({ assets: [{ ...row, on: false, waiting: false, canTurnOn: false, line: TASK_SAYS.needsGithub }, worker, reviews], reviewsRequired: false });
+    expect(await page()).toEqual({
+      assets: [{ ...row, on: false, waiting: false, canTurnOn: false, line: TASK_SAYS.needsGithub }, worker, reviews], reviewsRequired: false,
+      // The Require Reviews row: off, and it needs Local Reviews on first.
+      reviews: { required: false, waiting: false, line: TASK_SAYS.reviewerFirst, canChange: false },
+    });
     expect(await others()).toEqual([worker, reviews]);
     expect(await refusal(fileEnable(db, CI_WATCHER.id))).toMatchObject({ status: 409, message: TASK_SAYS.needsGithub });
     await fx.sourceOn();
