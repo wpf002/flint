@@ -285,12 +285,12 @@ describe.skipIf(NO_DB)('running and checking a task on flint_test', () => {
     expect((await taskView(db, u.id, 'UTC'))!.line).toBe('Its result wasn’t usable.');
   });
 
-  it('the task jobs: none unless tasks are switched on; then the tick every 2 minutes and one worker each for runs and checks; a job that is not a task’s id does nothing', async () => {
+  it('the task jobs: none unless tasks are switched on; then the tick every 2 minutes and one worker each for runs, checks and card reviews; a job that is not its own does nothing', async () => {
     const ctx = (over: Record<string, string> = {}): JobContext => ({ db, bus: bus as unknown as JobContext['bus'], sources: [], log: () => {}, config: loadConfig({ DATABASE_URL: urls.app, HOME: '/tmp/none', ...over }) });
     // As it ships, and with anything but `on`: nothing is scheduled and nothing is worked.
     for (const over of [{}, { FLINT_ASSETS: '' }, { FLINT_ASSETS: 'off' }, { FLINT_ASSETS: 'true' }]) expect(taskJobs(ctx(over)), JSON.stringify(over)).toEqual([]);
     const specs = taskJobs(ctx({ FLINT_ASSETS: 'on' }));
-    expect(specs.map((s) => [s.queue, s.cron])).toEqual([['tasks.tick', TASK_TICK_CRON], ['tasks.run', undefined], ['tasks.check', undefined]]);
+    expect(specs.map((s) => [s.queue, s.cron])).toEqual([['tasks.tick', TASK_TICK_CRON], ['tasks.run', undefined], ['tasks.check', undefined], ['reviews.run', undefined]]);
     const job = (data: unknown) => [{ id: 'j1', name: 'q', data }] as unknown as Parameters<(typeof specs)[number]['handler']>[0];
     const item = await fx.ciRun('wpf002/jobs', { status: 'completed', conclusion: 'success' });
     const t = await fx.dispatched(item);
@@ -303,5 +303,8 @@ describe.skipIf(NO_DB)('running and checking a task on flint_test', () => {
     await specs[2]!.handler(job({ taskId: t.id }));
     expect(await fx.task(t.id)).toMatchObject({ status: 'checking', metBar: true });
     await specs[0]!.handler(job(null));
+    // The review worker takes a card's id and nothing else: anything else does nothing, and no review is written.
+    for (const data of [null, { taskId: t.id }, { proposalId: 'has space' }, { proposalId: 'x'.repeat(41) }]) await specs[3]!.handler(job(data));
+    expect(await db.review.count()).toBe(0);
   });
 });

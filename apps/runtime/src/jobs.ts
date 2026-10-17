@@ -427,16 +427,6 @@ export function taskJobs(ctx: JobContext): JobSpec[] {
       },
     },
     {
-      // One card's review on the local model: a debate and a verdict, written beside the card. Its data is a card's id.
-      queue: 'reviews.run',
-      handler: async (jobs) => {
-        for (const job of jobs) {
-          const data = CardReviewJob.safeParse(job.data);
-          if (data.success) await runCardReview({ db: ctx.db, config: ctx.config, log }, data.data);
-        }
-      },
-    },
-    {
       // One task's run on its asset.
       queue: 'tasks.run',
       handler: async (jobs) => {
@@ -456,6 +446,16 @@ export function taskJobs(ctx: JobContext): JobSpec[] {
         for (const job of jobs) {
           const data = TaskJob.safeParse(job.data);
           if (data.success) await checkTaskJob({ db: ctx.db, tz: ctx.config.tz, log }, data.data);
+        }
+      },
+    },
+    {
+      // One card's review on the local model: a debate and a verdict, written beside the card. Its data is a card's id.
+      queue: 'reviews.run',
+      handler: async (jobs) => {
+        for (const job of jobs) {
+          const data = CardReviewJob.safeParse(job.data);
+          if (data.success) await runCardReview({ db: ctx.db, config: ctx.config, log }, data.data);
         }
       },
     },
