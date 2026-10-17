@@ -21,7 +21,7 @@ import { buildApp, type RuntimeStatus } from '../src/app';
 import type { RuntimeScope } from '../src/config';
 import { createDb, type Db } from '../src/db';
 import { SPEND_NEEDS_ESTIMATE, WHOLE_NUMBERS_ONLY } from '../src/governance/proposals';
-import { CI_WATCHER } from '../src/assets/registry';
+import { CI_WATCHER, LOCAL_WORKER } from '../src/assets/registry';
 import { checkTaskJob } from '../src/tasks/check';
 import { runTaskJob } from '../src/tasks/run';
 import { NO_DB, freshDb, id, withClient, type TestUrls } from './db';
@@ -201,7 +201,12 @@ describe.skipIf(NO_DB)('the task routes on flint_test', () => {
   });
 
   it('Settings and a task’s whole life over HTTP: turn the watcher on, create, dispatch, run, check, accept', async () => {
-    expect(AssetsPage.parse(await ok('GET', '/v1/assets')).assets).toEqual([expect.objectContaining({ id: CI_WATCHER.id, on: false, canTurnOn: true })]);
+    // Every asset the registry holds has a row, each off. This runtime names no local model, so nothing of the
+    // local worker's can be run (the form below offers none of its kinds), but Will can still turn the asset on.
+    expect(AssetsPage.parse(await ok('GET', '/v1/assets')).assets).toEqual([
+      expect.objectContaining({ id: CI_WATCHER.id, on: false, canTurnOn: true }),
+      expect.objectContaining({ id: LOCAL_WORKER.id, on: false, canTurnOn: true }),
+    ]);
     const on = TaskCardFiled.parse(await ok('POST', `/v1/assets/${CI_WATCHER.id}/on`, {}));
     expect(await signRun(on.proposalId)).toEqual({ assetId: CI_WATCHER.id, enabled: true });
     expect(AssetsPage.parse(await ok('GET', '/v1/assets')).assets[0]).toMatchObject({ on: true, waiting: false });
