@@ -20,7 +20,7 @@ import { AssetEnableArgs, AssetsPage, TASK_FORM_ITEMS_MAX, TASK_SAYS, TASK_STATU
 import { HEX, NO_DB, freshDb, id, type TestUrls } from '../db';
 import { createDb, type Db } from '../../src/db';
 import { Forbidden, Refused } from '../../src/governance/proposals';
-import { ASSETS, CI_WATCHER, LOCAL_WORKER, assetDef, assetFor, enableArgsOf, sameAsset } from '../../src/assets/registry';
+import { ASSETS, CI_WATCHER, LOCAL_REVIEWER, LOCAL_WORKER, assetDef, assetFor, enableArgsOf, sameAsset } from '../../src/assets/registry';
 import { fileEnable, known, syncAssets, turnOff } from '../../src/assets/service';
 import { WAITING, assetsPage } from '../../src/assets/view';
 import { checkTaskJob } from '../../src/tasks/check';
@@ -46,13 +46,16 @@ const refusal = async (p: Promise<unknown>): Promise<Refused> => {
 };
 
 describe('the asset registry, before the database', () => {
-  it('is a closed list: the CI watcher and the local worker, each calling nothing off this Mac and costing nothing; every name and sentence is fit to show', () => {
-    expect(ASSETS).toEqual([CI_WATCHER, LOCAL_WORKER]);
+  it('is a closed list: the CI watcher, the local worker and Local Reviews, each calling nothing off this Mac and costing nothing; every name and sentence is fit to show', () => {
+    expect(ASSETS).toEqual([CI_WATCHER, LOCAL_WORKER, LOCAL_REVIEWER]);
+    // Local Reviews runs no task: it reviews cards, handed its work under review.local.
+    expect(LOCAL_REVIEWER).toMatchObject({ kind: 'local_reviewer', externalRef: 'ollama:review:v1', name: 'Local Reviews', capabilities: ['review'], dispatchAction: 'review.local', spends: false, entityId: null });
+    expect(AssetEnableArgs.safeParse(enableArgsOf(LOCAL_REVIEWER)).success).toBe(true);
     expect(CI_WATCHER).toMatchObject({ kind: 'ci_runner', externalRef: 'github:ci:v1', capabilities: ['watch_ci'], dispatchAction: 'task.dispatch.ci_runner', spends: false });
     expect(LOCAL_WORKER).toMatchObject({
       kind: 'local_worker', externalRef: 'ollama:local:v1', capabilities: ['summarize_items', 'sort_items', 'draft_note'], dispatchAction: 'task.dispatch.local_worker', spends: false, entityId: null,
     });
-    // Nothing either asset does spends, and neither stands for one item of Will's.
+    // Nothing any asset does spends, and none stands for one item of Will's.
     for (const a of ASSETS) expect([a.spends, a.entityId], a.id).toEqual([false, null]);
     for (const a of ASSETS) {
       expect(noteProblems(a.name, a.line), a.id).toEqual([]);
@@ -106,10 +109,11 @@ describe.skipIf(NO_DB)('the Tasks panel’s writes and views on flint_test', () 
     const row = { id: CI_WATCHER.id, name: 'CI Watcher', kind: 'ci_runner', costs: false };
     // Every asset the registry holds has a row, each off; this test is the CI watcher's.
     const worker = { id: LOCAL_WORKER.id, name: 'Local Worker', kind: 'local_worker', costs: false, on: false, waiting: false, canTurnOn: true, line: LOCAL_WORKER.line };
+    const reviews = { id: LOCAL_REVIEWER.id, name: 'Local Reviews', kind: 'local_reviewer', costs: false, on: false, waiting: false, canTurnOn: true, line: LOCAL_REVIEWER.line };
     const others = async () => (await page()).assets.filter((a) => a.id !== CI_WATCHER.id);
     // The row is made by the first read, off. Until the GitHub source is on it says what it needs.
-    expect(await page()).toEqual({ assets: [{ ...row, on: false, waiting: false, canTurnOn: false, line: TASK_SAYS.needsGithub }, worker], reviewsRequired: false });
-    expect(await others()).toEqual([worker]);
+    expect(await page()).toEqual({ assets: [{ ...row, on: false, waiting: false, canTurnOn: false, line: TASK_SAYS.needsGithub }, worker, reviews], reviewsRequired: false });
+    expect(await others()).toEqual([worker, reviews]);
     expect(await refusal(fileEnable(db, CI_WATCHER.id))).toMatchObject({ status: 409, message: TASK_SAYS.needsGithub });
     await fx.sourceOn();
     const watcher = async () => (await page()).assets.filter((a) => a.id === CI_WATCHER.id);
@@ -118,8 +122,8 @@ describe.skipIf(NO_DB)('the Tasks panel’s writes and views on flint_test', () 
     expect(await watcher()).toEqual([{ ...row, on: false, waiting: true, canTurnOn: false, line: WAITING }]);
     await fx.signRun(filed.proposalId);
     expect(await watcher()).toEqual([{ ...row, on: true, waiting: false, canTurnOn: false, line: CI_WATCHER.line }]);
-    // One asset waiting for a card, or on, says nothing about another: the local worker's row is untouched.
-    expect(await others()).toEqual([worker]);
+    // One asset waiting for a card, or on, says nothing about another: the others' rows are untouched.
+    expect(await others()).toEqual([worker, reviews]);
     // Turning it off needs no signature and is on record by id.
     await turnOff(db, CI_WATCHER.id);
     expect((await watcher())[0]).toMatchObject({ on: false, canTurnOn: true, line: CI_WATCHER.line });
@@ -129,7 +133,7 @@ describe.skipIf(NO_DB)('the Tasks panel’s writes and views on flint_test', () 
     expect(await refusal(turnOff(db, 'as-unknown-v1'))).toMatchObject({ status: 404, message: TASK_SAYS.noAsset });
     // A row the registry does not describe is left out: nothing can run on it.
     await syncAssets(db, [{ ...CI_WATCHER, id: 'as-stray-v1', externalRef: 'github:ci:stray' }]);
-    expect((await page()).assets.map((a) => a.id)).toEqual([CI_WATCHER.id, LOCAL_WORKER.id]);
+    expect((await page()).assets.map((a) => a.id)).toEqual([CI_WATCHER.id, LOCAL_WORKER.id, LOCAL_REVIEWER.id]);
     await fx.watcherOn();
   });
 

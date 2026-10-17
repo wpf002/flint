@@ -21,7 +21,7 @@ import { buildApp, type RuntimeStatus } from '../src/app';
 import type { RuntimeScope } from '../src/config';
 import { createDb, type Db } from '../src/db';
 import { SPEND_NEEDS_ESTIMATE, WHOLE_NUMBERS_ONLY } from '../src/governance/proposals';
-import { CI_WATCHER, LOCAL_WORKER } from '../src/assets/registry';
+import { CI_WATCHER, LOCAL_REVIEWER, LOCAL_WORKER } from '../src/assets/registry';
 import { checkTaskJob } from '../src/tasks/check';
 import { runTaskJob } from '../src/tasks/run';
 import { NO_DB, freshDb, id, withClient, type TestUrls } from './db';
@@ -206,6 +206,7 @@ describe.skipIf(NO_DB)('the task routes on flint_test', () => {
     expect(AssetsPage.parse(await ok('GET', '/v1/assets')).assets).toEqual([
       expect.objectContaining({ id: CI_WATCHER.id, on: false, canTurnOn: true }),
       expect.objectContaining({ id: LOCAL_WORKER.id, on: false, canTurnOn: true }),
+      expect.objectContaining({ id: LOCAL_REVIEWER.id, on: false, canTurnOn: true }),
     ]);
     const on = TaskCardFiled.parse(await ok('POST', `/v1/assets/${CI_WATCHER.id}/on`, {}));
     expect(await signRun(on.proposalId)).toEqual({ assetId: CI_WATCHER.id, enabled: true });

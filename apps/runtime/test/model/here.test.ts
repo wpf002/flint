@@ -451,7 +451,7 @@ describe('the one reader of Ollama’s lists', () => {
 // ── nothing reaches a model without asking first (static) ────────────────────
 
 /** Every file in the runtime that asks a local model. A new one is added here, and to the callers below. */
-const LOCAL_CALLERS = ['goals/planner.ts', 'predict/reason.ts', 'tasks/local-worker.ts', 'triage/judge.ts'];
+const LOCAL_CALLERS = ['goals/planner.ts', 'predict/reason.ts', 'reviews/adjudicate.ts', 'tasks/local-worker.ts', 'triage/judge.ts'];
 const HERE_FILE = 'model/here.ts';
 /** Code only: a comment may name what the code must never do. */
 const bare = (source: string) => source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
@@ -512,7 +512,7 @@ function reachProblems(sources: ReadonlyMap<string, string>, callers: readonly s
  * not on it does not name fetch in any form. Each file on it says why in one line (`// Network: ...`).
  */
 const NETWORK_FILES = [
-  'cli.ts', 'goals/batch.ts', 'goals/planner.ts', 'health/machine.ts', 'model/here.ts', 'notify.ts', 'policy/egress.ts', 'predict/reason.ts', 'scheduler.ts',
+  'cli.ts', 'goals/batch.ts', 'goals/planner.ts', 'health/machine.ts', 'model/here.ts', 'notify.ts', 'policy/egress.ts', 'predict/reason.ts', 'reviews/adjudicate.ts', 'scheduler.ts',
   'sources/github.ts', 'sources/google/calendar.ts', 'sources/google/oauth.ts', 'sources/health.ts', 'sources/nexus-inbox.ts', 'sources/nexus.ts', 'sources/railway.ts',
   'sources/types.ts', 'spend/push.ts', 'tasks/local-worker.ts', 'triage/judge.ts', 'triage/load.ts', 'triage/worker.ts',
 ];
@@ -541,7 +541,7 @@ describe('nothing in the runtime reaches a model without asking where it runs', 
   const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(dir, e.name)) : e.name.endsWith('.ts') ? [join(dir, e.name)] : []));
   const real = (): Map<string, string> => new Map(files(src).map((f) => [f.slice(src.length + 1), readFileSync(f, 'utf8')]));
 
-  it('every file under src/ passes: four callers, each asking first and again before every request; one reader of Ollama’s lists', () => {
+  it('every file under src/ passes: five callers, each asking first and again before every request; one reader of Ollama’s lists', () => {
     const sources = real();
     expect(sources.size).toBeGreaterThan(100);
     expect(reachProblems(sources)).toEqual([]);
@@ -594,8 +594,8 @@ describe('nothing in the runtime reaches a model without asking where it runs', 
     const sources = real();
     expect(networkProblems(sources)).toEqual([]);
     expect([...NETWORK_FILES].sort()).toEqual(NETWORK_FILES);
-    expect(NETWORK_FILES.length).toBeLessThanOrEqual(22);
-    // The four that ask a model are on it, and say the same thing: Ollama on this Mac, after it was asked.
+    expect(NETWORK_FILES.length).toBeLessThanOrEqual(23);
+    // The five that ask a model are on it, and say the same thing: Ollama on this Mac, after it was asked.
     for (const file of LOCAL_CALLERS) expect(sources.get(file)!, file).toContain('// Network: Ollama on this Mac only, a scoped POST to /api/chat, after model/here.ts says the model runs here.');
     // Every reason is a plain sentence: no address but this Mac's, no key.
     for (const file of NETWORK_FILES) {

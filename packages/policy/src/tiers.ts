@@ -279,9 +279,10 @@ export const AUTONOMOUS_ACTIONS: ReadonlySet<string> = new Set([
   'ledger.reason.local',
   'ledger.resolve.ask_will',
   'calibration.note',
-  // P5: checking a task's result, and nothing else yet. No dispatch and no review is asked for by a job
-  // until a part that needs one adds it here.
+  // P5: checking a task's result, and Local Reviews' review of a waiting card (advice beside it, in shadow,
+  // 20 a day). No dispatch is asked for by a job until a part that needs one adds it here.
   'task.check_bar',
+  'review.local',
 ]);
 
 /**
