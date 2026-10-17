@@ -603,7 +603,12 @@ describe('the list', () => {
     await click(body(), 'Open Settings');
     expect(panels).toMatchObject({ tasks: false, settings: true });
     // An asset that only reviews runs no task; one this page has no words for is named by its own name; none at all is "an asset".
-    for (const [list, needs] of [[[asset({ kind: 'local_reviewer', name: 'Local Reviews' })], 'an asset'], [[asset({ kind: 'local_worker', name: 'Local Tasks', on: false })], 'Local Tasks'], [[], 'an asset']] as const) {
+    for (const [list, needs] of [
+      [[asset({ kind: 'local_reviewer', name: 'Local Reviews' })], 'an asset'],
+      [[asset({ kind: 'local_worker', name: 'Local Worker', on: false })], 'the Local Worker'],
+      [[asset({ kind: 'nexus_participant', name: 'Paid Tasks', on: false })], 'Paid Tasks'],
+      [[], 'an asset'],
+    ] as const) {
       routes = answers({ 'GET /assets': { status: 200, body: { assets: list, reviewsRequired: false } }, 'GET /tasks?tab=active': none });
       await open('active');
       expect(empty(), needs).toEqual(['No Asset Is On', `Turn on ${needs} in Settings to start.`]);
@@ -1554,25 +1559,193 @@ describe('New Task', () => {
     expect(body().with('fl').map((w) => w.children[0]!.textContent)).toEqual(['What to Do', 'Goal', 'Due']);
     expect(body().shown()).toContain('Flint tracks no CI runs yet.');
     expect(foot().button('Create Task').disabled).toBe(true);
-    // Every kind the runtime may name but watch_ci: none has a field here yet, so none is offered.
-    const others = TASK_TEMPLATE_IDS.filter((t) => t !== 'watch_ci').map((template) => ({ template, title: 'Summarize Items', runsOn: 'Local Tasks', items: [{ entityId: ITEM, label: 'wpf002/flint #57' }], more: false }));
-    routes = answers({ 'GET /tasks/form': { status: 200, body: form({ templates: others }) } });
+    // Every kind the runtime may name has its own field here now, so each one it offers is offered.
+    const others = TASK_TEMPLATE_IDS.filter((t) => t !== 'watch_ci').map((template) => ({ template, title: 'Summarize Items', runsOn: 'Local Worker', items: [{ entityId: ITEM, label: 'wpf002/flint #57' }], more: false }));
+    routes = answers({ 'GET /tasks/form': { status: 200, body: form({ templates: [...others, form().templates[0]!] }) } });
+    run('taskNew()');
+    await settle();
+    expect(body().field('What to Do').children.map((o) => o.value)).toEqual([...others.map((t) => t.template), 'watch_ci']);
+    // The runtime offering no kind at all: nothing can be run, and the form is not drawn.
+    routes = answers({ 'GET /tasks/form': { status: 200, body: form({ templates: [] }) } });
     run('taskNew()');
     await settle();
     expect(empty()).toEqual(['Nothing to Run Yet', 'No asset that is on can run a task yet.']);
     ownWords(['Nothing to Run Yet'], ['No asset that is on can run a task yet.']);
     expect(body().buttons()).toEqual(['Open Settings']);
     expect(foot().hidden).toBe(true);
-    routes = answers({ 'GET /tasks/form': { status: 200, body: form({ templates: [...others, form().templates[0]!] }) } });
-    run('taskNew()');
-    await settle();
-    expect(body().field('What to Do').children.map((o) => o.textContent)).toEqual(['Watch a CI Run']);
     routes = answers({ 'GET /tasks/form': { status: 501, body: { error: TASKS_SAY.older } } });
     run('taskNew()');
     await settle();
     expect(title()).toBe('New Task');
     expect(empty()).toEqual(['Couldn’t Load Tasks', 'This needs a newer runtime.']);
     expect(ids.taskback!.hidden).toBe(false);
+  });
+});
+
+describe('New Task: the kinds the local worker runs', () => {
+  const ITEM2 = 'en1a2b3c4d5e6f7g8h9i0j1k';
+  const TITLES: Record<string, string> = { summarize_items: 'Summarize Items', sort_items: 'Sort Items', draft_note: 'Draft a Note' };
+  /** One kind of task as the runtime offers it: the Local Worker runs it, and these are the items it can be about. */
+  const kind = (template: string, over: Record<string, unknown> = {}) => ({
+    template, title: TITLES[template]!, runsOn: 'Local Worker', items: [{ entityId: ITEM, label: 'wpf002/flint #57' }, { entityId: ITEM2, label: 'wpf002/nexus #12' }], more: false, ...over,
+  });
+  const offering = async (...templates: Array<Record<string, unknown>>) => {
+    const body = { templates, goals: [{ id: GOAL, title: 'Finish Building Flint' }] };
+    expect(TaskForm.safeParse(body).success).toBe(true);
+    routes = answers({ 'GET /tasks/form': { status: 200, body } });
+    await open();
+    run('taskNew()');
+    await settle();
+  };
+  /** The items picked, by the label on each row. */
+  const picked = () => body().with('lbl').map((l) => l.children[0]!.textContent).filter((t) => t.indexOf('wpf002/') === 0);
+  const add = (value: string) => {
+    const f = body().field('Items');
+    f.value = value;
+    f.onchange!();
+  };
+  const type = (label: string, value: string) => {
+    const f = body().field(label);
+    f.value = value;
+    f.oninput!();
+  };
+  const titles = () => body().all().find((e) => e.id === 'tasktitles');
+
+  it('a summary is about several items: each is added and taken away one at a time, and the titles switch is off until Will turns it on', async () => {
+    await offering(kind('summarize_items'));
+    expect(body().with('fl').map((w) => w.children[0]!.textContent)).toEqual(['What to Do', 'Items', 'Goal', 'Due']);
+    expect(body().field('Items').children.map((o) => [o.value, o.textContent])).toEqual([['', 'Add an Item'], [ITEM, 'wpf002/flint #57'], [ITEM2, 'wpf002/nexus #12']]);
+    // No items picked: nothing to show the model a title of, so no switch yet.
+    expect(titles()).toBeUndefined();
+    add(ITEM);
+    expect(picked()).toEqual(['wpf002/flint #57']);
+    // The one that is picked is no longer on offer.
+    expect(body().field('Items').children.map((o) => o.value)).toEqual(['', ITEM2]);
+    add(ITEM2);
+    expect(picked()).toEqual(['wpf002/flint #57', 'wpf002/nexus #12']);
+    expect(body().shown()).toContain('Every item Flint offers is already picked.');
+    // Taking one away leaves the other, and puts it back on offer.
+    await click(body(), '');
+    expect(picked()).toEqual(['wpf002/nexus #12']);
+    expect(body().field('Items').children.map((o) => o.value)).toEqual(['', ITEM]);
+    add(ITEM);
+    // The switch: off, and on only when he says so.
+    expect(titles()!.getAttribute('aria-checked')).toBe('false');
+    titles()!.onclick!();
+    expect(titles()!.getAttribute('aria-checked')).toBe('true');
+    calls = [];
+    await click(foot(), 'Create Task');
+    const sent = posts()[0]!;
+    expect(sent.url).toBe('/tasks');
+    expect(NewTaskBody.safeParse(sent.body).success).toBe(true);
+    expect(sent.body).toEqual({ draftKey: expect.stringMatching(/^[0-9a-f]{24}$/), template: 'summarize_items', params: { items: [ITEM2, ITEM], titles: true }, goalId: null, dueAt: null });
+    expect(TaskSpec.safeParse({ template: 'summarize_items', params: (sent.body as { params: unknown }).params }).success).toBe(true);
+  });
+
+  it('a summary with nothing picked is not sent, and says what it needs', async () => {
+    await offering(kind('summarize_items'));
+    calls = [];
+    await click(foot(), 'Create Task');
+    expect(said()).toEqual(['Choose at least one item to summarize.', 'res bad']);
+    expect(posts()).toEqual([]);
+    // Nothing to choose from at all: the sentence says so, and there is nothing to create.
+    await offering(kind('summarize_items', { items: [] }));
+    expect(body().shown()).toContain('Flint tracks no items to summarize yet.');
+    expect(foot().button('Create Task').disabled).toBe(true);
+  });
+
+  it('a sort takes two to six labels of Will’s own: blank and repeated are refused, and the labels ride on the card', async () => {
+    await offering(kind('sort_items'));
+    expect(body().with('fl').map((w) => w.children[0]!.textContent)).toEqual(['What to Do', 'Items', 'Label', 'Label', 'Goal', 'Due']);
+    add(ITEM);
+    calls = [];
+    // Two empty labels: said, not sent.
+    await click(foot(), 'Create Task');
+    expect(said()).toEqual(['Fill in every label, or take it out.', 'res bad']);
+    expect(posts()).toEqual([]);
+    type('Label', 'Mine');
+    // The second field holds the second label (fields are read in order).
+    const second = body().with('fl').filter((w) => w.children[0]!.textContent === 'Label')[1]!.children[1]!;
+    second.value = 'Mine';
+    second.oninput!();
+    await click(foot(), 'Create Task');
+    expect(said()).toEqual(['Give each label once.', 'res bad']);
+    second.value = 'Theirs';
+    second.oninput!();
+    // A third, then taken away again: two is enough.
+    await click(body(), 'Add Label');
+    expect(body().with('fl').filter((w) => w.children[0]!.textContent === 'Label')).toHaveLength(3);
+    await click(foot(), 'Create Task');
+    expect(said()).toEqual(['Fill in every label, or take it out.', 'res bad']);
+    const xs = body().visible().filter((e) => e.tagName === 'button' && e.getAttribute('aria-label') === 'Remove Label');
+    xs[xs.length - 1]!.onclick!();
+    await settle();
+    calls = [];
+    await click(foot(), 'Create Task');
+    const sent = posts()[0]!;
+    expect(sent.body).toEqual({ draftKey: expect.stringMatching(/^[0-9a-f]{24}$/), template: 'sort_items', params: { items: [ITEM], labels: ['Mine', 'Theirs'], titles: false }, goalId: null, dueAt: null });
+    expect(TaskSpec.safeParse({ template: 'sort_items', params: (sent.body as { params: unknown }).params }).success).toBe(true);
+  });
+
+  it('a note is Will’s own words, and its items are up to him: it can be made with none, and none means no titles', async () => {
+    await offering(kind('draft_note', { items: [] }));
+    expect(body().with('fl').map((w) => w.children[0]!.textContent)).toEqual(['What to Do', 'About', 'Goal', 'Due']);
+    // No item to pick, and none is needed: Create Task is live.
+    expect(foot().button('Create Task').disabled).toBe(false);
+    calls = [];
+    await click(foot(), 'Create Task');
+    expect(said()).toEqual(['Say what the note is about.', 'res bad']);
+    expect(posts()).toEqual([]);
+    type('About', '  What the week looked like  ');
+    await click(foot(), 'Create Task');
+    let sent = posts()[0]!;
+    // His words as typed, with the space around them taken off; no items, and so no titles.
+    expect(sent.body).toEqual({ draftKey: expect.stringMatching(/^[0-9a-f]{24}$/), template: 'draft_note', params: { items: [], titles: false, about: 'What the week looked like' }, goalId: null, dueAt: null });
+    expect(TaskSpec.safeParse({ template: 'draft_note', params: (sent.body as { params: unknown }).params }).success).toBe(true);
+    // With items offered, they can ride along, and then the switch is there.
+    await offering(kind('draft_note'));
+    type('About', 'What to do about these');
+    add(ITEM);
+    expect(titles()!.getAttribute('aria-checked')).toBe('false');
+    calls = [];
+    await click(foot(), 'Create Task');
+    sent = posts()[0]!;
+    expect((sent.body as { params: Record<string, unknown> }).params).toEqual({ items: [ITEM], titles: false, about: 'What to do about these' });
+  });
+
+  it('every word the form adds is its own: Title Case labels, whole sentences, and no id on screen', async () => {
+    await offering(kind('summarize_items'), kind('sort_items'), kind('draft_note'));
+    add(ITEM);
+    plainScreen();
+    ownWords(['New Task', 'What to Do', 'Items', 'Add an Item', 'About', 'Show Titles', 'Create Task'], ['Pick the items to summarize.', 'Flint shows the model each item’s title, which is text from outside Flint.']);
+    const f = body().field('What to Do');
+    f.value = 'sort_items';
+    f.onchange!();
+    plainScreen();
+    ownWords(['Label', 'Add Label'], ['Pick the items to sort, and the labels to sort them under.']);
+    // What he picked is kept across a change of kind, while the new kind is about those items too.
+    expect(picked()).toEqual(['wpf002/flint #57']);
+    const g = body().field('What to Do');
+    g.value = 'draft_note';
+    g.onchange!();
+    plainScreen();
+    ownWords(['About'], ['Say what the note is about. Items are up to you.']);
+  });
+
+  it('an item the new kind of task is not about is no longer picked, and no longer sent', async () => {
+    await offering(kind('summarize_items'), kind('sort_items', { items: [{ entityId: ITEM2, label: 'wpf002/nexus #12' }] }));
+    add(ITEM);
+    expect(picked()).toEqual(['wpf002/flint #57']);
+    const f = body().field('What to Do');
+    f.value = 'sort_items';
+    f.onchange!();
+    // This kind is not offered that item: it is dropped, so the form asks for one it is about.
+    expect(picked()).toEqual([]);
+    expect(body().field('Items').children.map((o) => o.value)).toEqual(['', ITEM2]);
+    calls = [];
+    await click(foot(), 'Create Task');
+    expect(said()).toEqual(['Choose at least one item to sort.', 'res bad']);
+    expect(posts()).toEqual([]);
   });
 });
 
