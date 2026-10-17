@@ -55,6 +55,11 @@ export interface RuntimeProposal {
   reason: string | null;
   createdAt: string;
   expiresAt: string;
+  /** P5: whether it needs a review (set when filed), its review once attached, and whether it must have one before it is approved. */
+  reviewRequired?: boolean;
+  reviewId?: string | null;
+  review?: unknown;
+  reviewFirst?: boolean;
 }
 
 export type Proposed = { id: string } | { spooled: true; spoolId: string } | { refused: string };

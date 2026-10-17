@@ -2018,10 +2018,36 @@ card that turns Local Reviews on.
   tick sends every waiting card that needs a review every two minutes until it
   has one.
 - **In shadow.** Reviews are written and nothing waits for them. Requiring them
-  stays your switch, and it has no button yet: it comes with the part that shows
-  a card's review in Approvals and makes Approve name the review you saw, which
-  the database insists on once reviews are required.
+  stays your switch, and it has no button yet (it comes next).
 - **Health** says when Local Reviews is on with no local model set up.
+
+### Reviews in Approvals (part 6)
+
+A card's review is on the card, in Approvals and on the Tasks panel's card alike.
+
+- **What the card shows.** Under its facts: the verdict (Go Ahead, Go Ahead with
+  Changes, Hold Off), how sure the judge was, its reasons, and what Flint's own
+  code found in the card, each from a fixed list. When the judge's two passes
+  disagreed, the card says so. The judge's sentence and the two cases are the
+  model's words: they wait behind Show Details, marked Outside Text, shown as
+  text only. Once they are cleared, the card says that instead.
+- **A card with a review asks on its own.** Approve All leaves it, so a review
+  is always read on its own card before it is signed.
+- **Approve names the review you saw.** The console sends the id of the review
+  its card showed (none, when it showed none). The server signs that review's id
+  and its verdict into the approval, and the console signs nothing unless the
+  request it gets back names the same review. A review that came in after you
+  opened the card is never signed for you: Approve says so, and you read it
+  first.
+- **When reviews are required** (the switch that comes next), a card that needs
+  a review can't be approved until its review is in: the card says so and its
+  Approve button is off. You can still reject it. The runtime checks that the
+  signature names the card's review and its verdict, and so does the database.
+
+`GET /v1/proposals` and `GET /v1/proposals/:id` carry each card's review (its
+findings, verdict, confidence, reasons, whether the passes agreed, and its words
+unless cleared, never the models it was made with or its cost) and
+`reviewFirst`: whether the card must have its review before it is approved.
 
 The console's Tasks panel and Settings > Assets use these routes, through the
 server's checked proxy. They sit behind the same token scope as approvals, so

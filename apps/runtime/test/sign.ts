@@ -12,10 +12,11 @@ export async function enrollTestKey(urls: TestUrls) {
     ]),
   );
   return {
-    async approve(o: { subjectType?: ApprovalPayload['subjectType']; subjectId: string; action: string; argsDigest: string; decision?: 'approve' | 'reject' }) {
+    /** `fields`: the key fields the card showed, signed with it (P5: the review Will was shown, and its verdict). */
+    async approve(o: { subjectType?: ApprovalPayload['subjectType']; subjectId: string; action: string; argsDigest: string; decision?: 'approve' | 'reject'; fields?: ApprovalPayload['fields'] }) {
       const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
       const payload: ApprovalPayload = {
-        v: 1, subjectType: o.subjectType ?? 'proposal', subjectId: o.subjectId, decision: o.decision ?? 'approve', action: o.action, argsDigest: o.argsDigest, expiresAt,
+        v: 1, subjectType: o.subjectType ?? 'proposal', subjectId: o.subjectId, decision: o.decision ?? 'approve', action: o.action, argsDigest: o.argsDigest, ...(o.fields ? { fields: o.fields } : {}), expiresAt,
         nonce: createHash('sha256').update(String(Math.random())).digest('hex').slice(0, 32),
       };
       const challenge = challengeOf(payload);

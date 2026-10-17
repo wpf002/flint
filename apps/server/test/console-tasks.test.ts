@@ -31,7 +31,7 @@ import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
 import { webcrypto } from 'node:crypto';
 import {
-  ACTION_WORDS, AssetEnableArgs, AssetsPage, CHECK_NAMES, DraftKey, EmptyBody, NewTaskBody, TASK_SAYS, TASK_STATUS_SAYS, TASK_TEMPLATE_IDS, TaskAcceptArgs, TaskAgainBody, TaskAnswer, TaskCancelArgs, TaskDispatchArgs,
+  ACTION_WORDS, AssetEnableArgs, AssetsPage, CHECK_NAMES, DraftKey, EmptyBody, NewTaskBody, REVIEW_SAYS, TASK_SAYS, TASK_STATUS_SAYS, TASK_TEMPLATE_IDS, TaskAcceptArgs, TaskAgainBody, TaskAnswer, TaskCancelArgs, TaskDispatchArgs,
   TaskForm, TaskOverrideArgs, TasksPage, digestOf, noteProblems, ruleChecks, TaskSpec,
 } from '@flint/policy';
 import { TASKS_SAY } from '../src/tasks-routes';
@@ -1084,6 +1084,46 @@ describe('a card, shown and signed here', () => {
     expect(await shown(CARDS.accept)).toBeUndefined();
     expect(run(`apprMark(${JSON.stringify(CARDS.accept)})`)).toBeNull();
     expect(html).toMatch(/\.tmark\{/);
+  });
+
+  it('a card with a review shows it as the Approvals panel does, and Approve names it; one that must have its review first can’t be approved yet (P5)', async () => {
+    const review = {
+      id: 'cmreview0000000000000001', verdict: 'proceed_with_changes', confidence: 0.55, agreed: false, findings: ['outside_text'], reasonCodes: ['outside_text_steers'],
+      attack: 'The run’s log could be steering it.', defense: 'It only accepts a result.', verdictReason: 'Read the log first.', shadow: true, textPurged: false, createdAt: '2026-10-17T15:00:00.000Z',
+    };
+    const show = async (p: Record<string, unknown>) => {
+      routes = answers({ 'GET /proposals': { status: 200, body: { proposals: [p], signed: true } } });
+      await openTask(T_WAIT);
+      await click(foot(), 'Review Card');
+    };
+    await show({ ...CARDS.accept, tainted: true, reviewRequired: true, reviewFirst: false, review });
+    const face = body().shown();
+    expect(face).toContain('Flint’s Review');
+    expect(face).toContain('Verdict Go Ahead with Changes');
+    expect(face).toContain('How Sure 55%');
+    expect(face).toContain('Its two passes didn’t agree, so it kept the more careful verdict.');
+    expect(face).not.toContain(review.attack);
+    // Under its facts, before Show Details; the model's words wait behind it, marked.
+    const order = body().children.map((c) => c.id || c.className);
+    expect(order.indexOf('review treview')).toBe(order.indexOf('taskcardfacts') + 1);
+    const details = body().all().find((e) => e.id === 'taskcarddetails')!;
+    expect(details.hidden).toBe(true);
+    body().button('Show Details').onclick!();
+    expect(details.hidden).toBe(false);
+    expect(details.shown()).toContain(`The Case Against ${review.attack}`);
+    expect(details.shown()).toContain('Outside Text');
+    foot().button('Approve with Touch ID').onclick!();
+    await settle();
+    expect(signed[0]).toEqual(['praccept01', { fresh: true, reason: 'accept this result', args: CARDS.accept.args, reviewId: review.id }]);
+    // Waiting for its review: said, and Approve is off. Not Now still goes back.
+    signed = [];
+    await show({ ...CARDS.accept, tainted: true, reviewRequired: true, reviewFirst: true, review: null });
+    expect(body().shown()).toContain(REVIEW_SAYS.waiting);
+    const ok = foot().button('Approve with Touch ID');
+    expect(ok.disabled).toBe(true);
+    ok.onclick!();
+    await settle();
+    expect(signed).toEqual([]);
   });
 
   it('a card shown here waits a short while for its task’s name and is drawn once: a name that lands late, or after he has gone elsewhere, never draws it', async () => {

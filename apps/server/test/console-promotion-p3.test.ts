@@ -155,8 +155,9 @@ describe('P3’s promotion cards', () => {
     const chatCard = /\nfunction renderProposals\([\s\S]*?\n\/\* -{10} Will.s approval key/.exec(html)![0];
     expect(chatCard).toContain("var pargs=el('div','pargs');if(typeof apprDetailsInto==='function')apprDetailsInto(pargs,a);card.appendChild(pargs);");
     expect(chatCard).not.toMatch(/JSON\.stringify/);
-    // What is signed is untouched: both hand the stored args to the signed path, which checks their digest.
-    expect(apprJs).toContain('approveAction(p.id,card,{reason:apprReason(p),fresh:apprAlone(p),args:p.args})');
+    // What is signed is untouched: both hand the stored args to the signed path, which checks their digest. (The panel
+    // names the card's review with them, when it has one: P5.)
+    expect(apprJs).toContain('approveAction(p.id,card,apprSignWith(p,{reason:apprReason(p),fresh:apprAlone(p),args:p.args}))');
     expect(chatCard).toContain("approveAction(a.id,card,{reason:'approve: '+title,fresh:typeof apprAlone==='function'?apprAlone(a):true,args:a.args});");
     // (test/console-card-details.test.ts opens every kind of card in a DOM and reads what it shows.)
   });

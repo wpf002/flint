@@ -14,7 +14,9 @@ import {
   REVIEW_REASONS,
   REVIEW_REASONS_MAX,
   REVIEW_REASON_SAYS,
+  REVIEW_SAYS,
   REVIEW_VERDICTS,
+  ReviewShown,
   REVIEW_VERDICT_WORDS,
   REVIEWS_WRITER,
   CardReviewJob,
@@ -107,6 +109,36 @@ describe('what the panel says', () => {
     for (const w of Object.values(REVIEW_VERDICT_WORDS)) {
       expect(titleCase(w), w).toBe(w);
       expect(noteProblems(w, ''), w).toEqual([]);
+    }
+  });
+});
+
+describe('a review on its card', () => {
+  const shown = {
+    id: 'cmreview0000000000000001', verdict: 'block', confidence: 0.7, agreed: false, findings: ['cannot_undo'], reasonCodes: ['cannot_undo'],
+    attack: 'It cannot be undone.', defense: 'It names one item.', verdictReason: 'Hold off.', shadow: true, textPurged: false, createdAt: '2026-10-17T15:00:00.000Z',
+  };
+
+  it('is the code’s findings, the judge’s closed verdict and reasons, and its words: what else the runtime sends is dropped', () => {
+    expect(ReviewShown.parse(shown)).toEqual(shown);
+    expect(ReviewShown.parse({ ...shown, models: { judge: 'm' }, costUsd: '0', subjectDigest: 'd'.repeat(64) })).toEqual(shown);
+    expect(ReviewShown.parse({ ...shown, attack: null, defense: null, verdictReason: null, textPurged: true })).toMatchObject({ attack: null, textPurged: true });
+  });
+
+  it('a verdict, reason or finding off its list, a confidence out of range, an id it could not be, or words past their limit: not shown', () => {
+    for (const bad of [
+      { ...shown, verdict: 'approve' }, { ...shown, reasonCodes: ['made_up'] }, { ...shown, findings: ['made_up'] }, { ...shown, confidence: 2 },
+      { ...shown, id: 'has space' }, { ...shown, id: 'x'.repeat(41) }, { ...shown, attack: 'x'.repeat(ATTACK_CHARS + 1) }, { ...shown, verdictReason: 'x'.repeat(VERDICT_REASON_CHARS + 1) },
+      { ...shown, agreed: 'yes' },
+    ]) {
+      expect(ReviewShown.safeParse(bad).success, JSON.stringify(bad).slice(0, 80)).toBe(false);
+    }
+  });
+
+  it('what Approve says when a review stands in its way is whole sentences', () => {
+    for (const t of Object.values(REVIEW_SAYS)) {
+      expect(noteProblems('Review', t), t).toEqual([]);
+      expect(t, t).toMatch(/^[A-Z].*\.$/);
     }
   });
 });
