@@ -132,6 +132,42 @@ export const REVIEW_VERDICT_WORDS: Readonly<Record<ReviewVerdict, string>> = {
   block: 'Hold Off',
 };
 
+// ---- Approving a card that has one ------------------------------------------------------
+
+/**
+ * What Approve says when a card's review stands in its way. Once reviews are
+ * required, a card that needs one is approved only by a signature that names its
+ * review and that review's verdict; and whenever a card has a review, the one
+ * Will signs is the one his card showed.
+ */
+export const REVIEW_SAYS = {
+  waiting: 'It needs its review before you can approve it, and the review isn’t in yet.',
+  unseen: 'A review of it came in after you opened it. Read the review, then approve it again.',
+} as const;
+
+/**
+ * A card's review as the card shows it: the code's findings, the judge's closed verdict and reasons, and its words.
+ * Strict: the server passes the console nothing else of a review (never its models, its cost or the digest it was of).
+ */
+export const ReviewShown = z
+  .object({
+    id: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/),
+    verdict: z.enum(REVIEW_VERDICTS),
+    confidence: z.number().finite().min(0).max(1),
+    agreed: z.boolean(),
+    findings: z.array(z.enum(REVIEW_FINDINGS)).max(REVIEW_FINDINGS.length),
+    reasonCodes: z.array(z.enum(REVIEW_REASONS)).max(REVIEW_REASONS_MAX),
+    /** The model's words: outside text, always shown marked. Null once cleared (textPurged). */
+    attack: z.string().max(ATTACK_CHARS).nullable(),
+    defense: z.string().max(DEFENSE_CHARS).nullable(),
+    verdictReason: z.string().max(VERDICT_REASON_CHARS).nullable(),
+    shadow: z.boolean(),
+    textPurged: z.boolean(),
+    createdAt: z.string().max(40),
+  })
+  .strip();
+export type ReviewShown = z.infer<typeof ReviewShown>;
+
 // ---- The job ----------------------------------------------------------------------------
 
 /** A card's id as a review names it (the database's Review takes 40 characters at most). */

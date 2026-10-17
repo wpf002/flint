@@ -7,7 +7,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Tool } from '@flint/core';
-import { ACTION_DONE, POLICY_CHANGE_SHAPE, digestOf, isTaskDispatch, policyChangeKind } from '@flint/policy';
+import { ACTION_DONE, POLICY_CHANGE_SHAPE, REVIEW_SAYS, ReviewShown, digestOf, isTaskDispatch, policyChangeKind } from '@flint/policy';
 import { readJsonLimited } from './attachments';
 import { keyOf, outcomeOf, type ActionQueue, type PendingAction } from './actions';
 import type { AuditSink } from './audit-sink';
@@ -25,6 +25,32 @@ export const DOES_NOT_MATCH = 'It can’t be signed: what it would do doesn’t 
  */
 function shownMatches(body: Record<string, unknown>, digest: string): boolean {
   return body.argsDigest === undefined || body.argsDigest === digest;
+}
+
+/**
+ * A runtime card's review as the console shows it (P5), and whether the card needs one and must have it before it is
+ * approved. A review the runtime sends out of shape is not shown: only what ReviewShown names reaches the console.
+ */
+function reviewFields(p: Pick<RuntimeProposal, 'reviewRequired' | 'review' | 'reviewFirst'>): { reviewRequired: boolean; reviewFirst: boolean; review?: ReviewShown } {
+  const r = p.review ? ReviewShown.safeParse(p.review) : undefined;
+  return { reviewRequired: p.reviewRequired === true, reviewFirst: p.reviewFirst === true, ...(r?.success ? { review: r.data } : {}) };
+}
+
+/**
+ * What an approval of a runtime card signs about its review, or why it can't be begun. Will signs the review his card
+ * showed: the console sends that review's id (null for none, and saying nothing is saying none), and it must be the
+ * card's own. A card that has one is signed with its id and its verdict, which the database checks once reviews are
+ * required; a card that must have one first and has none is not signed at all.
+ */
+function reviewSigned(body: Record<string, unknown>, p: Pick<RuntimeProposal, 'reviewId' | 'review' | 'reviewFirst'>): { fields: { reviewId?: string; verdict?: string } } | { error: string } {
+  const shown = typeof body.reviewId === 'string' ? body.reviewId : null;
+  const own = typeof p.reviewId === 'string' ? p.reviewId : null;
+  if (shown !== null && shown !== own) return { error: DOES_NOT_MATCH };
+  if (own === null) return p.reviewFirst === true ? { error: REVIEW_SAYS.waiting } : { fields: {} };
+  const r = ReviewShown.safeParse(p.review);
+  if (!r.success || r.data.id !== own) return { error: DOES_NOT_MATCH };
+  if (shown === null) return { error: REVIEW_SAYS.unseen };
+  return { fields: { reviewId: own, verdict: r.data.verdict } };
 }
 
 /** Do a runtime card's args hash to the digest it asks Will to sign? (Its args are what the card shows him.) */
@@ -153,6 +179,9 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
           ...(p.reason ? { reason: p.reason } : {}), expiresAt: p.expiresAt,
           // P5: what a task's dispatch card says the task will cost (zero included), for the card's Cost fact.
           ...costField(p),
+          // P5: its review (the code's findings, the judge's verdict and reasons, its words as outside text), and whether
+          // it needs one and must have it before it is approved.
+          ...reviewFields(p),
         });
         return reply(res, 200, { proposals: [...pending.map(card), ...approved.map(card)], unsynced: ctx.proposals.unsynced(), signed: true });
       } catch {
@@ -240,7 +269,10 @@ export async function approvalRoutes(req: IncomingMessage, res: ServerResponse, 
         // read as a switch-off and add a rule, so no signature is ever started for it, however it came to be filed.
         // (The runtime files no such card and the database refuses one; this is the server's own half.)
         if (decision === 'approve' && p.action === 'policy.change' && !policyChangeKind(p.args)) return reply(res, 409, { error: POLICY_CHANGE_SHAPE });
-        return reply(res, 200, ap.begin({ subjectType: 'proposal', subjectId: id, decision, action: p.action, argsDigest: p.argsDigest, fields: { tainted: p.tainted } }));
+        // P5: an approval names the review its card showed, and that review's verdict (rejecting carries nothing out).
+        const review = decision === 'approve' ? reviewSigned(body, p) : { fields: {} };
+        if ('error' in review) return reply(res, 409, { error: review.error });
+        return reply(res, 200, ap.begin({ subjectType: 'proposal', subjectId: id, decision, action: p.action, argsDigest: p.argsDigest, fields: { tainted: p.tainted, ...review.fields } }));
       }
       if (url === '/approvals/finish' && ctx.proposals) {
         const { approvalId, payload } = await ap.finish(body);

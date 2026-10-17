@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
 import { laterDay, pinLocale, shownDay } from './console-dates';
-import { ACTION_WORDS, FORECAST_REASONS, WEEKLY_JOBS, noteProblems } from '@flint/policy';
+import { ACTION_WORDS, FORECAST_REASONS, REVIEW_FINDING_SAYS, REVIEW_REASON_SAYS, REVIEW_SAYS, REVIEW_VERDICT_WORDS, WEEKLY_JOBS, noteProblems } from '@flint/policy';
 
 /** A rule's last day, and how the console shows it: a date with its year, whenever this runs. */
 const RULE_UNTIL = laterDay(3, 29);
@@ -1925,6 +1925,107 @@ describe('the console Approvals panel', () => {
     it('a goal’s task step on a plan card says Flint would run it as a task', () => {
       const says = JSON.parse(run(`JSON.stringify(apprDetails(${JSON.stringify(card({ fullName: 'plan.change', kind: 'plan', mcp: false, args: { goalId: 'go1', goalTitle: 'Finish Building Flint', ops: [{ op: 'add', key: 's4', step: { ordinal: 400, title: 'Watch the release run', kind: 'asset_task', tier: 'approval', dueAt: null, dependsOn: [] } }] } }))}).says)`) as string) as string[];
       expect(says).toContain('Add the step “Watch the release run”. Flint would run this step as a task.');
+    });
+  });
+
+  describe('a card’s review (P5)', () => {
+    const REVIEW = {
+      id: 'cmreview0000000000000001', verdict: 'block', confidence: 0.7, agreed: true, findings: ['cannot_undo', 'forgets'], reasonCodes: ['cannot_undo', 'args_unclear'],
+      attack: '<img src=x onerror=alert(1)>It cannot be undone.', defense: 'It names one item.', verdictReason: 'Hold off until it says why.', shadow: true, textPurged: false, createdAt: '2026-10-17T15:00:00.000Z',
+    };
+    const forget = (over: Record<string, unknown> = {}) =>
+      card({ id: 'prf', fullName: 'world.forget', kind: 'forget', destructive: true, args: { entityId: 'en1a2b3c', why: 'It was a test.' }, origin: 'console', reviewRequired: true, reviewFirst: false, ...over });
+
+    it('says it in @flint/policy’s own words: each verdict, reason and finding, and why a card waits', () => {
+      expect(ctx.APPR_VERDICTS).toEqual(REVIEW_VERDICT_WORDS);
+      expect(ctx.APPR_REVIEW_REASONS).toEqual(REVIEW_REASON_SAYS);
+      expect(ctx.APPR_FINDINGS).toEqual(REVIEW_FINDING_SAYS);
+      expect((ctx.APPR_REVIEW_SAYS as Record<string, string>).waiting).toBe(REVIEW_SAYS.waiting);
+      for (const t of Object.values(ctx.APPR_REVIEW_SAYS as Record<string, string>)) expect(noteProblems('Review', t), t).toEqual([]);
+    });
+
+    it('the open card shows its review under its facts, and the model’s words behind Show Details, marked and inert; Approve names that review, and it asks on its own', async () => {
+      answer = () => ({ status: 200, body: { signed: true, proposals: [forget({ review: REVIEW }), plain({ id: 'pp' })] } });
+      await open();
+      const row = ids.apprlist!.children[0]!.children[0]!;
+      const face = row.shown();
+      expect(face).toContain('Flint’s Review');
+      expect(face).toContain('VerdictHold Off');
+      expect(face).toContain('How Sure70%');
+      expect(face).toContain('WhyIt can’t be undone if it is wrong. What it would do isn’t clear from the card.');
+      expect(face).toContain('Reviewed BecauseIt can’t be undone. It has Flint forget something.');
+      // The two passes agreed: nothing says otherwise.
+      expect(face).not.toContain('didn’t agree');
+      // The model's words are not on the card's face.
+      for (const w of [REVIEW.attack, REVIEW.defense, REVIEW.verdictReason]) expect(face).not.toContain(w);
+      row.button('Show Details').onclick!();
+      const details = row.shown();
+      expect(details).toContain('The Review’s Words');
+      expect(details).toContain('Outside Text');
+      expect(details).toContain(`Its Reason${REVIEW.verdictReason}`);
+      expect(details).toContain(`The Case Against${REVIEW.attack}`);
+      expect(details).toContain(`The Case For${REVIEW.defense}`);
+      // Markup in the model's words is text.
+      const words = row.all().find((e) => e.tagName === 'dd' && e.textContent === REVIEW.attack)!;
+      expect(words.children.every((c) => c.tagName === '#text')).toBe(true);
+      // It asks on its own: Approve All leaves it for its own card. So would a card that would otherwise ride Approve All.
+      const alone = ctx.apprAlone as (p: unknown) => boolean;
+      expect(alone(plain())).toBe(false);
+      expect(alone(plain({ review: REVIEW }))).toBe(true);
+      expect(alone(plain({ reviewFirst: true }))).toBe(true);
+      expect(noteSays()).toBe('You have 2 approvals waiting. Approve All skips 1.');
+      row.button('Approve with Password').onclick!();
+      expect(decided[0]).toEqual(['approve', 'prf', { reason: expect.any(String), fresh: true, args: { entityId: 'en1a2b3c', why: 'It was a test.' }, reviewId: REVIEW.id }]);
+      await settle();
+      run('approveAll()');
+      await settle();
+      expect(decided.slice(1).map((d) => d[1])).toEqual(['pp']);
+      expect(decided[1]![2]).not.toHaveProperty('reviewId');
+    });
+
+    it('two passes that disagreed say so; words that were cleared say that; a reason or a finding it does not know is left out', async () => {
+      answer = () => ({ status: 200, body: { signed: true, proposals: [forget({ review: { ...REVIEW, agreed: false, textPurged: true, attack: null, defense: null, verdictReason: null, reasonCodes: ['low_risk', 'made_up'], findings: ['forgets', 'made_up'] } })] } });
+      await open();
+      const row = ids.apprlist!.children[0]!.children[0]!;
+      expect(row.shown()).toContain('Its two passes didn’t agree, so it kept the more careful verdict.');
+      expect(row.shown()).toContain('WhyLittle can go wrong.Reviewed Because');
+      expect(row.shown()).toContain('Reviewed BecauseIt has Flint forget something.');
+      expect(row.shown()).not.toContain('made_up');
+      row.button('Show Details').onclick!();
+      expect(row.shown()).toContain('The Review’s WordsIts words were cleared.');
+      expect(row.shown()).not.toContain('Its Reason');
+    });
+
+    it('a card that must have its review first and has none can’t be approved yet, and says why; it can be rejected, and Approve All leaves it', async () => {
+      answer = () => ({ status: 200, body: { signed: true, proposals: [forget({ reviewFirst: true, review: null }), plain({ id: 'pp' })] } });
+      await open();
+      const row = ids.apprlist!.children[0]!.children[0]!;
+      expect(row.shown()).toContain(REVIEW_SAYS.waiting);
+      expect(row.shown()).not.toContain('Flint’s Review');
+      const ok = row.button('Approve with Password');
+      expect(ok.disabled).toBe(true);
+      ok.onclick!();
+      expect(decided).toEqual([]);
+      run('approveAll()');
+      await settle();
+      expect(decided.map((d) => d[1])).toEqual(['pp']);
+      row.button('Reject').onclick!();
+      expect(decided.at(-1)).toEqual(['reject', 'prf']);
+    });
+
+    it('a card with no review, or one this page can’t read, shows none and names none; one that needs a review but isn’t held for it is approved as before', async () => {
+      for (const review of [undefined, null, { ...REVIEW, verdict: 'approve' }, { ...REVIEW, id: 'has space' }, 'cmreview']) {
+        decided = [];
+        answer = () => ({ status: 200, body: { signed: true, proposals: [forget({ review })] } });
+        await open();
+        const row = ids.apprlist!.children[0]!.children[0]!;
+        expect(row.shown(), JSON.stringify(review)).not.toContain('Flint’s Review');
+        expect(row.shown()).not.toContain(REVIEW_SAYS.waiting);
+        expect(row.button('Approve with Password').disabled).toBe(false);
+        row.button('Approve with Password').onclick!();
+        expect(decided[0]![2], JSON.stringify(review)).not.toHaveProperty('reviewId');
+        await settle();
+      }
     });
   });
 

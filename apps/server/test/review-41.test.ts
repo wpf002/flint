@@ -13,7 +13,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, generateKeyPairSync, sign as signRaw } from 'node:crypto';
-import { ACTION_DONE, POLICY_CHANGE_SHAPE, digestOf, type TierDecision } from '@flint/policy';
+import { ACTION_DONE, POLICY_CHANGE_SHAPE, REVIEW_SAYS, digestOf, type TierDecision } from '@flint/policy';
 import type { Tool, Turn } from '@flint/core';
 import type { GateRequest } from '@flint/mcp';
 import { ActionQueue, keyOf, outcomeOf } from '../src/actions';
@@ -659,6 +659,66 @@ describe('approval routes', () => {
     const finished = await post('/approvals/finish', { challengeId: begun.body.challengeId, credentialId: mem.creds[0]!.credentialId, signature: signRaw('sha256', Buffer.from(String(begun.body.challenge), 'base64url'), k.privateKey).toString('base64url') });
     expect(finished).toMatchObject({ status: 409, body: { error: DOES_NOT_MATCH } });
     expect(ran).toEqual([]);
+    server?.close();
+  });
+
+  it('an approval names the review its card showed, and that review’s verdict; a card that must have one first and has none is not signed (P5)', async () => {
+    const dir = tmp();
+    const code = join(dir, 'code');
+    writeFileSync(code, 'abcd-efgh-ijkl-mnop\n');
+    const mem = memoryStore();
+    const args = { entityId: 'en1a2b3c' };
+    const review = {
+      id: 'cmreview0000000000000001', verdict: 'block', confidence: 0.7, agreed: true, findings: ['cannot_undo'], reasonCodes: ['cannot_undo'],
+      attack: 'It cannot be undone.', defense: 'It names one item.', verdictReason: 'Hold off.', shadow: true, textPurged: false, createdAt: '2026-10-17T15:00:00.000Z',
+    };
+    const proposal: Record<string, unknown> = {
+      id: 'prrev', origin: 'console', action: 'world.forget', args, argsDigest: digestOf(args), tainted: false, status: 'pending', reviewRequired: true, reviewId: review.id, review, reviewFirst: false,
+    };
+    const rt = fakeRuntime(proposal);
+    const proposals = new RuntimeProposals({ runtime: () => RT, spoolDir: tmp(), fetchImpl: rt.fetchImpl });
+    await serve(baseDeps({ approvals: new Approvals({ store: mem.store, enrollCodeFile: code }), proposals }));
+    const k = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const b = await post('/approvals/enroll/begin', { code: 'abcd-efgh-ijkl-mnop', label: 'Mac' });
+    await post('/approvals/enroll/finish', { challengeId: b.body.challengeId, factor: 'secure_enclave', publicKey: k.publicKey.export({ format: 'der', type: 'spki' }).toString('base64url'), signature: signRaw('sha256', Buffer.from(String(b.body.challenge), 'base64url'), k.privateKey).toString('base64url') });
+    const begin = (more: Record<string, unknown> = {}) => post('/approvals/begin', { proposalId: 'prrev', argsDigest: digestOf(args), ...more });
+    const fieldsOf = (r: { body: Record<string, unknown> }) => (r.body.payload as { fields?: unknown }).fields;
+    // Its review: signed with its id and its verdict.
+    const signed = await begin({ reviewId: review.id });
+    expect(signed.status).toBe(200);
+    expect(fieldsOf(signed)).toEqual({ tainted: false, reviewId: review.id, verdict: 'block' });
+    // A card showed without its review (or a console that says nothing of one): read the review first.
+    expect(await begin()).toEqual({ status: 409, body: { error: REVIEW_SAYS.unseen } });
+    expect(await begin({ reviewId: null })).toEqual({ status: 409, body: { error: REVIEW_SAYS.unseen } });
+    // Another review's id: not this card's.
+    expect(await begin({ reviewId: 'cmreview0000000000000002' })).toEqual({ status: 409, body: { error: DOES_NOT_MATCH } });
+    // Rejecting carries nothing out: no review is named, and none is needed.
+    const rejected = await post('/approvals/begin', { proposalId: 'prrev', decision: 'reject' });
+    expect(rejected.status).toBe(200);
+    expect(fieldsOf(rejected)).toEqual({ tainted: false });
+    // A review the runtime sends out of shape is never signed.
+    proposal.review = { ...review, verdict: 'approve' };
+    expect(await begin({ reviewId: review.id })).toEqual({ status: 409, body: { error: DOES_NOT_MATCH } });
+    proposal.review = { ...review, id: 'cmreview0000000000000003' };
+    expect(await begin({ reviewId: review.id })).toEqual({ status: 409, body: { error: DOES_NOT_MATCH } });
+    // No review yet, while reviews are required: nothing to sign until it is in. Rejecting it still can be.
+    Object.assign(proposal, { reviewId: null, review: null, reviewFirst: true });
+    expect(await begin()).toEqual({ status: 409, body: { error: REVIEW_SAYS.waiting } });
+    expect(await begin({ reviewId: review.id })).toEqual({ status: 409, body: { error: DOES_NOT_MATCH } });
+    expect((await post('/approvals/begin', { proposalId: 'prrev', decision: 'reject' })).status).toBe(200);
+    // No review, and none required first: signed as before, naming none.
+    proposal.reviewFirst = false;
+    const plain = await begin({ reviewId: null });
+    expect(plain.status).toBe(200);
+    expect(fieldsOf(plain)).toEqual({ tainted: false });
+    // The approval recorded names the review, and the runtime is asked to approve with it (it checks the same, and so does the database).
+    Object.assign(proposal, { reviewId: review.id, review });
+    const recorded: Array<{ payload: { fields?: unknown } }> = [];
+    mem.store.addApproval = async (a) => void recorded.push(a as unknown as { payload: { fields?: unknown } });
+    const go = await begin({ reviewId: review.id });
+    await post('/approvals/finish', { challengeId: go.body.challengeId, credentialId: mem.creds[0]!.credentialId, signature: signRaw('sha256', Buffer.from(String(go.body.challenge), 'base64url'), k.privateKey).toString('base64url') });
+    expect(recorded.map((a) => a.payload.fields)).toEqual([{ tainted: false, reviewId: review.id, verdict: 'block' }]);
+    expect(rt.calls).toContain('POST /v1/proposals/prrev/approve');
     server?.close();
   });
 

@@ -12,6 +12,11 @@
  *  - Not written: Local Reviews off, no model, a rule's cap used up, a card that
  *    needs none, and a card decided while the model answered. A reviewer turned
  *    off while the model answered is refused by the database itself.
+ *  - A card is read with its review: the code's findings, the judge's verdict and
+ *    reasons, its words, and whether it must have one before it is approved.
+ *  - Once reviews are required, a card that needs one is not approved until its
+ *    review is in, and then only by a signature that names that review and its
+ *    verdict. Stopping requiring them lets the next card go without.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { NO_DB, freshDb, type TestUrls } from '../db';
@@ -19,6 +24,8 @@ import { createDb, type Db } from '../../src/db';
 import { LOCAL_REVIEWER, LOCAL_WORKER } from '../../src/assets/registry';
 import { fileEnable, turnOff } from '../../src/assets/service';
 import { REVIEW_QUEUE, runCardReview, sendCardReviews, type ReviewDeps } from '../../src/reviews/run';
+import { getProposal, listProposals } from '../../src/governance/proposals';
+import { REVIEW_SAYS } from '@flint/policy';
 import { modelsHere } from '../ollama-kit';
 import { CANARY, FakeBus, taskFixture, type TaskFixture } from '../tasks/fixture';
 
@@ -132,6 +139,57 @@ describe.skipIf(NO_DB)('reviews on flint_test', () => {
     const before = bus.sent.length;
     await sendCardReviews({ db, bus, config: { ollama: OLLAMA } });
     expect(bus.sent.slice(before).some((j) => (j.data as { proposalId?: string }).proposalId === card.id)).toBe(false);
+  });
+
+  it('a card is read with its review: what the code found, the verdict and reasons, its words, and nothing it was made with', async () => {
+    const card = await freshCard();
+    const before = await getProposal(db, card.id);
+    expect(before).toMatchObject({ reviewRequired: true, review: null, reviewFirst: false });
+    const r = await runCardReview(deps(debate('block').fetch), { proposalId: card.id });
+    const one = await getProposal(db, card.id);
+    expect(one?.review).toMatchObject({
+      id: r.reviewId, verdict: 'block', confidence: 0.6, agreed: true, findings: ['cannot_undo', 'consequential'], reasonCodes: ['changes_rules', 'reversible'],
+      shadow: true, textPurged: false,
+    });
+    expect(one?.review?.attack).toContain('CANARY');
+    expect(one?.review?.verdictReason).toContain('CANARY');
+    // Never its models, its cost, its timing or the digest it was of.
+    for (const k of ['models', 'costUsd', 'modelMs', 'subjectDigest', 'textPurgedAt', 'engine']) expect(one?.review, k).not.toHaveProperty(k);
+    // The list says the same of the same card; one with no review says it has none.
+    const listed = await listProposals(db, 'pending', 200);
+    expect(listed.find((p) => p.id === card.id)?.review).toEqual(one?.review);
+    expect(listed.filter((p) => !p.reviewId).every((p) => p.review === null && p.reviewFirst === false)).toBe(true);
+  });
+
+  it('once reviews are required: a card that needs one waits for its review, and Approve must name that review and its verdict', async () => {
+    const refusal = (p: Promise<unknown>) => p.then(() => undefined, (e: unknown) => e as { status?: number; message?: string });
+    const require = await fx.file('review.enforce', { gate: 'proposal', enforced: true }, { kind: 'policy', consequential: true });
+    expect(await fx.signRun(require.id)).toEqual({ gate: 'proposal', enforced: true });
+    const card = await freshCard();
+    expect(await getProposal(db, card.id)).toMatchObject({ reviewFirst: true, review: null });
+    // No review yet: nothing he signs approves it.
+    expect(await refusal(fx.approve(card.id))).toMatchObject({ status: 409, message: REVIEW_SAYS.waiting });
+    const r = await runCardReview(deps(debate('proceed_with_changes').fetch), { proposalId: card.id });
+    expect(r.outcome).toBe('written');
+    // A signature that does not name it, names another verdict, or another review: refused, and the card still waits.
+    for (const fields of [undefined, { reviewId: r.reviewId!, verdict: 'proceed' }, { reviewId: 'cmnotthereview000000000000', verdict: 'proceed_with_changes' }]) {
+      expect(await refusal(fx.approve(card.id, fields)), JSON.stringify(fields)).toMatchObject({ status: 409, message: REVIEW_SAYS.unseen });
+    }
+    expect((await db.proposal.findUniqueOrThrow({ where: { id: card.id } })).status).toBe('pending');
+    // Each refusal is on record, ids only.
+    const denied = await db.auditEntry.findMany({ where: { correlationId: card.id, kind: 'decision', outcome: 'denied' } });
+    expect(denied.map((e) => e.reasoning)).toEqual(expect.arrayContaining(['it needs a review before it is approved', 'the approval does not name the review Will was shown']));
+    // The review he was shown, and its verdict: approved.
+    await fx.approve(card.id, { reviewId: r.reviewId!, verdict: 'proceed_with_changes' });
+    expect(await db.proposal.findUniqueOrThrow({ where: { id: card.id } })).toMatchObject({ status: 'approved', reviewId: r.reviewId });
+    // Stopping requiring them: the card that does is never held for a review itself, and the next card goes without.
+    const stop = await fx.file('review.enforce', { gate: 'proposal', enforced: false }, { kind: 'policy', consequential: true });
+    expect(await getProposal(db, stop.id)).toMatchObject({ reviewRequired: false, reviewFirst: false });
+    expect(await fx.signRun(stop.id)).toEqual({ gate: 'proposal', enforced: false });
+    const next = await freshCard();
+    expect(await getProposal(db, next.id)).toMatchObject({ reviewFirst: false });
+    await fx.approve(next.id);
+    expect((await db.proposal.findUniqueOrThrow({ where: { id: next.id } })).status).toBe('approved');
   });
 
   it('a card decided while the model answered gets no review', async () => {

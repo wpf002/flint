@@ -34,12 +34,12 @@ export async function taskFixture(urls: TestUrls, db: Db, bus = new FakeBus(), o
   const key = await enrollTestKey(urls);
   const owner = (sql: string, params: unknown[] = []) => withClient(urls.owner, (c) => c.query(sql, params));
 
-  async function sign(pid: string, decision: 'approve' | 'reject' = 'approve') {
+  async function sign(pid: string, decision: 'approve' | 'reject' = 'approve', fields?: Record<string, string | number | boolean | null>) {
     const p = await db.proposal.findUniqueOrThrow({ where: { id: pid } });
-    return key.approve({ subjectId: pid, action: p.action, argsDigest: p.argsDigest, decision });
+    return key.approve({ subjectId: pid, action: p.action, argsDigest: p.argsDigest, decision, ...(fields ? { fields } : {}) });
   }
-  /** Will signs a card that is filed. */
-  const approve = async (pid: string) => approveProposal(db, pid, await sign(pid), undefined, 'test');
+  /** Will signs a card that is filed (with the key fields its card showed, when given). */
+  const approve = async (pid: string, fields?: Record<string, string | number | boolean | null>) => approveProposal(db, pid, await sign(pid, 'approve', fields), undefined, 'test');
   /** Will signs it and the runtime carries it out, as the console's Approve does. */
   async function signRun(pid: string, deps: TaskCardDeps = { assets: true, bus }) {
     await approve(pid);

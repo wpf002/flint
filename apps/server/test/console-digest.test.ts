@@ -2,9 +2,11 @@
  * What Will signs is what his card showed him (apps/console/index.html, the main
  * script): the console hashes the args a card displayed exactly as
  * @flint/policy's digestOf does, sends that digest with the request to sign, and
- * signs nothing unless the challenge carries the same digest back. Run in a vm
+ * signs nothing unless the challenge carries the same digest back. So with the
+ * review a card showed (P5): its id goes with the request, null for none, and
+ * nothing is signed unless the challenge names that same review. Run in a vm
  * with Node's WebCrypto, against generated values and a server that names a
- * different digest.
+ * different digest, or a different review.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -74,7 +76,7 @@ describe('the console hashes what it shows exactly as digestOf does', () => {
 
 describe('approving signs only the digest of what the card showed', () => {
   const shownArgs = { goalId: 'gotest0001', goalTitle: 'Synthetic' };
-  const run = async (decide: 'enclaveDecide' | 'passkeyDecide', named: string) => {
+  const run = async (decide: 'enclaveDecide' | 'passkeyDecide', named: string, review: { shown?: string; named?: string } = {}) => {
     const posted: Array<[string, Record<string, unknown>]> = [];
     const signed: unknown[] = [];
     const failures: string[] = [];
@@ -82,7 +84,7 @@ describe('approving signs only the digest of what the card showed', () => {
     const c = sandbox({
       postJson: async (path: string, body: Record<string, unknown>) => {
         posted.push([path, body]);
-        if (path === '/approvals/begin') return { challengeId: 'ch1', challenge: 'AAAA', payload: { action: 'goal.abandon', argsDigest: named } };
+        if (path === '/approvals/begin') return { challengeId: 'ch1', challenge: 'AAAA', payload: { action: 'goal.abandon', argsDigest: named, fields: { tainted: false, ...(review.named ? { reviewId: review.named, verdict: 'block' } : {}) } } };
         return { action: { status: 'done' } };
       },
       se: async (_op: string, o: unknown) => (signed.push(o), { signature: 'sig' }),
@@ -95,7 +97,8 @@ describe('approving signs only the digest of what the card showed', () => {
     const card = { querySelector: () => el };
     // The args go in from the card as the console got them (JSON, in its own realm).
     c.cardArgs = runInContext(`JSON.parse(${JSON.stringify(JSON.stringify(shownArgs))})`, c);
-    const out = (runInContext(`${decide}('pr1', 'approve', card, { reason: 'approve: Abandon a Goal', fresh: true, args: cardArgs })`, Object.assign(c, { card })) as Promise<unknown>).then(() => 'ok', (e: Error) => e.message);
+    const shown = review.shown ? `, reviewId: ${JSON.stringify(review.shown)}` : '';
+    const out = (runInContext(`${decide}('pr1', 'approve', card, { reason: 'approve: Abandon a Goal', fresh: true, args: cardArgs${shown} })`, Object.assign(c, { card })) as Promise<unknown>).then(() => 'ok', (e: Error) => e.message);
     return { result: await out, posted, signed, failures, decided };
   };
 
@@ -106,12 +109,27 @@ describe('approving signs only the digest of what the card showed', () => {
       expect(other.signed).toEqual([]);
       expect(other.posted.map((p) => p[0])).toEqual(['/approvals/begin']);
       // The request itself carried the shown digest, for the server's own check.
-      expect(other.posted[0]![1]).toEqual({ proposalId: 'pr1', decision: 'approve', argsDigest: digestOf(shownArgs) });
+      expect(other.posted[0]![1]).toEqual({ proposalId: 'pr1', decision: 'approve', argsDigest: digestOf(shownArgs), reviewId: null });
       expect(other.failures).toEqual(['It can’t be signed: what it would do doesn’t match what it shows.']);
       const same = await run(decide, digestOf(shownArgs));
       expect(same.result).toBe('ok');
       expect(same.signed).toHaveLength(1);
       expect(same.posted.map((p) => p[0])).toEqual(['/approvals/begin', '/approvals/finish']);
+    });
+
+    it(`${decide}: the review the card showed goes with the request, and a challenge that names another review, or none, or one the card never showed, is never signed (P5)`, async () => {
+      const digest = digestOf(shownArgs);
+      const REFUSED = 'It can’t be signed: what it would do doesn’t match what it shows.';
+      for (const review of [{ shown: 'cmreviewa', named: 'cmreviewb' }, { shown: 'cmreviewa' }, { named: 'cmreviewa' }]) {
+        const r = await run(decide, digest, review);
+        expect(r.result, JSON.stringify(review)).toBe(REFUSED);
+        expect(r.signed, JSON.stringify(review)).toEqual([]);
+        expect(r.posted[0]![1]).toEqual({ proposalId: 'pr1', decision: 'approve', argsDigest: digest, reviewId: review.shown ?? null });
+      }
+      const same = await run(decide, digest, { shown: 'cmreviewa', named: 'cmreviewa' });
+      expect(same.result).toBe('ok');
+      expect(same.signed).toHaveLength(1);
+      expect(same.posted[0]![1]).toEqual({ proposalId: 'pr1', decision: 'approve', argsDigest: digest, reviewId: 'cmreviewa' });
     });
   }
 });

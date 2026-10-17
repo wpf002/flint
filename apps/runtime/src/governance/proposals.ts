@@ -17,7 +17,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { GOAL_SAYS, HIVE_DISPATCH, REFUSAL, TASK_SAYS, digestOf, policyChangeKind, isChatSuggestion, isForecastSignedAction, isGoalSignedAction, isTaskCard, redact, refusalFix, resolveTier, taskNamed, type Cap, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
+import { GOAL_SAYS, HIVE_DISPATCH, REFUSAL, REVIEW_SAYS, TASK_SAYS, digestOf, policyChangeKind, isChatSuggestion, isForecastSignedAction, isGoalSignedAction, isTaskCard, redact, refusalFix, resolveTier, taskNamed, type Cap, type McpFacts, type PolicyRow, type TierContext, type TierDecision, type WebAuthnRelyingParty } from '@flint/policy';
 import type { Db, Tx } from '../db.js';
 import { appendAudit } from './audit.js';
 import { jsonbBytes } from '../jsonsize.js';
@@ -404,6 +404,16 @@ export async function approveProposal(db: Db, id: string, approvalId: string, rp
   if (v.payload.subjectType !== 'proposal' || v.payload.subjectId !== id || v.payload.decision !== 'approve' || v.payload.action !== p.action || v.payload.argsDigest !== p.argsDigest) {
     return refuseSigned(db, p, 'approve', approvalId, { status: 403, words: 'Your approval was for something else.', why: 'the approval was signed for something else' }, actor, now);
   }
+  // P5: once reviews are required, a card that needs one is approved only by a signature that names its review and
+  // that review's verdict. The database insists on it too (proposal_review_guard); this says it in Will's words.
+  if (p.reviewRequired && (await reviewsRequired(db))) {
+    const review = p.reviewId ? await db.review.findUnique({ where: { id: p.reviewId }, select: { id: true, verdict: true } }) : null;
+    if (!review) return refuseSigned(db, p, 'approve', approvalId, { status: 409, words: REVIEW_SAYS.waiting, why: 'it needs a review before it is approved' }, actor, now);
+    const f = v.payload.fields ?? {};
+    if (f.reviewId !== review.id || f.verdict !== review.verdict) {
+      return refuseSigned(db, p, 'approve', approvalId, { status: 409, words: REVIEW_SAYS.unseen, why: 'the approval does not name the review Will was shown' }, actor, now);
+    }
+  }
   const decision = await tierOf(db, p, now);
   if (decision.tier === 'forbidden') {
     return refuseSigned(db, p, 'approve', approvalId, { status: 409, words: 'Flint isn’t allowed to run this.', why: `forbidden: ${decision.reason}` }, actor, now);
@@ -656,16 +666,46 @@ export async function sweepExecuting(db: Db, now = new Date(), olderThanMs = 60 
   return n;
 }
 
-/** One proposal, as the console's card shows it. */
-export function getProposal(db: Db, id: string) {
-  return db.proposal.findUnique({ where: { id } });
+/**
+ * Are reviews required before a card that needs one is approved? Will's switch (review.enforce). A missing gate
+ * counts as required, as the database's own rule reads it (proposal_review_guard).
+ */
+export async function reviewsRequired(db: Db | Tx): Promise<boolean> {
+  const gate = await db.reviewGate.findUnique({ where: { id: 'proposal' }, select: { enforced: true } });
+  return gate?.enforced ?? true;
 }
 
-/** What the console's approval card shows: the full args, where each came from, and the tainted banner. */
+/** A card's review as its card shows it (ReviewShown): never its models, its cost or its subject's digest. */
+const REVIEW_SHOWN = {
+  id: true, verdict: true, confidence: true, agreed: true, findings: true, reasonCodes: true,
+  attack: true, defense: true, verdictReason: true, shadow: true, textPurgedAt: true, createdAt: true,
+} satisfies Prisma.ReviewSelect;
+type ReviewRow = Prisma.ReviewGetPayload<{ select: typeof REVIEW_SHOWN }>;
+
+const reviewShown = (r: ReviewRow) => {
+  const { textPurgedAt, ...rest } = r;
+  return { ...rest, textPurged: textPurgedAt !== null };
+};
+
+/**
+ * A card with its review (null when it has none), and reviewFirst: it needs a review and reviews are required, so it
+ * is approved only once it has one, by a signature that names it.
+ */
+function cardWithReview<T extends { reviewRequired: boolean; review: ReviewRow | null }>(p: T, required: boolean) {
+  return { ...p, review: p.review ? reviewShown(p.review) : null, reviewFirst: p.reviewRequired && required };
+}
+
+/** One proposal, as the console's card shows it, with its review. */
+export async function getProposal(db: Db, id: string) {
+  const [p, required] = await Promise.all([db.proposal.findUnique({ where: { id }, include: { review: { select: REVIEW_SHOWN } } }), reviewsRequired(db)]);
+  return p ? cardWithReview(p, required) : null;
+}
+
+/** What the console's approval card shows: the full args, where each came from, the tainted banner, and its review. */
 export async function listProposals(db: Db, status: string | undefined, limit: number) {
-  return db.proposal.findMany({
-    where: status ? { status } : {},
-    orderBy: { createdAt: 'desc' },
-    take: limit,
-  });
+  const [rows, required] = await Promise.all([
+    db.proposal.findMany({ where: status ? { status } : {}, orderBy: { createdAt: 'desc' }, take: limit, include: { review: { select: REVIEW_SHOWN } } }),
+    reviewsRequired(db),
+  ]);
+  return rows.map((p) => cardWithReview(p, required));
 }

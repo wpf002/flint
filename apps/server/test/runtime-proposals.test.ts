@@ -186,4 +186,44 @@ describe('the cards the console lists (P3)', () => {
       server.close();
     }
   });
+
+  it('a card carries its review as the console shows it, whether it needs one, and whether it must have one first; a review out of shape is not shown (P5)', async () => {
+    const at = '2026-10-17T15:00:00.000Z';
+    const review = {
+      id: 'cmreview0000000000000001', verdict: 'proceed_with_changes', confidence: 0.6, agreed: false, findings: ['cannot_undo', 'consequential'], reasonCodes: ['scope_too_wide'],
+      attack: 'It reaches further than it says.', defense: 'It names one item.', verdictReason: 'Narrow it first.', shadow: true, textPurged: false, createdAt: at,
+    };
+    const card = (id: string, over: Record<string, unknown> = {}) => ({
+      id, origin: 'console', action: 'world.forget', args: { entityId: 'en1' }, argsDigest: 'd'.repeat(64), argsProvenance: {}, tainted: false, sensitivity: 'personal', destructive: true,
+      kind: 'forget', status: 'pending', reason: null, createdAt: at, expiresAt: at, reviewRequired: true, reviewId: null, review: null, reviewFirst: false, ...over,
+    });
+    const listed = [
+      // What the runtime sends of a review beyond what a card shows is dropped too: its models, its cost, the digest it was of.
+      card('reviewed', { reviewId: review.id, review: { ...review, models: { judge: 'm' }, costUsd: '0', subjectDigest: 'd'.repeat(64) } }),
+      card('waiting', { reviewFirst: true }),
+      card('plain', { reviewRequired: false, destructive: false, kind: 'tool_call' }),
+      card('junk', { reviewId: 'cmjunk', review: { ...review, id: 'cmjunk', verdict: 'approve' } }),
+      // A runtime from before reviews says nothing of them.
+      { ...card('old'), reviewRequired: undefined, reviewId: undefined, review: undefined, reviewFirst: undefined },
+    ];
+    const fetchImpl = (async (url: string) => Response.json({ proposals: new URL(url).searchParams.get('status') === 'pending' ? listed : [] })) as typeof fetch;
+    const proposals = new RuntimeProposals({ runtime: () => ({ url: 'http://[::1]:8090', token: 't'.repeat(64) }), spoolDir: mkdtempSync(join(tmpdir(), 'flint-rp-')), fetchImpl });
+    const deps = { actions: new ActionQueue(isSafeTool), tools: [], audit: { record: () => {} }, notes: { push: () => {} }, approvals: undefined, proposals, errorRef: () => 'ref' } as unknown as ApprovalDeps;
+    const server = createServer((req, res) => void approvalRoutes(req, res, req.url ?? '/', deps));
+    await new Promise<void>((r) => server.listen(0, '::1', r));
+    try {
+      const r = (await (await fetch(`http://[::1]:${(server.address() as AddressInfo).port}/proposals`)).json()) as { proposals: Array<Record<string, unknown>> };
+      const by = (id: string) => r.proposals.find((p) => p.id === id)!;
+      expect(by('reviewed')).toMatchObject({ reviewRequired: true, reviewFirst: false, review });
+      expect(by('reviewed').review).toEqual(review);
+      expect(by('waiting')).toMatchObject({ reviewRequired: true, reviewFirst: true });
+      expect(by('plain')).toMatchObject({ reviewRequired: false, reviewFirst: false });
+      for (const id of ['waiting', 'plain', 'junk', 'old']) expect(by(id), id).not.toHaveProperty('review');
+      expect(by('old')).toMatchObject({ reviewRequired: false, reviewFirst: false });
+      // Never the review's id as a field of its own: the console reads it from the review it shows.
+      for (const p of r.proposals) expect(p, String(p.id)).not.toHaveProperty('reviewId');
+    } finally {
+      server.close();
+    }
+  });
 });
