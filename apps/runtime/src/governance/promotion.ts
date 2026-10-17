@@ -41,6 +41,7 @@ import { createProposal, Refused } from './proposals.js';
 import { PolicyArgs } from './internal.js';
 import { chatSuggestions, daysNotRunning, firstReviewAt, overdueNow, reviewCounts, reviewsNow, windowStart } from '../goals/measures.js';
 import { CHAT_FLOOR_SAYS, chatFloorInDatabase } from '../goals/candidates.js';
+import { acceptCards, firstAcceptCard } from '../tasks/measures.js';
 
 /**
  * What P1 asks Will to promote (the plan's P1 table): chat's reads of the world
@@ -127,6 +128,16 @@ export const NEXUS_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: numbe
   { pattern: 'restore.drill.nexus' },
 ];
 
+/**
+ * P5's table: Flint accepts a task's result on its own when it passes its
+ * checks, 20 a day at most (the tier engine's ALONE_CAPS holds that whatever a
+ * row says). Past the cap, or where a rule of Will's is stricter, a passing
+ * result still comes to him on a card.
+ */
+export const P5_PROMOTIONS: ReadonlyArray<{ pattern: string; dailyCap?: number }> = [
+  { pattern: 'task.check_bar', dailyCap: 20 },
+];
+
 /** The rows of that table the command offers: what the database has a floor under. */
 export const P3C_OFFERED: ReadonlySet<string> = new Set(['goal.propose']);
 /** p3c's evidence: two weeks of chat's goal suggestion cards. */
@@ -146,7 +157,7 @@ export const NEVER_PROMOTED: ReadonlySet<string> = new Set([
   'asset.enable', 'review.enforce', 'task.cancel', 'task.bar_override', PAID_DISPATCH, 'review.trident_panel', HIVE_DISPATCH,
 ]);
 
-export const PHASES_LIST = ['p1', 'p2', 'p25', 'p26', 'p3', 'p3c', 'nexus'] as const;
+export const PHASES_LIST = ['p1', 'p2', 'p25', 'p26', 'p3', 'p3c', 'p5', 'nexus'] as const;
 export type Phase = (typeof PHASES_LIST)[number];
 
 export const SHADOW_DAYS = 7;
@@ -374,6 +385,30 @@ const PHASES: Record<Phase, PhaseOf> = {
       if (!g.filed) return { gap: `Flint suggested no goal from chat in the last ${P3C_SHADOW_DAYS} days` };
       // Making a suggestion a goal himself is a yes, counted as one (it sets the suggestion's own card aside).
       return { measured: `Since ${dayWords(tz, since)}, Flint suggested ${count(g.filed, 'goal')} from chat: you approved ${g.executed}, made ${g.made} into goals yourself, rejected ${g.rejected}, and ${g.expired} expired.` };
+    },
+  },
+  p5: {
+    rows: P5_PROMOTIONS,
+    template: 'p5.promotion',
+    label: 'P5',
+    lets: 'Flint accept a task’s result on its own when it passes its checks',
+    evidence: 'checked task results',
+    says: /^Since [A-Z][a-z]{2} \d{1,2}, Flint’s checks passed \d+ results?: you accepted \d+, and \d+ expired\.$/,
+    // The first result Flint's checks passed and sent to Will on an accept card: the trial week runs from there.
+    first: (db) => firstAcceptCard(db),
+    covered: async () => undefined,
+    measured: async () => '',
+    // The week was lived: at least one passing result came to Will in the 7 whole local days before today and
+    // today, and in that time he rejected none that passed and overruled no check either way. The sentence counts
+    // the same cards, from the same moment.
+    weighed: async (db, now, tz) => {
+      const since = windowStart(tz, now, SHADOW_DAYS);
+      const k = await acceptCards(db, since);
+      if (!k.filed) return { gap: `Flint’s checks passed no task result in the last ${SHADOW_DAYS} days` };
+      if (k.rejected) return { gap: `you rejected ${count(k.rejected, 'result')} that passed Flint’s checks` };
+      const anyway = k.acceptedAnyway + k.rejectedAnyway;
+      if (anyway) return { gap: `you overruled Flint’s checks ${count(anyway, 'time')}` };
+      return { measured: `Since ${dayWords(tz, since)}, Flint’s checks passed ${count(k.filed, 'result')}: you accepted ${k.accepted}, and ${k.expired} expired.` };
     },
   },
   nexus: {

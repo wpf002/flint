@@ -25,7 +25,8 @@
  *   pnpm --filter @flint/runtime p25-report [--source google_calendar|apple_calendar]
  *                                                    P2.5's exit criteria for a calendar, measured now (JSON)
  *   pnpm --filter @flint/runtime p3-report            P3's exit criteria, measured now (JSON, numbers only)
- *   pnpm --filter @flint/runtime promotion-table [--phase p1|p2|p25|p26|p3|p3c|nexus] [--drop <pattern>]...
+ *   pnpm --filter @flint/runtime p5-report            P5's exit criteria, measured now (JSON, numbers only)
+ *   pnpm --filter @flint/runtime promotion-table [--phase p1|p2|p25|p26|p3|p3c|p5|nexus] [--drop <pattern>]...
  *                                                    file a phase's promotion table for Will to sign
  *   pnpm --filter @flint/runtime enable-source <name> file the card that turns a source on, for Will
  *                                                    to sign in the console
@@ -72,6 +73,7 @@ import { backupEnvFile, loadBackupConfig, loadRuntimeConfig } from './config.js'
 import { p2Report } from './report/exit.js';
 import { p25Report } from './report/p25.js';
 import { p3Report } from './report/p3.js';
+import { p5Report } from './report/p5.js';
 import { appleCalendarStatus } from './report/apple-calendar.js';
 import { PHASES_LIST, promotionTable, type Phase } from './governance/promotion.js';
 import { isCalendarSource } from './world/people.js';
@@ -268,6 +270,16 @@ async function main(): Promise<void> {
     }
     return;
   }
+  if (process.argv[2] === 'p5-report') {
+    const config = loadRuntimeConfig();
+    const db = createDb(config.databaseUrl);
+    try {
+      console.log(JSON.stringify(await p5Report(db), null, 2));
+    } finally {
+      await db.$disconnect();
+    }
+    return;
+  }
   if (process.argv[2] === 'apple-calendar') {
     const config = loadRuntimeConfig();
     const db = createDb(config.databaseUrl);
@@ -323,7 +335,7 @@ async function main(): Promise<void> {
     return;
   }
   const cmd = process.argv[2] as Command;
-  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | rules [--off <id>...] | predictions-on [key]... | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | p3-report | promotion-table [--phase p1|p2|p25|p26|p3|p3c|nexus] [--drop <pattern>] | backup|offsite|drill [--auto] | nexus-setup [--database <name>] | nexus-backup|nexus-offsite|nexus-drill [--auto] | prune [--remove] | prune --auto | restore-production [--dump <file>] [--without-copy] [--without-fingerprint] [--check] | restore-production --compare | restore-production --repair | restore-empty --from-rebuild --dump <file>');
+  if (!(cmd in ACTION)) throw new Error('usage: cli.ts enroll [--replace] | enable-source <name> | rules [--off <id>...] | predictions-on [key]... | google-login | apple-calendar | p2-report | p25-report [--source google_calendar|apple_calendar] | p3-report | p5-report | promotion-table [--phase p1|p2|p25|p26|p3|p3c|p5|nexus] [--drop <pattern>] | backup|offsite|drill [--auto] | nexus-setup [--database <name>] | nexus-backup|nexus-offsite|nexus-drill [--auto] | prune [--remove] | prune --auto | restore-production [--dump <file>] [--without-copy] [--without-fingerprint] [--check] | restore-production --compare | restore-production --repair | restore-empty --from-rebuild --dump <file>');
   const auto = process.argv.includes('--auto');
   const b = loadBackupConfig();
   const action = ACTION[cmd];
