@@ -100,11 +100,13 @@ export async function taskFixture(urls: TestUrls, db: Db, bus = new FakeBus(), o
     await withClient(urls.app, (c) => c.query(`SELECT forget_entity($1, $2)`, [entityId, aid]));
   }
 
-  /** The CI watcher, turned on by Will's signed card (once). */
-  async function watcherOn(): Promise<void> {
-    if ((await db.asset.findUnique({ where: { id: CI_WATCHER.id } }))?.enabled) return;
-    await signRun((await fileEnable(db, CI_WATCHER.id)).proposalId);
+  /** An asset, turned on by Will's signed card (once). */
+  async function assetOn(assetId: string): Promise<void> {
+    if ((await db.asset.findUnique({ where: { id: assetId } }))?.enabled) return;
+    await signRun((await fileEnable(db, assetId)).proposalId);
   }
+  /** The CI watcher, turned on by Will's signed card (once). */
+  const watcherOn = (): Promise<void> => assetOn(CI_WATCHER.id);
   /** A new watch task for a run, with its dispatch card filed. */
   async function newTask(item: string, over: Record<string, unknown> = {}) {
     return createTask(db, { draftKey: draft(), template: 'watch_ci', params: { item }, goalId: null, dueAt: null, ownCheck: null, ...over } as Parameters<typeof createTask>[1]);
@@ -150,6 +152,6 @@ export async function taskFixture(urls: TestUrls, db: Db, bus = new FakeBus(), o
     const resolutions = await db.resolution.findMany({ select: { evidence: true } });
     return JSON.stringify([bus.sent.map((j) => j.data), audits, cards, health, predictions, resolutions], (_k, v: unknown) => (typeof v === 'bigint' ? String(v) : v));
   }
-  return { key, bus, owner, sign, approve, signRun, signRunCard, file, sourceOn, ciRun, entity, person, forget, watcherOn, newTask, dispatched, checked, task, endedAgo, cardFor, policy, everythingButTasks };
+  return { key, bus, owner, sign, approve, signRun, signRunCard, file, sourceOn, ciRun, entity, person, forget, assetOn, watcherOn, newTask, dispatched, checked, task, endedAgo, cardFor, policy, everythingButTasks };
 }
 export type TaskFixture = Awaited<ReturnType<typeof taskFixture>>;

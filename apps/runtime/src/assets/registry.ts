@@ -5,8 +5,11 @@
  * definition is a new entry (a new id and reference, `...:v2`) that he turns on
  * again: his signature always covers what the asset can do.
  *
- * The CI watcher is the only one so far. It calls nothing: it waits for a CI
- * run Flint already tracks and says how it ended.
+ * The CI watcher calls nothing: it waits for a CI run Flint already tracks and
+ * says how it ended. The local worker does the three jobs that need words, on
+ * this Mac's own model and nowhere else; a runtime with no local model named
+ * has nothing to run it, so New Task offers none of its kinds of task and
+ * Settings > Health says so.
  */
 import { dispatchActionOf, type AssetKind, type TaskTemplateId } from '@flint/policy';
 
@@ -34,8 +37,13 @@ export const CI_WATCHER: AssetDef = assetOf({
   line: 'Flint reports how your CI runs end.',
 });
 
+export const LOCAL_WORKER: AssetDef = assetOf({
+  id: 'as-local-worker-v1', kind: 'local_worker', externalRef: 'ollama:local:v1', name: 'Local Worker', capabilities: ['summarize_items', 'sort_items', 'draft_note'], spends: false,
+  line: 'Flint summarizes, sorts and drafts on this Mac’s own model.',
+});
+
 /** Every asset there is. Adding one is a reviewed code change. */
-export const ASSETS: readonly AssetDef[] = [CI_WATCHER];
+export const ASSETS: readonly AssetDef[] = [CI_WATCHER, LOCAL_WORKER];
 
 export const assetDef = (id: string, registry: readonly AssetDef[] = ASSETS): AssetDef | undefined => registry.find((a) => a.id === id);
 /** The asset that runs a template, if one is defined. */

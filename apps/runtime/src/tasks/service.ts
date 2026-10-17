@@ -93,10 +93,12 @@ export async function createTask(db: Db, body: NewTaskBody, deps: TaskServiceDep
   const registry = deps.registry ?? ASSETS;
   const def = assetFor(spec.template, registry);
   if (!def) throw new Refused(409, SAY.cantRun);
-  const asset = await db.asset.findUnique({ where: { id: def.id } });
-  if (!asset || !sameAsset(def, asset) || !asset.enabled) throw new Refused(409, SAY.assetOff);
+  // Whether anything in this runtime could run it at all comes first, as the form reads it (tasks/offer.ts): with no
+  // local model named there is no local worker, and "turn its asset on" would be no way forward.
   const adapter = (deps.adapters ?? ADAPTERS)[def.kind];
   if (!adapter) throw new Refused(409, SAY.cantRun);
+  const asset = await db.asset.findUnique({ where: { id: def.id } });
+  if (!asset || !sameAsset(def, asset) || !asset.enabled) throw new Refused(409, SAY.assetOff);
 
   const ids = specItems(spec);
   const items = ids.length ? await db.entity.findMany({ where: { id: { in: ids } }, select: { id: true, kind: true, status: true, sensitivity: true } }) : [];

@@ -16,8 +16,25 @@ import type { AdapterSet } from './adapters/types.js';
 import { SAY } from './errors.js';
 import { ADAPTERS } from './run.js';
 
-/** The kind of item each kind of task in the New Task form is about. One not named here is not offered there yet. */
-export const FORM_ITEM_KIND: Readonly<Partial<Record<TaskTemplateId, string>>> = { watch_ci: 'ci_run' };
+/**
+ * The kinds of item the New Task form lists for each kind of task, and the only
+ * ones a task of that kind may be about. A kind of task not named here is not
+ * offered there yet.
+ *
+ * A watched run is about one CI run. The local worker's three work on anything
+ * Flint tracks but a person: every kind the world model writes (world/kinds.ts)
+ * except `person`, which createTask refuses outright, with its own sentence, and
+ * which no task of any kind may name. The list is the whole of them on purpose:
+ * an item of a kind left out would be turned away as "no longer active", which
+ * would not be true of it.
+ */
+export const WORK_ITEM_KINDS = ['service', 'repo', 'deployment', 'account', 'pull_request', 'issue', 'ci_run', 'project', 'thread', 'deadline', 'commitment'] as const;
+export const FORM_ITEM_KINDS: Readonly<Partial<Record<TaskTemplateId, readonly string[]>>> = {
+  watch_ci: ['ci_run'],
+  summarize_items: WORK_ITEM_KINDS,
+  sort_items: WORK_ITEM_KINDS,
+  draft_note: WORK_ITEM_KINDS,
+};
 /** The status an item or a goal has while it can be offered. */
 export const OFFERED_STATUS = 'active';
 
@@ -43,11 +60,11 @@ export async function runnerOf(db: Db | Tx, template: TaskTemplateId, deps: Offe
  * goal is refused with the same sentence.
  */
 export async function aboutProblem(db: Db | Tx, spec: TaskSpec, goalId: string | null): Promise<string | undefined> {
-  const kind = FORM_ITEM_KIND[spec.template];
+  const kinds = FORM_ITEM_KINDS[spec.template];
   const ids = specItems(spec);
   const items = ids.length ? await db.entity.findMany({ where: { id: { in: ids } }, select: { kind: true, status: true } }) : [];
   if (items.length !== ids.length) return SAY.itemGone;
-  if (items.some((e) => (kind !== undefined && e.kind !== kind) || e.status !== OFFERED_STATUS)) return SAY.itemEnded;
+  if (items.some((e) => (kinds !== undefined && !kinds.includes(e.kind)) || e.status !== OFFERED_STATUS)) return SAY.itemEnded;
   if (goalId !== null && (await db.goal.findUnique({ where: { id: goalId }, select: { status: true } }))?.status !== OFFERED_STATUS) return SAY.goalEnded;
   return undefined;
 }
@@ -57,7 +74,7 @@ export async function aboutProblem(db: Db | Tx, spec: TaskSpec, goalId: string |
  * it would: its kind, its items and its goal, each as it stands.
  */
 export async function offerProblem(db: Db | Tx, spec: TaskSpec, goalId: string | null, deps: OfferDeps = {}): Promise<string | undefined> {
-  if (!FORM_ITEM_KIND[spec.template]) return SAY.cantRun;
+  if (!FORM_ITEM_KINDS[spec.template]) return SAY.cantRun;
   const runner = await runnerOf(db, spec.template, deps);
   if ('why' in runner) return runner.why;
   return aboutProblem(db, spec, goalId);

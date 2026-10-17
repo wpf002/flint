@@ -32,6 +32,7 @@ import { Forbidden, Refused } from '../governance/proposals.js';
 import { fileEnable, turnOff } from '../assets/service.js';
 import { assetsPage } from '../assets/view.js';
 import { SAY } from '../tasks/errors.js';
+import type { AdapterSet } from '../tasks/adapters/types.js';
 import { cancelTask, createTask, overrideTask, runAgain } from '../tasks/service.js';
 import { taskForm, taskView, tasksPage } from '../tasks/view.js';
 
@@ -41,6 +42,13 @@ export interface TaskRouteDeps {
   tz: string;
   /** True only while tasks and assets are switched on (FLINT_ASSETS=on). */
   on: boolean;
+  /**
+   * The adapters this runtime has (run.ts's adaptersFor), which decide which
+   * kinds of task can run at all: without a local model the local worker is not
+   * among them, so New Task offers none of its kinds and one sent by hand is
+   * refused. The CI watcher alone when not given.
+   */
+  adapters?: AdapterSet;
 }
 
 /** An answer that broke its contract on the way out: the runtime's bug (a 500), never a leak. */
@@ -67,6 +75,8 @@ const AssetVerb = z.object({ id: AssetId, verb: z.enum(['on', 'off']) }).strict(
 export function registerTaskRoutes(app: FastifyInstance, d: TaskRouteDeps): void {
   const { db, need, tz } = d;
   const pre = { preHandler: need('proposals') };
+  /** What a new task, Run Again and the form are all told of this runtime: which kinds of task it has something to run. */
+  const has = d.adapters ? { adapters: d.adapters } : {};
   /**
    * A refusal as Will reads it, with its code; anything else to the app's
    * handler. Switched off, the refusal is the whole answer: no route's own code runs.
@@ -116,17 +126,17 @@ export function registerTaskRoutes(app: FastifyInstance, d: TaskRouteDeps): void
     return out(TaskAnswer, { task });
   }));
 
-  app.post('/v1/tasks', pre, guarded(async (req) => out(TaskFiled, await createTask(db, parse(NewTaskBody, req.body)))));
+  app.post('/v1/tasks', pre, guarded(async (req) => out(TaskFiled, await createTask(db, parse(NewTaskBody, req.body), has))));
 
   // Its own path, not one under /v1/tasks/: a runtime from before the form answers a plain 404, which the server reads as "older".
   app.get('/v1/task-form', pre, guarded(async (req) => {
     parse(EmptyBody, req.query ?? {});
-    return out(TaskForm, await taskForm(db, tz));
+    return out(TaskForm, await taskForm(db, tz, has));
   }));
 
   app.post('/v1/tasks/:id/:verb', pre, guarded(async (req) => {
     const { id, verb } = parse(TaskVerb, req.params);
-    if (verb === 'again') return out(TaskFiled, await runAgain(db, id, parse(TaskAgainBody, req.body).draftKey));
+    if (verb === 'again') return out(TaskFiled, await runAgain(db, id, parse(TaskAgainBody, req.body).draftKey, has));
     parse(EmptyBody, req.body ?? {});
     if (verb === 'cancel') {
       const r = await cancelTask(db, id);

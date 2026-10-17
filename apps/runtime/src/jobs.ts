@@ -38,7 +38,8 @@ import { TICK_CRON, tick } from './goals/tick.js';
 import { PlanJob, ReviewJob, runReview } from './goals/review.js';
 import { runPlan } from './goals/batch.js';
 import { TASK_TICK_CRON, taskTick } from './tasks/tick.js';
-import { TaskJob, runTaskJob } from './tasks/run.js';
+import { TaskJob, adaptersFor, runTaskJob } from './tasks/run.js';
+import { workerDeps } from './tasks/local-worker.js';
 import { checkTaskJob } from './tasks/check.js';
 import { predictionsStarted, sweep } from './ledger/sweep.js';
 import { SNAPSHOT_ACTION, runSnapshot } from './ledger/calibration.js';
@@ -419,9 +420,12 @@ export function taskJobs(ctx: JobContext): JobSpec[] {
       // One task's run on its asset.
       queue: 'tasks.run',
       handler: async (jobs) => {
+        // The adapters this runtime has: the local worker only while a local model is named (its own requests are
+        // counted in the database by the task's id, so a retry or a later tick finds the same count).
+        const adapters = adaptersFor(workerDeps(ctx.db, ctx.config));
         for (const job of jobs) {
           const data = TaskJob.safeParse(job.data);
-          if (data.success) await runTaskJob({ db: ctx.db, bus: ctx.bus, log }, data.data);
+          if (data.success) await runTaskJob({ db: ctx.db, bus: ctx.bus, adapters, log }, data.data);
         }
       },
     },

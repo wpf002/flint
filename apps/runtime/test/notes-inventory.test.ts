@@ -276,7 +276,7 @@ describe('the runtime’s notes to Will', () => {
       for (const re of NEVER) expect(`${HEALTH_NAMES.tasks}\n${line}`, line).not.toMatch(re);
       expect(line, line).toMatch(/^[A-Z0-9].*\.$/);
     };
-    const health = [TASK_HEALTH.none, TASK_HEALTH.stopped, ...[1, 2, 14].map((n) => TASK_HEALTH.stuck(n))];
+    const health = [TASK_HEALTH.none, TASK_HEALTH.stopped, TASK_HEALTH.noModel, ...[1, 2, 14].map((n) => TASK_HEALTH.stuck(n))];
     for (const line of [...health, WAITING, SPEND_NEEDS_ESTIMATE, WHOLE_NUMBERS_ONLY, ...ASSETS.map((a) => a.line)]) said(line);
     expect(HEALTH_NAMES.tasks).toBe('Tasks');
     expect([TASK_HEALTH.stuck(1), TASK_HEALTH.stuck(14)]).toEqual(['A task is past its time and hasn’t been ended.', '14 tasks are past their time and haven’t been ended.']);
@@ -286,8 +286,8 @@ describe('the runtime’s notes to Will', () => {
     const checks = readFileSync(join(SRC, 'health', 'checks.ts'), 'utf8');
     const fn = checks.slice(checks.indexOf('async function tasks('), checks.indexOf('/** Last night\'s run is this old: it was missed'));
     expect(fn.length).toBeGreaterThan(300);
-    expect(fn.match(/\bdetail: /g)).toHaveLength(3);
-    expect(fn.match(/detail: TASK_HEALTH\.\w+(\([^)]*\))?/g)).toHaveLength(3);
+    expect(fn.match(/\bdetail: /g)).toHaveLength(4);
+    expect(fn.match(/detail: TASK_HEALTH\.\w+(\([^)]*\))?/g)).toHaveLength(4);
     // The digest names the component as Health does when it needs a look.
     expect(digestBody({ relevant: 0, quiet: 0, escalated: 0, did: 0, queued: 0, open: 0, due: 0 }, ['tasks'])).toContain('Tasks');
   });

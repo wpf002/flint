@@ -3368,10 +3368,20 @@ var TASKS={tab:'active',view:'list',on:false,off:false,offSays:'',assets:null,ta
 var TASK_TABS=[['active','Active'],['finished','Finished']];
 /* The kinds of asset a task runs on (a reviewer runs none), and how a sentence names each. */
 var TASK_RUNS={ci_runner:1,local_worker:1,nexus_participant:1};
-var TASK_ASSET_NAMES={ci_runner:'the CI Watcher'};
+var TASK_ASSET_NAMES={ci_runner:'the CI Watcher',local_worker:'the Local Worker'};
 /* What New Task asks for, by the kind of task: the field's label, its first choice, its hint, and what it says when
-   Flint tracks nothing to choose from. A kind this page has no field for is not offered. */
-var TASK_FIELDS={watch_ci:['CI Run','Choose a CI Run','Pick a CI run Flint tracks.','Flint tracks no CI runs yet.','Choose a CI run to watch.']};
+   Flint tracks nothing to choose from, then what it says when Will has chosen nothing. A kind this page has no field
+   for is not offered. */
+var TASK_FIELDS={
+  watch_ci:['CI Run','Choose a CI Run','Pick a CI run Flint tracks.','Flint tracks no CI runs yet.','Choose a CI run to watch.'],
+  summarize_items:['Items','Add an Item','Pick the items to summarize.','Flint tracks no items to summarize yet.','Choose at least one item to summarize.'],
+  sort_items:['Items','Add an Item','Pick the items to sort, and the labels to sort them under.','Flint tracks no items to sort yet.','Choose at least one item to sort.'],
+  draft_note:['Items','Add an Item','Say what the note is about. Items are up to you.','Flint tracks no items to write about yet.','Say what the note is about.']};
+/* What each kind of task's form holds: how many items it is about (one, many, or some, where none is fine), whether
+   it takes Will's own words, labels to sort under, and whether it can show the model the items' titles. */
+var TASK_SHAPE={watch_ci:{items:'one'},summarize_items:{items:'many',titles:1},sort_items:{items:'many',labels:1,titles:1},draft_note:{items:'some',about:1,titles:1}};
+/* How many items one task may be about, and how many labels a sort takes: the shared contract's own limits. */
+var TASK_ITEMS_MAX=12,TASK_LABELS_MIN=2,TASK_LABELS_MAX=6;
 var TASK_SAY={waiting:'Flint is waiting for your approval.',later:'It’s waiting in Approvals.',approved:'Approved. It hasn’t run yet.',
   key:'This device needs an approval key.',gone:'That card is no longer waiting.',card:'A card is waiting for your approval.',down:'The runtime isn’t answering, so the card can’t load.',
   start:'Flint runs a task after you approve it.',finished:'Tasks that end show here.',more:'Flint shows the newest 100 tasks.',
@@ -3379,6 +3389,9 @@ var TASK_SAY={waiting:'Flint is waiting for your approval.',later:'It’s waitin
   rules:'Flint checked these by rule.',model:'The local model judged these.',you:'You decided it yourself, against its checks.',
   withdrawn:'Nothing has run, and its card is withdrawn.',stops:'Flint files a card to stop it, for you to approve.',youCancelled:'You cancelled it.',
   armOff:'Tasks that are running on it will fail.',noAssets:'Flint has no assets yet.',moreItems:'Flint lists the 50 it saw most recently.',started:'Flint started it.',
+  itemsFull:'A task can be about 12 items at most.',itemsAll:'Every item Flint offers is already picked.',
+  labelsFew:'Give at least two labels.',labelsSame:'Give each label once.',labelsEmpty:'Fill in every label, or take it out.',
+  titlesSay:'Flint shows the model each item’s title, which is text from outside Flint.',
   nothing:'No asset that is on can run a task yet.',unreadable:'The runtime sent an answer Flint can’t read.'};
 /* What the panel says once a card it showed has run, by the card. */
 var TASK_DONE={'asset.enable':'It’s on.','task.check_bar':'You accepted its result.','task.cancel':'You cancelled it.'};
@@ -3639,31 +3652,97 @@ function taskSettled(p,say,ok){
 function taskNew(){taskNav('form');TASKS.back=null;var seq=++TASKS.seq;taskHead('New Task',true,false);taskFoot();taskBody().appendChild(gEl('div','empty','Loading…'));
   gCall('/tasks/form').then(function(d){if(seq!==TASKS.seq)return;taskForm(d||{});},
     function(e){if(seq!==TASKS.seq)return;if(taskOff(e)){taskTab(TASKS.tab);return;}taskFailedView(e,taskNew);taskHead('New Task',true,false);});}
-function taskForm(d){var kinds=(d.templates||[]).filter(function(t){return !!t&&!!tGet(TASK_FIELDS,t.template);}),goals=d.goals||[];
+/* A blank form, with the key that makes one sent twice one task. */
+function taskBlank(template){return {draftKey:gDraftKey(),template:template,item:'',items:[],labels:['',''],about:'',titles:false,goal:'',due:''};}
+/* What this kind of task's form holds; a kind with no entry is about one item and nothing else. */
+function taskShape(template){return tGet(TASK_SHAPE,template)||{items:'one'};}
+/* The element this render should put the cursor in, by the key gKey wrote; false when there is none there. */
+function taskKeyed(k){var b=document.getElementById('taskbody'),e=k&&b&&b.querySelector?b.querySelector('[data-k="'+k+'"]'):null;if(!e)return false;taskFocus(e);return true;}
+/* The items Will has picked, in the order the runtime offered them, by their labels. */
+function taskPicked(f,items){return items.filter(function(i){return f.items.indexOf(i.entityId)>=0;});}
+
+/* The items a task is about: one row each, with the one that takes it away, then the field that adds another. Text
+   Will types never re-draws the form (the cursor would jump), so only a pick, an add or a remove does. */
+function taskItemsRows(d,f,words,items,g){
+  var picked=taskPicked(f,items),left=items.filter(function(i){return f.items.indexOf(i.entityId)<0;});
+  picked.forEach(function(i,n){var row=gEl('div','row two gwrap');var l=gEl('span','lbl');l.appendChild(gEl('b',null,i.label));row.appendChild(l);
+    var x=gBtn('xb gx','',function(){f.items.splice(f.items.indexOf(i.entityId),1);taskMsg('');taskForm(d,'items');});
+    x.setAttribute('aria-label','Remove Item');x.appendChild(gIcon('x'));row.appendChild(x);g.appendChild(row);});
+  if(f.items.length>=TASK_ITEMS_MAX){g.appendChild(predLine(TASK_SAY.itemsFull));return;}
+  if(!left.length){g.appendChild(predLine(picked.length?TASK_SAY.itemsAll:words[3]));return;}
+  var r=gEl('div','formrow');var add=goalSelect(words[0],[['',words[1]]].concat(left.map(function(i){return [i.entityId,i.label];})),'');
+  gKey(add.input,'items');add.input.onchange=function(){var v=add.input.value;if(!v)return;f.items.push(v);taskMsg('');taskForm(d,'items');};
+  r.appendChild(add.wrap);g.appendChild(r);}
+
+/* The labels a sort puts each item under: Will's own words, two to six of them. */
+function taskLabelRows(d,f,g){
+  f.labels.forEach(function(v,n){var r=gEl('div','formrow');var t=goalField('Label','input','Mine',40,v);gKey(t.input,'label:'+n);
+    t.input.oninput=function(){f.labels[n]=t.input.value;};r.appendChild(t.wrap);
+    if(f.labels.length>TASK_LABELS_MIN){var x=gBtn('xb gx','',function(){f.labels.splice(n,1);taskMsg('');taskForm(d,'label:'+Math.max(0,n-1));});
+      x.setAttribute('aria-label','Remove Label');x.appendChild(gIcon('x'));r.appendChild(x);}
+    g.appendChild(r);});
+  if(f.labels.length<TASK_LABELS_MAX)g.appendChild(gBtn('ghost','Add Label',function(){f.labels.push('');taskMsg('');taskForm(d,'label:'+f.labels.length);}));}
+
+/* `focus`: what the last press was about, so the cursor stays where Will was working. */
+function taskForm(d,focus){var kinds=(d.templates||[]).filter(function(t){return !!t&&!!tGet(TASK_FIELDS,t.template);}),goals=d.goals||[];
   taskHead('New Task',true,false);var body=taskBody(),foot=taskFoot();
   if(!kinds.length){body.appendChild(goalEmpty('Nothing to Run Yet',TASK_SAY.nothing,gBtn('btn pri','Open Settings',taskToSettings)));return;}
-  if(!TASKS.form)TASKS.form={draftKey:gDraftKey(),template:kinds[0].template,item:'',goal:'',due:''};
+  if(!TASKS.form)TASKS.form=taskBlank(kinds[0].template);
   var f=TASKS.form,kind=kinds[0];kinds.forEach(function(t){if(t.template===f.template)kind=t;});f.template=kind.template;
-  var words=tGet(TASK_FIELDS,kind.template),items=kind.items||[];
+  var words=tGet(TASK_FIELDS,kind.template),items=kind.items||[],shape=taskShape(kind.template);
   if(!items.some(function(i){return i.entityId===f.item;}))f.item='';
+  /* An item the runtime no longer offers is no longer picked. */
+  f.items=f.items.filter(function(id){return items.some(function(i){return i.entityId===id;});});
   if(!goals.some(function(g){return g.id===f.goal;}))f.goal='';
   var box=gEl('div','gform');box.id='taskform';var g=gEl('div','group');
   var r1=gEl('div','formrow');var what=goalSelect('What to Do',kinds.map(function(t){return [t.template,t.title];}),f.template);
-  what.input.onchange=function(){f.template=what.input.value;f.item='';taskForm(d);};r1.appendChild(what.wrap);g.appendChild(r1);
-  var r2=gEl('div','formrow');
-  if(items.length){var item=goalSelect(words[0],[['',words[1]]].concat(items.map(function(i){return [i.entityId,i.label];})),f.item);item.input.onchange=function(){f.item=item.input.value;taskMsg('');};r2.appendChild(item.wrap);g.appendChild(r2);}
-  else g.appendChild(predLine(words[3]));
+  what.input.onchange=function(){f.template=what.input.value;f.item='';taskMsg('');taskForm(d);};r1.appendChild(what.wrap);g.appendChild(r1);
+  /* What it is about: Will's own words where the kind takes them, then its items. */
+  if(shape.about){var ra=gEl('div','formrow');var about=goalField('About','textarea','What the note is about',300,f.about);gKey(about.input,'about');
+    about.input.oninput=function(){f.about=about.input.value;};ra.appendChild(about.wrap);g.appendChild(ra);}
+  if(shape.items==='one'){
+    if(items.length){var r2=gEl('div','formrow');var item=goalSelect(words[0],[['',words[1]]].concat(items.map(function(i){return [i.entityId,i.label];})),f.item);
+      item.input.onchange=function(){f.item=item.input.value;taskMsg('');};r2.appendChild(item.wrap);g.appendChild(r2);}
+    else g.appendChild(predLine(words[3]));}
+  else taskItemsRows(d,f,words,items,g);
+  if(shape.labels)taskLabelRows(d,f,g);
   var r3=gEl('div','formrow');var goal=goalSelect('Goal',[['','No Goal']].concat(goals.map(function(x){return [x.id,x.title];})),f.goal);goal.input.onchange=function(){f.goal=goal.input.value;};r3.appendChild(goal.wrap);
   var due=goalField('Due','date',null,null,f.due);due.input.onchange=function(){f.due=due.input.value;};due.input.oninput=due.input.onchange;r3.appendChild(due.wrap);g.appendChild(r3);
-  box.appendChild(g);if(items.length)box.appendChild(gEl('p','gnote',words[2]+(kind.more?' '+TASK_SAY.moreItems:'')));body.appendChild(box);
+  box.appendChild(g);
+  /* Showing the model the items' titles is Will's to ask for, and it is off until he does: titles are text from
+     outside Flint, and a task that reads them is marked as having read it. */
+  if(shape.titles&&f.items.length){var tg=gEl('div','group'),trow=gEl('div','row two gwrap ppick');
+    var tl=gEl('span','lbl');tl.appendChild(gEl('b',null,'Show Titles'));tl.appendChild(gEl('span',null,TASK_SAY.titlesSay));trow.appendChild(tl);
+    var tt=gEl('button','toggle');tt.id='tasktitles';tt.setAttribute('role','switch');tt.setAttribute('aria-label','Show Titles');tt.setAttribute('aria-checked',f.titles?'true':'false');
+    var flip=function(ev){if(ev&&ev.stopPropagation)ev.stopPropagation();if(TASKS.busy)return;f.titles=!f.titles;tt.setAttribute('aria-checked',f.titles?'true':'false');taskMsg('');};
+    tt.onclick=flip;trow.onclick=flip;trow.appendChild(tt);tg.appendChild(trow);box.appendChild(tg);}
+  box.appendChild(gEl('p','gnote',words[2]+(kind.more?' '+TASK_SAY.moreItems:'')));body.appendChild(box);
   foot.hidden=false;foot.appendChild(gEl('span','note'));
-  var cancel=gBtn('btn','Cancel',function(){if(!TASKS.busy)taskTab(TASKS.tab);});var go=gBtn('btn pri','Create Task',function(){taskCreate(d,[cancel,go]);});go.disabled=!items.length;
-  foot.appendChild(cancel);foot.appendChild(go);taskFocus(what.input);}
+  var cancel=gBtn('btn','Cancel',function(){if(!TASKS.busy)taskTab(TASKS.tab);});var go=gBtn('btn pri','Create Task',function(){taskCreate(d,[cancel,go]);});
+  /* Nothing to choose from, and this kind of task needs an item: there is nothing to create. */
+  go.disabled=!items.length&&shape.items!=='some';
+  foot.appendChild(cancel);foot.appendChild(go);if(!taskKeyed(focus))taskFocus(what.input);}
+/* What this form asks the runtime for, or the sentence saying what it still needs: the shape of the params is the
+   kind of task's own (the shared contract's), and nothing is sent until every part of it is there. */
+function taskParams(f){var words=tGet(TASK_FIELDS,f.template),shape=taskShape(f.template),need=(words&&words[4])||'Choose what the task is about.';
+  if(shape.items==='one')return f.item?{params:{item:f.item}}:{say:need};
+  var params={items:f.items.slice(),titles:!!f.titles};
+  if(shape.items==='many'&&!f.items.length)return {say:need};
+  if(f.items.length>TASK_ITEMS_MAX)return {say:TASK_SAY.itemsFull};
+  /* Titles are only ever shown for items: with none picked, none is asked for. */
+  if(!f.items.length)params.titles=false;
+  if(shape.about){var about=gClean(f.about);if(!about)return {say:need};params.about=about;}
+  if(shape.labels){var labels=f.labels.map(gClean),seen={};
+    if(labels.some(function(l){return !l;}))return {say:TASK_SAY.labelsEmpty};
+    if(labels.length<TASK_LABELS_MIN)return {say:TASK_SAY.labelsFew};
+    for(var i=0;i<labels.length;i++){if(seen[labels[i]])return {say:TASK_SAY.labelsSame};seen[labels[i]]=1;}
+    params.labels=labels;}
+  return {params:params};}
 /* Create Task: the task is made and its card filed in one request; the card is then shown here to approve. */
-function taskCreate(d,buttons){var f=TASKS.form;if(!f||TASKS.busy||taskIsOff(taskMsg))return;var words=tGet(TASK_FIELDS,f.template);
-  if(!f.item){taskMsg(words?words[4]:'Choose what the task is about.');return;}
+function taskCreate(d,buttons){var f=TASKS.form;if(!f||TASKS.busy||taskIsOff(taskMsg))return;
+  var asked=taskParams(f);if(asked.say){taskMsg(asked.say);return;}
   /* A due date is the end of that day. */
-  var body={draftKey:f.draftKey,template:f.template,params:{item:f.item},goalId:f.goal||null,dueAt:f.due?gAt(f.due,23,59):null};
+  var body={draftKey:f.draftKey,template:f.template,params:asked.params,goalId:f.goal||null,dueAt:f.due?gAt(f.due,23,59):null};
   TASKS.busy=true;taskOnOff(buttons,true);var here=taskHere();taskMsg('');
   gCall('/tasks',body).then(function(x){TASKS.busy=false;if(!here())return;TASKS.form=null;taskCard(x.proposalId,taskFrom(x.id));},
   function(e){TASKS.busy=false;if(!here())return;if(taskOff(e)){taskTab(TASKS.tab);return;}taskOnOff(buttons,false);

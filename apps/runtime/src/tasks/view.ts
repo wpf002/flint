@@ -15,7 +15,7 @@ import {
 import type { Db } from '../db.js';
 import { labelFor } from '../goals/items.js';
 import { ACCEPT_CARD, WILL_ORIGINS, countsOf, microsOf, overrideProblem } from './card.js';
-import { FORM_ITEM_KIND, OFFERED_STATUS, runnerOf, type OfferDeps } from './offer.js';
+import { FORM_ITEM_KINDS, OFFERED_STATUS, runnerOf, type OfferDeps } from './offer.js';
 import { TASK_TITLES, againProblem } from './service.js';
 
 const PAGE = 100;
@@ -131,12 +131,12 @@ const FORM_GOALS_MAX = 50;
 export async function taskForm(db: Db, tz: string, deps: OfferDeps = {}, now = new Date()): Promise<z.infer<typeof TaskForm>> {
   const templates: z.infer<typeof TaskForm>['templates'] = [];
   for (const template of TASK_TEMPLATE_IDS) {
-    const kind = FORM_ITEM_KIND[template];
-    if (!kind) continue;
+    const kinds = FORM_ITEM_KINDS[template];
+    if (!kinds) continue;
     const runner = await runnerOf(db, template, deps);
     if ('why' in runner) continue;
     const found = await db.entity.findMany({
-      where: { kind, status: OFFERED_STATUS }, orderBy: [{ lastObservedAt: 'desc' }, { id: 'asc' }], take: TASK_FORM_ITEMS_MAX + 1,
+      where: { kind: { in: [...kinds] }, status: OFFERED_STATUS }, orderBy: [{ lastObservedAt: 'desc' }, { id: 'asc' }], take: TASK_FORM_ITEMS_MAX + 1,
       select: { id: true, kind: true, key: true, name: true, taintedPaths: true, firstSeenAt: true },
     });
     const items = await Promise.all(found.slice(0, TASK_FORM_ITEMS_MAX).map(async (e) => ({ entityId: e.id, label: await labelFor(db, e, tz, now) })));
